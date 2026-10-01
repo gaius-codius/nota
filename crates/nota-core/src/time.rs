@@ -381,24 +381,49 @@ mod tests {
         );
     }
 
+    /// The largest count whose duration fits in a `SessionTime` at `rate`.
+    fn max_count(rate: SampleRate) -> u64 {
+        u64::try_from(u128::from(u64::MAX) * u128::from(rate.hz()) / NANOS_PER_SEC).unwrap()
+    }
+
+    /// A rate, and a count whose duration fits at it: anywhere in range, or
+    /// right at the top, where rounding is most likely to go wrong.
+    fn rate_and_count() -> impl Strategy<Value = (SampleRate, u64)> {
+        any_rate().prop_flat_map(|rate| {
+            let max = max_count(rate);
+            (
+                Just(rate),
+                prop_oneof![0..=max, max.saturating_sub(1_000)..=max],
+            )
+        })
+    }
+
+    #[test]
+    fn max_count_is_the_last_that_fits() {
+        for hz in [1, 44_100, 16_000, SampleRate::MAX_HZ] {
+            let rate = SampleRate::new(hz).unwrap();
+            let max = max_count(rate);
+            assert!(SampleCount::new(max).duration_at(rate).is_some(), "{hz} Hz");
+            assert_eq!(SampleCount::new(max + 1).duration_at(rate), None, "{hz} Hz");
+        }
+    }
+
     proptest! {
         /// Sample → time → sample is exact at every allowed rate.
         #[test]
-        fn count_duration_round_trip(n in 0..u64::MAX / 2, rate in any_rate()) {
-            if let Some(d) = SampleCount::new(n).duration_at(rate) {
-                prop_assert_eq!(SampleCount::started_within(d, rate), Some(SampleCount::new(n)));
-            }
+        fn count_duration_round_trip((rate, n) in rate_and_count()) {
+            let d = SampleCount::new(n).duration_at(rate).unwrap();
+            prop_assert_eq!(SampleCount::started_within(d, rate), Some(SampleCount::new(n)));
         }
 
         /// Consecutive samples are always at least a nanosecond apart, so no
         /// two samples share a session time.
         #[test]
-        fn durations_strictly_increase(n in 0..u64::MAX / 4, rate in any_rate()) {
-            let a = SampleCount::new(n).duration_at(rate);
-            let b = SampleCount::new(n + 1).duration_at(rate);
-            if let (Some(a), Some(b)) = (a, b) {
-                prop_assert!(b > a);
-            }
+        fn durations_strictly_increase((rate, n) in rate_and_count()) {
+            prop_assume!(n < max_count(rate));
+            let a = SampleCount::new(n).duration_at(rate).unwrap();
+            let b = SampleCount::new(n + 1).duration_at(rate).unwrap();
+            prop_assert!(b > a);
         }
 
         /// Time → sample picks the sample playing at that moment: the last one

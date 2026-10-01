@@ -13,6 +13,10 @@ fake-clock = []
 
 [dependencies]
 
+# CLOCK_BOOTTIME for the session clock, which std's Instant doesn't offer.
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+rustix.workspace = true
+
 [dev-dependencies]
 proptest.workspace = true
 

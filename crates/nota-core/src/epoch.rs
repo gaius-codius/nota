@@ -104,6 +104,21 @@ impl Gap {
     }
 }
 
+/// A newly opened epoch, as [`TrackTimeline::open_epoch`] placed it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenedEpoch {
+    /// The new epoch.
+    pub id: EpochId,
+    /// Where it starts: the requested start, or later if the previous
+    /// epoch's audio hadn't ended by then.
+    pub start: SessionTime,
+    /// How far the previous epoch's audio, timed at its nominal rate, ran
+    /// past the requested start. Zero normally; more means the device's
+    /// clock ran fast against the session clock, and this is the drift it
+    /// built up.
+    pub overrun: Duration,
+}
+
 /// Why a new epoch was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EpochError {
@@ -114,14 +129,6 @@ pub enum EpochError {
         previous: SampleIndex,
         /// The refused first sample.
         first_sample: SampleIndex,
-    },
-    /// The new epoch starts before the previous epoch's audio ended, which
-    /// would give two samples the same moment.
-    StartsBeforePreviousEnded {
-        /// When the previous epoch's audio ended.
-        previous_end: SessionTime,
-        /// The refused start.
-        start: SessionTime,
     },
     /// The previous epoch's end can't be expressed in session time.
     TimeOverflow,
@@ -140,15 +147,6 @@ impl std::fmt::Display for EpochError {
                 "a new epoch's first sample ({}) is before the previous epoch's ({})",
                 first_sample.get(),
                 previous.get()
-            ),
-            Self::StartsBeforePreviousEnded {
-                previous_end,
-                start,
-            } => write!(
-                f,
-                "a new epoch starts at {} ns, before the previous epoch ended at {} ns",
-                start.as_nanos(),
-                previous_end.as_nanos()
             ),
             Self::TimeOverflow => f.write_str("the previous epoch ends beyond the session clock"),
             Self::TooManyEpochs => f.write_str("the track has run out of epoch numbers"),
@@ -201,19 +199,30 @@ impl TrackTimeline {
     /// Opening without a sample in between (a stream that fails straight
     /// away) is allowed: the earlier epoch just holds no samples.
     ///
+    /// If the previous epoch's audio, timed at its nominal rate, runs past
+    /// `start` (a device clock running fast), the new epoch starts where
+    /// that audio ends instead, so no two samples share a moment, and the
+    /// overrun is reported. Correcting drift itself is the clock's later
+    /// work; this keeps the timeline consistent meanwhile.
+    ///
     /// # Errors
     ///
-    /// Refuses an epoch whose first sample is before the previous epoch's, or
-    /// that starts before the previous epoch's audio up to `first_sample`
-    /// ended. The timeline is unchanged when it refuses.
+    /// Refuses an epoch whose first sample is before the previous epoch's,
+    /// one whose previous epoch ends beyond the session clock, and one past
+    /// the last [`EpochId`]. The timeline is unchanged when it refuses.
     pub fn open_epoch(
         &mut self,
         start: SessionTime,
         first_sample: SampleIndex,
         rate: SampleRate,
-    ) -> Result<EpochId, EpochError> {
+    ) -> Result<OpenedEpoch, EpochError> {
         let id =
             EpochId::new(u32::try_from(self.epochs.len()).map_err(|_| EpochError::TooManyEpochs)?);
+        let mut opened = OpenedEpoch {
+            id,
+            start,
+            overrun: Duration::ZERO,
+        };
         if let Some(previous) = self.epochs.last() {
             if first_sample < previous.first_sample {
                 return Err(EpochError::SampleWentBack {
@@ -224,20 +233,20 @@ impl TrackTimeline {
             let previous_end = previous
                 .time_of(first_sample)
                 .ok_or(EpochError::TimeOverflow)?;
-            if start < previous_end {
-                return Err(EpochError::StartsBeforePreviousEnded {
-                    previous_end,
-                    start,
-                });
+            if let Some(overrun) = previous_end.checked_duration_since(start)
+                && !overrun.is_zero()
+            {
+                opened.start = previous_end;
+                opened.overrun = overrun;
             }
         }
         self.epochs.push(Epoch {
             id,
-            start,
+            start: opened.start,
             first_sample,
             rate,
         });
-        Ok(id)
+        Ok(opened)
     }
 
     /// The epoch `sample` belongs to, or `None` if it's before the first.
@@ -256,6 +265,11 @@ impl TrackTimeline {
 
     /// The sample playing at `time`, or `None` if `time` is before the first
     /// epoch or in a gap between two.
+    ///
+    /// The newest epoch runs on without end, so an answer past the audio
+    /// captured so far is provisional: if the stream reopens, that time may
+    /// fall in a gap instead. Store moments as [`SessionTime`] and resolve
+    /// them to samples when needed, rather than keeping the sample.
     #[must_use]
     pub fn sample_at(&self, time: SessionTime) -> Option<SampleIndex> {
         let after = self.epochs.partition_point(|e| e.start <= time);
@@ -312,8 +326,16 @@ mod tests {
     #[test]
     fn one_epoch_maps_at_the_rate() {
         let mut timeline = TrackTimeline::new(TrackId::new(0));
-        let id = timeline.open_epoch(t(1_000_000_000), s(0), SPEECH).unwrap();
-        assert_eq!(id, EpochId::new(0));
+        let opened = timeline.open_epoch(t(1_000_000_000), s(0), SPEECH).unwrap();
+        let id = opened.id;
+        assert_eq!(
+            opened,
+            OpenedEpoch {
+                id: EpochId::new(0),
+                start: t(1_000_000_000),
+                overrun: Duration::ZERO
+            }
+        );
         assert_eq!(timeline.current().map(Epoch::id), Some(id));
         // 16 kHz: one sample every 62.5 µs.
         assert_eq!(timeline.time_of(s(0)), Some(t(1_000_000_000)));
@@ -342,7 +364,14 @@ mod tests {
         let second = timeline
             .open_epoch(t(1_500_000_000), s(16_000), SPEECH)
             .unwrap();
-        assert_eq!(second, EpochId::new(1));
+        assert_eq!(
+            second,
+            OpenedEpoch {
+                id: EpochId::new(1),
+                start: t(1_500_000_000),
+                overrun: Duration::ZERO
+            }
+        );
         assert_eq!(timeline.time_of(s(15_999)), Some(t(999_937_500)));
         assert_eq!(timeline.time_of(s(16_000)), Some(t(1_500_000_000)));
         assert_eq!(timeline.sample_at(t(999_937_500)), Some(s(15_999)));
@@ -428,18 +457,49 @@ mod tests {
     }
 
     #[test]
-    fn refuses_an_epoch_that_overlaps_the_previous_audio() {
+    fn a_fast_device_clock_pushes_the_next_epoch_back() {
         let mut timeline = TrackTimeline::new(TrackId::new(0));
         timeline.open_epoch(t(0), s(0), SPEECH).unwrap();
-        let before = timeline.clone();
+        // A device 100 ppm fast delivers 57_605_760 samples in an hour (60 min
+        // 0.36 s at the nominal rate); the stream reopens 100 ms after the hour.
+        let opened = timeline
+            .open_epoch(t(3_600_100_000_000), s(57_605_760), SPEECH)
+            .unwrap();
         assert_eq!(
-            timeline.open_epoch(t(999_999_999), s(16_000), SPEECH),
-            Err(EpochError::StartsBeforePreviousEnded {
-                previous_end: t(1_000_000_000),
-                start: t(999_999_999),
-            })
+            opened,
+            OpenedEpoch {
+                id: EpochId::new(1),
+                start: t(3_600_360_000_000),
+                overrun: Duration::from_millis(260),
+            }
         );
-        assert_eq!(timeline, before);
+        assert_eq!(
+            timeline.current().map(Epoch::start),
+            Some(t(3_600_360_000_000))
+        );
+        // Still one moment per sample, and no gap.
+        assert_eq!(timeline.gaps().count(), 0);
+        let last = s(57_605_759);
+        assert_eq!(
+            timeline.sample_at(timeline.time_of(last).unwrap()),
+            Some(last)
+        );
+        let first = s(57_605_760);
+        assert_eq!(
+            timeline.sample_at(timeline.time_of(first).unwrap()),
+            Some(first)
+        );
+    }
+
+    #[test]
+    fn an_overrun_of_one_nanosecond_is_reported() {
+        let mut timeline = TrackTimeline::new(TrackId::new(0));
+        timeline.open_epoch(t(0), s(0), SPEECH).unwrap();
+        let opened = timeline
+            .open_epoch(t(999_999_999), s(16_000), SPEECH)
+            .unwrap();
+        assert_eq!(opened.start, t(1_000_000_000));
+        assert_eq!(opened.overrun, Duration::from_nanos(1));
     }
 
     #[test]
@@ -461,12 +521,6 @@ mod tests {
         }
         .to_string();
         assert!(text.contains('3') && text.contains('5'), "{text}");
-        let text = EpochError::StartsBeforePreviousEnded {
-            previous_end: t(9),
-            start: t(7),
-        }
-        .to_string();
-        assert!(text.contains("7 ns") && text.contains("9 ns"), "{text}");
         assert!(!EpochError::TimeOverflow.to_string().is_empty());
         assert!(!EpochError::TooManyEpochs.to_string().is_empty());
     }
@@ -476,6 +530,7 @@ mod tests {
     #[derive(Debug, Clone)]
     struct Opening {
         gap_nanos: u64,
+        early_nanos: u64,
         samples: u64,
         rate: SampleRate,
     }
@@ -491,11 +546,15 @@ mod tests {
     fn any_openings() -> impl Strategy<Value = (u64, u64, Vec<Opening>)> {
         let opening = (
             prop_oneof![Just(0u64), 0..10_000_000_000u64],
+            // Usually on time; sometimes requested early, as a fast device
+            // clock would.
+            prop_oneof![4 => Just(0u64), 1 => 0..1_000_000_000u64],
             prop_oneof![Just(0u64), 0..10_000_000u64],
             any_rate(),
         )
-            .prop_map(|(gap_nanos, samples, rate)| Opening {
+            .prop_map(|(gap_nanos, early_nanos, samples, rate)| Opening {
                 gap_nanos,
+                early_nanos,
                 samples,
                 rate,
             });
@@ -506,8 +565,15 @@ mod tests {
         )
     }
 
-    /// Opens every epoch, each `gap_nanos` after the previous one's audio
-    /// ended. Returns the timeline and each epoch's sample range.
+    /// The gap actually left before an opening: what was asked for, less
+    /// any part of it the device clock's overrun used up.
+    fn effective_gap(opening: &Opening) -> u64 {
+        opening.gap_nanos.saturating_sub(opening.early_nanos)
+    }
+
+    /// Opens every epoch, each requested `gap_nanos - early_nanos` after the
+    /// previous one's audio ended, and checks where `open_epoch` put it.
+    /// Returns the timeline and each epoch's start and sample range.
     fn build(
         first_start: u64,
         first_sample: u64,
@@ -518,12 +584,20 @@ mod tests {
         let mut start = t(first_start);
         let mut first = s(first_sample);
         for (i, opening) in openings.iter().enumerate() {
+            let mut requested = start;
             if i > 0 {
-                start = start
-                    .checked_add(Duration::from_nanos(opening.gap_nanos))
-                    .unwrap();
+                let ended = start;
+                let asked = ended.as_nanos() + opening.gap_nanos;
+                requested = t(asked.saturating_sub(opening.early_nanos));
+                start = t(ended.as_nanos() + effective_gap(opening));
             }
-            timeline.open_epoch(start, first, opening.rate).unwrap();
+            let opened = timeline.open_epoch(requested, first, opening.rate).unwrap();
+            assert_eq!(opened.start, start);
+            assert_eq!(
+                opened.overrun,
+                start.checked_duration_since(requested).unwrap(),
+                "the overrun is how far the start moved"
+            );
             let end = first
                 .checked_add(SampleCount::new(opening.samples))
                 .unwrap();
@@ -577,8 +651,8 @@ mod tests {
                 .iter()
                 .enumerate()
                 .skip(1)
-                .filter(|(_, o)| o.gap_nanos > 0)
-                .map(|(i, o)| (EpochId::new(u32::try_from(i - 1).unwrap()), o.gap_nanos))
+                .filter(|(_, o)| effective_gap(o) > 0)
+                .map(|(i, o)| (EpochId::new(u32::try_from(i - 1).unwrap()), effective_gap(o)))
                 .collect();
             let gaps: Vec<Gap> = timeline.gaps().collect();
             prop_assert_eq!(

@@ -2,9 +2,16 @@
 //!
 //! Everything else takes a [`Clock`], so timing code runs against a
 //! [`FakeClock`] in tests. Clippy's `disallowed-methods` bans
-//! `Instant::now`, `SystemTime::now` and their `elapsed` shortcuts elsewhere.
+//! `Instant::now`, `SystemTime::now`, their `elapsed` shortcuts and
+//! `rustix::time::clock_gettime` elsewhere.
+//!
+//! Session time keeps counting while the machine is suspended, so a sleep
+//! shows up as a gap between epochs rather than vanishing. On Linux that
+//! takes `CLOCK_BOOTTIME`: `Instant` uses `CLOCK_MONOTONIC`, which stops
+//! during suspend.
 
-use std::time::Instant;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use crate::time::SessionTime;
 
@@ -14,37 +21,66 @@ pub trait Clock: Send + Sync + std::fmt::Debug {
     fn now(&self) -> SessionTime;
 }
 
-/// The real session clock: monotonic, with zero at the moment it started.
-#[derive(Debug, Clone, Copy)]
+/// The real session clock: monotonic, counting through suspend, with zero at
+/// the moment it started.
+#[derive(Debug)]
 pub struct SystemClock {
-    origin: Instant,
+    origin: Duration,
+    /// The latest reading handed out, so `now` can't go back even if the
+    /// clock underneath misbehaves.
+    latest: AtomicU64,
 }
 
 impl SystemClock {
-    /// Starts a session clock; session time zero is now.
+    /// Starts a session clock; session time zero is now. Make one per
+    /// session and share it (`Arc<dyn Clock>`): two clocks started at
+    /// different moments disagree, and tracks timed by them won't line up.
     #[must_use]
     pub fn start() -> Self {
         Self {
             origin: monotonic_now(),
+            latest: AtomicU64::new(0),
         }
     }
 }
 
 impl Clock for SystemClock {
     fn now(&self) -> SessionTime {
-        // `Instant` is monotonic, so this never goes back. It would take
-        // about 584 years to saturate.
-        let elapsed = monotonic_now().saturating_duration_since(self.origin);
-        SessionTime::from_elapsed(elapsed).unwrap_or(SessionTime::from_nanos(u64::MAX))
+        let elapsed = monotonic_now().saturating_sub(self.origin);
+        // Saturates after about 584 years.
+        let nanos = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
+        let before = self.latest.fetch_max(nanos, Ordering::SeqCst);
+        SessionTime::from_nanos(before.max(nanos))
     }
 }
 
+/// The monotonic clock, counting through suspend, from an arbitrary fixed
+/// point.
+#[cfg(any(target_os = "linux", target_os = "android"))]
 #[expect(
     clippy::disallowed_methods,
     reason = "the session clock is the one place nota reads the monotonic clock"
 )]
-fn monotonic_now() -> Instant {
-    Instant::now()
+fn monotonic_now() -> Duration {
+    let now = rustix::time::clock_gettime(rustix::time::ClockId::Boottime);
+    // CLOCK_BOOTTIME is never negative; if it were, `now` above stays put.
+    Duration::try_from(now).unwrap_or(Duration::ZERO)
+}
+
+/// The monotonic clock from an arbitrary fixed point. Windows' `Instant`
+/// counts through sleep; macOS's doesn't, so v2 needs `mach_continuous_time`
+/// there.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the session clock is the one place nota reads the monotonic clock"
+)]
+fn monotonic_now() -> Duration {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static ANCHOR: OnceLock<Instant> = OnceLock::new();
+    let now = Instant::now();
+    now.saturating_duration_since(*ANCHOR.get_or_init(|| now))
 }
 
 #[cfg(any(test, feature = "fake-clock"))]
@@ -110,6 +146,16 @@ mod tests {
             assert!(now >= last);
             last = now;
         }
+    }
+
+    #[test]
+    fn system_clock_moves_forward() {
+        let clock = SystemClock::start();
+        let first = clock.now();
+        // The monotonic clock ticks in nanoseconds; a busy loop sees it move
+        // long before the cap. No sleep, per the clippy ban.
+        let moved = (0..100_000_000).any(|_| clock.now() > first);
+        assert!(moved, "the session clock never advanced past {first:?}");
     }
 
     #[test]
