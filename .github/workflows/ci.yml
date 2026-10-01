@@ -43,8 +43,8 @@ jobs:
         with:
           tool: cargo-nextest
       - run: cargo nextest run --workspace --locked --profile ci --no-tests=pass
-      # Add `cargo test --workspace --locked --doc` with the first library crate;
       # nextest does not run doctests.
+      - run: cargo test --workspace --locked --doc
 
   deps:
     name: Dependencies (cargo-deny, cargo-shear)

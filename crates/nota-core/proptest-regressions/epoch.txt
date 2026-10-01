@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b583e32c1cdb0a8d86f0d6c70b959653b389c66445d307dfa8b414dc094bc9ce # shrinks to (first_start, first_sample, openings) = (0, 0, [Opening { gap_nanos: 0, samples: 0, rate: SampleRate(16000) }, Opening { gap_nanos: 1, samples: 0, rate: SampleRate(16000) }, Opening { gap_nanos: 1, samples: 0, rate: SampleRate(16000) }]), within = Index(0)
