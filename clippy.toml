@@ -1,0 +1,16 @@
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-dbg-in-tests = true
+
+# nota-specific bans. Where a ban has one legitimate home (the clock module, the
+# durable-write layer), that code uses #[expect(clippy::disallowed_methods,
+# reason = "...")], so every exception is visible and greppable.
+disallowed-methods = [
+  { path = "std::time::Instant::now", reason = "read time through the session clock in nota-core, so timing code can be tested with a fake clock" },
+  { path = "std::time::SystemTime::now", reason = "read time through the session clock in nota-core, so timing code can be tested with a fake clock" },
+  { path = "std::thread::sleep", reason = "sleeping hides races and makes tests slow and flaky; wait on a channel or the clock instead" },
+  { path = "std::process::exit", reason = "exiting skips destructors and can leave a segment unfinished; return an error from main" },
+  { path = "std::fs::write", reason = "recordings and the database go through the durable-write layer; anything else needs #[expect] with a reason" },
+  { path = "std::fs::File::create", reason = "recordings and the database go through the durable-write layer; anything else needs #[expect] with a reason" },
+]

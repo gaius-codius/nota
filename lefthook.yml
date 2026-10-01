@@ -1,0 +1,36 @@
+# Git hooks for nota. Install once per clone: `lefthook install`.
+# CI runs the same checks, so skipping a hook only delays the failure, and
+# skipping one on purpose (--no-verify) is against the "Code quality" rules in AGENTS.md.
+# Needs on PATH: cargo, typos, gitleaks; uvx and actionlint for workflow edits.
+# A lefthook-local.yml next to this file, if present, adds hooks for one machine.
+
+pre-commit:
+  parallel: true
+  commands:
+    fmt:
+      glob: "*.rs"
+      run: cargo fmt --all --check
+    typos:
+      run: typos --force-exclude {staged_files}
+    files:
+      run: scripts/check-files.sh --staged
+    secrets:
+      run: gitleaks git --pre-commit --staged --no-banner --redact .
+    workflows:
+      glob: ".github/workflows/*"
+      run: actionlint && uvx zizmor@1.30.1 --offline .github/workflows/
+
+pre-push:
+  parallel: true
+  commands:
+    clippy:
+      run: cargo clippy --workspace --all-targets --locked --config 'build.warnings="deny"'
+    test:
+      run: cargo nextest run --workspace --locked --no-tests=pass
+    deny:
+      run: cargo deny --locked check
+    shear:
+      run: cargo shear
+    weakened:
+      # Report only; CI requires an explanation in the PR body.
+      run: git rev-parse -q --verify origin/main >/dev/null && scripts/check-weakened.sh origin/main HEAD || true

@@ -1,0 +1,50 @@
+# cargo-deny: licences, advisories, bans and sources. Runs in CI and the pre-push hook.
+# Schema as of cargo-deny 0.20.
+
+[graph]
+all-features = true
+
+[advisories]
+# Vulnerabilities and yanked crates fail; unmaintained crates fail only if
+# they're direct dependencies of a workspace crate.
+unmaintained = "workspace"
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Permissive licences only. GPL, LGPL and AGPL code is never linked (espeak-ng
+# runs as a separate program). MPL-2.0 is file-level copyleft: allowed, but
+# check any new MPL crate in review.
+allow = [
+  "MIT",
+  "MIT-0",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "0BSD",
+  "BSL-1.0",
+  "CC0-1.0",
+  "Unicode-3.0",
+  "CDLA-Permissive-2.0",
+  "MPL-2.0",
+]
+confidence-threshold = 0.9
+# The list is a policy, not an inventory: unused entries are fine.
+unused-allowed-license = "allow"
+# Build scripts, proc macros and dev-dependencies count too: they run on
+# contributors' machines.
+include-build = true
+include-dev = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

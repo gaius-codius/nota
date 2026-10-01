@@ -1,0 +1,24 @@
+# Build output
+/target/
+/dist/
+
+# Recordings and local data
+*.wav
+*.flac
+*.mp3
+*.m4a
+*.ogg
+*.opus
+*.webm
+
+# Coverage and test reports
+lcov.info
+
+# Editor, OS and environment files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+.env
+.envrc
+.direnv/

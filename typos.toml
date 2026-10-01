@@ -1,0 +1,13 @@
+[files]
+extend-exclude = [
+  "nota-logo/",
+  "*.svg",
+  "*.png",
+  "Cargo.lock",
+  "LICENSE-*",
+]
+
+# Real words typos doesn't know. Add specialist terms here when a test fixture
+# needs them, with a comment saying why.
+[default.extend-words]
+caf = "caf"  # Core Audio Format, in scripts/check-files.sh

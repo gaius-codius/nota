@@ -1,0 +1,6 @@
+# The exact compiler for nota. Bump it in its own change (see "Code quality" in AGENTS.md);
+# keep `rust-version` in Cargo.toml equal to it.
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
