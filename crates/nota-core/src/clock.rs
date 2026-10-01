@@ -35,18 +35,28 @@ impl SystemClock {
     /// Starts a session clock; session time zero is now. Make one per
     /// session and share it (`Arc<dyn Clock>`): two clocks started at
     /// different moments disagree, and tracks timed by them won't line up.
-    #[must_use]
-    pub fn start() -> Self {
-        Self {
-            origin: monotonic_now(),
+    ///
+    /// # Errors
+    ///
+    /// [`ClockUnavailable`] if the system clock can't be read (on Linux,
+    /// a kernel without `CLOCK_BOOTTIME`, older than 2.6.39).
+    pub fn start() -> Result<Self, ClockUnavailable> {
+        let origin = monotonic_now().ok_or(ClockUnavailable)?;
+        Ok(Self {
+            origin,
             latest: AtomicU64::new(0),
-        }
+        })
     }
 }
 
 impl Clock for SystemClock {
     fn now(&self) -> SessionTime {
-        let elapsed = monotonic_now().saturating_sub(self.origin);
+        // A read that fails after `start` succeeded shouldn't happen; if it
+        // does, time stands still rather than jumping or panicking.
+        let Some(reading) = monotonic_now() else {
+            return SessionTime::from_nanos(self.latest.load(Ordering::SeqCst));
+        };
+        let elapsed = reading.saturating_sub(self.origin);
         // Saturates after about 584 years.
         let nanos = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
         let before = self.latest.fetch_max(nanos, Ordering::SeqCst);
@@ -54,17 +64,30 @@ impl Clock for SystemClock {
     }
 }
 
+/// The system's monotonic clock couldn't be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClockUnavailable;
+
+impl std::fmt::Display for ClockUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the system's monotonic clock can't be read")
+    }
+}
+
+impl std::error::Error for ClockUnavailable {}
+
 /// The monotonic clock, counting through suspend, from an arbitrary fixed
-/// point.
+/// point. `None` if it can't be read. Uses the `Result`-returning call:
+/// rustix's plain `clock_gettime` panics on failure.
 #[cfg(any(target_os = "linux", target_os = "android"))]
 #[expect(
     clippy::disallowed_methods,
     reason = "the session clock is the one place nota reads the monotonic clock"
 )]
-fn monotonic_now() -> Duration {
-    let now = rustix::time::clock_gettime(rustix::time::ClockId::Boottime);
-    // CLOCK_BOOTTIME is never negative; if it were, `now` above stays put.
-    Duration::try_from(now).unwrap_or(Duration::ZERO)
+fn monotonic_now() -> Option<Duration> {
+    let now = rustix::time::clock_gettime_dynamic(rustix::time::DynamicClockId::Boottime).ok()?;
+    // Never negative, but a negative reading is refused rather than misread.
+    Duration::try_from(now).ok()
 }
 
 /// The monotonic clock from an arbitrary fixed point. Windows' `Instant`
@@ -75,12 +98,16 @@ fn monotonic_now() -> Duration {
     clippy::disallowed_methods,
     reason = "the session clock is the one place nota reads the monotonic clock"
 )]
-fn monotonic_now() -> Duration {
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the same signature as the Linux version, whose read can fail"
+)]
+fn monotonic_now() -> Option<Duration> {
     use std::sync::OnceLock;
     use std::time::Instant;
     static ANCHOR: OnceLock<Instant> = OnceLock::new();
     let now = Instant::now();
-    now.saturating_duration_since(*ANCHOR.get_or_init(|| now))
+    Some(now.saturating_duration_since(*ANCHOR.get_or_init(|| now)))
 }
 
 #[cfg(any(test, feature = "fake-clock"))]
@@ -137,7 +164,7 @@ mod tests {
 
     #[test]
     fn system_clock_starts_near_zero_and_never_goes_back() {
-        let clock = SystemClock::start();
+        let clock = SystemClock::start().unwrap();
         let mut last = clock.now();
         // Generous: only a stalled test machine would take a minute here.
         assert!(last.elapsed() < Duration::from_secs(60));
@@ -150,7 +177,7 @@ mod tests {
 
     #[test]
     fn system_clock_moves_forward() {
-        let clock = SystemClock::start();
+        let clock = SystemClock::start().unwrap();
         let first = clock.now();
         // The monotonic clock ticks in nanoseconds; a busy loop sees it move
         // long before the cap. No sleep, per the clippy ban.
@@ -177,6 +204,11 @@ mod tests {
         let clock = FakeClock::default();
         clock.advance(Duration::MAX);
         assert_eq!(clock.now(), SessionTime::from_nanos(u64::MAX));
+    }
+
+    #[test]
+    fn clock_unavailable_describes_itself() {
+        assert!(ClockUnavailable.to_string().contains("clock"));
     }
 
     #[test]

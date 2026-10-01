@@ -23,9 +23,18 @@ pub struct Epoch {
     start: SessionTime,
     first_sample: SampleIndex,
     rate: SampleRate,
+    overrun: Duration,
 }
 
 impl Epoch {
+    /// How far this epoch's start was pushed back because the previous
+    /// epoch's audio, at its nominal rate, ran past the requested start: the
+    /// drift measured at this reopening. Zero normally.
+    #[must_use]
+    pub const fn overrun(&self) -> Duration {
+        self.overrun
+    }
+
     /// The epoch's number within its track.
     #[must_use]
     pub const fn id(&self) -> EpochId {
@@ -104,7 +113,20 @@ impl Gap {
     }
 }
 
-/// A newly opened epoch, as [`TrackTimeline::open_epoch`] placed it.
+/// The overrun always allowed, however short the previous epoch: covers a
+/// device clock's drift over a short epoch plus scheduling jitter.
+const MIN_OVERRUN_ALLOWED_NANOS: u64 = 10_000_000;
+
+/// The most a previous epoch of `length` can overrun the next one's
+/// requested start before it's refused: 1000 ppm, ten times a poor USB
+/// device's drift, plus [`MIN_OVERRUN_ALLOWED_NANOS`].
+fn max_overrun(length: Duration) -> Duration {
+    (length / 1_000).saturating_add(Duration::from_nanos(MIN_OVERRUN_ALLOWED_NANOS))
+}
+
+/// A newly opened epoch, as [`TrackTimeline::open_epoch`] placed it. The
+/// epoch keeps its overrun too ([`Epoch::overrun`]), so ignoring this loses
+/// nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpenedEpoch {
     /// The new epoch.
@@ -130,6 +152,15 @@ pub enum EpochError {
         /// The refused first sample.
         first_sample: SampleIndex,
     },
+    /// The new epoch was requested so long before the previous epoch's
+    /// audio ended that drift can't explain it: more audio arrived than
+    /// time passed, by more than 1000 ppm plus 10 ms.
+    ImplausibleOverrun {
+        /// When the previous epoch's audio ended, at its nominal rate.
+        previous_end: SessionTime,
+        /// The refused start.
+        start: SessionTime,
+    },
     /// The previous epoch's end can't be expressed in session time.
     TimeOverflow,
     /// The track already has as many epochs as an [`EpochId`] can number.
@@ -147,6 +178,16 @@ impl std::fmt::Display for EpochError {
                 "a new epoch's first sample ({}) is before the previous epoch's ({})",
                 first_sample.get(),
                 previous.get()
+            ),
+            Self::ImplausibleOverrun {
+                previous_end,
+                start,
+            } => write!(
+                f,
+                "a new epoch was requested at {} ns, too long before the previous epoch's \
+                 audio ended at {} ns to be drift",
+                start.as_nanos(),
+                previous_end.as_nanos()
             ),
             Self::TimeOverflow => f.write_str("the previous epoch ends beyond the session clock"),
             Self::TooManyEpochs => f.write_str("the track has run out of epoch numbers"),
@@ -203,12 +244,16 @@ impl TrackTimeline {
     /// `start` (a device clock running fast), the new epoch starts where
     /// that audio ends instead, so no two samples share a moment, and the
     /// overrun is reported. Correcting drift itself is the clock's later
-    /// work; this keeps the timeline consistent meanwhile.
+    /// work; this keeps the timeline consistent meanwhile. Until then, a
+    /// real gap shorter than the drift built up is absorbed: it shows as a
+    /// smaller overrun, not as a gap.
     ///
     /// # Errors
     ///
-    /// Refuses an epoch whose first sample is before the previous epoch's,
-    /// one whose previous epoch ends beyond the session clock, and one past
+    /// Refuses an epoch whose first sample is before the previous epoch's;
+    /// one whose overrun is more than any real device's drift (1000 ppm of
+    /// the previous epoch, plus 10 ms), which means a caller or clock bug;
+    /// one whose previous epoch ends beyond the session clock; and one past
     /// the last [`EpochId`]. The timeline is unchanged when it refuses.
     pub fn open_epoch(
         &mut self,
@@ -236,6 +281,15 @@ impl TrackTimeline {
             if let Some(overrun) = previous_end.checked_duration_since(start)
                 && !overrun.is_zero()
             {
+                let length = previous_end
+                    .checked_duration_since(previous.start)
+                    .unwrap_or(Duration::ZERO);
+                if overrun > max_overrun(length) {
+                    return Err(EpochError::ImplausibleOverrun {
+                        previous_end,
+                        start,
+                    });
+                }
                 opened.start = previous_end;
                 opened.overrun = overrun;
             }
@@ -245,6 +299,7 @@ impl TrackTimeline {
             start: opened.start,
             first_sample,
             rate,
+            overrun: opened.overrun,
         });
         Ok(opened)
     }
@@ -492,6 +547,63 @@ mod tests {
     }
 
     #[test]
+    fn the_epoch_keeps_its_overrun() {
+        let mut timeline = TrackTimeline::new(TrackId::new(0));
+        timeline.open_epoch(t(0), s(0), SPEECH).unwrap();
+        timeline
+            .open_epoch(t(999_000_000), s(16_000), SPEECH)
+            .unwrap();
+        let overruns: Vec<Duration> = timeline.epochs().iter().map(Epoch::overrun).collect();
+        assert_eq!(overruns, [Duration::ZERO, Duration::from_millis(1)]);
+    }
+
+    #[test]
+    fn refuses_an_overrun_drift_cannot_explain() {
+        let mut timeline = TrackTimeline::new(TrackId::new(0));
+        timeline.open_epoch(t(0), s(0), SPEECH).unwrap();
+        let before = timeline.clone();
+        // 1000 s of audio allows 1 s + 10 ms of overrun, and no more.
+        let end = 1_000_000_000_000;
+        let allowed = t(end - 1_010_000_000);
+        let refused = t(end - 1_010_000_001);
+        assert_eq!(
+            timeline
+                .clone()
+                .open_epoch(allowed, s(16_000_000), SPEECH)
+                .map(|o| o.overrun),
+            Ok(Duration::from_millis(1_010))
+        );
+        assert_eq!(
+            timeline.open_epoch(refused, s(16_000_000), SPEECH),
+            Err(EpochError::ImplausibleOverrun {
+                previous_end: t(end),
+                start: refused
+            })
+        );
+        assert_eq!(timeline, before);
+    }
+
+    #[test]
+    fn refuses_a_start_well_before_an_empty_previous_epoch() {
+        let mut timeline = TrackTimeline::new(TrackId::new(0));
+        timeline.open_epoch(t(1_000_000_000), s(0), SPEECH).unwrap();
+        // An empty epoch still allows the 10 ms minimum.
+        assert!(
+            timeline
+                .clone()
+                .open_epoch(t(990_000_000), s(0), SPEECH)
+                .is_ok()
+        );
+        assert_eq!(
+            timeline.open_epoch(t(989_999_999), s(0), SPEECH),
+            Err(EpochError::ImplausibleOverrun {
+                previous_end: t(1_000_000_000),
+                start: t(989_999_999),
+            })
+        );
+    }
+
+    #[test]
     fn an_overrun_of_one_nanosecond_is_reported() {
         let mut timeline = TrackTimeline::new(TrackId::new(0));
         timeline.open_epoch(t(0), s(0), SPEECH).unwrap();
@@ -521,6 +633,12 @@ mod tests {
         }
         .to_string();
         assert!(text.contains('3') && text.contains('5'), "{text}");
+        let text = EpochError::ImplausibleOverrun {
+            previous_end: t(9),
+            start: t(7),
+        }
+        .to_string();
+        assert!(text.contains("7 ns") && text.contains("9 ns"), "{text}");
         assert!(!EpochError::TimeOverflow.to_string().is_empty());
         assert!(!EpochError::TooManyEpochs.to_string().is_empty());
     }
@@ -548,7 +666,7 @@ mod tests {
             prop_oneof![Just(0u64), 0..10_000_000_000u64],
             // Usually on time; sometimes requested early, as a fast device
             // clock would.
-            prop_oneof![4 => Just(0u64), 1 => 0..1_000_000_000u64],
+            prop_oneof![4 => Just(0u64), 1 => 0..=MIN_OVERRUN_ALLOWED_NANOS],
             prop_oneof![Just(0u64), 0..10_000_000u64],
             any_rate(),
         )

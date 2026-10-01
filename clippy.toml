@@ -13,6 +13,7 @@ disallowed-methods = [
   { path = "std::time::Instant::elapsed", reason = "read time through the session clock in nota-core, so timing code can be tested with a fake clock" },
   { path = "std::time::SystemTime::elapsed", reason = "read time through the session clock in nota-core, so timing code can be tested with a fake clock" },
   { path = "rustix::time::clock_gettime", reason = "read time through the session clock in nota-core, so timing code can be tested with a fake clock", allow-invalid = true },
+  { path = "rustix::time::clock_gettime_dynamic", reason = "read time through the session clock in nota-core, so timing code can be tested with a fake clock", allow-invalid = true },
   { path = "std::thread::sleep", reason = "sleeping hides races and makes tests slow and flaky; wait on a channel or the clock instead" },
   { path = "std::process::exit", reason = "exiting skips destructors and can leave a segment unfinished; return an error from main" },
   { path = "std::fs::write", reason = "recordings and the database go through the durable-write layer; anything else needs #[expect] with a reason" },

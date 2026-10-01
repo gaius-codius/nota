@@ -32,7 +32,7 @@ pub mod time;
 
 #[cfg(any(test, feature = "fake-clock"))]
 pub use clock::FakeClock;
-pub use clock::{Clock, SystemClock};
+pub use clock::{Clock, ClockUnavailable, SystemClock};
 pub use epoch::{Epoch, EpochError, Gap, OpenedEpoch, TrackTimeline};
 pub use ids::{EpochId, TrackId};
 pub use time::{SampleCount, SampleIndex, SampleRange, SampleRate, SessionTime};

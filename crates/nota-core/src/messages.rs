@@ -60,7 +60,8 @@ pub enum FromEngine {
 
 /// A run of one track's audio: 16-bit mono PCM, contiguous from the start of
 /// [`AudioChunk::range`]. The range always holds exactly as many samples as
-/// the audio.
+/// the audio. The recorder ends a chunk at every epoch boundary, so one
+/// chunk never spans a reopened stream or a change of rate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioChunk {
     track: TrackId,
