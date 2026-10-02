@@ -3,7 +3,7 @@
 //! The engine child (`nota engine asr`) gets audio and returns text, both
 //! located by sample, never by session time: the recorder maps samples to
 //! session time through the track's epochs, so the engine needn't know about
-//! them. How these are put on the wire is the engine protocol's business.
+//! them. How these are put on the wire is [`crate::protocol`]'s business.
 
 use crate::ids::TrackId;
 use crate::time::{SampleCount, SampleIndex, SampleRange, SampleRate};

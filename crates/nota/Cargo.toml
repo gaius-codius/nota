@@ -8,6 +8,11 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+nota-engine = { path = "../nota-engine" }
+
+[dev-dependencies]
+nota-core = { path = "../nota-core" }
+nota-recorder = { path = "../nota-recorder" }
 
 [lints]
 workspace = true
