@@ -34,7 +34,7 @@
 use std::error::Error;
 use std::fmt;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use nota_core::{EpochId, SampleIndex, SampleRange, TrackId};
 use nota_store::{SegmentRow, Sha256Digest};
@@ -46,7 +46,8 @@ use crate::session::SessionDir;
 pub const FILE_NAME: &str = "salvage-findings";
 /// The name it's written under before its rename.
 const TEMP_NAME: &str = "salvage-findings.tmp";
-/// Where a findings file that doesn't parse is set aside, keeping its bytes.
+/// Where a findings file that doesn't parse is set aside, keeping its bytes
+/// (with `.1`, `.2`, … after it if that's taken).
 const ASIDE_NAME: &str = "salvage-findings.unreadable";
 
 const MAGIC: &[u8; 8] = b"NOTAFIND";
@@ -293,8 +294,8 @@ pub enum FindingsError {
     /// Reading the file failed.
     Io(io::Error),
     /// The file isn't a valid findings file (see the module docs). The next
-    /// publish run sets it aside, as `salvage-findings.unreadable`, and
-    /// starts a new one.
+    /// publish run sets it aside, as `salvage-findings.unreadable` (or
+    /// `.unreadable.1`, …), and starts a new one.
     Corrupt,
 }
 
@@ -341,7 +342,8 @@ pub(super) fn is_temp(path: &Path) -> bool {
 
 /// Merges `new` findings and the run's `verification` into the findings
 /// file in `dir`, durably, and returns them all. Rewrites the file only if
-/// that changes it. A file that doesn't parse is first renamed aside,
+/// that changes it (and otherwise only syncs the directory, in case an
+/// earlier run's rename isn't durable yet). A file that doesn't parse is first renamed aside,
 /// keeping its bytes, and the findings start again from `new`.
 ///
 /// # Errors
@@ -358,7 +360,7 @@ pub(super) fn record<S: Fs>(
         Ok(bytes) => {
             let old = Findings::decode(&bytes);
             if old.is_none() {
-                fs.rename(&path, &dir.join(ASIDE_NAME))?;
+                fs.rename(&path, &aside_path(fs, dir)?)?;
                 fs.sync_dir(dir)?;
             }
             old
@@ -367,16 +369,30 @@ pub(super) fn record<S: Fs>(
         Err(e) => return Err(e),
     };
     let merged = old.clone().unwrap_or_default().merged(new, verification);
-    // No file and nothing to say: leave it that way.
-    let unchanged = match &old {
-        Some(old) => *old == merged,
-        None => merged == Findings::default(),
-    };
-    if unchanged {
-        return Ok(merged);
+    match &old {
+        // Already says it. The file may be one an earlier run renamed into
+        // place before its directory sync failed: sync now, so success
+        // here means durable.
+        Some(old) if *old == merged => fs.sync_dir(dir)?,
+        // No file and nothing to say: leave it that way.
+        None if merged == Findings::default() => {}
+        _ => write(fs, dir, &path, &merged.encode())?,
     }
-    write(fs, dir, &path, &merged.encode())?;
     Ok(merged)
+}
+
+/// Where to set a findings file that doesn't parse aside: the first of
+/// `salvage-findings.unreadable`, `salvage-findings.unreadable.1`, … not
+/// taken, so an earlier one is never replaced.
+fn aside_path<S: Fs>(fs: &S, dir: &Path) -> io::Result<PathBuf> {
+    let taken = fs.list(dir)?;
+    let mut name = ASIDE_NAME.to_owned();
+    let mut n = 0_u64;
+    while taken.contains(&dir.join(&name)) {
+        n += 1;
+        name = format!("{ASIDE_NAME}.{n}");
+    }
+    Ok(dir.join(name))
 }
 
 /// Writes `bytes` to `path` in `dir` atomically: temp file, fsync, rename,
@@ -388,6 +404,11 @@ fn write<S: Fs>(fs: &S, dir: &Path, path: &Path, bytes: &[u8]) -> io::Result<()>
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(e),
     }
+    // A temp file a crash left (removed just now, or by salvage) must be
+    // durably gone before its name is reused: otherwise a crash could keep
+    // the rename below but not the unlink, and move the old, torn temp
+    // over the findings.
+    fs.sync_dir(dir)?;
     let mut file = fs.create(&temp)?;
     file.write_all(bytes)?;
     file.sync()?;

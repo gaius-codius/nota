@@ -1571,3 +1571,52 @@ fn recording_starts_and_rotates_with_the_store_down_and_the_findings_unwritable(
         3_500
     );
 }
+
+#[test]
+fn nothing_in_a_bad_rows_window_is_published_even_in_another_segment() {
+    // One window, two epochs: two segments, only the first under the row.
+    let fs = FakeFs::with_dirs([session(), db()]);
+    let (_, clock) = fake_clock();
+    let mut writer = SessionWriter::open(&session_dir(&fs), rate(), length(), clock).unwrap();
+    writer
+        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .unwrap();
+    writer.append(MIC, &samples(MIC, 0, 500)).unwrap();
+    writer.new_epoch(MIC, EpochId::new(1)).unwrap();
+    writer.append(MIC, &samples(MIC, 500, 500)).unwrap();
+    // The next window, which publishes.
+    writer.append(MIC, &samples(MIC, 1_000, 1_000)).unwrap();
+    let finished = writer.finish().unwrap();
+    assert_eq!(finished.len(), 3);
+    let range = SampleRange::new(SampleIndex::new(100), SampleIndex::new(200)).unwrap();
+    let missing = plant_missing_row(&fs, MIC, range);
+
+    let done = publish_journals(&mut session_store(&fs), length(), &finished).unwrap();
+    assert_eq!(as_found(done.findings()), [(missing, Problem::Missing)]);
+    assert_eq!(
+        done.segments()
+            .iter()
+            .map(|r| (r.range().start().get(), r.range().end().get()))
+            .collect::<Vec<_>>(),
+        [(1_500, 2_000)]
+    );
+    // Both journals of the first window are kept (the second runs on to
+    // the window's end); the next window's is published and deleted.
+    assert_eq!(done.deleted(), [JournalId::new(2)]);
+    assert_eq!(fs.paths().into_iter().filter(|p| is_journal(p)).count(), 2);
+}
+
+#[test]
+fn salvage_removes_a_findings_temp_a_crash_left() {
+    let (fs, expected) = recording_with_a_missing_row();
+    salvage(&mut session_store(&fs), length()).unwrap();
+    let clean = observe(&fs);
+    // A crash during a findings write that, rerun, has nothing to change.
+    let temp = session().join("salvage-findings.tmp");
+    let mut file = fs.create(&temp).unwrap();
+    file.write_all(b"half").unwrap();
+    let done = salvage(&mut session_store(&fs), length()).unwrap();
+    assert_eq!(as_found(done.findings()), expected);
+    assert!(!fs.paths().contains(&temp));
+    assert_eq!(observe(&fs), clean);
+}

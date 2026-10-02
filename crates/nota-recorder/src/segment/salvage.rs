@@ -11,7 +11,7 @@ use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use nota_core::SampleRate;
+use nota_core::{SampleIndex, SampleRate};
 use nota_store::SegmentRow;
 use sha2::{Digest, Sha256};
 
@@ -305,7 +305,7 @@ pub fn publish_journals<S: Fs, T: SegmentStore>(
 
     // Pass 2: one segment at a time.
     for segment in &plan.segments {
-        if overlaps_any(&published.findings, segment) {
+        if in_a_bad_window(&published.findings, segment, length) {
             // Its samples stay in their journals, which need it and so
             // aren't deleted.
             continue;
@@ -373,12 +373,20 @@ fn claims<S: Fs>(
     Ok(claiming)
 }
 
-/// Whether `segment` shares a sample with any of `findings`' rows.
-fn overlaps_any(findings: &[Finding], segment: &PlannedSegment) -> bool {
+/// Whether `segment`'s window shares a sample with any of `findings`' rows
+/// on its track. The whole window is left alone, not only the samples a row
+/// claims: a window can hold several segments (an epoch change, a gap), and
+/// none of them is published while a row over that window is unresolved.
+fn in_a_bad_window(findings: &[Finding], segment: &PlannedSegment, length: SegmentLength) -> bool {
+    let start = segment.range.start();
+    let from = SampleIndex::new(length.window_of(start).saturating_mul(length.samples()));
+    let to = length
+        .window_end(start)
+        .unwrap_or(SampleIndex::new(u64::MAX));
     findings
         .iter()
         .map(Finding::row)
-        .any(|r| r.track() == segment.track && overlap(r.range(), segment.range))
+        .any(|r| r.track() == segment.track && r.range().start() < to && from < r.range().end())
 }
 
 const fn overlap(a: nota_core::SampleRange, b: nota_core::SampleRange) -> bool {

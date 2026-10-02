@@ -88,6 +88,46 @@ proptest! {
     }
 
     #[test]
+    fn sealed_random_entries_parse_into_valid_findings_or_are_refused(
+        verification in 0_u8..3,
+        count in 0_u32..4,
+        body in prop::collection::vec(any::<u8>(), 0..300),
+        entries in prop::collection::vec((any::<u32>(), any::<u32>(), 0_u64..50, 0_u64..50, 0_u8..4, 0_u8..2), 0..4),
+    ) {
+        // Past the CRC and magic, so the field checks are what's tested.
+        let mut bytes = MAGIC.to_vec();
+        bytes.extend_from_slice(&VERSION.to_le_bytes());
+        bytes.push(verification);
+        bytes.extend_from_slice(&count.to_le_bytes());
+        let mut valid = verification < 2 && count as usize == entries.len();
+        for &(track, epoch, start, end, problem, status) in &entries {
+            bytes.extend_from_slice(&track.to_le_bytes());
+            bytes.extend_from_slice(&epoch.to_le_bytes());
+            bytes.extend_from_slice(&start.to_le_bytes());
+            bytes.extend_from_slice(&end.to_le_bytes());
+            bytes.extend_from_slice(&[u8::try_from(start).unwrap(); 32]);
+            bytes.push(problem);
+            bytes.push(status);
+            valid &= start < end && problem < 3 && status == 0;
+        }
+        if body.len() % 2 == 1 {
+            // Sometimes trailing junk too.
+            bytes.extend_from_slice(&body);
+            valid &= body.is_empty();
+        }
+        let crc = crc32fast::hash(&bytes);
+        bytes.extend_from_slice(&crc.to_le_bytes());
+        let got = Findings::decode(&bytes);
+        prop_assert_eq!(got.is_some(), valid);
+        if let Some(f) = got {
+            prop_assert_eq!(f.found().len() <= entries.len(), true);
+            prop_assert!(f.found().windows(2).all(|w| w[0].key() < w[1].key()));
+            prop_assert!(f.found().iter().all(|f| !f.row().range().is_empty()));
+            prop_assert_eq!(Findings::decode(&f.encode()), Some(f));
+        }
+    }
+
+    #[test]
     fn any_bytes_parse_or_are_refused_without_panicking(bytes in prop::collection::vec(any::<u8>(), 0..400)) {
         if let Some(f) = Findings::decode(&bytes) {
             // Anything accepted is sorted and without duplicates.
@@ -179,13 +219,12 @@ fn findings_merge_and_are_rewritten_only_when_they_change() {
     assert_eq!(got.found(), [a]);
     assert_eq!(found(&fs).unwrap(), got);
 
-    // The same again: no write.
+    // The same again: no write, only a directory sync.
     let ops = fs.ops().len();
     record(&fs, &dir(), &[a], Verification::Done).unwrap();
-    assert!(
-        fs.ops()[ops..]
-            .iter()
-            .all(|op| matches!(op, Op::Read(_) | Op::List(_)))
+    assert_eq!(
+        fs.ops()[ops..],
+        [Op::Read(dir().join(FILE_NAME)), Op::SyncDir(dir())]
     );
 
     // Nothing new found this time: the old finding stays.
@@ -223,12 +262,19 @@ fn a_corrupt_file_is_set_aside_and_findings_start_again() {
         b"not findings".to_vec()
     );
 
-    // Corrupt, with nothing to say: set aside all the same, and no new file.
-    let fs = FakeFs::with_dirs([dir()]);
-    let mut file = fs.create(&dir().join(FILE_NAME)).unwrap();
-    file.write_all(b"junk").unwrap();
-    record(&fs, &dir(), &[], Verification::Done).unwrap();
-    assert_eq!(fs.paths(), [dir().join(ASIDE_NAME)]);
+    // Corrupt again, with nothing to say: set aside all the same, beside
+    // the first, and no new file.
+    for junk in [b"junk 1", b"junk 2"] {
+        let _ = fs.remove(&dir().join(FILE_NAME));
+        let mut file = fs.create(&dir().join(FILE_NAME)).unwrap();
+        file.write_all(junk).unwrap();
+        record(&fs, &dir(), &[], Verification::Done).unwrap();
+    }
+    let aside = |n: &str| dir().join(format!("{ASIDE_NAME}{n}"));
+    assert_eq!(fs.paths(), [aside(""), aside(".1"), aside(".2")]);
+    assert_eq!(fs.read(&aside("")).unwrap(), b"not findings".to_vec());
+    assert_eq!(fs.read(&aside(".1")).unwrap(), b"junk 1".to_vec());
+    assert_eq!(fs.read(&aside(".2")).unwrap(), b"junk 2".to_vec());
     assert_eq!(found(&fs).unwrap(), Findings::default());
 }
 
@@ -257,6 +303,14 @@ fn a_temp_name_is_only_the_findings_temp() {
     assert!(!is_temp(Path::new("/x/seg-t0-000000000000.flac.tmp")));
 }
 
+/// What a findings file read after a crash may hold: the old findings or
+/// the new, never a torn or missing file.
+fn old_or_new(fs: &FakeFs, old: &Findings, new: &Findings, case: &str) -> bool {
+    let got = found(fs).unwrap_or_else(|e| panic!("{case}: {e}"));
+    assert!(got == *old || got == *new, "{case}: {got:?}");
+    got == *new
+}
+
 #[test]
 fn a_write_crashed_at_every_operation_leaves_the_old_findings_or_the_new() {
     let a = Finding::new(row(0, 0, 10, 1), Problem::Missing);
@@ -267,7 +321,7 @@ fn a_write_crashed_at_every_operation_leaves_the_old_findings_or_the_new() {
     let new = record(&probe, &dir(), &[b], Verification::Unavailable).unwrap();
     assert_ne!(old, new);
     let ops = probe.attempted();
-    assert!(ops >= 6, "{ops}");
+    assert!(ops >= 7, "{ops}");
     let mut saw = (0, 0);
     for after in 0..=ops {
         for outcome in CrashOutcome::standard() {
@@ -275,19 +329,65 @@ fn a_write_crashed_at_every_operation_leaves_the_old_findings_or_the_new() {
             run.crash_after(after);
             let _ = record(&run, &dir(), &[b], Verification::Unavailable);
             let survived = run.crash(outcome);
-            let got =
-                found(&survived).unwrap_or_else(|e| panic!("after {after}, {outcome:?}: {e}"));
-            if got == old {
-                saw.0 += 1;
-            } else {
-                assert_eq!(got, new, "after {after}, {outcome:?}");
+            let case = format!("after {after}, {outcome:?}");
+            if old_or_new(&survived, &old, &new, &case) {
                 saw.1 += 1;
+            } else {
+                saw.0 += 1;
             }
-            // Recording again finishes the job.
-            let again = record(&survived, &dir(), &[b], Verification::Unavailable).unwrap();
-            assert_eq!(again, new);
-            assert_eq!(found(&survived).unwrap(), new);
+            // The retry crashed too, anywhere: still old or new.
+            let retry_ops = {
+                let probe = survived.copy_disk();
+                record(&probe, &dir(), &[b], Verification::Unavailable).unwrap();
+                probe.attempted()
+            };
+            for again in 0..=retry_ops {
+                // More partial outcomes than usual: the case that matters is
+                // a reused temp name whose unlink is lost but whose rename
+                // survives, which few seeds pick.
+                let seconds = (8..64).map(|seed| CrashOutcome::Partial { seed });
+                for second in CrashOutcome::standard().into_iter().chain(seconds) {
+                    let run = survived.copy_disk();
+                    run.crash_after(again);
+                    let _ = record(&run, &dir(), &[b], Verification::Unavailable);
+                    let twice = run.crash(second);
+                    let case = format!("{case}, then after {again}, {second:?}");
+                    old_or_new(&twice, &old, &new, &case);
+                    // An uninterrupted retry finishes the job.
+                    let done = record(&twice, &dir(), &[b], Verification::Unavailable).unwrap();
+                    assert_eq!(done, new, "{case}");
+                    assert_eq!(found(&twice).unwrap(), new, "{case}");
+                }
+            }
         }
     }
     assert!(saw.0 > 0 && saw.1 > 0, "{saw:?}");
+}
+
+#[test]
+fn a_retry_after_any_failed_operation_is_durable_when_it_returns() {
+    let a = Finding::new(row(0, 0, 10, 1), Problem::Missing);
+    let b = Finding::new(row(1, 20, 30, 2), Problem::HashMismatch);
+    let base = FakeFs::with_dirs([dir()]);
+    let old = record(&base, &dir(), &[a], Verification::Done).unwrap();
+    let probe = base.copy_disk();
+    let new = record(&probe, &dir(), &[b], Verification::Done).unwrap();
+    let ops = probe.attempted();
+    for at in 0..ops {
+        for outcome in CrashOutcome::standard() {
+            let run = base.copy_disk();
+            run.fail_after(at, io::ErrorKind::Other);
+            let first = record(&run, &dir(), &[b], Verification::Done);
+            assert!(first.is_err(), "failing op {at} went unnoticed");
+            // The retry succeeds: then the new findings survive any crash.
+            assert_eq!(record(&run, &dir(), &[b], Verification::Done).unwrap(), new);
+            let survived = run.crash(outcome);
+            assert_eq!(
+                found(&survived).unwrap(),
+                new,
+                "failing op {at}, {outcome:?}"
+            );
+        }
+    }
+    assert_ne!(old, new);
 }
