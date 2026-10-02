@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use nota_core::{
-    Clock, EpochId, FakeClock, SampleCount, SampleIndex, SampleRange, SampleRate, SessionTime,
-    TrackId,
+    Clock, EpochId, FakeClock, SampleCount, SampleIndex, SampleRange, SampleRate, SessionId,
+    SessionTime, TrackId,
 };
 use nota_store::SegmentRow;
 use sha2::{Digest, Sha256};
@@ -22,11 +22,12 @@ use crate::fs::fake::{CrashOutcome, FakeFs, Op};
 use crate::fs::{Fs, FsFile, StdFs};
 use crate::journal::format::{FRAME_HEADER_LEN, HEADER_LEN};
 use crate::journal::{JournalId, read_journal};
-use crate::session::{FinishedJournal, SessionWriter};
+use crate::session::{FinishedJournal, SessionDir, SessionStore, SessionWriter};
 use crate::test_dir::TestDir;
 
 const MIC: TrackId = TrackId::new(0);
 const SYSTEM: TrackId = TrackId::new(1);
+const SESSION: SessionId = SessionId::new(1);
 
 /// A low rate keeps the crash tests fast: a second is 1,000 samples.
 fn rate() -> SampleRate {
@@ -46,6 +47,15 @@ fn db() -> PathBuf {
     PathBuf::from("/db")
 }
 
+fn session_dir(fs: &FakeFs) -> SessionDir<FakeFs> {
+    SessionDir::new(SESSION, fs.clone(), &session())
+}
+
+/// The session's store, in the usual place.
+fn session_store(fs: &FakeFs) -> SessionStore<FakeFs, FakeStore> {
+    SessionStore::new(session_dir(fs), FakeStore::new(fs, &db()))
+}
+
 /// The sample a test track holds at `index`: distinct per track and
 /// position, so misplaced or duplicated audio shows.
 fn sample(track: TrackId, index: u64) -> i16 {
@@ -62,7 +72,7 @@ fn samples(track: TrackId, from: u64, len: u64) -> Vec<i16> {
 /// The finished journals numbered `ids`.
 fn finished(ids: &[u64]) -> Vec<FinishedJournal> {
     ids.iter()
-        .map(|&n| FinishedJournal::new(JournalId::new(n)))
+        .map(|&n| FinishedJournal::new(SESSION, JournalId::new(n)))
         .collect()
 }
 
@@ -137,8 +147,8 @@ fn record(fs: &FakeFs, how: Recording) -> Promised {
 
 fn record_into(fs: &FakeFs, how: Recording, promised: &mut Promised) -> Result<(), Box<dyn Error>> {
     let (clock, dyn_clock) = fake_clock();
-    let mut writer = SessionWriter::open(fs.clone(), &session(), rate(), length(), dyn_clock)?;
-    let mut store = FakeStore::new(fs, &db());
+    let mut writer = SessionWriter::open(&session_dir(fs), rate(), length(), dyn_clock)?;
+    let mut store = session_store(fs);
     for (track, at) in [(MIC, 0_u64), (SYSTEM, 700)] {
         writer.start_track(track, EpochId::new(0), SampleIndex::new(at))?;
         promised.started.insert(track, SampleIndex::new(at));
@@ -151,7 +161,7 @@ fn record_into(fs: &FakeFs, how: Recording, promised: &mut Promised) -> Result<(
      -> Result<(), Box<dyn Error>> {
         pending.extend(writer.take_finished());
         if how.publish && !pending.is_empty() {
-            let done = publish_journals(fs, &mut store, &session(), length(), &pending)?;
+            let done = publish_journals(&mut store, length(), &pending)?;
             promised.rows.extend_from_slice(done.segments());
             pending.clear();
         }
@@ -183,7 +193,7 @@ fn record_into(fs: &FakeFs, how: Recording, promised: &mut Promised) -> Result<(
     }
     pending.extend(finished);
     if how.publish {
-        let done = publish_journals(fs, &mut store, &session(), length(), &pending)?;
+        let done = publish_journals(&mut store, length(), &pending)?;
         promised.rows.extend_from_slice(done.segments());
     }
     Ok(())
@@ -218,8 +228,8 @@ struct Recovered {
 }
 
 fn salvage_fake(fs: &FakeFs) -> Result<Observed, String> {
-    let mut store = FakeStore::new(fs, &db());
-    salvage(fs, &mut store, &session(), length()).map_err(|e| e.to_string())?;
+    let mut store = session_store(fs);
+    salvage(&mut store, length()).map_err(|e| e.to_string())?;
     Ok(observe(fs))
 }
 
@@ -569,10 +579,9 @@ fn overlapping_journals_resolve_to_the_newer_one() {
 fn journals_rotate_at_every_window_even_when_publishing_fails() {
     let fs = FakeFs::with_dirs([session()]);
     let (clock, dyn_clock) = fake_clock();
-    let mut writer =
-        SessionWriter::open(fs.clone(), &session(), rate(), length(), dyn_clock).unwrap();
+    let mut writer = SessionWriter::open(&session_dir(&fs), rate(), length(), dyn_clock).unwrap();
     // The store's directory doesn't exist: every publish fails.
-    let mut store = FakeStore::new(&fs, Path::new("/missing"));
+    let mut store = SessionStore::new(session_dir(&fs), FakeStore::new(&fs, Path::new("/missing")));
     writer
         .start_track(MIC, EpochId::new(0), SampleIndex::new(100))
         .unwrap();
@@ -585,7 +594,7 @@ fn journals_rotate_at_every_window_even_when_publishing_fails() {
         clock.advance(SampleCount::new(len).duration_at(rate()).unwrap());
         writer.sync_if_due().unwrap();
         pending.extend(writer.take_finished());
-        if publish_journals(&fs, &mut store, &session(), length(), &pending).is_err() {
+        if publish_journals(&mut store, length(), &pending).is_err() {
             failures += 1;
         }
     }
@@ -650,15 +659,15 @@ fn salvage_twice_changes_nothing_and_leaves_no_journals() {
         fail_at: None,
     });
     let disk = fs.crash(CrashOutcome::KeepAll);
-    assert!(needs_salvage(&disk, &session()).unwrap());
-    let mut store = FakeStore::new(&disk, &db());
-    let first = salvage(&disk, &mut store, &session(), length()).unwrap();
+    assert!(needs_salvage(&session_dir(&disk)).unwrap());
+    let mut store = session_store(&disk);
+    let first = salvage(&mut store, length()).unwrap();
     assert!(!first.segments().is_empty());
     assert!(!first.deleted().is_empty());
-    assert!(!needs_salvage(&disk, &session()).unwrap());
+    assert!(!needs_salvage(&session_dir(&disk)).unwrap());
     let seen = observe(&disk);
     check_after(&promised, &seen).unwrap();
-    let second = salvage(&disk, &mut store, &session(), length()).unwrap();
+    let second = salvage(&mut store, length()).unwrap();
     assert_eq!(second, Published::default());
     assert_eq!(observe(&disk), seen);
 }
@@ -667,7 +676,7 @@ fn salvage_twice_changes_nothing_and_leaves_no_journals() {
 fn rows_carry_the_epoch_and_a_new_epoch_starts_a_new_segment() {
     let fs = FakeFs::with_dirs([session(), db()]);
     let (_, clock) = fake_clock();
-    let mut writer = SessionWriter::open(fs.clone(), &session(), rate(), length(), clock).unwrap();
+    let mut writer = SessionWriter::open(&session_dir(&fs), rate(), length(), clock).unwrap();
     writer
         .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
         .unwrap();
@@ -676,8 +685,8 @@ fn rows_carry_the_epoch_and_a_new_epoch_starts_a_new_segment() {
     writer.append(MIC, &samples(MIC, 400, 200)).unwrap();
     let ids = writer.finish().unwrap();
     assert_eq!(ids, finished(&[0, 1]));
-    let mut store = FakeStore::new(&fs, &db());
-    let done = publish_journals(&fs, &mut store, &session(), length(), &ids).unwrap();
+    let mut store = session_store(&fs);
+    let done = publish_journals(&mut store, length(), &ids).unwrap();
     let got: Vec<_> = done
         .segments()
         .iter()
@@ -702,7 +711,7 @@ fn journal_ids_continue_after_a_restart() {
         .create(&session().join(JournalId::new(7).file_name()))
         .unwrap();
     file.write_all(b"x").unwrap();
-    let mut writer = SessionWriter::open(fs.clone(), &session(), rate(), length(), clock).unwrap();
+    let mut writer = SessionWriter::open(&session_dir(&fs), rate(), length(), clock).unwrap();
     writer
         .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
         .unwrap();
@@ -727,8 +736,8 @@ fn an_unreadable_journal_is_set_aside_and_the_rest_salvaged() {
     let mut copy = disk.create(&renamed).unwrap();
     copy.write_all(&disk.read(&first).unwrap()).unwrap();
 
-    let mut store = FakeStore::new(&disk, &db());
-    let done = salvage(&disk, &mut store, &session(), length()).unwrap();
+    let mut store = session_store(&disk);
+    let done = salvage(&mut store, length()).unwrap();
     let mut aside: Vec<_> = done.quarantined().to_vec();
     aside.sort();
     assert_eq!(
@@ -752,12 +761,13 @@ fn a_failing_store_keeps_the_journals_for_the_next_try() {
         publish: false,
         fail_at: None,
     });
-    let mut missing = FakeStore::new(&fs, Path::new("/missing"));
-    let err = salvage(&fs, &mut missing, &session(), length()).unwrap_err();
+    let mut missing =
+        SessionStore::new(session_dir(&fs), FakeStore::new(&fs, Path::new("/missing")));
+    let err = salvage(&mut missing, length()).unwrap_err();
     assert!(matches!(err, PublishError::Store(_)), "{err}");
-    assert!(needs_salvage(&fs, &session()).unwrap());
-    let mut store = FakeStore::new(&fs, &db());
-    salvage(&fs, &mut store, &session(), length()).unwrap();
+    assert!(needs_salvage(&session_dir(&fs)).unwrap());
+    let mut store = session_store(&fs);
+    salvage(&mut store, length()).unwrap();
     check_after(&promised, &observe(&fs)).unwrap();
 }
 
@@ -767,7 +777,8 @@ fn salvage_on_the_real_filesystem_with_sqlite() {
     let session = dir.0.join("session");
     StdFs.create_dir(&session).unwrap();
     let (clock, dyn_clock) = fake_clock();
-    let mut writer = SessionWriter::open(StdFs, &session, rate(), length(), dyn_clock).unwrap();
+    let ours = SessionDir::new(SESSION, StdFs, &session);
+    let mut writer = SessionWriter::open(&ours, rate(), length(), dyn_clock).unwrap();
     writer
         .start_track(MIC, EpochId::new(2), SampleIndex::new(10))
         .unwrap();
@@ -778,7 +789,7 @@ fn salvage_on_the_real_filesystem_with_sqlite() {
     drop(writer);
 
     let mut store = nota_store::Store::open(&dir.0.join("nota.db")).unwrap();
-    let done = salvage(&StdFs, &mut store, &session, length()).unwrap();
+    let done = salvage(&mut SessionStore::new(ours.clone(), &mut store), length()).unwrap();
     let rows = store.segments().unwrap();
     assert_eq!(rows, done.segments());
     let ranges: Vec<_> = rows
@@ -803,13 +814,13 @@ fn salvage_on_the_real_filesystem_with_sqlite() {
         let r = row.range();
         assert_eq!(got, samples(MIC, r.start().get(), r.len().get()));
     }
-    assert!(!needs_salvage(&StdFs, &session).unwrap());
+    assert!(!needs_salvage(&ours).unwrap());
     // Reopened, the rows are still there, and salvage has nothing to do.
     drop(store);
     let mut store = nota_store::Store::open(&dir.0.join("nota.db")).unwrap();
     assert_eq!(store.segments().unwrap(), rows);
     assert_eq!(
-        salvage(&StdFs, &mut store, &session, length()).unwrap(),
+        salvage(&mut SessionStore::new(ours, &mut store), length()).unwrap(),
         Published::default()
     );
 }
@@ -862,6 +873,11 @@ fn errors_describe_themselves() {
         assert!(!e.to_string().is_empty());
     }
     assert!(errors[3].to_string().contains("journal-000004"));
+    let other =
+        PublishError::OtherSession(FinishedJournal::new(SessionId::new(9), JournalId::new(4)));
+    assert!(other.to_string().contains("journal-000004"));
+    assert!(other.to_string().contains('9'));
+    assert!(other.source().is_none());
     assert!(errors[0].source().is_some());
     assert!(errors[3].source().is_none());
 }
@@ -910,12 +926,12 @@ fn a_row_without_its_file_here_claims_nothing() {
             .unwrap(),
     )
     .unwrap();
-    let mut store = FakeStore::new(&fs, &db());
-    assert_eq!(store.rows().unwrap(), row);
+    assert_eq!(FakeStore::new(&fs, &db()).rows().unwrap(), row);
+    let mut store = session_store(&fs);
     let journals_before: Vec<_> = fs.paths().into_iter().filter(|p| is_journal(p)).collect();
     // Salvage plans a segment over the row's samples, and the store refuses
     // it: nothing is deleted.
-    let err = salvage(&fs, &mut store, &session(), length()).unwrap_err();
+    let err = salvage(&mut store, length()).unwrap_err();
     assert!(matches!(err, PublishError::Store(_)), "{err}");
     let journals_after: Vec<_> = fs.paths().into_iter().filter(|p| is_journal(p)).collect();
     assert!(journals_after.contains(&session().join(JournalId::new(0).file_name())));
@@ -927,7 +943,7 @@ fn a_journal_corrupt_before_its_end_is_published_then_set_aside() {
     let fs = FakeFs::with_dirs([session(), db()]);
     let (clock, dyn_clock) = fake_clock();
     let long = SegmentLength::new(1_000_000).unwrap();
-    let mut writer = SessionWriter::open(fs.clone(), &session(), rate(), long, dyn_clock).unwrap();
+    let mut writer = SessionWriter::open(&session_dir(&fs), rate(), long, dyn_clock).unwrap();
     writer
         .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
         .unwrap();
@@ -947,8 +963,8 @@ fn a_journal_corrupt_before_its_end_is_published_then_set_aside() {
     let mut file = disk.create(&path).unwrap();
     file.write_all(&bytes).unwrap();
 
-    let mut store = FakeStore::new(&disk, &db());
-    let done = salvage(&disk, &mut store, &session(), long).unwrap();
+    let mut store = session_store(&disk);
+    let done = salvage(&mut store, long).unwrap();
     let ranges: Vec<_> = done
         .segments()
         .iter()
@@ -965,8 +981,8 @@ fn a_journal_corrupt_before_its_end_is_published_then_set_aside() {
     let disk = FakeFs::with_dirs([session(), db()]);
     let mut file = disk.create(&path).unwrap();
     file.write_all(torn).unwrap();
-    let mut store = FakeStore::new(&disk, &db());
-    let done = salvage(&disk, &mut store, &session(), long).unwrap();
+    let mut store = session_store(&disk);
+    let done = salvage(&mut store, long).unwrap();
     assert_eq!(done.deleted(), [JournalId::FIRST]);
     assert!(done.quarantined().is_empty());
 }
@@ -998,8 +1014,8 @@ fn a_row_whose_commit_failed_isnt_reported() {
     assert!(FakeStore::new(&fs, &db()).rows().unwrap().is_empty());
     // Salvage on the running system, then a crash that drops what wasn't
     // made durable: nothing promised is lost.
-    let mut store = FakeStore::new(&fs, &db());
-    salvage(&fs, &mut store, &session(), length()).unwrap();
+    let mut store = session_store(&fs);
+    salvage(&mut store, length()).unwrap();
     let after = observe(&fs.crash(CrashOutcome::LoseUnsynced));
     check_after(&promised, &after).unwrap();
 }
@@ -1056,4 +1072,280 @@ fn a_journal_break_while_publishing_live_loses_nothing_at_any_crash() {
         ])
         .run()
         .unwrap();
+}
+
+/// Plants a committed row on `fs` for `range` of `track`, hashed over
+/// `hashed`, and leaves `file` (durably) under the row's name.
+fn plant_row(
+    fs: &FakeFs,
+    track: TrackId,
+    range: SampleRange,
+    hashed: &[u8],
+    file: &[u8],
+) -> SegmentRow {
+    let durable = TempSegment::write(fs, &session(), track, EpochId::new(0), range, hashed)
+        .unwrap()
+        .sync()
+        .unwrap()
+        .rename(fs)
+        .unwrap()
+        .sync_dir(fs)
+        .unwrap();
+    let row = *durable.row();
+    durable.commit(&mut FakeStore::new(fs, &db())).unwrap();
+    if file != hashed {
+        let path = durable_path(track, range);
+        fs.remove(&path).unwrap();
+        let mut out = fs.create(&path).unwrap();
+        out.write_all(file).unwrap();
+        out.sync().unwrap();
+        fs.sync_dir(&session()).unwrap();
+    }
+    row
+}
+
+fn durable_path(track: TrackId, range: SampleRange) -> PathBuf {
+    session().join(segment_file_name(track, range))
+}
+
+fn flac_of(track: TrackId, from: u64, len: u64) -> Vec<u8> {
+    flac::encode(rate(), &[&samples(track, from, len)]).unwrap()
+}
+
+#[test]
+fn a_row_whose_file_doesnt_match_never_lets_a_journal_go_at_any_crash() {
+    let (fs, promised) = clean_run(Recording {
+        steps: 4,
+        publish: false,
+        fail_at: None,
+    });
+    let range = |a, b| SampleRange::new(SampleIndex::new(a), SampleIndex::new(b)).unwrap();
+    for outcome in [
+        CrashOutcome::LoseUnsynced,
+        CrashOutcome::KeepAll,
+        CrashOutcome::Partial { seed: 5 },
+    ] {
+        let disk = fs.crash(outcome);
+        // A wrong hash: the file under the row's name holds other audio
+        // (another session's, or a store restored out of step). It ends
+        // where the next window's segment starts.
+        let wrong_hash = plant_row(
+            &disk,
+            MIC,
+            range(0, 1_500),
+            &flac_of(MIC, 0, 1_500),
+            &flac::encode(rate(), &[&[0; 1_500]]).unwrap(),
+        );
+        // The same name with a different range: the file's hash is the
+        // row's, but it holds 300 samples where the row claims 800. A check
+        // of the hash alone would let the row claim 1,500..2,300 and the
+        // journals holding 1,800..2,300 go. It starts where the window
+        // before ends.
+        let short = flac_of(SYSTEM, 1_500, 300);
+        let wrong_range = plant_row(&disk, SYSTEM, range(1_500, 2_300), &short, &short);
+        let bad = [wrong_hash, wrong_range];
+        // Rows overlapping no journal of their own track are never read,
+        // so their files, which don't match either, aren't reported: one
+        // right after the mic's last sample, and one on the system track
+        // before its first, over samples the mic's journals hold.
+        let mic_end = promised.durable[&MIC].get();
+        let unread = [
+            plant_row(&disk, MIC, range(mic_end, mic_end + 10), b"a", b"b"),
+            plant_row(&disk, SYSTEM, range(0, 700), b"c", b"d"),
+        ];
+        let planted: BTreeMap<PathBuf, Vec<u8>> = bad
+            .iter()
+            .chain(&unread)
+            .map(|r| {
+                let path = durable_path(r.track(), r.range());
+                let bytes = disk.read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect();
+        let ignored: Vec<SegmentRow> = bad.iter().chain(&unread).copied().collect();
+
+        // Uninterrupted: both rows are reported, claim nothing, and keep
+        // their journals and files; the rest is published.
+        let probe = disk.copy_disk();
+        let done = salvage(&mut session_store(&probe), length()).unwrap();
+        assert_eq!(done.mismatched(), bad, "{outcome:?}");
+        assert!(!done.segments().is_empty());
+        assert!(!done.deleted().is_empty());
+        let uninterrupted = observe(&probe);
+        check_mismatch_kept(&promised, &bad, &ignored, &planted, &uninterrupted)
+            .unwrap_or_else(|e| panic!("{outcome:?}: {e}"));
+
+        // Crashed after every operation, under every outcome, then run
+        // again: the same end state.
+        let ops = probe.attempted();
+        for after in 0..=ops {
+            for crash in CrashOutcome::standard() {
+                let run = disk.copy_disk();
+                run.crash_after(after);
+                let _ = salvage(&mut session_store(&run), length());
+                let survived = run.crash(crash);
+                let mut again = session_store(&survived);
+                let rerun = salvage(&mut again, length())
+                    .unwrap_or_else(|e| panic!("after {after} ops, {crash:?}: {e}"));
+                assert_eq!(rerun.mismatched(), bad);
+                let seen = observe(&survived);
+                check_mismatch_kept(&promised, &bad, &ignored, &planted, &seen)
+                    .unwrap_or_else(|e| panic!("after {after} ops, {crash:?}: {e}"));
+                assert!(
+                    seen == uninterrupted,
+                    "salvage crashed after {after} ops, {crash:?}, ended differently"
+                );
+            }
+        }
+    }
+}
+
+/// After salvage with mismatched rows `bad`, and `ignored` rows (`bad` and
+/// those never read) whose files were `planted`: those files are as they
+/// were, every sample in a window a bad row overlaps is still in a journal
+/// and in no row, and every other promised sample is in a good row's file,
+/// with no journal left holding it.
+fn check_mismatch_kept(
+    promised: &Promised,
+    bad: &[SegmentRow],
+    ignored: &[SegmentRow],
+    planted: &BTreeMap<PathBuf, Vec<u8>>,
+    seen: &Observed,
+) -> Result<(), String> {
+    for (path, bytes) in planted {
+        if seen.files.get(path) != Some(bytes) {
+            return Err(format!("{} changed", path.display()));
+        }
+    }
+    let good = Observed {
+        files: seen.files.clone(),
+        rows: Ok(seen
+            .rows
+            .clone()?
+            .into_iter()
+            .filter(|r| !ignored.contains(r))
+            .collect()),
+    };
+    let in_rows = row_samples(&good)?;
+    let in_journals = journal_samples(seen)?;
+    // A segment is one window here (no gaps), so a window that shares a
+    // sample with a bad row isn't published, and stays in its journals.
+    let in_bad = |track: TrackId, s: u64| {
+        let window = length().window_of(SampleIndex::new(s));
+        let (from, to) = (
+            window * length().samples(),
+            (window + 1) * length().samples(),
+        );
+        bad.iter().any(|r| {
+            r.track() == track && r.range().start().get() < to && from < r.range().end().get()
+        })
+    };
+    for (&track, &start) in &promised.started {
+        let end = promised.durable[&track].get();
+        for s in start.get()..end {
+            let ok = if in_bad(track, s) {
+                in_journals.contains(&(track, s)) && !in_rows.contains(&(track, s))
+            } else {
+                in_rows.contains(&(track, s)) && !in_journals.contains(&(track, s))
+            };
+            if !ok {
+                return Err(format!(
+                    "track {} sample {s}: in a row {}, in a journal {}, under a mismatched row {}",
+                    track.get(),
+                    in_rows.contains(&(track, s)),
+                    in_journals.contains(&(track, s)),
+                    in_bad(track, s)
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn recording_with_the_store_down_loses_nothing_once_it_is_back() {
+    // The store's directory doesn't exist yet: every publish fails.
+    let fs = FakeFs::with_dirs([session()]);
+    let (clock, dyn_clock) = fake_clock();
+    let mut writer = SessionWriter::open(&session_dir(&fs), rate(), length(), dyn_clock).unwrap();
+    let mut store = session_store(&fs);
+    let mut promised = Promised::default();
+    for (track, at) in [(MIC, 100_u64), (SYSTEM, 0)] {
+        writer
+            .start_track(track, EpochId::new(0), SampleIndex::new(at))
+            .unwrap();
+        promised.started.insert(track, SampleIndex::new(at));
+    }
+    let mut pending = Vec::new();
+    let mut failures = 0;
+    for len in [700_u64, 3_100, 20, 1_480, 2_000] {
+        for track in [MIC, SYSTEM] {
+            let from = writer.next_sample(track).unwrap().get();
+            writer.append(track, &samples(track, from, len)).unwrap();
+        }
+        clock.advance(SampleCount::new(len).duration_at(rate()).unwrap());
+        writer.sync_if_due().unwrap();
+        pending.extend(writer.take_finished());
+        let err = publish_journals(&mut store, length(), &pending).unwrap_err();
+        assert!(matches!(err, PublishError::Store(_)), "{err}");
+        failures += 1;
+    }
+    for track in [MIC, SYSTEM] {
+        promised
+            .durable
+            .insert(track, writer.next_sample(track).unwrap());
+    }
+    pending.extend(writer.finish().unwrap());
+    assert_eq!(failures, 5);
+    // Journals rotated at every window while the store was down.
+    let journals = fs.paths().into_iter().filter(|p| is_journal(p)).count();
+    assert_eq!(journals, pending.len());
+    assert!(journals >= 10, "{journals}");
+
+    // The store comes back.
+    fs.create_dir(&db()).unwrap();
+    fs.sync_dir(Path::new("/")).unwrap();
+    // Salvage of a copy, crashed anywhere, loses nothing...
+    salvage_crashed_everywhere(&fs.copy_disk(), &promised);
+    // ...and the same handle publishes everything that waited.
+    let done = publish_journals(&mut store, length(), &pending).unwrap();
+    assert_eq!(done.deleted().len(), journals);
+    promised.rows = done.segments().to_vec();
+    check_after(&promised, &observe(&fs)).unwrap();
+}
+
+#[test]
+fn another_sessions_journals_are_refused_before_anything_is_done() {
+    // Both sessions number their journals from 0: another session's
+    // finished journal 0 names this session's journal 0, still recording.
+    let fs = FakeFs::with_dirs([session(), db()]);
+    let (_, clock) = fake_clock();
+    let mut writer = SessionWriter::open(&session_dir(&fs), rate(), length(), clock).unwrap();
+    writer
+        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .unwrap();
+    writer.append(MIC, &samples(MIC, 0, 100)).unwrap();
+    let theirs = FinishedJournal::new(SessionId::new(2), JournalId::FIRST);
+    let before = observe(&fs);
+    let ops = fs.ops().len();
+    let err = publish_journals(&mut session_store(&fs), length(), &[theirs]).unwrap_err();
+    assert!(
+        matches!(err, PublishError::OtherSession(j) if j == theirs),
+        "{err}"
+    );
+    // Mixed with this session's own, still refused.
+    let ours = finished(&[0]);
+    let err = publish_journals(&mut session_store(&fs), length(), &[ours[0], theirs]).unwrap_err();
+    assert!(matches!(err, PublishError::OtherSession(_)), "{err}");
+    assert_eq!(fs.ops().len(), ops);
+    assert_eq!(observe(&fs), before);
+    // The journal goes on recording, and is published once it's finished.
+    writer.append(MIC, &samples(MIC, 100, 100)).unwrap();
+    let finished = writer.finish().unwrap();
+    assert_eq!(finished, ours);
+    assert_eq!(finished[0].session(), SESSION);
+    let done = publish_journals(&mut session_store(&fs), length(), &finished).unwrap();
+    assert_eq!(done.deleted(), [JournalId::FIRST]);
+    assert_eq!(done.segments().len(), 1);
+    assert_eq!(done.segments()[0].range().len().get(), 200);
 }

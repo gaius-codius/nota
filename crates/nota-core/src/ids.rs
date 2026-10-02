@@ -37,6 +37,25 @@ impl EpochId {
     }
 }
 
+/// One recording session: a lecture or workshop, recorded into its own
+/// directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SessionId(u64);
+
+impl SessionId {
+    /// The session numbered `id`.
+    #[must_use]
+    pub const fn new(id: u64) -> Self {
+        Self(id)
+    }
+
+    /// The session's number.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -45,6 +64,7 @@ mod tests {
     fn ids_round_trip() {
         assert_eq!(TrackId::new(7).get(), 7);
         assert_eq!(EpochId::new(9).get(), 9);
+        assert_eq!(SessionId::new(u64::MAX).get(), u64::MAX);
         assert!(EpochId::new(1) < EpochId::new(2));
     }
 }

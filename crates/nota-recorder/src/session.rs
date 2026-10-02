@@ -29,32 +29,47 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use nota_core::{Clock, EpochId, SampleCount, SampleIndex, SampleRate, TrackId};
+use nota_core::{Clock, EpochId, SampleCount, SampleIndex, SampleRate, SessionId, TrackId};
 
 use crate::fs::Fs;
 use crate::journal::{DurablePosition, JournalError, JournalHeader, JournalId, JournalWriter};
 use crate::segment::SegmentLength;
 
+mod handle;
+
+pub use handle::{SessionDir, SessionStore};
+
 /// A journal no writer will append to again: ended by a [`SessionWriter`],
 /// or found on disk by salvage at startup, when nothing is recording.
 /// Publishing deletes the journals it publishes, so it takes only these: a
-/// journal still being written can't be handed to it by mistake.
+/// journal still being written can't be handed to it by mistake. Journal
+/// ids are numbered per session, so it names its session too, and
+/// publishing refuses another session's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct FinishedJournal(JournalId);
+pub struct FinishedJournal {
+    session: SessionId,
+    id: JournalId,
+}
 
 impl FinishedJournal {
     /// Only the session writer, and salvage, say a journal is finished.
-    pub(crate) const fn new(id: JournalId) -> Self {
-        Self(id)
+    pub(crate) const fn new(session: SessionId, id: JournalId) -> Self {
+        Self { session, id }
+    }
+
+    /// The session the journal belongs to.
+    #[must_use]
+    pub const fn session(self) -> SessionId {
+        self.session
     }
 
     /// The journal's id.
     #[must_use]
     pub const fn id(self) -> JournalId {
-        self.0
+        self.id
     }
 }
 
@@ -149,6 +164,7 @@ struct Track<F> {
 /// own thread. Call [`Self::sync_if_due`] on a timer.
 #[derive(Debug)]
 pub struct SessionWriter<S: Fs> {
+    session: SessionId,
     fs: S,
     dir: PathBuf,
     rate: SampleRate,
@@ -160,22 +176,29 @@ pub struct SessionWriter<S: Fs> {
 }
 
 impl<S: Fs> SessionWriter<S> {
-    /// A writer recording into `dir`, at `rate`, rotating every `length`.
-    /// New journal ids continue after the highest one already in `dir`
-    /// (journals and those salvage set aside), so they stay in order across
-    /// a restart. Salvage `dir` first.
+    /// A writer recording into `session`'s directory, at `rate`, rotating
+    /// every `length`. New journal ids continue after the highest one
+    /// already there (journals and those salvage set aside), so they stay in
+    /// order across a restart. Salvage the session first.
+    ///
+    /// It takes the session's directory, not its [`SessionStore`]: recording
+    /// never depends on the store.
     ///
     /// # Errors
     ///
-    /// [`SessionError::Io`] if `dir` can't be listed;
+    /// [`SessionError::Io`] if the directory can't be listed;
     /// [`SessionError::Overflow`] if its highest id is the last one.
     pub fn open(
-        fs: S,
-        dir: &Path,
+        session: &SessionDir<S>,
         rate: SampleRate,
         length: SegmentLength,
         clock: Arc<dyn Clock>,
-    ) -> Result<Self, SessionError> {
+    ) -> Result<Self, SessionError>
+    where
+        S: Clone,
+    {
+        let fs = session.fs().clone();
+        let dir = session.dir();
         let highest = fs
             .list(dir)
             .map_err(SessionError::Io)?
@@ -187,6 +210,7 @@ impl<S: Fs> SessionWriter<S> {
             Some(id) => Some(id.next().ok_or(SessionError::Overflow)?),
         };
         Ok(Self {
+            session: session.id(),
             fs,
             dir: dir.to_path_buf(),
             rate,
@@ -419,7 +443,7 @@ impl<S: Fs> SessionWriter<S> {
             Ok(journal) => journal,
             Err(e) => {
                 state.unsynced.clear();
-                hand_out(&mut state.held, &mut self.finished, None);
+                hand_out(self.session, &mut state.held, &mut self.finished, None);
                 return Err(SessionError::Journal(e));
             }
         };
@@ -433,7 +457,7 @@ impl<S: Fs> SessionWriter<S> {
             }
             // A replacement broke too: give up on these samples.
             let broken = state.journal.take().map(|j| j.header().id());
-            hand_out(&mut state.held, &mut self.finished, broken);
+            hand_out(self.session, &mut state.held, &mut self.finished, broken);
             state.unsynced.clear();
             return Err(SessionError::Journal(e));
         }
@@ -451,7 +475,9 @@ impl<S: Fs> SessionWriter<S> {
             return Ok(());
         };
         let from = broken.durable().end();
-        state.held.push(FinishedJournal::new(broken.header().id()));
+        state
+            .held
+            .push(FinishedJournal::new(self.session, broken.header().id()));
         self.start_journal(track, from, false)
     }
 
@@ -470,7 +496,7 @@ impl<S: Fs> SessionWriter<S> {
         trim_unsynced(state, durable);
         if synced.is_ok() {
             let id = journal.header().id();
-            hand_out(&mut state.held, &mut self.finished, Some(id));
+            hand_out(self.session, &mut state.held, &mut self.finished, Some(id));
             state.unsynced.clear();
             return Ok(());
         }
@@ -486,7 +512,7 @@ impl<S: Fs> SessionWriter<S> {
         };
         let synced = journal.sync();
         let id = journal.header().id();
-        hand_out(&mut state.held, &mut self.finished, Some(id));
+        hand_out(self.session, &mut state.held, &mut self.finished, Some(id));
         state.unsynced.clear();
         synced.map_err(SessionError::Journal)
     }
@@ -495,12 +521,13 @@ impl<S: Fs> SessionWriter<S> {
 /// Moves a track's held broken journals, then the journal that just
 /// `ended`, to the finished list: the track has no journal in progress.
 fn hand_out(
+    session: SessionId,
     held: &mut Vec<FinishedJournal>,
     finished: &mut Vec<FinishedJournal>,
     ended: Option<JournalId>,
 ) {
     finished.append(held);
-    finished.extend(ended.map(FinishedJournal::new));
+    finished.extend(ended.map(|id| FinishedJournal::new(session, id)));
 }
 
 /// The id in a journal's file name, or in a journal set aside by salvage

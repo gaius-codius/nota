@@ -45,6 +45,20 @@ impl SegmentStore for nota_store::Store {
     }
 }
 
+/// A store lent to a [`SessionStore`](crate::session::SessionStore), so the
+/// caller keeps it when the session ends.
+impl<T: SegmentStore + ?Sized> SegmentStore for &mut T {
+    type Error = T::Error;
+
+    fn rows(&mut self) -> Result<Vec<SegmentRow>, Self::Error> {
+        (**self).rows()
+    }
+
+    fn insert(&mut self, segment: &DurableSegment) -> Result<(), Self::Error> {
+        (**self).insert(segment)
+    }
+}
+
 #[cfg(any(test, feature = "fake-fs"))]
 pub use fake::FakeStore;
 
@@ -183,6 +197,36 @@ mod fake {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn a_lent_store_is_the_store() {
+            use crate::fs::fake::FakeFs;
+            use crate::segment::publish::TempSegment;
+
+            let fs = FakeFs::with_dirs(["/s", "/db"]);
+            let range = SampleRange::new(SampleIndex::new(5), SampleIndex::new(9)).unwrap();
+            let durable = TempSegment::write(
+                &fs,
+                Path::new("/s"),
+                TrackId::new(1),
+                EpochId::new(0),
+                range,
+                b"flac",
+            )
+            .unwrap()
+            .sync()
+            .unwrap()
+            .rename(&fs)
+            .unwrap()
+            .sync_dir(&fs)
+            .unwrap();
+            let mut store = FakeStore::new(&fs, Path::new("/db"));
+            let mut lent = &mut store;
+            SegmentStore::insert(&mut lent, &durable).unwrap();
+            let rows = SegmentStore::rows(&mut lent).unwrap();
+            assert_eq!(rows, [*durable.row()]);
+            assert_eq!(store.rows().unwrap(), rows);
+        }
 
         #[test]
         fn rows_round_trip_and_bad_files_are_refused() {

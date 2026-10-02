@@ -141,8 +141,31 @@ pub(super) fn encode(rate: SampleRate, pieces: &[&[i16]]) -> Result<Vec<u8>, Fla
     Ok(sink.as_slice().to_vec())
 }
 
+/// The number of samples a FLAC file declares in its STREAMINFO block, which
+/// the format requires to come first: `None` if `bytes` don't start that way,
+/// or the count is unknown (zero). Only the header is read; the hash of the
+/// whole file is what proves the audio.
+pub(super) fn stream_len(bytes: &[u8]) -> Option<u64> {
+    // "fLaC", then a metadata block header whose type (low 7 bits of its
+    // first byte) is 0, STREAMINFO, with a 34-byte body.
+    let (magic, rest) = bytes.split_first_chunk::<4>()?;
+    let (block, info) = rest.split_first_chunk::<4>()?;
+    if magic != b"fLaC" || block[0] & 0x7F != 0 || block[1..] != [0, 0, 34] {
+        return None;
+    }
+    // In the body: block sizes (4 bytes) and frame sizes (6), then 64 bits
+    // of rate (20), channels (3), bits per sample (5) and total samples (36).
+    let packed = u64::from_be_bytes(*info.get(10..18)?.first_chunk::<8>()?);
+    match packed & 0xF_FFFF_FFFF {
+        0 => None,
+        n => Some(n),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     fn rate(hz: u32) -> SampleRate {
@@ -189,12 +212,13 @@ mod tests {
             for total in [1, 15, 4095, 4096, 4097, 10_000] {
                 let data = samples(total);
                 let bytes = encode(rate(hz), &[&data]).unwrap();
-                let (info, decoded) = decode(bytes);
+                let (info, decoded) = decode(bytes.clone());
                 assert_eq!(decoded, data, "hz {hz} total {total}");
                 assert_eq!(info.channels, 1);
                 assert_eq!(info.bits_per_sample, 16);
                 assert_eq!(info.sample_rate, hz);
                 assert_eq!(info.samples, Some(total as u64));
+                assert_eq!(stream_len(&bytes), Some(total as u64));
             }
         }
         let data = samples(100);
@@ -254,5 +278,44 @@ mod tests {
         assert!(!FlacError::Empty.to_string().is_empty());
         let shown = FlacError::Encode("boom".into()).to_string();
         assert!(shown.contains("boom"));
+    }
+
+    #[test]
+    fn stream_len_refuses_what_isnt_a_flac_header() {
+        let bytes = encode(rate(16_000), &[&samples(5_000)]).unwrap();
+        assert_eq!(stream_len(&bytes), Some(5_000));
+        assert_eq!(stream_len(&bytes[..25]), None);
+        assert_eq!(stream_len(&bytes[..26]), Some(5_000));
+        for at in [0, 3, 4, 5, 6, 7] {
+            let mut bad = bytes.clone();
+            bad[at] ^= 0x01;
+            assert_eq!(stream_len(&bad), None, "byte {at}");
+        }
+        // The last-block flag (top bit) is fine.
+        let mut last = bytes.clone();
+        last[4] ^= 0x80;
+        assert_eq!(stream_len(&last), Some(5_000));
+        // An unknown count is no count.
+        let mut unknown = bytes;
+        unknown[21] &= 0xF0;
+        unknown[22..26].fill(0);
+        assert_eq!(stream_len(&unknown), None);
+    }
+
+    proptest! {
+        #[test]
+        fn stream_len_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..64)) {
+            let _ = stream_len(&bytes);
+            let mut flac = b"fLaC\x00\x00\x00\x22".to_vec();
+            flac.extend_from_slice(&bytes);
+            let got = stream_len(&flac);
+            if bytes.len() < 18 {
+                prop_assert_eq!(got, None);
+            } else {
+                let packed = u64::from_be_bytes(bytes[10..18].try_into().unwrap());
+                let n = packed & 0xF_FFFF_FFFF;
+                prop_assert_eq!(got, (n != 0).then_some(n));
+            }
+        }
     }
 }
