@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 4690cf769e2a6e6632384b4c31e03ac4d00c92690e967e9a2dd45e601217e782 # shrinks to (config, first, len, truth, pushes, lag) = (ChunkerConfig { min_pause: 3, target: 3, cap: 26, fallback_window: 1, frame: 1 }, 0, 31, [(0, 27)], [31, 44, 14, 14, 16, 50, 62], 23)

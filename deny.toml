@@ -43,6 +43,10 @@ include-dev = true
 multiple-versions = "warn"
 wildcards = "deny"
 allow-wildcard-paths = true
+deny = [
+  # Native model code (sherpa-onnx, onnxruntime) stays in the engine child.
+  { crate = "sherpa-onnx", wrappers = ["nota-engine"] },
+]
 
 [sources]
 unknown-registry = "deny"
