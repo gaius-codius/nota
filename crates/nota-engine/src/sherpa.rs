@@ -425,7 +425,10 @@ mod tests {
     }
 
     #[test]
-    fn reset_after_is_an_hour() {
+    fn reset_after_is_an_hour_and_backdate_matches_sherpa() {
         assert_eq!(RESET_AFTER, 57_600_000);
+        // sherpa-onnx: start = tail - 2 * window - min_speech_samples.
+        assert_eq!(BACKDATE, 5_024);
+        assert!(SETTLE_LAG > BACKDATE + 2 * WINDOW as u64);
     }
 }
