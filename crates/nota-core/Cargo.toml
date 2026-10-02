@@ -1,0 +1,24 @@
+[package]
+name = "nota-core"
+description = "Shared types for nota: the session clock, track epochs, time units and messages."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# `FakeClock`, for other crates' tests. Enable it from `[dev-dependencies]` only.
+fake-clock = []
+
+[dependencies]
+
+# CLOCK_BOOTTIME for the session clock, which std's Instant doesn't offer.
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+rustix.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

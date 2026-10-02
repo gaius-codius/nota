@@ -27,6 +27,8 @@ pre-push:
       run: cargo clippy --workspace --all-targets --locked --config 'build.warnings="deny"'
     test:
       run: cargo nextest run --workspace --locked --no-tests=pass
+    doctest:
+      run: cargo test --workspace --locked --doc
     deny:
       run: cargo deny --locked check
     shear:
