@@ -120,7 +120,24 @@ proptest! {
         let got = Findings::decode(&bytes);
         prop_assert_eq!(got.is_some(), valid);
         if let Some(f) = got {
-            prop_assert_eq!(f.found().len() <= entries.len(), true);
+            // Every entry, once each, as written.
+            let mut want: Vec<_> = entries
+                .iter()
+                .map(|&(track, epoch, start, end, problem, _)| (track, epoch, start, end, problem))
+                .collect();
+            want.sort_unstable();
+            want.dedup();
+            let mut got: Vec<_> = f
+                .found()
+                .iter()
+                .map(|f| {
+                    let r = f.row();
+                    prop_assert_eq!(r.sha256().as_bytes()[0], u8::try_from(r.range().start().get()).unwrap());
+                    Ok((r.track().get(), r.epoch().get(), r.range().start().get(), r.range().end().get(), f.problem().code()))
+                })
+                .collect::<Result<_, TestCaseError>>()?;
+            got.sort_unstable();
+            prop_assert_eq!(got, want);
             prop_assert!(f.found().windows(2).all(|w| w[0].key() < w[1].key()));
             prop_assert!(f.found().iter().all(|f| !f.row().range().is_empty()));
             prop_assert_eq!(Findings::decode(&f.encode()), Some(f));
