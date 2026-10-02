@@ -1,0 +1,50 @@
+# Weekly mutation testing of the whole core and recorder crates. Each PR
+# tests only the mutants of its own changes (ci.yml); this catches tests that
+# have weakened since, and code a PR's diff didn't reach.
+name: Mutation testing
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  mutants:
+    name: Mutation testing (shard ${{ matrix.shard }} of 8)
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: scripts/install-linux-build-deps.sh
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: cargo-mutants@27.1.0,cargo-nextest
+      - env:
+          SHARD: ${{ matrix.shard }}
+        run: >-
+          cargo mutants -p nota-core -p nota-recorder
+          --shard "$SHARD/8"
+          --test-tool nextest --jobs 2 --output "$RUNNER_TEMP"
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutants-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/mutants.out

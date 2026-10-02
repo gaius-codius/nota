@@ -26,7 +26,7 @@ pre-push:
     clippy:
       run: cargo clippy --workspace --all-targets --locked --config 'build.warnings="deny"'
     test:
-      run: cargo nextest run --workspace --locked --no-tests=pass
+      run: cargo nextest run --workspace --locked --no-tests=fail
     doctest:
       run: cargo test --workspace --locked --doc
     deny:
