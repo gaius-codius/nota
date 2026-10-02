@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.0.0"
@@ -10,6 +11,8 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [workspace.dependencies]
+# The journal's per-frame checksum (CRC-32, IEEE).
+crc32fast = { version = "1.5", default-features = false, features = ["std"] }
 proptest = { version = "1.11", default-features = false, features = ["std"] }
 rustix = { version = "1.1", default-features = false, features = ["std", "time"] }
 

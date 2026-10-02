@@ -22,3 +22,8 @@ lcov.info
 .env
 .envrc
 .direnv/
+
+# Fuzzing output
+/fuzz/target/
+/fuzz/in/
+/fuzz/out/

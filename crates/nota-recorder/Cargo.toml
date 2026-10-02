@@ -1,0 +1,24 @@
+[package]
+name = "nota-recorder"
+description = "nota's recorder: the filesystem layer every durable write goes through, and the crash-safe PCM journal."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# `FakeFs` and the crash test helper, for other crates' tests. Enable it from
+# `[dev-dependencies]` only.
+fake-fs = []
+
+[dependencies]
+crc32fast.workspace = true
+nota-core = { path = "../nota-core" }
+
+[dev-dependencies]
+nota-core = { path = "../nota-core", features = ["fake-clock"] }
+proptest.workspace = true
+
+[lints]
+workspace = true

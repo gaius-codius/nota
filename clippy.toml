@@ -18,4 +18,14 @@ disallowed-methods = [
   { path = "std::process::exit", reason = "exiting skips destructors and can leave a segment unfinished; return an error from main" },
   { path = "std::fs::write", reason = "recordings and the database go through the durable-write layer; anything else needs #[expect] with a reason" },
   { path = "std::fs::File::create", reason = "recordings and the database go through the durable-write layer; anything else needs #[expect] with a reason" },
+  # The rest of the write path: opening for writing, renaming, removing, fsyncing.
+  # `nota_recorder::fs::StdFs` is the one home for these.
+  { path = "std::fs::File::create_new", reason = "recordings and the database go through the durable-write layer; anything else needs #[expect] with a reason" },
+  { path = "std::fs::OpenOptions::open", reason = "recordings and the database go through the durable-write layer; anything else needs #[expect] with a reason" },
+  { path = "std::fs::rename", reason = "recordings and the database go through the durable-write layer; anything else needs #[expect] with a reason" },
+  { path = "std::fs::remove_file", reason = "recordings and the database go through the durable-write layer; anything else needs #[expect] with a reason" },
+  { path = "std::fs::copy", reason = "recordings and the database go through the durable-write layer; anything else needs #[expect] with a reason" },
+  { path = "std::fs::File::set_len", reason = "recordings and the database go through the durable-write layer; anything else needs #[expect] with a reason" },
+  { path = "std::fs::File::sync_all", reason = "fsync goes through the durable-write layer, so durable positions come only from it" },
+  { path = "std::fs::File::sync_data", reason = "fsync goes through the durable-write layer, so durable positions come only from it" },
 ]
