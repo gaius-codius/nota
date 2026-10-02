@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prepares the sherpa-onnx libraries for a release build: upstream's static
+# Prepares the sherpa-onnx libraries for a build for distribution: upstream's static
 # archive built without text-to-speech, so no GPL code (espeak-ng,
 # ucd-tools) is linked into nota. Prints the library directory; point
 # SHERPA_ONNX_LIB_DIR at it:

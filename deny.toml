@@ -13,7 +13,7 @@ ignore = []
 
 [licenses]
 # Permissive licences only. GPL, LGPL and AGPL code is never linked into a
-# distributed binary (espeak-ng runs as a separate program). MPL-2.0 is file-level copyleft: allowed, but
+# distributed binary (if nota uses espeak-ng, it runs as a separate program). MPL-2.0 is file-level copyleft: allowed, but
 # check any new MPL crate in review. This sees crates only, not native
 # archives: sherpa-onnx's default archive links GPL text-to-speech libraries,
 # so a build for distribution must use scripts/sherpa-onnx-no-tts.sh and pass
