@@ -36,6 +36,30 @@ fn fake(args: &[&str]) -> EngineConfig {
     config
 }
 
+fn on_track(track: TrackId, k: u64) -> AudioChunk {
+    let c = chunk(k);
+    AudioChunk::new(
+        track,
+        c.range().start(),
+        SampleRate::SPEECH,
+        c.samples().to_vec(),
+    )
+    .unwrap()
+}
+
+/// Chunk `k` on `track`, with a sample the fake engine dies on.
+fn poisoned(track: TrackId, k: u64) -> AudioChunk {
+    let mut samples = chunk(k).samples().to_vec();
+    samples[0] = 1_002;
+    AudioChunk::new(
+        track,
+        SampleIndex::new(k * CHUNK),
+        SampleRate::SPEECH,
+        samples,
+    )
+    .unwrap()
+}
+
 fn chunk(k: u64) -> AudioChunk {
     let samples = (0..CHUNK)
         .map(|i| i16::try_from(i % 1_000).unwrap())
@@ -240,8 +264,19 @@ fn a_hung_engine_is_killed_and_restarted() {
     assert!(!alive(pid), "the hung engine was killed");
     let again = events.online();
     assert_ne!(again, pid);
-    // Still hung: killed again.
+    // Still hung: killed again, and again, but its audio isn't taken for
+    // what hangs it.
     assert_eq!(events.offline(Duration::from_secs(10)), OfflineReason::Hung);
+    assert_eq!(events.offline(Duration::from_secs(10)), OfflineReason::Hung);
+    assert_eq!(events.offline(Duration::from_secs(10)), OfflineReason::Hung);
+    assert!(
+        !events
+            .seen
+            .iter()
+            .any(|(_, e)| matches!(e, EngineEvent::Skipped { .. })),
+        "{:#?}",
+        events.seen
+    );
 }
 
 /// A slow engine working through a backlog keeps replying, so it isn't
@@ -430,49 +465,62 @@ fn audio_the_engine_cant_take_is_refused() {
     supervisor.send_audio(self::chunk(0)).unwrap();
 }
 
-/// Audio that kills every engine it's given is skipped after three
-/// engines in a row die on it, rather than replayed forever.
+/// Audio that kills every engine it's given is skipped, up to one chunk's
+/// worth, after three engines in a row die on it, rather than replayed
+/// forever.
 #[test]
 fn audio_that_keeps_killing_the_engine_is_skipped() {
     // Only chunk 2 holds the sample value 1002 (`chunk` stays under 1000):
     // the fake dies on it.
     let (mut supervisor, mut events) = start(fake(&["echo", "--poison", "1002"]));
     events.online();
-    let mut poisoned = chunk(2).samples().to_vec();
-    poisoned[0] = 1_002;
     send(&mut supervisor, 0..2);
-    supervisor
-        .send_audio(
-            AudioChunk::new(
-                TRACK,
-                SampleIndex::new(2 * CHUNK),
-                SampleRate::SPEECH,
-                poisoned,
-            )
-            .unwrap(),
-        )
-        .unwrap();
+    supervisor.send_audio(poisoned(TRACK, 2)).unwrap();
     send(&mut supervisor, 3..5);
     let skipped = events.until(Duration::from_secs(20), |e| {
         matches!(e, EngineEvent::Skipped { .. })
     });
-    let EngineEvent::Skipped { range, .. } = skipped else {
+    let EngineEvent::Skipped { track, range } = skipped else {
         unreachable!()
     };
+    assert_eq!(track, TRACK);
+    // Everything queued from the poison on, being under a chunk's worth.
     assert_eq!(
         (range.start().get(), range.end().get()),
-        (2 * CHUNK, 3 * CHUNK)
+        (2 * CHUNK, 5 * CHUNK)
     );
-    events.confirmed_to(5 * CHUNK, Duration::from_secs(10));
+    // Transcription carries on after it.
+    send(&mut supervisor, 5..7);
+    events.confirmed_to(7 * CHUNK, Duration::from_secs(10));
     assert_eq!(
         events.transcripts(),
         [
             (0, CHUNK),
             (CHUNK, 2 * CHUNK),
-            (3 * CHUNK, 4 * CHUNK),
-            (4 * CHUNK, 5 * CHUNK)
+            (5 * CHUNK, 6 * CHUNK),
+            (6 * CHUNK, 7 * CHUNK)
         ]
     );
+}
+
+/// Poison on one track doesn't cost another track its audio.
+#[test]
+fn poison_on_one_track_spares_the_others() {
+    let other = TrackId::new(1);
+    let (mut supervisor, mut events) = start(fake(&["echo", "--poison", "1002"]));
+    events.online();
+    supervisor.send_audio(poisoned(TRACK, 0)).unwrap();
+    for k in 0..3 {
+        supervisor.send_audio(on_track(other, k)).unwrap();
+    }
+    events.until(Duration::from_secs(20), |e| {
+        matches!(e, EngineEvent::Confirmed { track, up_to } if *track == other && up_to.get() == 3 * CHUNK)
+    });
+    for (_, event) in &events.seen {
+        if let EngineEvent::Skipped { track, .. } = event {
+            assert_eq!(*track, TRACK, "{:#?}", events.seen);
+        }
+    }
 }
 
 /// Audio that stops coming without a flush is flushed after a while, so

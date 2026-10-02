@@ -50,6 +50,10 @@ pub(super) struct Replay {
     open: bool,
     /// When the latest audio was pushed.
     last_audio: Option<SessionTime>,
+    /// The first unconfirmed sample when the engine last failed, and how
+    /// many failures in a row it has stood still for.
+    stuck_at: Option<SampleIndex>,
+    strikes: u32,
 }
 
 impl Replay {
@@ -62,6 +66,8 @@ impl Replay {
             unconfirmed: 0,
             open: false,
             last_audio: None,
+            stuck_at: None,
+            strikes: 0,
         }
     }
 
@@ -106,17 +112,54 @@ impl Replay {
         self.last_audio.filter(|_| self.open)
     }
 
-    /// Drops the first audio, unsent, and returns its range: the engines
-    /// keep failing on it.
-    pub(super) fn skip_first(&mut self) -> Option<SampleRange> {
-        while let Some(entry) = self.entries.pop_front() {
+    /// Notes that the engine failed. Returns whether it has now failed
+    /// `limit` times in a row on this track's audio: sent to it each time,
+    /// with the first unconfirmed sample never moving.
+    pub(super) fn note_failure(&mut self, limit: u32) -> bool {
+        let first = self
+            .first_unconfirmed()
+            .filter(|_| self.oldest_sent().is_some());
+        if first.is_none() || first != self.stuck_at {
+            self.strikes = 0;
+        }
+        self.stuck_at = first;
+        if first.is_some() {
+            self.strikes += 1;
+        }
+        let poisoned = self.strikes >= limit;
+        if poisoned {
+            self.strikes = 0;
+        }
+        poisoned
+    }
+
+    /// Forgets the failures counted against this track.
+    pub(super) fn clear_strikes(&mut self) {
+        self.strikes = 0;
+        self.stuck_at = None;
+    }
+
+    /// Drops at least `count` samples of the oldest audio, in whole
+    /// entries, unsent: the engines keep failing on it. Returns the ranges
+    /// dropped.
+    pub(super) fn skip(&mut self, count: SampleCount) -> Vec<SampleRange> {
+        let mut dropped: Vec<SampleRange> = Vec::new();
+        let mut left = count.get();
+        while left > 0 {
+            let Some(entry) = self.entries.pop_front() else {
+                break;
+            };
             if let Entry::Audio { chunk, .. } = entry {
-                self.unconfirmed -= chunk.range().len().get();
-                self.held.clear();
-                return Some(chunk.range());
+                let range = chunk.range();
+                self.unconfirmed -= range.len().get();
+                left = left.saturating_sub(range.len().get());
+                join(&mut dropped, range);
             }
         }
-        None
+        if !dropped.is_empty() {
+            self.held.clear();
+        }
+        dropped
     }
 
     /// Everything not yet sent to the current engine, in order, marked as
@@ -276,14 +319,7 @@ impl Replay {
             };
             if let Entry::Audio { chunk, .. } = front {
                 self.unconfirmed -= chunk.range().len().get();
-                match dropped.last_mut() {
-                    Some(last) if last.end() == chunk.range().start() => {
-                        if let Some(joined) = SampleRange::new(last.start(), chunk.range().end()) {
-                            *last = joined;
-                        }
-                    }
-                    _ => dropped.push(chunk.range()),
-                }
+                join(&mut dropped, chunk.range());
             }
         }
         if !dropped.is_empty() {
@@ -296,6 +332,18 @@ impl Replay {
     fn unconfirmed(&self) -> u64 {
         self.unconfirmed
     }
+}
+
+/// Adds `range` to `ranges`, merging it into the last if they touch.
+fn join(ranges: &mut Vec<SampleRange>, range: SampleRange) {
+    if let Some(last) = ranges.last_mut()
+        && last.end() == range.start()
+        && let Some(joined) = SampleRange::new(last.start(), range.end())
+    {
+        *last = joined;
+        return;
+    }
+    ranges.push(range);
 }
 
 #[cfg(test)]
@@ -422,6 +470,35 @@ mod tests {
         replay.push_flush();
         assert_eq!(starts(&sent(&mut replay)), [None]);
         assert!(sent(&mut replay).is_empty());
+    }
+
+    #[test]
+    fn a_track_that_stands_still_through_failures_is_skipped() {
+        let mut replay = Replay::new(TRACK);
+        // Nothing sent: failures don't count against the track.
+        replay.push_audio(&chunk(0, 10), SessionTime::ZERO);
+        assert!(!replay.note_failure(2));
+        assert!(!replay.note_failure(2));
+        sent(&mut replay);
+        assert!(!replay.note_failure(2));
+        replay.reset_sent();
+        // Progress resets the count.
+        sent(&mut replay);
+        replay.on_confirmed(at(5)).unwrap();
+        assert!(!replay.note_failure(2));
+        replay.reset_sent();
+        sent(&mut replay);
+        assert!(replay.note_failure(2));
+        replay.reset_sent();
+        replay.push_audio(&chunk(10, 10), SessionTime::ZERO);
+        replay.push_audio(&chunk(20, 10), SessionTime::ZERO);
+        // At least 8 samples from 5, in whole entries: 5..20.
+        assert_eq!(
+            replay.skip(SampleCount::new(8)),
+            [SampleRange::new(at(5), at(20)).unwrap()]
+        );
+        assert_eq!(replay.first_unconfirmed(), Some(at(20)));
+        assert_eq!(replay.unconfirmed(), 10);
     }
 
     #[test]

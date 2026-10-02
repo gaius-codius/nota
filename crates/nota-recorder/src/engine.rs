@@ -78,7 +78,9 @@ pub struct EngineConfig {
     pub max_backoff: Duration,
     /// How long a track may go without new audio before what the engine
     /// holds of it is flushed. The recorder flushes when a track stops or
-    /// its epoch ends; this covers audio that just stops coming.
+    /// its epoch ends; this covers audio that just stops coming. The
+    /// recorder must deliver audio more often than this, or the flush cuts
+    /// mid-speech.
     pub idle_flush: Duration,
     /// The most unconfirmed audio kept per track while the engine is down;
     /// older audio is dropped from the live view (it's still in the
@@ -88,7 +90,7 @@ pub struct EngineConfig {
 
 impl EngineConfig {
     /// The defaults: 60 s to start, 20 s per request, backoff from 250 ms to
-    /// 30 s, a flush after 2 s without audio, and 10 minutes of audio at
+    /// 30 s, a flush after 5 s without audio, and 10 minutes of audio at
     /// 16 kHz kept while down.
     #[must_use]
     pub const fn new(command: EngineCommand) -> Self {
@@ -98,7 +100,7 @@ impl EngineConfig {
             request_timeout: Duration::from_secs(20),
             initial_backoff: Duration::from_millis(250),
             max_backoff: Duration::from_secs(30),
-            idle_flush: Duration::from_secs(2),
+            idle_flush: Duration::from_secs(5),
             max_unconfirmed: SampleCount::new(16_000 * 600),
         }
     }
@@ -275,7 +277,7 @@ impl EngineSupervisor {
     }
 
     /// Stops the engine: closes its stdin so it exits, and kills it if it
-    /// hasn't within a second.
+    /// hasn't within three seconds.
     pub fn shutdown(mut self) {
         self.stop();
     }
@@ -296,7 +298,7 @@ impl Drop for EngineSupervisor {
 }
 
 /// How long a closed engine gets to exit before it's killed.
-const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 
 /// What the supervisor thread waits on.
 #[derive(Debug)]
@@ -357,15 +359,15 @@ struct Supervisor {
     /// When the running engine last made progress: said hello or replied.
     /// A slow engine working through a backlog isn't hung.
     progress: SessionTime,
-    /// Whether the running engine has confirmed anything.
-    confirmed_any: bool,
-    /// Engines in a row that failed without confirming anything.
-    strikes: u32,
 }
 
-/// After this many engines in a row fail without confirming anything, the
-/// audio each was given first is taken to be what kills them, and skipped.
+/// After this many engines in a row fail with a track's first unconfirmed
+/// sample unmoved, the audio from there is taken to be what kills them.
 const POISON_STRIKES: u32 = 3;
+
+/// How much of that audio is skipped: one chunk at the live cap, 10 s at
+/// 16 kHz, the most the engine decodes at once.
+const POISON_SKIP: SampleCount = SampleCount::new(160_000);
 
 impl Supervisor {
     fn new(
@@ -385,8 +387,6 @@ impl Supervisor {
             phase: Phase::Waiting(now),
             generation: 0,
             progress: now,
-            confirmed_any: false,
-            strikes: 0,
         }
     }
 
@@ -599,7 +599,6 @@ impl Supervisor {
                 // The new engine works: the next failure starts the backoff
                 // afresh.
                 self.backoff = self.config.initial_backoff;
-                self.confirmed_any = true;
                 for transcript in done {
                     self.emit(EngineEvent::Transcript(transcript));
                 }
@@ -613,7 +612,6 @@ impl Supervisor {
         self.generation += 1;
         match start_child(&self.config.command, self.generation, &self.inputs) {
             Ok(running) => {
-                self.confirmed_any = false;
                 let deadline = self.clock.now().checked_add(self.config.start_timeout);
                 let deadline = deadline.unwrap_or(SessionTime::from_nanos(u64::MAX));
                 self.phase = Phase::Starting(running, deadline);
@@ -628,15 +626,19 @@ impl Supervisor {
         let now = self.clock.now();
         let restart = now.checked_add(self.backoff).unwrap_or(now);
         let phase = std::mem::replace(&mut self.phase, Phase::Waiting(restart));
-        // An engine that came up and then failed without confirming
-        // anything may have been killed by its first audio.
-        if matches!(phase, Phase::Online(_)) {
-            self.strikes = if self.confirmed_any {
-                0
-            } else {
-                self.strikes + 1
-            };
-        }
+        // A track whose audio was sent to an engine that then crashed or
+        // misspoke, with the track's first unconfirmed sample unmoved, may
+        // hold the audio that kills it. A hang doesn't count: it can't be
+        // told from a stalled machine, and skipping would drop good audio.
+        let crashed = !matches!(reason, OfflineReason::Hung);
+        let poisoned: Vec<TrackId> = if crashed && matches!(phase, Phase::Online(_)) {
+            self.tracks
+                .iter_mut()
+                .filter_map(|(&track, replay)| replay.note_failure(POISON_STRIKES).then_some(track))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let status = match phase {
             Phase::Starting(mut running, _) | Phase::Online(mut running) => {
                 kill(&mut running.process)
@@ -652,14 +654,21 @@ impl Supervisor {
             replay.reset_sent();
         }
         self.emit(EngineEvent::Status(EngineStatus::Offline(reason)));
-        if self.strikes >= POISON_STRIKES {
-            self.strikes = 0;
-            let skipped: Vec<(TrackId, SampleRange)> = self
+        // Tracks are sent in order, so the first one standing still is the
+        // likeliest culprit; the others get a fresh count, and if the
+        // poison was theirs they're caught next.
+        for &track in poisoned.iter().skip(1) {
+            if let Some(replay) = self.tracks.get_mut(&track) {
+                replay.clear_strikes();
+            }
+        }
+        for track in poisoned.into_iter().take(1) {
+            let skipped = self
                 .tracks
-                .iter_mut()
-                .filter_map(|(&track, replay)| replay.skip_first().map(|range| (track, range)))
-                .collect();
-            for (track, range) in skipped {
+                .get_mut(&track)
+                .map(|replay| replay.skip(POISON_SKIP))
+                .unwrap_or_default();
+            for range in skipped {
                 self.emit(EngineEvent::Skipped { track, range });
             }
         }
