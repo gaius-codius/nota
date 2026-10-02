@@ -1,0 +1,9 @@
+# The sherpa-onnx static archive for Windows is built against the static C
+# runtime (/MT). Linking it into a binary that uses the dynamic runtime (the
+# Rust default) mixes the two (LNK4098), so Windows builds use the static
+# runtime too.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
