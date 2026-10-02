@@ -1,70 +1,120 @@
 //! Writes the synthetic seed journals for the fuzz target into `fuzz/in/`.
 //! Run from the `fuzz/` directory. Existing seed files are left alone.
+//!
+//! The writer names each journal after its id, so each seed is written in
+//! `seeds.tmp/`, then copied into `in/` under the seed's name. All file
+//! operations go through the recorder's filesystem layer.
 
+use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
-use nota_core::{Clock, SampleIndex, SampleRate, SystemClock, TrackId};
-use nota_recorder::fs::StdFs;
-use nota_recorder::journal::JournalWriter;
+use nota_core::{Clock, EpochId, SampleIndex, SampleRate, SystemClock, TrackId};
+use nota_recorder::fs::{Fs, FsFile, StdFile, StdFs};
 use nota_recorder::journal::format::MAX_FRAME_SAMPLES;
+use nota_recorder::journal::{JournalHeader, JournalId, JournalWriter};
+
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 fn tone(len: usize, step: i16) -> Vec<i16> {
     (0..len).map(|i| (i as i16).wrapping_mul(step)).collect()
 }
 
-fn writer(
-    path: &Path,
-) -> Result<JournalWriter<nota_recorder::fs::StdFile>, Box<dyn std::error::Error>> {
-    let clock: Arc<dyn Clock> = Arc::new(SystemClock::start()?);
-    Ok(JournalWriter::create(
-        &StdFs,
-        path,
-        SampleRate::SPEECH,
-        clock,
-    )?)
+/// Makes `dir` unless it's already there.
+fn ensure_dir(dir: &Path) -> io::Result<()> {
+    match StdFs.create_dir(dir) {
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        other => other,
+    }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let dir = Path::new("in");
-    std::fs::create_dir_all(dir)?;
-    let mic = TrackId::new(0);
-    let sys = TrackId::new(1);
-
-    let path = dir.join("empty.journal");
-    if !path.exists() {
-        let mut w = writer(&path)?;
-        w.sync()?;
+/// Writes the seed `name` in `dir` with `fill`, unless it already exists,
+/// by way of the journal `header` names in `scratch`.
+fn seed(
+    dir: &Path,
+    scratch: &Path,
+    name: &str,
+    header: JournalHeader,
+    first: u64,
+    fill: impl FnOnce(&mut JournalWriter<StdFile>) -> Result<()>,
+) -> Result<()> {
+    let target = dir.join(name);
+    if target.exists() {
+        return Ok(());
     }
+    // A journal left over from an interrupted run would block the create.
+    match StdFs.remove(&scratch.join(header.id().file_name())) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
+        _ => {}
+    }
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock::start()?);
+    let mut w = JournalWriter::create(&StdFs, scratch, header, SampleIndex::new(first), clock)?;
+    fill(&mut w)?;
+    let path = w.path().to_path_buf();
+    w.finish()?;
+    // The layer renames only within a directory: copy, then remove.
+    let bytes = StdFs.read(&path)?;
+    let mut out = StdFs.create(&target)?;
+    out.write_all(&bytes)?;
+    out.sync()?;
+    StdFs.sync_dir(dir)?;
+    StdFs.remove(&path)?;
+    Ok(())
+}
 
-    let path = dir.join("one_track.journal");
-    if !path.exists() {
-        let mut w = writer(&path)?;
-        w.start_track(mic, SampleIndex::new(0))?;
+fn main() -> Result<()> {
+    // The filesystem layer wants absolute paths.
+    let here = std::env::current_dir()?;
+    let (dir, scratch) = (&here.join("in"), &here.join("seeds.tmp"));
+    ensure_dir(dir)?;
+    ensure_dir(scratch)?;
+    let speech = |id, track, epoch| {
+        JournalHeader::new(
+            JournalId::new(id),
+            TrackId::new(track),
+            EpochId::new(epoch),
+            SampleRate::SPEECH,
+        )
+    };
+
+    seed(
+        dir,
+        scratch,
+        "empty.journal",
+        speech(0, 0, 0),
+        0,
+        |_| Ok(()),
+    )?;
+    seed(dir, scratch, "one_track.journal", speech(0, 0, 0), 0, |w| {
         for len in [10, 160, 1] {
-            w.append(mic, &tone(len, 7))?;
+            w.append(&tone(len, 7))?;
         }
-        w.sync()?;
-    }
-
-    let path = dir.join("two_tracks.journal");
-    if !path.exists() {
-        let mut w = writer(&path)?;
-        w.start_track(mic, SampleIndex::new(0))?;
-        w.start_track(sys, SampleIndex::new(480))?;
-        for round in 0..3 {
-            w.append(mic, &tone(64 + round, 3))?;
-            w.append(sys, &tone(32 + round, 5))?;
-        }
-        w.sync()?;
-    }
-
-    let path = dir.join("split_append.journal");
-    if !path.exists() {
-        let mut w = writer(&path)?;
-        w.start_track(mic, SampleIndex::new(0))?;
-        w.append(mic, &tone(MAX_FRAME_SAMPLES as usize + 500, 11))?;
-        w.sync()?;
-    }
+        Ok(())
+    })?;
+    // Another track, a later epoch and journal, starting partway in.
+    seed(
+        dir,
+        scratch,
+        "later_journal.journal",
+        speech(7, 1, 2),
+        480,
+        |w| {
+            for round in 0..3 {
+                w.append(&tone(32 + round, 5))?;
+            }
+            Ok(())
+        },
+    )?;
+    seed(
+        dir,
+        scratch,
+        "split_append.journal",
+        speech(1, 0, 0),
+        0,
+        |w| {
+            w.append(&tone(MAX_FRAME_SAMPLES as usize + 500, 11))?;
+            Ok(())
+        },
+    )?;
     Ok(())
 }

@@ -11,15 +11,22 @@ the reader's contract on the result:
 
 - `valid_len()` is at most the input length
 - no header means no frames and `valid_len() == 0`
+- a returned header matches the input's bytes, checked independently of the
+  reader: magic, version 2, a matching CRC, and the id, track, epoch and rate
+  at their offsets; it re-encodes to the same 34 bytes
 - frame sequence numbers are 0, 1, 2, ... in order
 - each frame has between 1 and `MAX_FRAME_SAMPLES` samples, and as many as
   its range says
-- within a track, each frame starts where the previous one ended
+- every frame is the header's track (one track per journal), and each
+  frame starts where the previous one ended
 - `valid_len()` equals the header plus the size of every frame
 - each returned frame's bytes in the input carry a matching CRC, checked
   independently of the reader, and decode to the samples returned
 - `ReadEnd::Complete` means `valid_len()` equals the input length
-- re-reading `data[..valid_len()]` gives the same frames and `Complete`
+- a frame refused as another track's stops the read at `valid_len()`, and
+  really does carry a track other than the header's
+- re-reading `data[..valid_len()]` gives the same header, the same frames and
+  `Complete`
 
 A violated assertion panics, which AFL saves as a crash.
 

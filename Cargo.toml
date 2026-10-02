@@ -11,10 +11,18 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [workspace.dependencies]
+# Decodes FLAC segments in tests, to check what was encoded.
+claxon = "0.4"
 # The journal's per-frame checksum (CRC-32, IEEE).
 crc32fast = { version = "1.5", default-features = false, features = ["std"] }
+# FLAC segments: a pure-Rust encoder, without its logging, threading and serde.
+flacenc = { version = "0.5", default-features = false }
 proptest = { version = "1.11", default-features = false, features = ["std"] }
 rustix = { version = "1.1", default-features = false, features = ["std", "time"] }
+# The store's database, with SQLite built in (no system library).
+rusqlite = { version = "0.40", features = ["bundled"] }
+# Each segment's checksum in its row.
+sha2 = { version = "0.10", default-features = false, features = ["std"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -38,3 +46,12 @@ print_stdout = "warn"
 print_stderr = "warn"
 allow_attributes_without_reason = "warn"
 undocumented_unsafe_blocks = "warn"
+
+# The crash tests encode thousands of short FLAC segments; unoptimised, the
+# encoder and its hashes dominate the test run.
+[profile.dev.package.flacenc]
+opt-level = 3
+[profile.dev.package.md-5]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
