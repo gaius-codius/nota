@@ -12,17 +12,27 @@
 //! guarantees it may rely on:
 //! - [`Fs::create`] makes a new, empty file and fails if the name exists. The
 //!   file's directory entry isn't durable until [`Fs::sync_dir`].
-//! - [`FsFile::write_all`] appends. The bytes aren't durable until
+//! - [`Fs::create_dir`] makes a directory; its entry, in its parent, isn't
+//!   durable until [`Fs::sync_dir`] on the parent.
+//! - [`FsFile::write_all`] appends; there's no seek. A FLAC segment is
+//!   encoded in memory and published as one append, fsync, rename and
+//!   directory sync. The bytes aren't durable until
 //!   [`FsFile::sync`]; a crash may keep none, some or all of them, and kept
 //!   bytes past the last sync may read back as zeros.
 //! - [`Fs::rename`] moves a name within one directory, replacing any file
 //!   at the new name. It isn't durable until that directory is synced.
 //! - [`Fs::remove`] unlinks a name; durable after a directory sync.
-//! - [`Fs::read`] reads a whole file as the running system sees it.
+//! - [`Fs::read`] reads a whole file, and [`Fs::list`] a directory's
+//!   entries, as the running system sees them.
+//!
+//! Paths are absolute, or at least have a non-empty directory part:
+//! `journal` alone is refused, so the fake and the real filesystem agree.
+//! New files are private to the user (mode 0600, directories 0700): they
+//! hold recordings.
 
 use std::fmt;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[cfg(any(test, feature = "fake-fs"))]
 pub mod crash;
@@ -45,6 +55,15 @@ pub trait Fs: Send + Sync + fmt::Debug {
     ///
     /// Any I/O error, including a missing directory.
     fn create(&self, path: &Path) -> io::Result<Self::File>;
+
+    /// Creates the directory `path`, whose parent must exist. Fails with
+    /// [`io::ErrorKind::AlreadyExists`] if anything is there already. The
+    /// new name is durable only after [`Fs::sync_dir`] on the parent.
+    ///
+    /// # Errors
+    ///
+    /// Any I/O error, including a missing parent.
+    fn create_dir(&self, path: &Path) -> io::Result<()>;
 
     /// Renames `from` to `to`, replacing any file at `to`. Both must be in the
     /// same directory, which keeps the crash model simple and is all the
@@ -79,6 +98,14 @@ pub trait Fs: Send + Sync + fmt::Debug {
     ///
     /// Any I/O error, including [`io::ErrorKind::NotFound`].
     fn read(&self, path: &Path) -> io::Result<Vec<u8>>;
+
+    /// The paths of the files and directories in `dir`, sorted, as the
+    /// running system sees them.
+    ///
+    /// # Errors
+    ///
+    /// Any I/O error, including [`io::ErrorKind::NotFound`].
+    fn list(&self, dir: &Path) -> io::Result<Vec<PathBuf>>;
 }
 
 /// A file opened by [`Fs::create`].
@@ -112,14 +139,28 @@ impl Synced {
     }
 }
 
-/// Checks that `from` and `to` name files in the same directory, as
-/// [`Fs::rename`] requires.
-fn same_directory(from: &Path, to: &Path) -> io::Result<()> {
-    match (from.parent(), to.parent(), from.file_name(), to.file_name()) {
-        (Some(a), Some(b), Some(_), Some(_)) if a == b => Ok(()),
+/// Checks that `path` has a non-empty directory part and a file name.
+fn valid_path(path: &Path) -> io::Result<()> {
+    match (path.parent(), path.file_name()) {
+        (Some(dir), Some(_)) if !dir.as_os_str().is_empty() => Ok(()),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "a rename must stay within one directory",
+            "a path needs a directory and a name",
         )),
+    }
+}
+
+/// Checks that `from` and `to` are valid paths in the same directory, as
+/// [`Fs::rename`] requires.
+fn same_directory(from: &Path, to: &Path) -> io::Result<()> {
+    valid_path(from)?;
+    valid_path(to)?;
+    if from.parent() == to.parent() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a rename must stay within one directory",
+        ))
     }
 }

@@ -14,6 +14,7 @@ use super::*;
 use crate::fs::crash::{CrashCase, CrashTest};
 use crate::fs::fake::{CrashOutcome, FakeFs, Op};
 use crate::fs::{Fs, FsFile, StdFs};
+use crate::test_dir::TestDir;
 
 const MIC: TrackId = TrackId::new(0);
 const SYSTEM: TrackId = TrackId::new(1);
@@ -45,6 +46,9 @@ fn fake_clock() -> (Arc<FakeClock>, Arc<dyn Clock>) {
 /// What the recording scenario told its caller before it stopped.
 #[derive(Debug, Default)]
 struct Promised {
+    /// Whether `JournalWriter::create` returned: the file and its header
+    /// are then durable.
+    created: bool,
     /// Per track: where the track started, and the last durable position
     /// the writer reported.
     started: BTreeMap<TrackId, SampleIndex>,
@@ -65,6 +69,7 @@ fn record(fs: &FakeFs) -> Promised {
 fn record_into(fs: &FakeFs, promised: &mut Promised) -> Result<(), JournalError> {
     let (clock, dyn_clock) = fake_clock();
     let mut journal = JournalWriter::create(fs, &journal_path(), SampleRate::SPEECH, dyn_clock)?;
+    promised.created = true;
     let starts = [(MIC, 0_u64), (SYSTEM, 5_000)];
     for (track, at) in starts {
         journal.start_track(track, SampleIndex::new(at))?;
@@ -128,8 +133,8 @@ fn check_recovered(
     recovered: Option<&JournalRead>,
 ) -> Result<(), String> {
     let Some(read) = recovered else {
-        // No file: fine only if nothing was promised durable.
-        return if promised.durable.is_empty() {
+        // No file: fine only if nothing was promised.
+        return if promised.durable.is_empty() && !promised.created {
             Ok(())
         } else {
             Err(format!(
@@ -138,7 +143,7 @@ fn check_recovered(
             ))
         };
     };
-    if promised.durable.is_empty() && read.header().is_none() {
+    if !promised.created && read.header().is_none() {
         // The crash came before the header was synced.
         return Ok(());
     }
@@ -174,6 +179,13 @@ fn check_recovered(
         if end_found > promised.captured[&track] {
             return Err(format!("track {track:?}: recovered past the captured end"));
         }
+        // Keeping everything recovers everything captured.
+        if case.outcome == CrashOutcome::KeepAll && end_found != promised.captured[&track] {
+            return Err(format!(
+                "track {track:?}: recovered to {end_found:?} with everything kept, captured {:?}",
+                promised.captured[&track]
+            ));
+        }
         // Losing everything unsynced loses exactly that.
         if case.outcome == CrashOutcome::LoseUnsynced {
             let durable = promised.durable.get(&track).copied().unwrap_or(start);
@@ -190,11 +202,12 @@ fn check_recovered(
 #[test]
 fn crash_after_every_operation_recovers_to_the_durable_position() {
     let summary = CrashTest::new(record, recover, CHECK_RECOVERED)
+        .dirs(["/session"])
         .run()
         .unwrap_or_else(|failure| panic!("{failure}"));
     // Not vacuous: dozens of writes and several syncs, each crashed at.
     assert!(summary.scenario_ops > 30, "{summary:?}");
-    let clean = FakeFs::new();
+    let clean = FakeFs::with_dirs(["/session"]);
     let promised = record(&clean);
     let syncs = clean
         .ops()
@@ -229,6 +242,7 @@ fn a_journal_without_its_directory_sync_fails_the_crash_test() {
         promised
     };
     let failure = CrashTest::new(without_dir_sync, recover, CHECK_RECOVERED)
+        .dirs(["/session"])
         .run()
         .unwrap_err();
     assert!(failure.message.contains("journal lost"), "{failure}");
@@ -236,7 +250,7 @@ fn a_journal_without_its_directory_sync_fails_the_crash_test() {
 
 #[test]
 fn durable_stays_within_a_second_of_captured_in_a_timed_run() {
-    let fs = FakeFs::new();
+    let fs = FakeFs::with_dirs(["/session"]);
     let (clock, dyn_clock) = fake_clock();
     let mut journal =
         JournalWriter::create(&fs, &journal_path(), SampleRate::SPEECH, dyn_clock).unwrap();
@@ -270,7 +284,7 @@ fn durable_stays_within_a_second_of_captured_in_a_timed_run() {
 #[test]
 fn a_burst_faster_than_real_time_still_syncs_each_second_of_audio() {
     // The clock stands still; the audio bound alone keeps durable close.
-    let fs = FakeFs::new();
+    let fs = FakeFs::with_dirs(["/session"]);
     let (_clock, dyn_clock) = fake_clock();
     let mut journal =
         JournalWriter::create(&fs, &journal_path(), SampleRate::SPEECH, dyn_clock).unwrap();
@@ -294,7 +308,7 @@ fn a_burst_faster_than_real_time_still_syncs_each_second_of_audio() {
 
 #[test]
 fn sync_if_due_syncs_a_stalled_track_after_the_interval() {
-    let fs = FakeFs::new();
+    let fs = FakeFs::with_dirs(["/session"]);
     let (clock, dyn_clock) = fake_clock();
     let mut journal =
         JournalWriter::create(&fs, &journal_path(), SampleRate::SPEECH, dyn_clock).unwrap();
@@ -317,7 +331,7 @@ fn sync_if_due_syncs_a_stalled_track_after_the_interval() {
 
 #[test]
 fn a_failed_write_breaks_the_journal() {
-    let fs = FakeFs::new();
+    let fs = FakeFs::with_dirs(["/session"]);
     let (_clock, dyn_clock) = fake_clock();
     let mut journal =
         JournalWriter::create(&fs, &journal_path(), SampleRate::SPEECH, dyn_clock).unwrap();
@@ -343,26 +357,103 @@ fn a_failed_write_breaks_the_journal() {
 
 #[test]
 fn a_failed_fsync_breaks_the_journal_without_moving_durable() {
-    let fs = FakeFs::new();
+    let fs = FakeFs::with_dirs(["/session"]);
     let (_clock, dyn_clock) = fake_clock();
-    let mut journal =
-        JournalWriter::create(&fs, &journal_path(), SampleRate::SPEECH, dyn_clock).unwrap();
+    let mut journal = JournalWriter::create(
+        &fs,
+        &journal_path(),
+        SampleRate::SPEECH,
+        Arc::clone(&dyn_clock),
+    )
+    .unwrap();
     journal.start_track(MIC, SampleIndex::ZERO).unwrap();
     journal.append(MIC, &samples(MIC, 0, 10)).unwrap();
     journal.sync().unwrap();
     journal.append(MIC, &samples(MIC, 10, 10)).unwrap();
-    fs.crash_after(0);
+    // EIO from fsync, and the process lives on.
+    fs.fail_after(0, io::ErrorKind::Other);
     assert!(matches!(journal.sync(), Err(JournalError::Io(_))));
+    assert!(!fs.has_crashed());
     assert_eq!(
         journal.durable(MIC).map(DurablePosition::end),
         Some(SampleIndex::new(10))
     );
+    // No retry: the kernel may have dropped the data, so another fsync
+    // "succeeding" would claim audio that's gone.
     assert!(matches!(journal.sync(), Err(JournalError::Broken)));
+    assert!(matches!(
+        journal.append(MIC, &[1]),
+        Err(JournalError::Broken)
+    ));
+    // What was durable is still there, and a new journal can start.
+    let read = read_journal(&fs.read(&journal_path()).unwrap());
+    assert_eq!(read.track_audio(MIC).unwrap().1, samples(MIC, 0, 10));
+    let next = PathBuf::from("/session/journal-2");
+    let mut journal = JournalWriter::create(&fs, &next, SampleRate::SPEECH, dyn_clock).unwrap();
+    journal.start_track(MIC, SampleIndex::new(10)).unwrap();
+    journal.append(MIC, &samples(MIC, 10, 10)).unwrap();
+    journal.sync().unwrap();
+    assert_eq!(
+        journal.durable(MIC).map(DurablePosition::end),
+        Some(SampleIndex::new(20))
+    );
+}
+
+#[test]
+fn a_full_disk_breaks_the_journal_but_not_the_process() {
+    let fs = FakeFs::with_dirs(["/session"]);
+    let (_clock, dyn_clock) = fake_clock();
+    let mut journal =
+        JournalWriter::create(&fs, &journal_path(), SampleRate::SPEECH, dyn_clock).unwrap();
+    journal.start_track(MIC, SampleIndex::ZERO).unwrap();
+    fs.fail_after(0, io::ErrorKind::StorageFull);
+    assert!(matches!(
+        journal.append(MIC, &samples(MIC, 0, 10)),
+        Err(JournalError::Io(e)) if e.kind() == io::ErrorKind::StorageFull
+    ));
+    assert_eq!(journal.captured(MIC), Some(SampleIndex::ZERO));
+    assert!(matches!(
+        journal.append(MIC, &[1]),
+        Err(JournalError::Broken)
+    ));
+    assert!(fs.read(&journal_path()).is_ok());
+}
+
+#[test]
+fn a_long_append_never_leaves_more_than_a_second_unsynced() {
+    // One append of ten seconds, crashed after every operation: whatever
+    // the writer reports, captured is never more than a second ahead of
+    // durable, and the durable part survives.
+    let second = SampleCount::new(16_000);
+    for crash_at in 0..60 {
+        let fs = FakeFs::with_dirs(["/session"]);
+        let (_clock, dyn_clock) = fake_clock();
+        let mut journal =
+            JournalWriter::create(&fs, &journal_path(), SampleRate::SPEECH, dyn_clock).unwrap();
+        journal.start_track(MIC, SampleIndex::ZERO).unwrap();
+        fs.crash_after(crash_at);
+        let done = journal.append(MIC, &samples(MIC, 0, 160_000)).is_ok();
+        let captured = journal.captured(MIC).unwrap();
+        let durable = journal
+            .durable(MIC)
+            .map_or(SampleIndex::ZERO, DurablePosition::end);
+        let lag = captured.checked_count_since(durable).unwrap();
+        assert!(lag <= second, "crash at {crash_at}: {lag:?} unsynced");
+        let after = fs.crash(CrashOutcome::LoseUnsynced);
+        let read = read_journal(&after.read(&journal_path()).unwrap());
+        let end = read
+            .track_audio(MIC)
+            .map_or(SampleIndex::ZERO, |(range, _)| range.end());
+        assert_eq!(end, durable, "crash at {crash_at}");
+        if done {
+            assert_eq!(captured, SampleIndex::new(160_000));
+        }
+    }
 }
 
 #[test]
 fn track_errors_write_nothing() {
-    let fs = FakeFs::new();
+    let fs = FakeFs::with_dirs(["/session"]);
     let (_clock, dyn_clock) = fake_clock();
     let mut journal =
         JournalWriter::create(&fs, &journal_path(), SampleRate::SPEECH, dyn_clock).unwrap();
@@ -391,7 +482,7 @@ fn track_errors_write_nothing() {
 
 #[test]
 fn create_refuses_an_existing_journal() {
-    let fs = FakeFs::new();
+    let fs = FakeFs::with_dirs(["/session"]);
     let (_clock, dyn_clock) = fake_clock();
     let _first = JournalWriter::create(
         &fs,
@@ -406,7 +497,7 @@ fn create_refuses_an_existing_journal() {
 
 #[test]
 fn long_appends_split_into_frames() {
-    let fs = FakeFs::new();
+    let fs = FakeFs::with_dirs(["/session"]);
     let (_clock, dyn_clock) = fake_clock();
     let mut journal =
         JournalWriter::create(&fs, &journal_path(), SampleRate::SPEECH, dyn_clock).unwrap();
@@ -419,7 +510,18 @@ fn long_appends_split_into_frames() {
         .iter()
         .map(|f| f.range().len().get())
         .collect();
-    assert_eq!(lens, [max, max, 1]);
+    // A full frame, then what's left of the first second (16 000 samples),
+    // a sync, and the rest.
+    assert_eq!(lens, [max, 16_000 - max, 2 * max + 1 - 16_000]);
+    let syncs = fs
+        .ops()
+        .iter()
+        .filter(|op| matches!(op, Op::Sync(_)))
+        .count();
+    assert_eq!(
+        syncs, 2,
+        "the header's sync and the one at a second of audio"
+    );
     let (range, got) = read.track_audio(MIC).unwrap();
     assert_eq!(
         (range.start().get(), range.end().get()),
@@ -431,7 +533,7 @@ fn long_appends_split_into_frames() {
 
 /// A synced journal of three frames, then a fourth written but not synced.
 fn journal_with_unsynced_frame() -> (FakeFs, usize, Vec<u8>) {
-    let fs = FakeFs::new();
+    let fs = FakeFs::with_dirs(["/session"]);
     let (_clock, dyn_clock) = fake_clock();
     let mut journal =
         JournalWriter::create(&fs, &journal_path(), SampleRate::SPEECH, dyn_clock).unwrap();
@@ -662,17 +764,14 @@ fn bad_lengths_and_magic_are_invalid() {
 
 #[test]
 fn journal_on_the_real_filesystem() {
-    let dir = std::env::temp_dir().join(format!("nota-journal-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("journal");
+    let dir = TestDir::new("journal");
+    let path = dir.0.join("journal");
     let (_clock, dyn_clock) = fake_clock();
     let mut journal = JournalWriter::create(&StdFs, &path, SampleRate::SPEECH, dyn_clock).unwrap();
     journal.start_track(MIC, SampleIndex::ZERO).unwrap();
     journal.append(MIC, &samples(MIC, 0, 20_000)).unwrap();
     journal.sync().unwrap();
     let read = read_journal(&StdFs.read(&path).unwrap());
-    let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(read.track_audio(MIC).unwrap().1, samples(MIC, 0, 20_000));
     assert_eq!(read.end(), ReadEnd::Complete);
 }
@@ -695,7 +794,62 @@ fn errors_describe_themselves() {
 
 #[test]
 fn create_needs_a_directory() {
-    let fs = FakeFs::new();
+    let fs = FakeFs::with_dirs(["/session"]);
     let (_clock, dyn_clock) = fake_clock();
     assert!(JournalWriter::create(&fs, Path::new("/"), SampleRate::SPEECH, dyn_clock).is_err());
+}
+
+#[test]
+fn a_failed_create_removes_its_file_so_a_retry_works() {
+    // Fail each step after the file exists: the header write, its fsync,
+    // the directory fsync.
+    for step in 1..=3 {
+        let fs = FakeFs::with_dirs(["/session"]);
+        let (_clock, dyn_clock) = fake_clock();
+        fs.fail_after(step, io::ErrorKind::StorageFull);
+        let first = JournalWriter::create(
+            &fs,
+            &journal_path(),
+            SampleRate::SPEECH,
+            Arc::clone(&dyn_clock),
+        );
+        assert!(matches!(first, Err(JournalError::Io(_))), "step {step}");
+        assert_eq!(fs.paths(), Vec::<PathBuf>::new(), "step {step}");
+        JournalWriter::create(&fs, &journal_path(), SampleRate::SPEECH, dyn_clock).unwrap();
+    }
+}
+
+#[test]
+fn finish_syncs_what_was_captured() {
+    let fs = FakeFs::with_dirs(["/session"]);
+    let (_clock, dyn_clock) = fake_clock();
+    let mut journal =
+        JournalWriter::create(&fs, &journal_path(), SampleRate::SPEECH, dyn_clock).unwrap();
+    journal.start_track(MIC, SampleIndex::ZERO).unwrap();
+    journal.append(MIC, &samples(MIC, 0, 100)).unwrap();
+    journal.finish().unwrap();
+    let after = fs.crash(CrashOutcome::LoseUnsynced);
+    let read = read_journal(&after.read(&journal_path()).unwrap());
+    assert_eq!(read.track_audio(MIC).unwrap().1, samples(MIC, 0, 100));
+
+    // Nothing new: no fsync. Broken: the error.
+    let fs = FakeFs::with_dirs(["/session"]);
+    let (_clock, dyn_clock) = fake_clock();
+    let journal =
+        JournalWriter::create(&fs, &journal_path(), SampleRate::SPEECH, dyn_clock).unwrap();
+    let before = fs.ops().len();
+    journal.finish().unwrap();
+    assert_eq!(fs.ops().len(), before);
+    let (_clock, dyn_clock) = fake_clock();
+    let mut journal = JournalWriter::create(
+        &fs,
+        Path::new("/session/journal-2"),
+        SampleRate::SPEECH,
+        dyn_clock,
+    )
+    .unwrap();
+    journal.start_track(MIC, SampleIndex::ZERO).unwrap();
+    fs.fail_after(0, io::ErrorKind::StorageFull);
+    assert!(journal.append(MIC, &[1]).is_err());
+    assert!(matches!(journal.finish(), Err(JournalError::Broken)));
 }

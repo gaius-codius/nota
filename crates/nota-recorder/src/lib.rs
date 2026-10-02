@@ -7,3 +7,6 @@
 
 pub mod fs;
 pub mod journal;
+
+#[cfg(test)]
+mod test_dir;

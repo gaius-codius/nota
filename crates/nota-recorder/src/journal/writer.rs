@@ -17,8 +17,9 @@ use crate::fs::{Fs, FsFile, Synced};
 /// or this much audio on any track, goes unsynced.
 pub const SYNC_INTERVAL: Duration = Duration::from_secs(1);
 
-/// How far a track has been fsync'd: every sample before `end` is on disk.
-/// Only a completed fsync of the journal makes one.
+/// How far a track has been fsync'd: every sample the journal holds for it,
+/// from the track's start up to `end`, is on disk. Only a completed fsync of
+/// the journal makes one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DurablePosition {
     track: TrackId,
@@ -112,6 +113,10 @@ impl Track {
 ///
 /// After any failed write or fsync the writer is broken: every later call
 /// returns [`JournalError::Broken`].
+///
+/// An fsync can take a second or more on a busy disk, and `append` may run
+/// one, so the writer belongs on its own thread, fed by a channel, never on
+/// the audio callback.
 #[derive(Debug)]
 pub struct JournalWriter<F> {
     file: F,
@@ -134,7 +139,8 @@ impl<F: FsFile> JournalWriter<F> {
     /// # Errors
     ///
     /// [`JournalError::Io`] if any step fails, including when the file
-    /// already exists.
+    /// already exists. If a step after creating the file fails, the file
+    /// is removed again (best effort).
     pub fn create<S>(
         fs: &S,
         path: &Path,
@@ -148,10 +154,16 @@ impl<F: FsFile> JournalWriter<F> {
             .parent()
             .ok_or_else(|| JournalError::Io(io::Error::from(io::ErrorKind::InvalidInput)))?;
         let mut file = fs.create(path).map_err(JournalError::Io)?;
-        file.write_all(&encode_header(rate))
-            .map_err(JournalError::Io)?;
-        file.sync().map_err(JournalError::Io)?;
-        fs.sync_dir(dir).map_err(JournalError::Io)?;
+        let made_durable = file
+            .write_all(&encode_header(rate))
+            .and_then(|()| file.sync())
+            .and_then(|_| fs.sync_dir(dir));
+        if let Err(e) = made_durable {
+            // Don't leave a half-made journal to block the next attempt.
+            // Best effort: the original error is the one to report.
+            let _ = fs.remove(path);
+            return Err(JournalError::Io(e));
+        }
         let last_sync = clock.now();
         Ok(Self {
             file,
@@ -209,8 +221,9 @@ impl<F: FsFile> JournalWriter<F> {
         self.tracks.get(&track).and_then(|t| t.durable)
     }
 
-    /// Appends `samples` to `track`, continuing where it left off, then syncs
-    /// if one is due.
+    /// Appends `samples` to `track`, continuing where it left off, syncing
+    /// whenever one is due, so the track never has more than a second of
+    /// audio unsynced.
     ///
     /// # Errors
     ///
@@ -234,7 +247,23 @@ impl<F: FsFile> JournalWriter<F> {
 
         // The max is a u32, so it fits in usize on every platform nota builds for.
         let max = usize::try_from(MAX_FRAME_SAMPLES).unwrap_or(usize::MAX);
-        for chunk in samples.chunks(max) {
+        let second = u64::from(self.rate.hz());
+        let mut rest = samples;
+        while !rest.is_empty() {
+            // Never more than a second unsynced on a track, even within one
+            // long append: a frame never runs past the budget, and the sync
+            // check runs after every frame.
+            let unsynced = self.tracks.get(&track).map_or(0, |t| t.unsynced().get());
+            let room = second.saturating_sub(unsynced);
+            if room == 0 {
+                self.sync()?;
+                continue;
+            }
+            let len = rest
+                .len()
+                .min(max)
+                .min(usize::try_from(room).unwrap_or(usize::MAX));
+            let (chunk, tail) = rest.split_at(len);
             self.buf.clear();
             encode_frame(&mut self.buf, self.next_seq, track, first, chunk);
             self.dirty = true;
@@ -250,8 +279,10 @@ impl<F: FsFile> JournalWriter<F> {
             if let Some(t) = self.tracks.get_mut(&track) {
                 t.captured = first;
             }
+            rest = tail;
+            self.sync_if_due()?;
         }
-        self.sync_if_due().map(|_| ())
+        Ok(())
     }
 
     /// Syncs if [`SYNC_INTERVAL`] has passed since the last sync, or a track
@@ -282,6 +313,23 @@ impl<F: FsFile> JournalWriter<F> {
             self.sync()?;
         }
         Ok(due)
+    }
+
+    /// Ends the journal cleanly: a last fsync, so everything captured is
+    /// durable. Call it when recording stops; dropping the writer doesn't
+    /// sync (an fsync in `drop` would block unseen and lose its error).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::sync`].
+    pub fn finish(mut self) -> Result<(), JournalError> {
+        if self.dirty {
+            self.sync()
+        } else if self.broken {
+            Err(JournalError::Broken)
+        } else {
+            Ok(())
+        }
     }
 
     /// Fsyncs the journal now, moving every track's durable position up to

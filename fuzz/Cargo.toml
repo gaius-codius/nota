@@ -11,5 +11,6 @@ publish = false
 
 [dependencies]
 afl = "0.18"
+crc32fast = "1.5"
 nota-core = { path = "../crates/nota-core" }
 nota-recorder = { path = "../crates/nota-recorder" }

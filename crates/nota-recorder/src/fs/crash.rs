@@ -14,15 +14,16 @@
 //! rename, directory sync) and a recovery that finishes it.
 
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 use super::fake::{CrashOutcome, FakeFs, Op};
 
 /// Where one crash test case crashed, handed to the check.
 #[derive(Debug)]
 pub struct CrashCase {
-    /// How many of the scenario's operations ran before the crash.
+    /// How many operations the scenario attempted before the crash.
     pub after_ops: usize,
-    /// The scenario's operations that ran, in order.
+    /// The scenario's operations that succeeded, in order.
     pub ops: Vec<Op>,
     /// What survived the crash.
     pub outcome: CrashOutcome,
@@ -68,7 +69,7 @@ impl std::error::Error for CrashFailure {}
 /// What a passing crash test covered, so a test can check it wasn't vacuous.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CrashSummary {
-    /// Operations in an uncrashed run of the scenario.
+    /// Operations attempted in an uncrashed run of the scenario.
     pub scenario_ops: usize,
     /// Cases checked.
     pub cases: usize,
@@ -89,6 +90,7 @@ pub struct CrashTest<S, R, C> {
     check: C,
     outcomes: Vec<CrashOutcome>,
     crash_recovery: bool,
+    dirs: Vec<PathBuf>,
 }
 
 impl<S, R, C> fmt::Debug for CrashTest<S, R, C> {
@@ -96,6 +98,7 @@ impl<S, R, C> fmt::Debug for CrashTest<S, R, C> {
         f.debug_struct("CrashTest")
             .field("outcomes", &self.outcomes)
             .field("crash_recovery", &self.crash_recovery)
+            .field("dirs", &self.dirs)
             .finish_non_exhaustive()
     }
 }
@@ -115,7 +118,16 @@ where
             check,
             outcomes: CrashOutcome::standard(),
             crash_recovery: false,
+            dirs: Vec::new(),
         }
+    }
+
+    /// Starts each run on a filesystem where these directories already
+    /// exist durably (see [`FakeFs::with_dirs`]). Without it, only `/` does.
+    #[must_use]
+    pub fn dirs<P: AsRef<Path>>(mut self, dirs: impl IntoIterator<Item = P>) -> Self {
+        self.dirs = dirs.into_iter().map(|d| d.as_ref().to_path_buf()).collect();
+        self
     }
 
     /// Crashes with these outcomes instead.
@@ -125,8 +137,8 @@ where
         self
     }
 
-    /// Also crashes recovery after each of its operations, with the same
-    /// outcome, and runs it again on what survived.
+    /// Also crashes recovery after each of its operations (and before the
+    /// first), with the same outcome, and runs it again on what survived.
     #[must_use]
     pub fn crash_recovery(mut self) -> Self {
         self.crash_recovery = true;
@@ -139,23 +151,33 @@ where
     ///
     /// The first case whose check fails.
     pub fn run(&self) -> Result<CrashSummary, CrashFailure> {
-        let clean = FakeFs::new();
+        let clean = FakeFs::with_dirs(&self.dirs);
         (self.scenario)(&clean);
-        let scenario_ops = clean.ops().len();
+        let scenario_ops = clean.attempted();
+        let clean_ops = clean.ops();
 
         let mut cases = 0;
         for after_ops in 0..=scenario_ops {
             for &outcome in &self.outcomes {
-                let fs = FakeFs::crashing_after(after_ops);
+                let fs = FakeFs::with_dirs(&self.dirs);
+                fs.crash_after(after_ops);
                 let observed = (self.scenario)(&fs);
                 let ops = fs.ops();
+                if after_ops == scenario_ops && (fs.has_crashed() || ops != clean_ops) {
+                    // With room for every operation it must do what the
+                    // clean run did, or the crash points don't line up.
+                    return Err(CrashFailure {
+                        case: format!("rerun with room for {scenario_ops} ops"),
+                        message: "the scenario isn't deterministic".to_owned(),
+                    });
+                }
                 let survived = fs.crash(outcome);
 
                 let mut recovery_points = vec![None];
                 if self.crash_recovery {
                     let probe = survived.copy_disk();
                     (self.recover)(&probe);
-                    recovery_points.extend((0..probe.ops().len()).map(Some));
+                    recovery_points.extend((0..=probe.attempted()).map(Some));
                 }
                 for recovery_crashed_after in recovery_points {
                     let mut disk = survived.copy_disk();
@@ -232,6 +254,7 @@ mod tests {
     #[test]
     fn correct_publish_passes_every_case() {
         let summary = CrashTest::new(|fs| publish(fs, true).is_ok(), published, PROMISED_IS_KEPT)
+            .dirs(["/s"])
             .run()
             .unwrap();
         assert_eq!(summary.scenario_ops, 5);
@@ -241,6 +264,7 @@ mod tests {
     #[test]
     fn missing_directory_sync_is_caught() {
         let failure = CrashTest::new(|fs| publish(fs, false).is_ok(), published, PROMISED_IS_KEPT)
+            .dirs(["/s"])
             .run()
             .unwrap_err();
         assert!(failure.case.contains("after 4 ops"), "{failure}");
@@ -267,6 +291,7 @@ mod tests {
             published,
             PROMISED_IS_KEPT,
         )
+        .dirs(["/s"])
         .run()
         .unwrap_err();
         assert!(failure.message.contains("half a file"), "{failure}");
@@ -298,6 +323,7 @@ mod tests {
             |fs| finish_publish(fs, true),
             ALWAYS_PUBLISHED,
         )
+        .dirs(["/s"])
         .outcomes(vec![CrashOutcome::LoseUnsynced])
         .crash_recovery();
         assert!(format!("{summary:?}").contains("crash_recovery: true"));
@@ -347,6 +373,7 @@ mod tests {
             lossy,
             must_publish,
         )
+        .dirs(["/s"])
         .outcomes(vec![CrashOutcome::LoseUnsynced])
         .run()
         .unwrap();
@@ -365,10 +392,96 @@ mod tests {
             lossy,
             must_publish,
         )
+        .dirs(["/s"])
         .outcomes(vec![CrashOutcome::LoseUnsynced])
         .crash_recovery()
         .run()
         .unwrap_err();
         assert!(failure.case.contains("recovery crashed"), "{failure}");
+    }
+
+    #[test]
+    fn a_nondeterministic_scenario_is_refused() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let runs = AtomicUsize::new(0);
+        let failure = CrashTest::new(
+            |fs: &FakeFs| {
+                // One more read on every run after the first.
+                if runs.fetch_add(1, Ordering::SeqCst) > 0 {
+                    let _ = fs.read(Path::new("/s/x"));
+                }
+                publish(fs, true).is_ok()
+            },
+            published,
+            PROMISED_IS_KEPT,
+        )
+        .dirs(["/s"])
+        .outcomes(vec![CrashOutcome::KeepAll])
+        .run()
+        .unwrap_err();
+        assert!(failure.message.contains("deterministic"), "{failure}");
+    }
+
+    #[test]
+    fn a_scenario_doing_different_operations_is_refused() {
+        // Same number of operations, different ones: no crash, but the crash
+        // points wouldn't line up with the clean run's.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let runs = AtomicUsize::new(0);
+        let failure = CrashTest::new(
+            |fs: &FakeFs| {
+                let name = format!("/s/x{}", runs.fetch_add(1, Ordering::SeqCst).min(1));
+                let _ = fs.create(Path::new(&name));
+                true
+            },
+            published,
+            |_, _, _| Ok(()),
+        )
+        .dirs(["/s"])
+        .outcomes(vec![CrashOutcome::KeepAll])
+        .run()
+        .unwrap_err();
+        assert!(failure.message.contains("deterministic"), "{failure}");
+    }
+
+    #[test]
+    fn recovery_is_crashed_after_its_last_operation_too() {
+        // Recovery whose last step destroys its input: crashing right after
+        // it, before anything replaces the file, loses the segment.
+        let destructive = |fs: &FakeFs| {
+            let dir = Path::new("/s");
+            let bytes = fs.read(&dir.join("seg.tmp")).ok();
+            if bytes.is_some() {
+                fs.remove(&dir.join("seg.tmp")).ok()?;
+            }
+            bytes.or_else(|| published(fs))
+        };
+        let kept = |_: &CrashCase, done: &bool, got: &Option<Vec<u8>>| match (done, got) {
+            (true, None) => Err("lost the segment".to_owned()),
+            _ => Ok(()),
+        };
+        let failure = CrashTest::new(
+            |fs: &FakeFs| {
+                let dir = Path::new("/s");
+                let run = || -> io::Result<()> {
+                    let mut f = fs.create(&dir.join("seg.tmp"))?;
+                    f.write_all(b"flac")?;
+                    f.sync()?;
+                    fs.sync_dir(dir)
+                };
+                run().is_ok()
+            },
+            destructive,
+            kept,
+        )
+        .dirs(["/s"])
+        .outcomes(vec![CrashOutcome::KeepAll])
+        .crash_recovery()
+        .run()
+        .unwrap_err();
+        assert!(
+            failure.case.contains("recovery crashed after 2 ops"),
+            "{failure}"
+        );
     }
 }

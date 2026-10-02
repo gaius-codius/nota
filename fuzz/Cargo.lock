@@ -78,6 +78,7 @@ name = "nota-fuzz"
 version = "0.0.0"
 dependencies = [
  "afl",
+ "crc32fast",
  "nota-core",
  "nota-recorder",
 ]

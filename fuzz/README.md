@@ -16,6 +16,8 @@ the reader's contract on the result:
   its range says
 - within a track, each frame starts where the previous one ended
 - `valid_len()` equals the header plus the size of every frame
+- each returned frame's bytes in the input carry a matching CRC, checked
+  independently of the reader, and decode to the samples returned
 - `ReadEnd::Complete` means `valid_len()` equals the input length
 - re-reading `data[..valid_len()]` gives the same frames and `Complete`
 

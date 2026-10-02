@@ -99,7 +99,11 @@ impl Frame {
     }
 }
 
-/// Why the reader stopped.
+/// Why the reader stopped. For logs and diagnostics only: it doesn't
+/// reliably tell a torn write from corruption. A frame's length is read
+/// before its CRC can vouch for it, so a corrupt length can look like a torn
+/// tail, and a torn tail that reads back as zeros looks invalid. Salvage
+/// treats both the same: keep the frames before `valid_len`, drop the rest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadEnd {
     /// The file ended exactly after a valid frame (or the header).

@@ -40,6 +40,19 @@ fn check(data: &[u8]) {
                 "track range is not contiguous"
             );
         }
+        // The frame's bytes in the input carry a CRC that matches them:
+        // checked here independently of the reader.
+        let bytes = &data[expected_len..expected_len + FRAME_HEADER_LEN + 2 * samples];
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&bytes[..28]);
+        hasher.update(&bytes[FRAME_HEADER_LEN..]);
+        let stored = u32::from_le_bytes([bytes[28], bytes[29], bytes[30], bytes[31]]);
+        assert_eq!(hasher.finalize(), stored, "returned a frame whose CRC fails");
+        let decoded: Vec<i16> = bytes[FRAME_HEADER_LEN..]
+            .chunks_exact(2)
+            .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        assert_eq!(decoded, frame.samples(), "samples differ from the input");
         expected_len += FRAME_HEADER_LEN + 2 * samples;
     }
     assert_eq!(read.valid_len(), expected_len, "valid_len does not add up");
