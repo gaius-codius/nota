@@ -6,20 +6,25 @@
 //! [`child::run`]. The child exits when its stdin closes.
 //!
 //! This is the only crate with native model code (cargo-deny's `wrappers`
-//! rule keeps it so). The `sherpa-onnx` crate's build script downloads a
-//! prebuilt static archive for its exact version and links it in:
+//! rule keeps it so). The `sherpa-onnx` crate's build script links a static
+//! sherpa-onnx archive for its exact version:
 //!
 //! | Library | Licence |
 //! |---|---|
 //! | sherpa-onnx, kaldi-native-fbank, kaldi-decoder, `OpenFst`, sentencepiece | Apache-2.0 |
-//! | onnxruntime, piper-phonemize | MIT |
+//! | onnxruntime | MIT. It bundles others, all permissive or MPL-2.0 (onnxruntime's `ThirdPartyNotices.txt`): abseil and flatbuffers (Apache-2.0), protobuf and re2 (BSD-3-Clause), Eigen (MPL-2.0) |
 //! | kissfft | BSD-3-Clause |
-//! | espeak-ng, ucd-tools | GPL-3.0-or-later |
 //!
-//! espeak-ng and ucd-tools serve sherpa-onnx's text-to-speech, which nota
-//! doesn't use, but the archive's C API references them, so the linker keeps
-//! them in the binary. cargo-deny doesn't see native archives. How nota is
-//! built for release has to settle this before any binary is distributed.
+//! By default the build script downloads upstream's archive with
+//! text-to-speech, which adds piper-phonemize (MIT) and espeak-ng and
+//! ucd-tools (GPL-3.0-or-later). nota doesn't use text-to-speech, but the
+//! archive's C API references it, so the linker keeps them. That's fine for
+//! development and tests, since nothing is distributed from them, but a
+//! plain `cargo build --release` has them too. A build for distribution must
+//! point `SHERPA_ONNX_LIB_DIR` at upstream's archive built without
+//! text-to-speech (`scripts/sherpa-onnx-no-tts.sh`) and pass
+//! `scripts/check-no-gpl.sh`; CI does both.
+//! cargo-deny doesn't see native archives.
 
 pub mod child;
 pub mod chunker;
