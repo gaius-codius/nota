@@ -39,6 +39,16 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # rust-cache keeps sherpa-onnx-sys's build-script output but deletes the
+      # files it downloaded into target/sherpa-onnx-prebuilt, leaving empty
+      # directories. Remove both, so the build script runs and downloads again.
+      - name: Rerun the sherpa-onnx-sys build script
+        shell: bash
+        run: |
+          if [ -d target ]; then
+            find target \( -path '*/.fingerprint/sherpa-onnx-sys-*' -o -name sherpa-onnx-prebuilt \) \
+              -prune -exec rm -rf {} +
+          fi
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: cargo-nextest
@@ -91,6 +101,16 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # rust-cache keeps sherpa-onnx-sys's build-script output but deletes the
+      # files it downloaded into target/sherpa-onnx-prebuilt, leaving empty
+      # directories. Remove both, so the build script runs and downloads again.
+      - name: Rerun the sherpa-onnx-sys build script
+        shell: bash
+        run: |
+          if [ -d target ]; then
+            find target \( -path '*/.fingerprint/sherpa-onnx-sys-*' -o -name sherpa-onnx-prebuilt \) \
+              -prune -exec rm -rf {} +
+          fi
       - run: cargo build --workspace --all-targets --locked
 
   coverage:
@@ -103,6 +123,16 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install && rustup component add llvm-tools-preview
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # rust-cache keeps sherpa-onnx-sys's build-script output but deletes the
+      # files it downloaded into target/sherpa-onnx-prebuilt, leaving empty
+      # directories. Remove both, so the build script runs and downloads again.
+      - name: Rerun the sherpa-onnx-sys build script
+        shell: bash
+        run: |
+          if [ -d target ]; then
+            find target \( -path '*/.fingerprint/sherpa-onnx-sys-*' -o -name sherpa-onnx-prebuilt \) \
+              -prune -exec rm -rf {} +
+          fi
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: cargo-llvm-cov,cargo-nextest
