@@ -49,6 +49,9 @@ allow-wildcard-paths = true
 deny = [
   # Native model code (sherpa-onnx, onnxruntime) stays in the engine child.
   { crate = "sherpa-onnx", wrappers = ["nota-engine"] },
+  # Audio capture (cpal, with its PipeWire and ALSA bindings) stays in the
+  # recorder.
+  { crate = "cpal", wrappers = ["nota-recorder"] },
 ]
 
 [sources]
