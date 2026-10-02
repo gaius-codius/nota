@@ -84,10 +84,28 @@ impl ChunkerConfig {
         SampleCount::new(self.min_pause)
     }
 
+    /// How far into a chunk a pause must be to end it early.
+    #[must_use]
+    pub const fn target(&self) -> SampleCount {
+        SampleCount::new(self.target)
+    }
+
     /// The longest chunk.
     #[must_use]
     pub const fn cap(&self) -> SampleCount {
         SampleCount::new(self.cap)
+    }
+
+    /// How far back from the cap the fallback cut may go.
+    #[must_use]
+    pub const fn fallback_window(&self) -> SampleCount {
+        SampleCount::new(self.fallback_window)
+    }
+
+    /// The frame the fallback cut compares loudness over.
+    #[must_use]
+    pub const fn frame(&self) -> SampleCount {
+        SampleCount::new(self.frame)
     }
 }
 
@@ -169,11 +187,11 @@ impl Chunker {
         chunks
     }
 
-    /// Ends the stream: everything pushed is settled by `labels` (the
-    /// detector's flush) and comes back as chunks.
+    /// Ends the stream: everything pushed comes back as chunks. `labels` is
+    /// the detector's last word (its flush); audio it still hasn't settled
+    /// counts as possible speech.
     pub fn finish(&mut self, labels: &Labels) -> Vec<Chunk> {
         self.learn(labels);
-        self.known = self.end();
         let mut chunks = Vec::new();
         while let Some(chunk) = self.cut(self.next_cut().unwrap_or_else(|| self.end())) {
             chunks.push(chunk);

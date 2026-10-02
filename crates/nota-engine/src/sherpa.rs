@@ -30,9 +30,9 @@ const WINDOW: usize = 512;
 /// anything older than 0.5 s that isn't in a segment is silence.
 const SETTLE_LAG: u64 = 8_000;
 
-/// Reset the detector after this many samples of silence, about an hour.
-/// sherpa-onnx counts samples in an `i32`, which would overflow after 37
-/// hours.
+/// Reset the detector, during a pause, once it has counted this many
+/// samples, about an hour. sherpa-onnx counts samples in an `i32`, which
+/// would overflow after 37 hours.
 const RESET_AFTER: u64 = 16_000 * 3_600;
 
 /// Where the model files are.
@@ -113,6 +113,7 @@ impl Models for SherpaModels {
             pending: Vec::with_capacity(WINDOW),
             onset: None,
             silent_until: first.get(),
+            speech_until: first.get(),
         })
     }
 
@@ -175,6 +176,8 @@ pub struct SileroDetector {
     /// still is.
     onset: Option<u64>,
     silent_until: u64,
+    /// The end of the latest speech seen, in track samples.
+    speech_until: u64,
 }
 
 impl std::fmt::Debug for SileroDetector {
@@ -198,12 +201,19 @@ impl SileroDetector {
             self.onset = None;
         }
         self.drain(labels);
-        let settled = self
-            .onset
-            .unwrap_or(self.processed)
-            .saturating_sub(SETTLE_LAG);
-        self.silent_until = self.silent_until.max(self.base + settled);
-        if self.onset.is_none() && self.vad.is_empty() && self.processed >= RESET_AFTER {
+        let now = self.base + self.processed;
+        if self.onset.is_some() {
+            self.speech_until = now;
+        }
+        // In track samples, so a reset (which zeroes `processed`) can't
+        // move it.
+        let settled = (self.base + self.onset.unwrap_or(self.processed)).saturating_sub(SETTLE_LAG);
+        self.silent_until = self.silent_until.max(settled);
+        // Reset only well into a pause: a speech candidate the model hasn't
+        // confirmed yet would otherwise be forgotten.
+        let in_pause = now.saturating_sub(self.speech_until) >= 2 * SETTLE_LAG;
+        if self.onset.is_none() && self.vad.is_empty() && in_pause && self.processed >= RESET_AFTER
+        {
             self.vad.reset();
             self.base += self.processed;
             self.processed = 0;
@@ -215,6 +225,7 @@ impl SileroDetector {
             let start = u64::try_from(segment.start()).unwrap_or(0);
             let len = u64::try_from(segment.n()).unwrap_or(0);
             let (from, to) = (self.base + start, self.base + start + len);
+            self.speech_until = self.speech_until.max(to);
             if let Some(range) = SampleRange::new(SampleIndex::new(from), SampleIndex::new(to)) {
                 labels.segments.push(range);
             }
@@ -243,16 +254,19 @@ impl Detector for SileroDetector {
 
     fn flush(&mut self) -> Labels {
         let mut labels = Labels::default();
-        if !self.pending.is_empty() {
-            // Pad the last part-window with silence so it's looked at too.
-            let mut window = std::mem::take(&mut self.pending);
-            window.resize(WINDOW, 0.0);
-            self.feed_window(&window, &mut labels);
+        // Pad the last part-window with silence, then add a whole window of
+        // it: the model keeps some of each window as context, so without
+        // the extra one the last samples would never be looked at.
+        let mut tail = std::mem::take(&mut self.pending);
+        tail.resize(WINDOW * 2, 0.0);
+        let (windows, _) = tail.as_chunks::<WINDOW>();
+        for window in windows {
+            self.feed_window(window, &mut labels);
         }
         self.vad.flush();
         self.drain(&mut labels);
-        self.onset = None;
-        self.silent_until = self.silent_until.max(self.base + self.processed);
+        // Settled silence stays where the windows put it; the chunker
+        // treats anything after as possible speech.
         self.labels(labels)
     }
 }

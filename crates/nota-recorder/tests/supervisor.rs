@@ -15,7 +15,7 @@ use std::time::Duration;
 use nota_core::messages::AudioChunk;
 use nota_core::{Clock, SampleCount, SampleIndex, SampleRate, SessionTime, SystemClock, TrackId};
 use nota_recorder::engine::{
-    AudioOutOfOrder, EngineCommand, EngineConfig, EngineEvent, EngineStatus, EngineStderr,
+    AudioRefused, EngineCommand, EngineConfig, EngineEvent, EngineStatus, EngineStderr,
     EngineSupervisor, OfflineReason,
 };
 
@@ -244,6 +244,36 @@ fn a_hung_engine_is_killed_and_restarted() {
     assert_eq!(events.offline(Duration::from_secs(10)), OfflineReason::Hung);
 }
 
+/// A slow engine working through a backlog keeps replying, so it isn't
+/// hung even though the last of the backlog waits longer than the timeout.
+#[test]
+fn a_slow_engine_with_a_backlog_is_not_hung() {
+    let mut config = fake(&["echo", "--delay-ms", "100"]);
+    config.request_timeout = Duration::from_millis(400);
+    let (mut supervisor, mut events) = start(config);
+    events.online();
+    // A second of decoding queued at once.
+    send(&mut supervisor, 0..10);
+    events.confirmed_to(10 * CHUNK, Duration::from_secs(10));
+    let offline = events
+        .seen
+        .iter()
+        .any(|(_, e)| matches!(e, EngineEvent::Status(EngineStatus::Offline(_))));
+    assert!(!offline, "{:#?}", events.seen);
+    events.assert_tiles(10 * CHUNK);
+}
+
+#[test]
+fn shutdown_passes_on_the_answer_to_a_last_flush() {
+    let (mut supervisor, mut events) = start(fake(&["echo", "--every", "100"]));
+    events.online();
+    send(&mut supervisor, 0..3);
+    supervisor.flush(TRACK);
+    supervisor.shutdown();
+    events.confirmed_to(3 * CHUNK, Duration::from_secs(5));
+    events.assert_tiles(3 * CHUNK);
+}
+
 #[test]
 fn an_engine_that_never_says_hello_is_restarted() {
     let mut config = fake(&["no-hello"]);
@@ -322,6 +352,20 @@ fn a_crash_is_reported_and_transcription_resumes() {
     events.assert_tiles(6 * CHUNK);
 }
 
+/// An engine killed in the middle of writing a frame died; it didn't send
+/// a bad reply.
+#[test]
+fn half_a_frame_then_exit_is_a_crash() {
+    let (mut supervisor, mut events) = start(fake(&["torn-after", "--after", "1"]));
+    events.online();
+    send(&mut supervisor, 0..2);
+    let reason = events.offline(Duration::from_secs(10));
+    let OfflineReason::Exited(Some(status)) = reason else {
+        panic!("{reason:?}")
+    };
+    assert_eq!(status.code(), Some(101));
+}
+
 #[test]
 fn an_engine_that_cant_start_is_retried_and_audio_is_bounded() {
     let mut config = fake(&[]);
@@ -356,7 +400,7 @@ fn overlapping_audio_is_refused_without_sending() {
     let err = supervisor.send_audio(chunk(1)).unwrap_err();
     assert_eq!(
         err,
-        AudioOutOfOrder {
+        AudioRefused::Overlaps {
             expected: SampleIndex::new(2 * CHUNK),
             got: SampleIndex::new(CHUNK),
         }
@@ -369,6 +413,88 @@ fn overlapping_audio_is_refused_without_sending() {
         ranges,
         [(0, CHUNK), (CHUNK, 2 * CHUNK), (5 * CHUNK, 6 * CHUNK)]
     );
+    let offline = events
+        .seen
+        .iter()
+        .any(|(_, e)| matches!(e, EngineEvent::Status(EngineStatus::Offline(_))));
+    assert!(!offline, "{:#?}", events.seen);
+}
+
+#[test]
+fn audio_the_engine_cant_take_is_refused() {
+    let (mut supervisor, _events) = start(fake(&["echo"]));
+    let rate = SampleRate::new(48_000).unwrap();
+    let chunk = AudioChunk::new(TRACK, SampleIndex::ZERO, rate, vec![0; 10]).unwrap();
+    assert_eq!(supervisor.send_audio(chunk), Err(AudioRefused::Rate(rate)));
+    // Nothing was queued: the track still starts at zero.
+    supervisor.send_audio(self::chunk(0)).unwrap();
+}
+
+/// Audio that kills every engine it's given is skipped after three
+/// engines in a row die on it, rather than replayed forever.
+#[test]
+fn audio_that_keeps_killing_the_engine_is_skipped() {
+    // Only chunk 2 holds the sample value 1002 (`chunk` stays under 1000):
+    // the fake dies on it.
+    let (mut supervisor, mut events) = start(fake(&["echo", "--poison", "1002"]));
+    events.online();
+    let mut poisoned = chunk(2).samples().to_vec();
+    poisoned[0] = 1_002;
+    send(&mut supervisor, 0..2);
+    supervisor
+        .send_audio(
+            AudioChunk::new(
+                TRACK,
+                SampleIndex::new(2 * CHUNK),
+                SampleRate::SPEECH,
+                poisoned,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    send(&mut supervisor, 3..5);
+    let skipped = events.until(Duration::from_secs(20), |e| {
+        matches!(e, EngineEvent::Skipped { .. })
+    });
+    let EngineEvent::Skipped { range, .. } = skipped else {
+        unreachable!()
+    };
+    assert_eq!(
+        (range.start().get(), range.end().get()),
+        (2 * CHUNK, 3 * CHUNK)
+    );
+    events.confirmed_to(5 * CHUNK, Duration::from_secs(10));
+    assert_eq!(
+        events.transcripts(),
+        [
+            (0, CHUNK),
+            (CHUNK, 2 * CHUNK),
+            (3 * CHUNK, 4 * CHUNK),
+            (4 * CHUNK, 5 * CHUNK)
+        ]
+    );
+}
+
+/// Audio that stops coming without a flush is flushed after a while, so
+/// the engine isn't left holding it (and isn't then taken for hung).
+#[test]
+fn a_track_whose_audio_stops_is_flushed() {
+    let mut config = fake(&["echo", "--every", "100"]);
+    config.idle_flush = Duration::from_millis(200);
+    config.request_timeout = Duration::from_millis(600);
+    let (mut supervisor, mut events) = start(config);
+    events.online();
+    send(&mut supervisor, 0..3);
+    events.confirmed_to(3 * CHUNK, Duration::from_secs(5));
+    events.assert_tiles(3 * CHUNK);
+    // The stream goes on after the flush.
+    send(&mut supervisor, 3..4);
+    events.confirmed_to(4 * CHUNK, Duration::from_secs(5));
+    let offline = events
+        .seen
+        .iter()
+        .any(|(_, e)| matches!(e, EngineEvent::Status(EngineStatus::Offline(_))));
+    assert!(!offline, "{:#?}", events.seen);
 }
 
 #[test]

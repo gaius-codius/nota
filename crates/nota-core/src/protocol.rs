@@ -600,6 +600,93 @@ mod tests {
     }
 
     #[test]
+    fn limits_fill_a_frame_exactly() {
+        assert_eq!(MAX_AUDIO_SAMPLES, 524_279);
+        assert_eq!(MAX_TEXT_LEN, MAX_BODY_LEN - 21);
+        // The longest text fills the body to the byte; audio to within one
+        // (an odd byte can't hold a sample).
+        let text = Transcript {
+            track: TrackId::new(0),
+            range: SampleRange::new(SampleIndex::ZERO, SampleIndex::ZERO).unwrap(),
+            text: "x".repeat(MAX_TEXT_LEN),
+        };
+        let bytes = encode(&Frame::Message(FromEngine::Transcript(text.clone()))).unwrap();
+        assert_eq!(bytes.len() - 4, MAX_BODY_LEN);
+        assert_eq!(
+            decode_body::<FromEngine>(&bytes[4..]),
+            Ok(Frame::Message(FromEngine::Transcript(text)))
+        );
+        let audio = chunk(0, vec![1; MAX_AUDIO_SAMPLES]);
+        let bytes = encode(&Frame::Message(ToEngine::Audio(audio))).unwrap();
+        assert_eq!(bytes.len() - 4, MAX_BODY_LEN - 1);
+        let mut reader = FrameReader::new(&bytes[..]);
+        assert!(reader.read_frame::<ToEngine>().unwrap().is_some());
+    }
+
+    #[test]
+    fn a_failing_stream_is_an_error_but_an_interruption_is_retried() {
+        struct Broken(bool);
+        impl Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                // Interrupted once, then broken for good.
+                let kind = if std::mem::replace(&mut self.0, false) {
+                    io::ErrorKind::Interrupted
+                } else {
+                    io::ErrorKind::BrokenPipe
+                };
+                Err(io::Error::from(kind))
+            }
+        }
+        let mut reader = FrameReader::new(Broken(true));
+        match reader.read_frame::<FromEngine>() {
+            Err(ReadError::Io(err)) => assert_eq!(err.kind(), io::ErrorKind::BrokenPipe),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn errors_say_what_went_wrong() {
+        use std::error::Error as _;
+        assert_eq!(
+            EncodeError::TooLarge.to_string(),
+            "frame body over 1048576 bytes"
+        );
+        assert_eq!(
+            DecodeError::UnknownTag(0x42).to_string(),
+            "unknown tag 0x42"
+        );
+        assert_eq!(
+            DecodeError::BadRate(0).to_string(),
+            "sampling rate 0 Hz out of range"
+        );
+        for err in [
+            DecodeError::Empty,
+            DecodeError::Short,
+            DecodeError::TrailingBytes,
+            DecodeError::BadMagic,
+            DecodeError::OddAudioLength,
+            DecodeError::RangeOverflow,
+            DecodeError::InvertedRange,
+            DecodeError::NotUtf8,
+        ] {
+            assert!(!err.to_string().is_empty());
+        }
+        let decode = ReadError::Decode(DecodeError::NotUtf8);
+        assert_eq!(decode.to_string(), "bad frame: transcript text isn't UTF-8");
+        assert!(decode.source().is_some());
+        let io = ReadError::Io(io::Error::from(io::ErrorKind::BrokenPipe));
+        assert!(io.to_string().starts_with("engine stream failed"));
+        assert!(io.source().is_some());
+        assert_eq!(
+            ReadError::TooLarge(9).to_string(),
+            "frame length 9 over 1048576"
+        );
+        assert!(ReadError::Truncated.source().is_none());
+        assert!(!ReadError::Truncated.to_string().is_empty());
+        assert!(!ReadError::Failed.to_string().is_empty());
+    }
+
+    #[test]
     fn reader_refuses_a_huge_length_without_allocating_it() {
         let bytes = u32::MAX.to_le_bytes();
         let mut reader = FrameReader::new(&bytes[..]);

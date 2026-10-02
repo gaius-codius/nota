@@ -1,17 +1,22 @@
 //! A test double for the speech engine child, used by the supervisor's
 //! integration tests. It speaks the engine protocol with no models behind it.
 //!
-//! Usage: `nota-fake-engine MODE [--every N] [--after K]`
+//! Usage: `nota-fake-engine MODE [--every N] [--after K] [--delay-ms D] [--poison V]`
+//!
+//! `D` (`--delay-ms`, default 0) is how long every answer takes: a slow but
+//! working engine. With `--poison V`, any mode exits 101 on receiving audio
+//! that holds the sample value `V`, as an engine might abort on some input.
 //!
 //! `K` (`--after`, default 0) counts the audio frames received.
 //!
 //! | Mode | Behaviour |
 //! |---|---|
-//! | `echo` | A good engine: every `N` audio frames per track (`--every`, default 1) it answers the buffered audio with a transcript of its range, text `"start-end"`, then a confirmation. `Flush` answers what is buffered. Exits 3 if a track's audio isn't contiguous. |
+//! | `echo` | A good engine: every `N` audio frames per track (`--every`, default 1) it answers the buffered audio with a transcript of its range, text `"start-end"`, then a confirmation. `Flush` answers what is buffered and ends the track's stream. Exits 3 if a track's audio isn't contiguous. |
 //! | `hang` | Sends `Hello`, then never writes again. |
 //! | `hang-after` | `echo` for `K` audio frames, then goes silent. |
 //! | `crash-after` | `echo`; exits 101 when audio frame `K + 1` arrives, unanswered. |
 //! | `garbage-after` | `echo` for `K` audio frames; then writes an over-long length prefix and goes silent. |
+//! | `torn-after` | `echo` for `K` audio frames; then writes half a frame and exits 101, as a crash mid-write would. |
 //! | `bad-transcript` | Answers the first audio frame with a confirmation far past the audio sent, then goes silent. |
 //! | `no-hello` | Never sends `Hello`. |
 //! | `wrong-version` | Sends a `Hello` with the wrong protocol version. |
@@ -43,6 +48,7 @@ enum Mode {
     HangAfter,
     CrashAfter,
     GarbageAfter,
+    TornAfter,
     BadTranscript,
     NoHello,
     WrongVersion,
@@ -56,6 +62,7 @@ impl Mode {
             "hang-after" => Self::HangAfter,
             "crash-after" => Self::CrashAfter,
             "garbage-after" => Self::GarbageAfter,
+            "torn-after" => Self::TornAfter,
             "bad-transcript" => Self::BadTranscript,
             "no-hello" => Self::NoHello,
             "wrong-version" => Self::WrongVersion,
@@ -69,6 +76,8 @@ struct Args {
     mode: Mode,
     every: u64,
     after: u64,
+    delay_ms: u64,
+    poison: Option<i16>,
 }
 
 impl Args {
@@ -79,12 +88,20 @@ impl Args {
             mode,
             every: 1,
             after: 0,
+            delay_ms: 0,
+            poison: None,
         };
         while let Some(flag) = args.next() {
-            let value: u64 = args.next()?.parse().ok()?;
+            let raw = args.next()?;
+            if flag == "--poison" {
+                parsed.poison = Some(raw.parse().ok()?);
+                continue;
+            }
+            let value: u64 = raw.parse().ok()?;
             match flag.as_str() {
                 "--every" if value > 0 => parsed.every = value,
                 "--after" => parsed.after = value,
+                "--delay-ms" => parsed.delay_ms = value,
                 _ => return None,
             }
         }
@@ -145,16 +162,33 @@ impl<W: Write> Engine<W> {
             return Ok(Step::Continue);
         }
         match message {
-            ToEngine::Flush { track } => self.answer(track, end_of(&self.tracks, track))?,
+            ToEngine::Flush { track } => {
+                self.answer(track, end_of(&self.tracks, track))?;
+                // As the real engine: the next audio may start anywhere.
+                self.tracks.remove(&track);
+            }
             ToEngine::Audio(chunk) => {
                 self.audio_frames += 1;
                 let range = chunk.range();
+                if self
+                    .args
+                    .poison
+                    .is_some_and(|v| chunk.samples().contains(&v))
+                {
+                    return Ok(Step::Exit(EXIT_CRASH));
+                }
                 if self.audio_frames > self.args.after {
                     match self.args.mode {
                         Mode::CrashAfter => return Ok(Step::Exit(EXIT_CRASH)),
                         Mode::HangAfter => {
                             self.silent = true;
                             return Ok(Step::Continue);
+                        }
+                        Mode::TornAfter => {
+                            // The first bytes of a confirmation's frame.
+                            self.out.write_all(&[13, 0, 0, 0, 0x82, 0])?;
+                            self.out.flush()?;
+                            return Ok(Step::Exit(EXIT_CRASH));
                         }
                         Mode::GarbageAfter => {
                             self.out.write_all(&GARBAGE)?;
@@ -206,10 +240,21 @@ impl<W: Write> Engine<W> {
         let Some(range) = SampleRange::new(start, end) else {
             return Ok(());
         };
+        if self.args.delay_ms > 0 {
+            slow_down(self.args.delay_ms);
+        }
         let text = format!("{}-{}", start.get(), end.get());
         self.send(FromEngine::Transcript(Transcript { track, range, text }))?;
         self.send(FromEngine::Confirmed { track, up_to: end })
     }
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a test double standing in for an engine that takes this long to decode"
+)]
+fn slow_down(ms: u64) {
+    std::thread::sleep(std::time::Duration::from_millis(ms));
 }
 
 /// Where a track's received audio ends.
@@ -264,15 +309,29 @@ mod tests {
             Some(Args {
                 mode: Mode::Echo,
                 every: 1,
-                after: 0
+                after: 0,
+                delay_ms: 0,
+                poison: None
             })
         );
         assert_eq!(
-            parse(&["crash-after", "--after", "3", "--every", "2"]),
+            parse(&[
+                "crash-after",
+                "--after",
+                "3",
+                "--every",
+                "2",
+                "--delay-ms",
+                "5",
+                "--poison",
+                "-7"
+            ]),
             Some(Args {
                 mode: Mode::CrashAfter,
                 every: 2,
-                after: 3
+                after: 3,
+                delay_ms: 5,
+                poison: Some(-7)
             })
         );
     }

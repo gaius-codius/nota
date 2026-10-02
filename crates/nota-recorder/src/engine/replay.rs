@@ -45,6 +45,11 @@ pub(super) struct Replay {
     next: Option<SampleIndex>,
     /// Samples in `entries`.
     unconfirmed: u64,
+    /// Audio has been pushed since the last flush, so the engine may hold
+    /// an open stream even when everything is confirmed.
+    open: bool,
+    /// When the latest audio was pushed.
+    last_audio: Option<SessionTime>,
 }
 
 impl Replay {
@@ -55,16 +60,19 @@ impl Replay {
             held: Vec::new(),
             next: None,
             unconfirmed: 0,
+            open: false,
+            last_audio: None,
         }
     }
 
     /// Adds audio. The caller has checked it doesn't start before the end
     /// of the audio pushed before; if it starts after, the stream before is flushed
     /// first. Audio longer than one frame can carry is split.
-    pub(super) fn push_audio(&mut self, chunk: &AudioChunk) {
+    pub(super) fn push_audio(&mut self, chunk: &AudioChunk, now: SessionTime) {
         if chunk.samples().is_empty() {
             return;
         }
+        self.last_audio = Some(now);
         if self.next.is_some_and(|next| chunk.range().start() > next) {
             self.push_flush();
         }
@@ -82,13 +90,33 @@ impl Replay {
             });
         }
         self.next = Some(chunk.range().end());
+        self.open = true;
     }
 
     /// Asks the engine to transcribe what it holds now.
     pub(super) fn push_flush(&mut self) {
-        if !matches!(self.entries.back(), None | Some(Entry::Flush { .. })) {
+        if self.open {
             self.entries.push_back(Entry::Flush { sent: false });
+            self.open = false;
         }
+    }
+
+    /// When the latest audio came, if the stream it's in is still open.
+    pub(super) fn idle_since(&self) -> Option<SessionTime> {
+        self.last_audio.filter(|_| self.open)
+    }
+
+    /// Drops the first audio, unsent, and returns its range: the engines
+    /// keep failing on it.
+    pub(super) fn skip_first(&mut self) -> Option<SampleRange> {
+        while let Some(entry) = self.entries.pop_front() {
+            if let Entry::Audio { chunk, .. } = entry {
+                self.unconfirmed -= chunk.range().len().get();
+                self.held.clear();
+                return Some(chunk.range());
+            }
+        }
+        None
     }
 
     /// Everything not yet sent to the current engine, in order, marked as
@@ -139,15 +167,27 @@ impl Replay {
         })
     }
 
-    /// Whether `at` ends or falls inside audio sent to the current engine.
-    fn sent_covers(&self, at: SampleIndex) -> bool {
-        self.entries.iter().any(|entry| match entry {
-            Entry::Audio {
-                chunk,
-                sent_at: Some(_),
-            } => chunk.range().start() < at && at <= chunk.range().end(),
-            Entry::Audio { .. } | Entry::Flush { .. } => false,
-        })
+    /// The end of the stream the engine is working on: the run of sent
+    /// audio from the first unconfirmed sample that follows on without a
+    /// gap, a flush, or audio not yet sent. Replies can't reach past it.
+    fn sent_run_end(&self) -> Option<SampleIndex> {
+        let mut end = None;
+        for entry in self
+            .entries
+            .iter()
+            .skip_while(|e| matches!(e, Entry::Flush { .. }))
+        {
+            match entry {
+                Entry::Audio {
+                    chunk,
+                    sent_at: Some(_),
+                } if end.is_none_or(|end| end == chunk.range().start()) => {
+                    end = Some(chunk.range().end());
+                }
+                Entry::Audio { .. } | Entry::Flush { .. } => break,
+            }
+        }
+        end
     }
 
     /// Text from the engine. It's held until confirmed.
@@ -163,7 +203,10 @@ impl Replay {
                 "text doesn't start at the first unconfirmed sample",
             ));
         }
-        if transcript.range.is_empty() || !self.sent_covers(transcript.range.end()) {
+        let past = self
+            .sent_run_end()
+            .is_none_or(|end| transcript.range.end() > end);
+        if transcript.range.is_empty() || past {
             return Err(Violation("text past the audio sent"));
         }
         self.held.push(transcript);
@@ -182,7 +225,7 @@ impl Replay {
         if up_to <= first {
             return Err(Violation("confirmed position goes back"));
         }
-        if !self.sent_covers(up_to) {
+        if self.sent_run_end().is_none_or(|end| up_to > end) {
             return Err(Violation("confirmed past the audio sent"));
         }
         if self.held.iter().any(|t| t.range.end() > up_to) {
@@ -297,8 +340,8 @@ mod tests {
     #[test]
     fn text_is_released_only_when_confirmed() {
         let mut replay = Replay::new(TRACK);
-        replay.push_audio(&chunk(0, 10));
-        replay.push_audio(&chunk(10, 10));
+        replay.push_audio(&chunk(0, 10), SessionTime::ZERO);
+        replay.push_audio(&chunk(10, 10), SessionTime::ZERO);
         sent(&mut replay);
         replay.on_transcript(t(0, 15)).unwrap();
         assert_eq!(replay.on_confirmed(at(15)).unwrap(), [t(0, 15)]);
@@ -313,8 +356,8 @@ mod tests {
     #[test]
     fn a_restart_resends_from_the_first_unconfirmed_sample() {
         let mut replay = Replay::new(TRACK);
-        replay.push_audio(&chunk(0, 10));
-        replay.push_audio(&chunk(10, 10));
+        replay.push_audio(&chunk(0, 10), SessionTime::ZERO);
+        replay.push_audio(&chunk(10, 10), SessionTime::ZERO);
         assert_eq!(starts(&sent(&mut replay)), [Some(0), Some(10)]);
         replay.on_confirmed(at(4)).unwrap();
         // Text the engine didn't confirm before dying is dropped.
@@ -334,9 +377,9 @@ mod tests {
     #[test]
     fn only_new_audio_is_sent_while_running() {
         let mut replay = Replay::new(TRACK);
-        replay.push_audio(&chunk(0, 10));
+        replay.push_audio(&chunk(0, 10), SessionTime::ZERO);
         assert_eq!(starts(&sent(&mut replay)), [Some(0)]);
-        replay.push_audio(&chunk(10, 10));
+        replay.push_audio(&chunk(10, 10), SessionTime::ZERO);
         replay.push_flush();
         replay.push_flush();
         assert_eq!(starts(&sent(&mut replay)), [Some(10), None]);
@@ -346,12 +389,16 @@ mod tests {
     #[test]
     fn a_jump_flushes_the_stream_before_it() {
         let mut replay = Replay::new(TRACK);
-        replay.push_audio(&chunk(0, 10));
-        replay.push_audio(&chunk(50, 10));
+        replay.push_audio(&chunk(0, 10), SessionTime::ZERO);
+        replay.push_audio(&chunk(50, 10), SessionTime::ZERO);
         assert_eq!(replay.next, Some(at(60)));
         assert_eq!(starts(&sent(&mut replay)), [Some(0), None, Some(50)]);
-        // Confirming into the gap between the streams is a violation.
+        // Text or a confirmation reaching into the gap, or across it into
+        // the next stream, is a violation.
         assert!(replay.on_confirmed(at(30)).is_err());
+        assert!(replay.on_confirmed(at(55)).is_err());
+        assert!(replay.on_transcript(t(0, 55)).is_err());
+        assert!(replay.on_transcript(t(0, 12)).is_err());
         replay.on_confirmed(at(10)).unwrap();
         // The sent flush goes with the stream it ended; the next stream's
         // text starts at its own first sample.
@@ -362,13 +409,35 @@ mod tests {
     }
 
     #[test]
+    fn a_jump_after_everything_is_confirmed_still_flushes() {
+        let mut replay = Replay::new(TRACK);
+        replay.push_audio(&chunk(0, 10), SessionTime::ZERO);
+        sent(&mut replay);
+        replay.on_confirmed(at(10)).unwrap();
+        // The engine may still hold the stream open at 10.
+        replay.push_audio(&chunk(50, 10), SessionTime::ZERO);
+        assert_eq!(starts(&sent(&mut replay)), [None, Some(50)]);
+        // A flush with nothing pushed since the last one sends nothing.
+        replay.push_flush();
+        replay.push_flush();
+        assert_eq!(starts(&sent(&mut replay)), [None]);
+        assert!(sent(&mut replay).is_empty());
+    }
+
+    #[test]
     fn replies_that_dont_fit_are_violations() {
         let mut replay = Replay::new(TRACK);
         assert!(replay.on_confirmed(at(1)).is_err(), "nothing sent");
         assert!(replay.on_transcript(t(0, 1)).is_err(), "nothing sent");
-        replay.push_audio(&chunk(100, 10));
+        replay.push_audio(&chunk(100, 10), SessionTime::ZERO);
         assert!(replay.on_confirmed(at(105)).is_err(), "pushed but not sent");
         sent(&mut replay);
+        // Audio pushed after the engine was last sent some isn't covered.
+        replay.push_audio(&chunk(110, 10), SessionTime::ZERO);
+        assert!(
+            replay.on_confirmed(at(115)).is_err(),
+            "confirmed audio not yet sent"
+        );
         assert!(replay.on_confirmed(at(100)).is_err(), "goes nowhere");
         assert!(replay.on_confirmed(at(99)).is_err(), "goes back");
         assert!(replay.on_confirmed(at(111)).is_err(), "past the audio");
@@ -390,7 +459,7 @@ mod tests {
     #[test]
     fn long_audio_is_split_into_frames() {
         let mut replay = Replay::new(TRACK);
-        replay.push_audio(&chunk(7, MAX_AUDIO_SAMPLES * 2 + 1));
+        replay.push_audio(&chunk(7, MAX_AUDIO_SAMPLES * 2 + 1), SessionTime::ZERO);
         let frames = sent(&mut replay);
         let lens: Vec<_> = frames
             .iter()
@@ -406,10 +475,10 @@ mod tests {
     #[test]
     fn trimming_drops_the_oldest_audio_and_says_what() {
         let mut replay = Replay::new(TRACK);
-        replay.push_audio(&chunk(0, 10));
-        replay.push_audio(&chunk(10, 10));
-        replay.push_audio(&chunk(40, 10));
-        replay.push_audio(&chunk(50, 10));
+        replay.push_audio(&chunk(0, 10), SessionTime::ZERO);
+        replay.push_audio(&chunk(10, 10), SessionTime::ZERO);
+        replay.push_audio(&chunk(40, 10), SessionTime::ZERO);
+        replay.push_audio(&chunk(50, 10), SessionTime::ZERO);
         assert_eq!(replay.trim(SampleCount::new(40)), []);
         let dropped = replay.trim(SampleCount::new(15));
         assert_eq!(
@@ -426,9 +495,9 @@ mod tests {
     #[test]
     fn oldest_sent_is_the_first_audio_still_unconfirmed() {
         let mut replay = Replay::new(TRACK);
-        replay.push_audio(&chunk(0, 10));
+        replay.push_audio(&chunk(0, 10), SessionTime::ZERO);
         replay.take_unsent(SessionTime::from_nanos(5));
-        replay.push_audio(&chunk(10, 10));
+        replay.push_audio(&chunk(10, 10), SessionTime::ZERO);
         replay.take_unsent(SessionTime::from_nanos(9));
         assert_eq!(replay.oldest_sent(), Some(SessionTime::from_nanos(5)));
         replay.on_confirmed(at(10)).unwrap();

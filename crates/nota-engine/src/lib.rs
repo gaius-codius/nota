@@ -5,9 +5,21 @@
 //! and reads text back over stdout, framed by [`nota_core::protocol`]; see
 //! [`child::run`]. The child exits when its stdin closes.
 //!
-//! This is the only crate with native model code: sherpa-onnx and
-//! onnxruntime, linked statically by the `sherpa-onnx` crate (see
-//! [`sherpa`]).
+//! This is the only crate with native model code (cargo-deny's `wrappers`
+//! rule keeps it so). The `sherpa-onnx` crate's build script downloads a
+//! prebuilt static archive for its exact version and links it in:
+//!
+//! | Library | Licence |
+//! |---|---|
+//! | sherpa-onnx, kaldi-native-fbank, kaldi-decoder, `OpenFst`, sentencepiece | Apache-2.0 |
+//! | onnxruntime, piper-phonemize | MIT |
+//! | kissfft | BSD-3-Clause |
+//! | espeak-ng, ucd-tools | GPL-3.0-or-later |
+//!
+//! espeak-ng and ucd-tools serve sherpa-onnx's text-to-speech, which nota
+//! doesn't use, but the archive's C API references them, so the linker keeps
+//! them in the binary. cargo-deny doesn't see native archives. How nota is
+//! built for release has to settle this before any binary is distributed.
 
 pub mod child;
 pub mod chunker;
@@ -93,4 +105,35 @@ fn protocol_output() -> io::Result<std::fs::File> {
 #[cfg(not(unix))]
 fn protocol_output() -> io::Result<io::Stdout> {
     Ok(io::stdout())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error as _;
+
+    use super::*;
+
+    #[test]
+    fn errors_say_what_went_wrong() {
+        let version = EngineError::Version(ProtocolVersion::new(3));
+        assert_eq!(
+            version.to_string(),
+            "the recorder speaks protocol v3, this engine v0"
+        );
+        assert_eq!(
+            EngineError::Protocol("second hello").to_string(),
+            "protocol error: second hello"
+        );
+        assert_eq!(
+            EngineError::Model("no model".into()).to_string(),
+            "no model"
+        );
+        let read = EngineError::from(ReadError::Truncated);
+        assert!(read.to_string().starts_with("reading from the recorder"));
+        assert!(read.source().is_some());
+        let write = EngineError::Write(io::Error::from(io::ErrorKind::BrokenPipe));
+        assert!(write.to_string().starts_with("writing to the recorder"));
+        assert!(write.source().is_some());
+        assert!(version.source().is_none());
+    }
 }
