@@ -10,6 +10,8 @@ use std::time::Duration;
 
 use nota_core::{Clock, EpochId, FakeClock, SampleIndex, SampleRate, SessionId, SessionTime};
 
+use std::error::Error as _;
+
 use super::*;
 use crate::fs::fake::{FakeFile, FakeFs};
 use crate::fs::{Fs, FsFile, Synced};
@@ -140,19 +142,21 @@ fn run<S: Fs + Clone + 'static>(
     let (sent, script_sent) = mpsc::channel();
     let backend = Synthetic { script, last, sent };
     let (capture, events) = start(&backend, &Source::Microphone, rate()).unwrap();
-    let recorder = thread::spawn(move || {
+    let (finished, done) = mpsc::channel();
+    thread::spawn(move || {
         let mut reported = Vec::new();
         let result = record_track(&mut writer, MIC, &events, &mut |e| reported.push(e));
-        Run {
+        let _ = finished.send(Run {
             writer,
             result,
             reported,
-        }
+        });
     });
     script_sent.recv().unwrap();
     while_running(&clock);
-    capture.stop();
-    recorder.join().unwrap()
+    drop(capture);
+    // A recorder that never returns fails the test rather than hanging it.
+    done.recv_timeout(Duration::from_secs(10)).unwrap()
 }
 
 /// The finished journals' audio, in id order: each journal's range must
@@ -309,7 +313,7 @@ fn notices_are_reported_and_recording_goes_on() {
         Step::Notice(CaptureNotice::Overrun),
         Step::Audio(samples(10, 10)),
         Step::Notice(CaptureNotice::RouteChanged),
-        Step::Notice(CaptureNotice::RealtimeDenied),
+        Step::Notice(CaptureNotice::Warning("watch lost".into())),
     ];
     let run = run(&fs, script, Vec::new(), |_| {});
     run.result.unwrap();
@@ -326,7 +330,7 @@ fn notices_are_reported_and_recording_goes_on() {
         [
             &CaptureNotice::Overrun,
             &CaptureNotice::RouteChanged,
-            &CaptureNotice::RealtimeDenied
+            &CaptureNotice::Warning("watch lost".into())
         ]
     );
     let journals = run.writer.finish().unwrap();
@@ -373,12 +377,13 @@ fn journals_are_synced_while_no_audio_arrives() {
         Vec::new(),
         |clock| {
             // Every sample written (the new journal's header is synced on
-            // the way), and the samples not due an fsync yet: nothing else
-            // happens until the clock moves.
+            // the way), and every report of it taken; the samples aren't
+            // due an fsync yet, so nothing else happens until the clock
+            // moves.
             while !written() {
                 next_op(&ops);
             }
-            assert!(ops.recv_timeout(Duration::from_millis(300)).is_err());
+            while ops.recv_timeout(Duration::from_millis(300)).is_ok() {}
             // No more audio comes: only the recorder's idle check can sync.
             clock.advance(Duration::from_secs(2));
             assert_eq!(next_op(&ops), FileOp::Sync);
@@ -452,4 +457,43 @@ fn a_stream_that_cant_open_is_an_error() {
         CaptureError::DeviceNotAvailable(Source::Device("nowhere".into()))
     );
     assert_eq!(err.to_string(), "device nowhere isn't available");
+}
+
+#[test]
+fn record_errors_show_and_chain_their_cause() {
+    let capture = CaptureError::Backend("gone".into());
+    let e = RecordError::Capture(capture.clone());
+    assert_eq!(e.to_string(), capture.to_string());
+    assert_eq!(e.source().unwrap().to_string(), capture.to_string());
+    let session = SessionError::UnknownTrack(MIC);
+    let message = session.to_string();
+    let e = RecordError::Session(session);
+    assert_eq!(e.to_string(), message);
+    assert_eq!(e.source().unwrap().to_string(), message);
+}
+
+#[test]
+fn capture_errors_and_sources_read_plainly() {
+    let cases = [
+        (
+            CaptureError::HostUnavailable("x".into()),
+            "the audio server isn't available: x",
+        ),
+        (
+            CaptureError::DeviceNotAvailable(Source::SystemAudio),
+            "the system audio isn't available",
+        ),
+        (
+            CaptureError::DeviceNotAvailable(Source::Microphone),
+            "the microphone isn't available",
+        ),
+        (
+            CaptureError::UnsupportedConfig("x".into()),
+            "the device can't capture as asked: x",
+        ),
+        (CaptureError::Backend("x".into()), "capture failed: x"),
+    ];
+    for (error, text) in cases {
+        assert_eq!(error.to_string(), text);
+    }
 }

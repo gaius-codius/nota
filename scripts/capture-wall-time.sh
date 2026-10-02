@@ -27,8 +27,9 @@ cleanup() {
 trap cleanup EXIT
 
 default_before=$(pactl get-default-sink)
+# The lowest priority, so the session manager never picks it as the default.
 module=$(pactl load-module module-null-sink "sink_name=$sink" \
-  "sink_properties=node.description=nota-wall-time")
+  "sink_properties=node.description=nota-wall-time priority.session=1 priority.driver=1")
 
 # A 440 Hz tone at -38 dBFS, longer than the capture.
 ffmpeg -loglevel error -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=$((seconds + 30))" \
@@ -40,6 +41,10 @@ status=0
 cargo run --quiet --release --locked -p nota-recorder --example capture_wall_time -- \
   "$work/session" "$seconds" device "$sink" || status=$?
 
+if ! kill -0 "$player" 2>/dev/null; then
+  echo "capture-wall-time.sh: the tone stopped before the capture did" >&2
+  status=1
+fi
 if [ "$(pactl get-default-sink)" != "$default_before" ]; then
   echo "capture-wall-time.sh: the default sink changed during the run (was $default_before)" >&2
 fi

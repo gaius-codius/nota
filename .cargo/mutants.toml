@@ -1,0 +1,5 @@
+# cargo-mutants (the PR job in ci.yml, the weekly run in mutants.yml).
+
+# The PipeWire stream's Debug impl only names the type, and a test would need
+# a running PipeWire to make one.
+exclude_re = ["impl .*Debug for PipeWireStream"]

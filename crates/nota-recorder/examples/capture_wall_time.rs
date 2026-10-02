@@ -8,7 +8,8 @@
 //! prints the samples captured, the wall time, the difference and the peak
 //! level, with any overruns the stream reported. It fails if the difference
 //! is more than 1000 ppm of the wall time plus 100 ms (the stream's start
-//! and its last buffer), or if the journals don't hold every sample.
+//! and its last buffer), if the journals don't hold every sample, or if the
+//! audio is silent (peak at or below -70 dBFS): it measures playing audio.
 //!
 //! `scripts/capture-wall-time.sh` runs it against a temporary null sink
 //! with a tone playing, so the user's own devices are left alone.
@@ -47,6 +48,8 @@ mod linux {
     const PPM: u128 = 1_000;
     /// Allowed on top: the stream's start-up and its last buffer.
     const SLACK: Duration = Duration::from_millis(100);
+    /// The quietest peak that counts as audio playing: -70 dBFS.
+    const MIN_PEAK: i16 = 10;
 
     pub(super) fn main() -> ExitCode {
         match run() {
@@ -104,7 +107,7 @@ mod linux {
         });
         wait(Duration::from_secs(seconds));
         let stopped = clock.now();
-        capture.stop();
+        drop(capture);
         let (writer, mut journals, notices, failures, result) = recorder
             .join()
             .map_err(|_| "the recorder thread panicked")?;
@@ -194,7 +197,10 @@ mod linux {
             .filter(|n| **n == CaptureNotice::Overrun)
             .count();
         let peak_dbfs = 20.0 * (f64::from(r.peak.max(1)) / 32_768.0).log10();
-        let ok = diff <= allowed && r.journaled == r.captured.get() && r.failures == 0;
+        let ok = diff <= allowed
+            && r.journaled == r.captured.get()
+            && r.failures == 0
+            && r.peak > MIN_PEAK;
         let mut out = io::stdout().lock();
         writeln!(out, "source        {}", r.source)?;
         writeln!(

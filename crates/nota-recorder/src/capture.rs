@@ -14,7 +14,7 @@
 //! catches up when the disk does.
 //!
 //! [`start`] returns a [`Capture`], which keeps the stream running until it's
-//! stopped or dropped, on the thread that started it, and a
+//! dropped, on the thread that started it, and a
 //! [`CaptureReceiver`] for the recorder thread. Stopping ends the stream and
 //! then tells the recorder, which records everything the stream delivered
 //! before it ends.
@@ -101,9 +101,10 @@ pub enum CaptureNotice {
     Overrun,
     /// The default device changed and the stream followed it.
     RouteChanged,
-    /// The stream's thread couldn't get real-time priority; overruns are
-    /// more likely under load.
-    RealtimeDenied,
+    /// Anything else the backend reported without stopping the stream,
+    /// such as real-time priority refused, or default-device changes no
+    /// longer watched.
+    Warning(String),
 }
 
 /// What a capture stream sends the recorder thread.
@@ -188,20 +189,14 @@ pub trait CaptureBackend {
     ) -> Result<Self::Stream, CaptureError>;
 }
 
-/// A running capture. Dropping it stops it, like [`Self::stop`].
+/// A running capture. Dropping it stops the stream, then tells the
+/// recorder, which records what the stream sent before stopping and then
+/// returns.
 #[derive(Debug)]
 pub struct Capture<T> {
     stream: Option<T>,
     stopped: mpsc::Sender<CaptureEvent>,
     stopping: Arc<AtomicBool>,
-}
-
-impl<T> Capture<T> {
-    /// Stops the stream, then tells the recorder: it records what the
-    /// stream sent before stopping, and then returns.
-    pub fn stop(self) {
-        drop(self);
-    }
 }
 
 impl<T> Drop for Capture<T> {
