@@ -29,6 +29,10 @@ pub struct CrashCase {
     pub outcome: CrashOutcome,
     /// If recovery was crashed too, after how many of its operations.
     pub recovery_crashed_after: Option<usize>,
+    /// What survived the scenario's crash, before any recovery ran: for a
+    /// check that compares with an uninterrupted recovery. Use a
+    /// [`FakeFs::copy_disk`] of it.
+    pub survived: FakeFs,
     /// The filesystem after recovery finished.
     pub fs: FakeFs,
 }
@@ -192,6 +196,7 @@ where
                             ops: ops.clone(),
                             outcome,
                             recovery_crashed_after,
+                            survived: survived.copy_disk(),
                             fs: disk,
                         },
                         &observed,

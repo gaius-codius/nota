@@ -1,6 +1,6 @@
 [package]
 name = "nota-recorder"
-description = "nota's recorder: the filesystem layer every durable write goes through, and the crash-safe PCM journal."
+description = "nota's recorder: the filesystem layer every durable write goes through, the crash-safe PCM journal, FLAC segments and salvage."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,9 +14,13 @@ fake-fs = []
 
 [dependencies]
 crc32fast.workspace = true
+flacenc.workspace = true
 nota-core = { path = "../nota-core" }
+nota-store = { path = "../nota-store" }
+sha2.workspace = true
 
 [dev-dependencies]
+claxon.workspace = true
 nota-core = { path = "../nota-core", features = ["fake-clock"] }
 proptest.workspace = true
 

@@ -1,0 +1,15 @@
+[package]
+name = "nota-store"
+description = "nota's database: the SQLite store, its schema and the single writer. For now, only the recorder's segment rows."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+nota-core = { path = "../nota-core" }
+rusqlite.workspace = true
+
+[lints]
+workspace = true

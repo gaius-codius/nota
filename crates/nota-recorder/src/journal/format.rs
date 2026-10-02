@@ -1,19 +1,23 @@
 //! The journal's bytes on disk, and the reader that parses them back.
 //!
-//! All integers are little-endian. A journal is a header, then frames:
+//! All integers are little-endian. A journal holds one track's audio from
+//! one epoch: a header, then frames.
 //!
 //! | Bytes | Header field |
 //! |---|---|
 //! | 0..8 | magic, `NOTAJRNL` |
-//! | 8..10 | format version, 1 |
+//! | 8..10 | format version, 2 |
 //! | 10..14 | sample rate in hertz |
-//! | 14..18 | CRC-32 of bytes 0..14 |
+//! | 14..22 | journal id ([`JournalId`]), also in the file name |
+//! | 22..26 | track |
+//! | 26..30 | the track's epoch |
+//! | 30..34 | CRC-32 of bytes 0..30 |
 //!
 //! | Bytes | Frame field |
 //! |---|---|
 //! | 0..4 | magic, `NJFR` |
 //! | 4..12 | sequence number: 0 for the first frame, then +1 |
-//! | 12..16 | track |
+//! | 12..16 | track, the header's |
 //! | 16..24 | the track's sample index of the first sample |
 //! | 24..28 | number of samples, 1 to [`MAX_FRAME_SAMPLES`] |
 //! | 28..32 | CRC-32 of bytes 0..28 and the samples |
@@ -23,21 +27,27 @@
 //! it treats its input as untrusted. It stops at the first frame that isn't
 //! valid and returns only the frames before it. Valid means a complete frame
 //! with the right magic, a length in range, a matching CRC, the next
-//! sequence number, and, for a track seen before, a first sample that
-//! continues it exactly. So the audio it returns for each track is
+//! sequence number, the header's track, and, after the first frame, a first
+//! sample that continues the last frame exactly. So the audio it returns is
 //! sample-continuous.
+//!
+//! Version 1 (no id, track or epoch in the header, several tracks per file)
+//! was only ever written by tests; the reader refuses it.
 
-use std::collections::BTreeMap;
 use std::fmt;
 
-use nota_core::{SampleCount, SampleIndex, SampleRange, SampleRate, TrackId};
+use nota_core::{EpochId, SampleCount, SampleIndex, SampleRange, SampleRate, TrackId};
+
+use super::JournalId;
 
 /// The journal file's magic number.
 const FILE_MAGIC: [u8; 8] = *b"NOTAJRNL";
 /// The format this code writes and reads.
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
 /// Bytes in the file header.
-pub const HEADER_LEN: usize = 18;
+pub const HEADER_LEN: usize = 34;
+/// Bytes of the header the CRC covers.
+const HEADER_FIELDS: usize = 30;
 
 /// Each frame's magic number.
 const FRAME_MAGIC: [u8; 4] = *b"NJFR";
@@ -50,14 +60,47 @@ pub const MAX_FRAME_SAMPLES: u32 = 8_192;
 /// Bytes per sample.
 const SAMPLE_BYTES: usize = 2;
 
-/// The journal's header.
+/// The journal's header: what the file is, and whose audio it holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JournalHeader {
+    id: JournalId,
+    track: TrackId,
+    epoch: EpochId,
     rate: SampleRate,
 }
 
 impl JournalHeader {
-    /// The sampling rate of every track in the journal.
+    /// The header of journal `id`, holding `track`'s audio from `epoch` at
+    /// `rate`.
+    #[must_use]
+    pub const fn new(id: JournalId, track: TrackId, epoch: EpochId, rate: SampleRate) -> Self {
+        Self {
+            id,
+            track,
+            epoch,
+            rate,
+        }
+    }
+
+    /// The journal's id.
+    #[must_use]
+    pub const fn id(self) -> JournalId {
+        self.id
+    }
+
+    /// The track every frame belongs to.
+    #[must_use]
+    pub const fn track(self) -> TrackId {
+        self.track
+    }
+
+    /// The track's epoch the audio was captured in.
+    #[must_use]
+    pub const fn epoch(self) -> EpochId {
+        self.epoch
+    }
+
+    /// The sampling rate.
     #[must_use]
     pub const fn rate(self) -> SampleRate {
         self.rate
@@ -80,7 +123,7 @@ impl Frame {
         self.seq
     }
 
-    /// The track the samples belong to.
+    /// The track the samples belong to: always the header's.
     #[must_use]
     pub const fn track(&self) -> TrackId {
         self.track
@@ -128,6 +171,13 @@ pub enum ReadEnd {
 pub enum Invalid {
     /// The file header's magic, version, rate or CRC is wrong.
     Header,
+    /// The frame belongs to another track than the header's.
+    Track {
+        /// The header's track.
+        expected: TrackId,
+        /// The frame's.
+        found: TrackId,
+    },
     /// The frame doesn't start with the frame magic.
     Magic,
     /// The frame's length is zero or above [`MAX_FRAME_SAMPLES`], or its
@@ -142,8 +192,7 @@ pub enum Invalid {
         /// The one in the frame.
         found: u64,
     },
-    /// The frame doesn't continue its track where the last frame of that
-    /// track ended.
+    /// The frame doesn't continue the track where the last frame ended.
     Discontinuous {
         /// The track.
         track: TrackId,
@@ -158,6 +207,12 @@ impl fmt::Display for Invalid {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Header => f.write_str("bad journal header"),
+            Self::Track { expected, found } => write!(
+                f,
+                "a frame of track {} in a journal of track {}",
+                found.get(),
+                expected.get()
+            ),
             Self::Magic => f.write_str("bad frame magic"),
             Self::Length => f.write_str("frame length out of range"),
             Self::Crc => f.write_str("frame CRC mismatch"),
@@ -213,19 +268,26 @@ impl JournalRead {
         self.end
     }
 
-    /// The recovered audio of `track`: its sample range and the samples,
-    /// continuous by construction. `None` if the track has no valid frames.
+    /// The samples the valid frames cover, continuous by construction.
+    /// `None` if there are no valid frames.
     #[must_use]
-    pub fn track_audio(&self, track: TrackId) -> Option<(SampleRange, Vec<i16>)> {
-        let mut frames = self.frames.iter().filter(|f| f.track == track);
-        let first = frames.next()?;
-        let mut end = first.range.end();
-        let mut samples = first.samples.clone();
-        for frame in frames {
-            end = frame.range.end();
-            samples.extend_from_slice(&frame.samples);
-        }
-        let range = SampleRange::new(first.range.start(), end)?;
+    pub fn range(&self) -> Option<SampleRange> {
+        let first = self.frames.first()?;
+        let last = self.frames.last()?;
+        SampleRange::new(first.range.start(), last.range.end())
+    }
+
+    /// The recovered audio: its sample range and the samples, copied into
+    /// one buffer. `None` if there are no valid frames. Salvage reads
+    /// [`Self::frames`] instead, to avoid the copy.
+    #[must_use]
+    pub fn audio(&self) -> Option<(SampleRange, Vec<i16>)> {
+        let range = self.range()?;
+        let samples = self
+            .frames
+            .iter()
+            .flat_map(|f| f.samples.iter().copied())
+            .collect();
         Some((range, samples))
     }
 }
@@ -259,15 +321,15 @@ pub fn read_journal(bytes: &[u8]) -> JournalRead {
     let mut frames = Vec::new();
     let mut offset = HEADER_LEN;
     let mut next_seq = 0_u64;
-    let mut track_ends = BTreeMap::<TrackId, SampleIndex>::new();
+    let mut next_sample = None;
     loop {
         let rest = &bytes[offset..];
         if rest.is_empty() {
             return stop(Some(header), frames, offset, ReadEnd::Complete);
         }
-        match parse_frame(rest, next_seq, &track_ends) {
+        match parse_frame(rest, next_seq, header.track, next_sample) {
             Parsed::Frame(frame, len) => {
-                track_ends.insert(frame.track, frame.range.end());
+                next_sample = Some(frame.range.end());
                 frames.push(frame);
                 offset += len;
                 next_seq += 1;
@@ -288,15 +350,19 @@ pub fn read_journal(bytes: &[u8]) -> JournalRead {
 }
 
 fn parse_header(bytes: &[u8]) -> Option<JournalHeader> {
-    let fields = bytes.get(..14)?;
+    let fields = bytes.get(..HEADER_FIELDS)?;
     if fields.get(..8)? != FILE_MAGIC
         || u16::from_le_bytes(array(bytes, 8)?) != VERSION
-        || u32::from_le_bytes(array(bytes, 14)?) != crc32fast::hash(fields)
+        || u32::from_le_bytes(array(bytes, HEADER_FIELDS)?) != crc32fast::hash(fields)
     {
         return None;
     }
-    let rate = SampleRate::new(u32::from_le_bytes(array(bytes, 10)?))?;
-    Some(JournalHeader { rate })
+    Some(JournalHeader {
+        rate: SampleRate::new(u32::from_le_bytes(array(bytes, 10)?))?,
+        id: JournalId::new(u64::from_le_bytes(array(bytes, 14)?)),
+        track: TrackId::new(u32::from_le_bytes(array(bytes, 22)?)),
+        epoch: EpochId::new(u32::from_le_bytes(array(bytes, 26)?)),
+    })
 }
 
 enum Parsed {
@@ -306,7 +372,12 @@ enum Parsed {
     Invalid(Invalid),
 }
 
-fn parse_frame(bytes: &[u8], next_seq: u64, track_ends: &BTreeMap<TrackId, SampleIndex>) -> Parsed {
+fn parse_frame(
+    bytes: &[u8],
+    next_seq: u64,
+    journal_track: TrackId,
+    next_sample: Option<SampleIndex>,
+) -> Parsed {
     let Some(head) = bytes.get(..FRAME_HEADER_LEN) else {
         // Too short for a header: torn, unless what's there already shows
         // it isn't a frame.
@@ -351,11 +422,17 @@ fn parse_frame(bytes: &[u8], next_seq: u64, track_ends: &BTreeMap<TrackId, Sampl
         });
     }
     let track = TrackId::new(track);
+    if track != journal_track {
+        return Parsed::Invalid(Invalid::Track {
+            expected: journal_track,
+            found: track,
+        });
+    }
     let first = SampleIndex::new(first);
     let Some(range) = SampleRange::starting_at(first, SampleCount::new(u64::from(len))) else {
         return Parsed::Invalid(Invalid::Length);
     };
-    if let Some(&expected) = track_ends.get(&track)
+    if let Some(expected) = next_sample
         && expected != first
     {
         return Parsed::Invalid(Invalid::Discontinuous {
@@ -393,15 +470,18 @@ fn frame_crc(head: &[u8], payload: &[u8]) -> u32 {
     hasher.finalize()
 }
 
-/// The file header for a journal at `rate`.
+/// The bytes of `header`.
 #[must_use]
-pub fn encode_header(rate: SampleRate) -> [u8; HEADER_LEN] {
+pub fn encode_header(header: JournalHeader) -> [u8; HEADER_LEN] {
     let mut out = [0; HEADER_LEN];
     out[..8].copy_from_slice(&FILE_MAGIC);
     out[8..10].copy_from_slice(&VERSION.to_le_bytes());
-    out[10..14].copy_from_slice(&rate.hz().to_le_bytes());
-    let crc = crc32fast::hash(&out[..14]);
-    out[14..].copy_from_slice(&crc.to_le_bytes());
+    out[10..14].copy_from_slice(&header.rate.hz().to_le_bytes());
+    out[14..22].copy_from_slice(&header.id.get().to_le_bytes());
+    out[22..26].copy_from_slice(&header.track.get().to_le_bytes());
+    out[26..30].copy_from_slice(&header.epoch.get().to_le_bytes());
+    let crc = crc32fast::hash(&out[..HEADER_FIELDS]);
+    out[HEADER_FIELDS..].copy_from_slice(&crc.to_le_bytes());
     out
 }
 
