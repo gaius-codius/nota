@@ -14,7 +14,9 @@ ignore = []
 [licenses]
 # Permissive licences only. GPL, LGPL and AGPL code is never linked (espeak-ng
 # runs as a separate program). MPL-2.0 is file-level copyleft: allowed, but
-# check any new MPL crate in review.
+# check any new MPL crate in review. This sees crates only, not native
+# archives: release builds link sherpa-onnx without its GPL text-to-speech
+# libraries, which scripts/check-no-gpl.sh checks in CI.
 allow = [
   "MIT",
   "MIT-0",
