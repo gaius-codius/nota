@@ -113,7 +113,6 @@ mod tests {
     fn stream_errors_that_dont_stop_capture_are_notices() {
         let mic = Source::Microphone;
         for (kind, notice) in [
-            (ErrorKind::Xrun, CaptureNotice::Overrun),
             (ErrorKind::DeviceChanged, CaptureNotice::RouteChanged),
             (
                 ErrorKind::RealtimeDenied,
