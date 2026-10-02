@@ -11,6 +11,9 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [workspace.dependencies]
+# Audio capture: the PipeWire host on Linux. Only nota-recorder may use it
+# (deny.toml).
+cpal = { version = "0.18", default-features = false }
 # Decodes FLAC segments in tests, to check what was encoded.
 claxon = "0.4"
 # The journal's per-frame checksum (CRC-32, IEEE).

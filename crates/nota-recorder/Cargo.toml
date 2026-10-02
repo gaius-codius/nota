@@ -1,6 +1,6 @@
 [package]
 name = "nota-recorder"
-description = "nota's recorder: the filesystem layer every durable write goes through, the crash-safe PCM journal, FLAC segments and salvage."
+description = "nota's recorder: the filesystem layer every durable write goes through, audio capture, the crash-safe PCM journal, FLAC segments and salvage."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,6 +18,11 @@ flacenc.workspace = true
 nota-core = { path = "../nota-core" }
 nota-store = { path = "../nota-store" }
 sha2.workspace = true
+
+# cpal's PipeWire host; it links libpipewire-0.3 and libasound (see the
+# `capture` module's docs for the build dependencies).
+[target.'cfg(target_os = "linux")'.dependencies]
+cpal = { workspace = true, features = ["pipewire"] }
 
 [dev-dependencies]
 claxon.workspace = true

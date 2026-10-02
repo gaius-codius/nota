@@ -26,6 +26,7 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: scripts/install-linux-build-deps.sh
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked
       - uses: crate-ci/typos@00f422f3b19c57bc6338715ebfe3316d38768461 # v1.50.3
@@ -49,10 +50,11 @@ jobs:
             find target \( -path '*/.fingerprint/sherpa-onnx-sys-*' -o -name sherpa-onnx-prebuilt \) \
               -prune -exec rm -rf {} +
           fi
+      - run: scripts/install-linux-build-deps.sh
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: cargo-nextest
-      - run: cargo nextest run --workspace --locked --profile ci --no-tests=pass
+      - run: cargo nextest run --workspace --locked --profile ci --no-tests=fail
       # nextest does not run doctests.
       - run: cargo test --workspace --locked --doc
 
@@ -104,6 +106,43 @@ jobs:
           SHERPA_ONNX_LIB_DIR=$lib cargo build --release -p nota --locked
       - run: scripts/check-no-gpl.sh target/release/nota
 
+  mutants:
+    # Every mutant of the lines this PR changes in the core and recorder
+    # crates must be caught by a test. A missed or timed-out mutant fails.
+    # The weekly full run is in mutants.yml.
+    name: Mutation testing (changed code)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # cargo-mutants builds in its own copy of the tree, so a cached
+          # target directory would go unused.
+          cache-targets: false
+      - run: scripts/install-linux-build-deps.sh
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: cargo-mutants@27.1.0,cargo-nextest
+      - name: Diff against the base branch
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+        run: git diff --src-prefix=a/ --dst-prefix=b/ "$PR_BASE...HEAD" > "$RUNNER_TEMP/pr.diff"
+      - run: >-
+          cargo mutants --in-diff "$RUNNER_TEMP/pr.diff"
+          -p nota-core -p nota-recorder
+          --test-tool nextest --jobs 2 --output "$RUNNER_TEMP"
+      - if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutants
+          path: ${{ runner.temp }}/mutants.out
+
   build:
     name: Build (${{ matrix.os }})
     strategy:
@@ -151,10 +190,11 @@ jobs:
             find target \( -path '*/.fingerprint/sherpa-onnx-sys-*' -o -name sherpa-onnx-prebuilt \) \
               -prune -exec rm -rf {} +
           fi
+      - run: scripts/install-linux-build-deps.sh
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: cargo-llvm-cov,cargo-nextest
-      - run: cargo llvm-cov nextest --workspace --locked --no-tests=pass --lcov --output-path lcov.info
+      - run: cargo llvm-cov nextest --workspace --locked --no-tests=fail --lcov --output-path lcov.info
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage
