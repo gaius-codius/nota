@@ -199,6 +199,36 @@ mod fake {
         use super::*;
 
         #[test]
+        fn a_lent_store_is_the_store() {
+            use crate::fs::fake::FakeFs;
+            use crate::segment::publish::TempSegment;
+
+            let fs = FakeFs::with_dirs(["/s", "/db"]);
+            let range = SampleRange::new(SampleIndex::new(5), SampleIndex::new(9)).unwrap();
+            let durable = TempSegment::write(
+                &fs,
+                Path::new("/s"),
+                TrackId::new(1),
+                EpochId::new(0),
+                range,
+                b"flac",
+            )
+            .unwrap()
+            .sync()
+            .unwrap()
+            .rename(&fs)
+            .unwrap()
+            .sync_dir(&fs)
+            .unwrap();
+            let mut store = FakeStore::new(&fs, Path::new("/db"));
+            let mut lent = &mut store;
+            SegmentStore::insert(&mut lent, &durable).unwrap();
+            let rows = SegmentStore::rows(&mut lent).unwrap();
+            assert_eq!(rows, [*durable.row()]);
+            assert_eq!(store.rows().unwrap(), rows);
+        }
+
+        #[test]
         fn rows_round_trip_and_bad_files_are_refused() {
             let row = SegmentRow::new(
                 TrackId::new(3),

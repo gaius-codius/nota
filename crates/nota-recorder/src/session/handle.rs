@@ -11,10 +11,15 @@
 //! rotated whether or not the store works, or even opens, and publishing
 //! catches up once it does.
 //!
-//! Rows carry no session column yet, so the binding can't be checked
-//! against the rows themselves; that comes with the library schema. Until
-//! then a row's claim is checked against its file's hash (see
-//! [`publish_journals`](crate::segment::publish_journals)).
+//! The session's id is checked against the finished journals handed to
+//! publishing, which name their session, so one session's journals can't be
+//! published, and deleted, through another's handle. Rows carry no session
+//! column yet, so the binding can't be checked against the rows themselves,
+//! and nothing checks that the store given to [`SessionStore::new`] is this
+//! session's; that comes with the library schema. Until then a row's claim
+//! is checked against its file's hash (see
+//! [`publish_journals`](crate::segment::publish_journals)), which is what
+//! keeps a wrong row from letting a journal go.
 
 use std::path::{Path, PathBuf};
 
@@ -83,7 +88,7 @@ impl<S: Fs> SessionDir<S> {
 ///
 /// A store and a directory can't be passed separately:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0061
 /// use std::path::Path;
 ///
 /// use nota_recorder::fs::StdFs;
@@ -96,7 +101,7 @@ impl<S: Fs> SessionDir<S> {
 ///
 /// or bound any other way than [`SessionStore::new`]:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0451
 /// use std::path::Path;
 ///
 /// use nota_core::SessionId;

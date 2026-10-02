@@ -72,7 +72,7 @@ fn samples(track: TrackId, from: u64, len: u64) -> Vec<i16> {
 /// The finished journals numbered `ids`.
 fn finished(ids: &[u64]) -> Vec<FinishedJournal> {
     ids.iter()
-        .map(|&n| FinishedJournal::new(JournalId::new(n)))
+        .map(|&n| FinishedJournal::new(SESSION, JournalId::new(n)))
         .collect()
 }
 
@@ -873,6 +873,11 @@ fn errors_describe_themselves() {
         assert!(!e.to_string().is_empty());
     }
     assert!(errors[3].to_string().contains("journal-000004"));
+    let other =
+        PublishError::OtherSession(FinishedJournal::new(SessionId::new(9), JournalId::new(4)));
+    assert!(other.to_string().contains("journal-000004"));
+    assert!(other.to_string().contains('9'));
+    assert!(other.source().is_none());
     assert!(errors[0].source().is_some());
     assert!(errors[3].source().is_none());
 }
@@ -1122,29 +1127,42 @@ fn a_row_whose_file_doesnt_match_never_lets_a_journal_go_at_any_crash() {
     ] {
         let disk = fs.crash(outcome);
         // A wrong hash: the file under the row's name holds other audio
-        // (another session's, or a store restored out of step).
+        // (another session's, or a store restored out of step). It ends
+        // where the next window's segment starts.
         let wrong_hash = plant_row(
             &disk,
             MIC,
-            range(0, 1_000),
-            &flac_of(MIC, 0, 1_000),
-            &flac::encode(rate(), &[&[0; 1_000]]).unwrap(),
+            range(0, 1_500),
+            &flac_of(MIC, 0, 1_500),
+            &flac::encode(rate(), &[&[0; 1_500]]).unwrap(),
         );
         // The same name with a different range: the file's hash is the
         // row's, but it holds 300 samples where the row claims 800. A check
-        // of the hash alone would let the row claim 700..1,500 and the
-        // journals holding 1,000..1,500 go.
-        let short = flac_of(SYSTEM, 700, 300);
-        let wrong_range = plant_row(&disk, SYSTEM, range(700, 1_500), &short, &short);
+        // of the hash alone would let the row claim 1,500..2,300 and the
+        // journals holding 1,800..2,300 go. It starts where the window
+        // before ends.
+        let short = flac_of(SYSTEM, 1_500, 300);
+        let wrong_range = plant_row(&disk, SYSTEM, range(1_500, 2_300), &short, &short);
         let bad = [wrong_hash, wrong_range];
+        // Rows overlapping no journal of their own track are never read,
+        // so their files, which don't match either, aren't reported: one
+        // right after the mic's last sample, and one on the system track
+        // before its first, over samples the mic's journals hold.
+        let mic_end = promised.durable[&MIC].get();
+        let unread = [
+            plant_row(&disk, MIC, range(mic_end, mic_end + 10), b"a", b"b"),
+            plant_row(&disk, SYSTEM, range(0, 700), b"c", b"d"),
+        ];
         let planted: BTreeMap<PathBuf, Vec<u8>> = bad
             .iter()
+            .chain(&unread)
             .map(|r| {
                 let path = durable_path(r.track(), r.range());
                 let bytes = disk.read(&path).unwrap();
                 (path, bytes)
             })
             .collect();
+        let ignored: Vec<SegmentRow> = bad.iter().chain(&unread).copied().collect();
 
         // Uninterrupted: both rows are reported, claim nothing, and keep
         // their journals and files; the rest is published.
@@ -1154,7 +1172,7 @@ fn a_row_whose_file_doesnt_match_never_lets_a_journal_go_at_any_crash() {
         assert!(!done.segments().is_empty());
         assert!(!done.deleted().is_empty());
         let uninterrupted = observe(&probe);
-        check_mismatch_kept(&promised, &bad, &planted, &uninterrupted)
+        check_mismatch_kept(&promised, &bad, &ignored, &planted, &uninterrupted)
             .unwrap_or_else(|e| panic!("{outcome:?}: {e}"));
 
         // Crashed after every operation, under every outcome, then run
@@ -1171,7 +1189,7 @@ fn a_row_whose_file_doesnt_match_never_lets_a_journal_go_at_any_crash() {
                     .unwrap_or_else(|e| panic!("after {after} ops, {crash:?}: {e}"));
                 assert_eq!(rerun.mismatched(), bad);
                 let seen = observe(&survived);
-                check_mismatch_kept(&promised, &bad, &planted, &seen)
+                check_mismatch_kept(&promised, &bad, &ignored, &planted, &seen)
                     .unwrap_or_else(|e| panic!("after {after} ops, {crash:?}: {e}"));
                 assert!(
                     seen == uninterrupted,
@@ -1182,12 +1200,15 @@ fn a_row_whose_file_doesnt_match_never_lets_a_journal_go_at_any_crash() {
     }
 }
 
-/// After salvage with mismatched rows `bad`: their files are as they were,
-/// every promised sample is in a good row's file or a journal, and every
-/// sample in a bad row's range is still in a journal.
+/// After salvage with mismatched rows `bad`, and `ignored` rows (`bad` and
+/// those never read) whose files were `planted`: those files are as they
+/// were, every sample in a window a bad row overlaps is still in a journal
+/// and in no row, and every other promised sample is in a good row's file,
+/// with no journal left holding it.
 fn check_mismatch_kept(
     promised: &Promised,
     bad: &[SegmentRow],
+    ignored: &[SegmentRow],
     planted: &BTreeMap<PathBuf, Vec<u8>>,
     seen: &Observed,
 ) -> Result<(), String> {
@@ -1202,23 +1223,40 @@ fn check_mismatch_kept(
             .rows
             .clone()?
             .into_iter()
-            .filter(|r| !bad.contains(r))
+            .filter(|r| !ignored.contains(r))
             .collect()),
     };
     let in_rows = row_samples(&good)?;
     let in_journals = journal_samples(seen)?;
-    let held = in_rows.union(&in_journals).copied().collect();
-    check_durable(promised, &held)?;
-    for row in bad {
-        let r = row.range();
-        let end = r.end().min(promised.durable[&row.track()]);
-        if let Some(s) =
-            (r.start().get()..end.get()).find(|&s| !in_journals.contains(&(row.track(), s)))
-        {
-            return Err(format!(
-                "track {} sample {s}, claimed by a mismatched row, is in no journal",
-                row.track().get()
-            ));
+    // A segment is one window here (no gaps), so a window that shares a
+    // sample with a bad row isn't published, and stays in its journals.
+    let in_bad = |track: TrackId, s: u64| {
+        let window = length().window_of(SampleIndex::new(s));
+        let (from, to) = (
+            window * length().samples(),
+            (window + 1) * length().samples(),
+        );
+        bad.iter().any(|r| {
+            r.track() == track && r.range().start().get() < to && from < r.range().end().get()
+        })
+    };
+    for (&track, &start) in &promised.started {
+        let end = promised.durable[&track].get();
+        for s in start.get()..end {
+            let ok = if in_bad(track, s) {
+                in_journals.contains(&(track, s)) && !in_rows.contains(&(track, s))
+            } else {
+                in_rows.contains(&(track, s)) && !in_journals.contains(&(track, s))
+            };
+            if !ok {
+                return Err(format!(
+                    "track {} sample {s}: in a row {}, in a journal {}, under a mismatched row {}",
+                    track.get(),
+                    in_rows.contains(&(track, s)),
+                    in_journals.contains(&(track, s)),
+                    in_bad(track, s)
+                ));
+            }
         }
     }
     Ok(())
@@ -1274,4 +1312,40 @@ fn recording_with_the_store_down_loses_nothing_once_it_is_back() {
     assert_eq!(done.deleted().len(), journals);
     promised.rows = done.segments().to_vec();
     check_after(&promised, &observe(&fs)).unwrap();
+}
+
+#[test]
+fn another_sessions_journals_are_refused_before_anything_is_done() {
+    // Both sessions number their journals from 0: another session's
+    // finished journal 0 names this session's journal 0, still recording.
+    let fs = FakeFs::with_dirs([session(), db()]);
+    let (_, clock) = fake_clock();
+    let mut writer = SessionWriter::open(&session_dir(&fs), rate(), length(), clock).unwrap();
+    writer
+        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .unwrap();
+    writer.append(MIC, &samples(MIC, 0, 100)).unwrap();
+    let theirs = FinishedJournal::new(SessionId::new(2), JournalId::FIRST);
+    let before = observe(&fs);
+    let ops = fs.ops().len();
+    let err = publish_journals(&mut session_store(&fs), length(), &[theirs]).unwrap_err();
+    assert!(
+        matches!(err, PublishError::OtherSession(j) if j == theirs),
+        "{err}"
+    );
+    // Mixed with this session's own, still refused.
+    let ours = finished(&[0]);
+    let err = publish_journals(&mut session_store(&fs), length(), &[ours[0], theirs]).unwrap_err();
+    assert!(matches!(err, PublishError::OtherSession(_)), "{err}");
+    assert_eq!(fs.ops().len(), ops);
+    assert_eq!(observe(&fs), before);
+    // The journal goes on recording, and is published once it's finished.
+    writer.append(MIC, &samples(MIC, 100, 100)).unwrap();
+    let finished = writer.finish().unwrap();
+    assert_eq!(finished, ours);
+    assert_eq!(finished[0].session(), SESSION);
+    let done = publish_journals(&mut session_store(&fs), length(), &finished).unwrap();
+    assert_eq!(done.deleted(), [JournalId::FIRST]);
+    assert_eq!(done.segments().len(), 1);
+    assert_eq!(done.segments()[0].range().len().get(), 200);
 }

@@ -48,7 +48,7 @@ fn samples(from: u64, len: u64) -> Vec<i16> {
 /// The finished journals numbered `ids`.
 fn finished(ids: &[u64]) -> Vec<FinishedJournal> {
     ids.iter()
-        .map(|&n| FinishedJournal::new(JournalId::new(n)))
+        .map(|&n| FinishedJournal::new(SESSION, JournalId::new(n)))
         .collect()
 }
 

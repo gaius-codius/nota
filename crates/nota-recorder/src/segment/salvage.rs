@@ -80,6 +80,9 @@ pub enum PublishError {
     /// A journal read back differently between the planning pass and the
     /// encoding pass: something else is writing to it.
     Changed(JournalId),
+    /// A journal finished in another session than the one being published.
+    /// Nothing was done.
+    OtherSession(FinishedJournal),
 }
 
 impl fmt::Display for PublishError {
@@ -93,6 +96,12 @@ impl fmt::Display for PublishError {
                 "journal {} changed while it was being published",
                 id.file_name()
             ),
+            Self::OtherSession(j) => write!(
+                f,
+                "journal {} is session {}'s, not this one's",
+                j.id().file_name(),
+                j.session().get()
+            ),
         }
     }
 }
@@ -103,7 +112,7 @@ impl Error for PublishError {
             Self::Io(e) => Some(e),
             Self::Store(e) => Some(e.as_ref()),
             Self::Flac(e) => Some(e),
-            Self::Changed(_) => None,
+            Self::Changed(_) | Self::OtherSession(_) => None,
         }
     }
 }
@@ -146,7 +155,7 @@ pub fn salvage<S: Fs, T: SegmentStore>(
             }
         } else if let Some(id) = path.file_name().and_then(JournalId::from_file_name) {
             // At startup nothing is writing: every journal is finished.
-            journals.push(FinishedJournal::new(id));
+            journals.push(FinishedJournal::new(session.session().id(), id));
         }
     }
     publish_journals(session, length, &journals)
@@ -184,18 +193,25 @@ pub fn needs_salvage<S: Fs>(session: &SessionDir<S>) -> io::Result<bool> {
 /// It takes [`FinishedJournal`]s, from
 /// [`SessionWriter::take_finished`](crate::session::SessionWriter::take_finished),
 /// because it deletes what it publishes: a journal still being written
-/// can't be passed by mistake.
+/// can't be passed by mistake. They must be this session's: journal ids are
+/// numbered per session, so another session's would name a journal here
+/// that may still be recording.
 ///
 /// # Errors
 ///
-/// [`PublishError`]. What was done before the error is consistent: rows
-/// only for durable files, journals deleted only after their rows.
+/// [`PublishError::OtherSession`], before anything is done, if a journal is
+/// another session's. Otherwise [`PublishError`]: what was done before the
+/// error is consistent, rows only for durable files, journals deleted only
+/// after their rows.
 pub fn publish_journals<S: Fs, T: SegmentStore>(
     session: &mut SessionStore<S, T>,
     length: SegmentLength,
     journals: &[FinishedJournal],
 ) -> Result<Published, PublishError> {
     let (session, store) = session.parts();
+    if let Some(&foreign) = journals.iter().find(|j| j.session() != session.id()) {
+        return Err(PublishError::OtherSession(foreign));
+    }
     let (fs, dir) = (session.fs(), session.dir());
     let ids: BTreeSet<JournalId> = journals.iter().map(|j| j.id()).collect();
 
