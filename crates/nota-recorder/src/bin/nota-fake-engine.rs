@@ -18,6 +18,7 @@
 //! | `garbage-after` | `echo` for `K` audio frames; then writes an over-long length prefix and goes silent. |
 //! | `torn-after` | `echo` for `K` audio frames; then writes half a frame and exits 101, as a crash mid-write would. |
 //! | `bad-transcript` | Answers the first audio frame with a confirmation far past the audio sent, then goes silent. |
+//! | `deaf` | Sends `Hello`, then never reads stdin again, so closing it doesn't stop it. |
 //! | `no-hello` | Never sends `Hello`. |
 //! | `wrong-version` | Sends a `Hello` with the wrong protocol version. |
 //!
@@ -51,6 +52,7 @@ enum Mode {
     TornAfter,
     BadTranscript,
     NoHello,
+    Deaf,
     WrongVersion,
 }
 
@@ -65,6 +67,7 @@ impl Mode {
             "torn-after" => Self::TornAfter,
             "bad-transcript" => Self::BadTranscript,
             "no-hello" => Self::NoHello,
+            "deaf" => Self::Deaf,
             "wrong-version" => Self::WrongVersion,
             _ => return None,
         })
@@ -263,6 +266,7 @@ fn end_of(tracks: &BTreeMap<TrackId, Track>, track: TrackId) -> Option<SampleInd
 }
 
 fn run(args: Args, input: impl Read, output: impl Write) -> u8 {
+    let args_mode = args.mode;
     let mut reader = FrameReader::new(BufReader::new(input));
     match reader.read_frame::<ToEngine>() {
         Ok(Some(Frame::Hello(version))) if version == ProtocolVersion::CURRENT => {}
@@ -271,6 +275,11 @@ fn run(args: Args, input: impl Read, output: impl Write) -> u8 {
     let mut engine = Engine::new(args, output);
     if engine.hello().is_err() {
         return EXIT_USAGE;
+    }
+    if args_mode == Mode::Deaf {
+        loop {
+            std::thread::park();
+        }
     }
     loop {
         match reader.read_frame::<ToEngine>() {

@@ -170,6 +170,69 @@ fn at_the_cap_cuts_in_the_widest_pause() {
 }
 
 #[test]
+fn at_the_cap_the_widest_pause_wins_even_if_earlier() {
+    // Pauses at 8..16 (8 wide) and 22..26 (4 wide), both before the target.
+    let config = config(3, 30, 40, 20, 2);
+    let mut detector = FakeDetector::new(0, vec![(0, 8), (16, 22), (26, 200)], 3, 0);
+    let samples = audio(0, 60, &detector);
+    let chunks = run(config, 0, &samples, &mut detector, &[1]);
+    assert_eq!(chunks[0].range, range(0, 12));
+}
+
+#[test]
+fn a_chunk_is_cut_as_soon_as_it_reaches_the_cap() {
+    let config = config(3, 10, 40, 20, 2);
+    let mut chunker = Chunker::new(config, SampleIndex::ZERO);
+    let labels = Labels {
+        segments: Vec::new(),
+        silent_until: SampleIndex::ZERO,
+    };
+    assert!(chunker.push(&[0.5; 39], &labels).is_empty());
+    let chunks = chunker.push(&[0.5], &labels);
+    assert_eq!(chunks.len(), 1);
+    assert!(chunks[0].range.end().get() <= 40);
+}
+
+#[test]
+fn the_quietest_frame_is_by_energy_not_by_sum() {
+    // Frames of 4 from 20: 20..24 swings hard but sums to zero; 28..32 is
+    // steady and quiet. The quiet one wins.
+    let config = config(3, 10, 40, 20, 4);
+    let mut chunker = Chunker::new(config, SampleIndex::ZERO);
+    let mut samples = vec![0.5_f32; 40];
+    for (i, s) in samples[20..24].iter_mut().enumerate() {
+        *s = if i % 2 == 0 { 0.9 } else { -0.9 };
+    }
+    for s in &mut samples[28..32] {
+        *s = 0.1;
+    }
+    let chunks = chunker.push(&samples, &Labels::default());
+    assert_eq!(chunks[0].range, range(0, 30));
+}
+
+#[test]
+fn settled_silence_at_the_end_is_not_speech() {
+    let config = config(3, 10, 40, 20, 2);
+    let mut chunker = Chunker::new(config, SampleIndex::ZERO);
+    assert!(chunker.push(&[0.0; 5], &Labels::default()).is_empty());
+    let settled = Labels {
+        segments: Vec::new(),
+        silent_until: SampleIndex::new(5),
+    };
+    let chunks = chunker.finish(&settled);
+    assert_eq!(chunks.len(), 1);
+    assert!(!chunks[0].has_speech);
+    // Unsettled, the same audio might be speech.
+    let mut chunker = Chunker::new(config, SampleIndex::ZERO);
+    chunker.push(&[0.0; 5], &Labels::default());
+    let unsettled = Labels {
+        segments: Vec::new(),
+        silent_until: SampleIndex::new(4),
+    };
+    assert!(chunker.finish(&unsettled)[0].has_speech);
+}
+
+#[test]
 fn in_continuous_speech_cuts_at_the_quietest_frame_before_the_cap() {
     let config = config(3, 10, 40, 20, 4);
     let mut detector = FakeDetector::new(0, vec![(0, 1_000)], 3, 0);
@@ -226,7 +289,10 @@ fn live_config_is_valid_at_any_rate() {
     }
     let live = ChunkerConfig::live(nota_core::SampleRate::SPEECH);
     assert_eq!(live.min_pause().get(), 2_400);
+    assert_eq!(live.target().get(), 48_000);
     assert_eq!(live.cap().get(), 160_000);
+    assert_eq!(live.fallback_window().get(), 128_000);
+    assert_eq!(live.frame().get(), 480);
 }
 
 #[test]

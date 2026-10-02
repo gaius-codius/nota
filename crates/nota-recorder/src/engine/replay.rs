@@ -502,6 +502,17 @@ mod tests {
     }
 
     #[test]
+    fn a_track_is_idle_from_its_latest_audio_until_flushed() {
+        let mut replay = Replay::new(TRACK);
+        assert_eq!(replay.idle_since(), None);
+        replay.push_audio(&chunk(0, 10), SessionTime::from_nanos(5));
+        replay.push_audio(&chunk(10, 10), SessionTime::from_nanos(9));
+        assert_eq!(replay.idle_since(), Some(SessionTime::from_nanos(9)));
+        replay.push_flush();
+        assert_eq!(replay.idle_since(), None);
+    }
+
+    #[test]
     fn replies_that_dont_fit_are_violations() {
         let mut replay = Replay::new(TRACK);
         assert!(replay.on_confirmed(at(1)).is_err(), "nothing sent");

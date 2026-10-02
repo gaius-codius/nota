@@ -30,6 +30,10 @@ const WINDOW: usize = 512;
 /// anything older than 0.5 s that isn't in a segment is silence.
 const SETTLE_LAG: u64 = 8_000;
 
+/// How far sherpa-onnx backdates a segment's start from where speech is
+/// confirmed: two windows plus the minimum speech (0.25 s).
+const BACKDATE: u64 = 2 * WINDOW as u64 + 4_000;
+
 /// Reset the detector, during a pause, once it has counted this many
 /// samples, about an hour. sherpa-onnx counts samples in an `i32`, which
 /// would overflow after 37 hours.
@@ -114,6 +118,9 @@ impl Models for SherpaModels {
             onset: None,
             silent_until: first.get(),
             speech_until: first.get(),
+            reset_after: RESET_AFTER,
+            reset: false,
+            segment_end: first.get(),
         })
     }
 
@@ -178,6 +185,12 @@ pub struct SileroDetector {
     silent_until: u64,
     /// The end of the latest speech seen, in track samples.
     speech_until: u64,
+    /// [`RESET_AFTER`], or less in tests.
+    reset_after: u64,
+    /// Whether the detector has been reset since it started.
+    reset: bool,
+    /// The end of the latest segment reported, in track samples.
+    segment_end: u64,
 }
 
 impl std::fmt::Debug for SileroDetector {
@@ -212,9 +225,13 @@ impl SileroDetector {
         // Reset only well into a pause: a speech candidate the model hasn't
         // confirmed yet would otherwise be forgotten.
         let in_pause = now.saturating_sub(self.speech_until) >= 2 * SETTLE_LAG;
-        if self.onset.is_none() && self.vad.is_empty() && in_pause && self.processed >= RESET_AFTER
+        if self.onset.is_none()
+            && self.vad.is_empty()
+            && in_pause
+            && self.processed >= self.reset_after
         {
             self.vad.reset();
+            self.reset = true;
             self.base += self.processed;
             self.processed = 0;
         }
@@ -224,7 +241,14 @@ impl SileroDetector {
         while let Some(segment) = self.vad.front() {
             let start = u64::try_from(segment.start()).unwrap_or(0);
             let len = u64::try_from(segment.n()).unwrap_or(0);
-            let (from, to) = (self.base + start, self.base + start + len);
+            let (mut from, to) = (self.base + start, self.base + start + len);
+            // After a reset, sherpa-onnx clamps a backdated start to where
+            // it was reset; the speech may have begun up to `BACKDATE`
+            // earlier, though not before the speech before it.
+            if start == 0 && self.reset {
+                from = from.saturating_sub(BACKDATE).max(self.segment_end);
+            }
+            self.segment_end = self.segment_end.max(to);
             self.speech_until = self.speech_until.max(to);
             if let Some(range) = SampleRange::new(SampleIndex::new(from), SampleIndex::new(to)) {
                 labels.segments.push(range);
@@ -268,5 +292,140 @@ impl Detector for SileroDetector {
         // Settled silence stays where the windows put it; the chunker
         // treats anything after as possible speech.
         self.labels(labels)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write as _;
+    use std::path::PathBuf;
+
+    use super::*;
+
+    /// The models and the fixture's audio, or `None` (said on stderr) if
+    /// they're absent.
+    fn models_and_fixture() -> Option<(SherpaModels, Vec<f32>)> {
+        let root = std::env::var_os("NOTA_TEST_MODELS")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .map(|h| PathBuf::from(h).join(".local/share/nota/test-models"))
+            })?;
+        let wav = root.join("fixtures/invented-lecture.wav");
+        let paths = ModelPaths {
+            parakeet_dir: root.join("parakeet-tdt-0.6b-v3-int8"),
+            vad_model: root.join("silero_vad_v6.onnx"),
+            threads: 2,
+        };
+        if !wav.is_file() || !paths.vad_model.is_file() {
+            let _ = writeln!(
+                std::io::stderr(),
+                "skipped: no test models in {}",
+                root.display()
+            );
+            return None;
+        }
+        let models = SherpaModels::load(&paths).unwrap();
+        let wave = sherpa_onnx::Wave::read(wav.to_str().unwrap()).unwrap();
+        Some((models, wave.samples().to_vec()))
+    }
+
+    /// Runs a detector from `first` over `audio` in 100 ms pieces; returns
+    /// every segment and the final `silent_until`, checking the contract on
+    /// the way.
+    fn detect(mut detector: SileroDetector, first: u64, audio: &[f32]) -> (Vec<(u64, u64)>, u64) {
+        let mut segments = Vec::new();
+        let mut silent = first;
+        let mut fed = first;
+        let mut collect = |labels: Labels, fed: u64, segments: &mut Vec<(u64, u64)>| {
+            assert!(
+                labels.silent_until.get() >= silent,
+                "silent_until went back"
+            );
+            assert!(
+                labels.silent_until.get() <= fed,
+                "silent_until past the audio"
+            );
+            silent = labels.silent_until.get();
+            for s in labels.segments {
+                let (from, to) = (s.start().get(), s.end().get());
+                assert!(
+                    from >= first && to <= fed + 2 * WINDOW as u64,
+                    "{from}..{to}"
+                );
+                assert!(
+                    segments.last().is_none_or(|&(_, end)| end <= from),
+                    "out of order"
+                );
+                segments.push((from, to));
+            }
+        };
+        for piece in audio.chunks(1_600) {
+            fed += piece.len() as u64;
+            let labels = detector.accept(piece);
+            collect(labels, fed, &mut segments);
+        }
+        let labels = detector.flush();
+        collect(labels, fed, &mut segments);
+        (segments, silent)
+    }
+
+    #[test]
+    fn segments_and_settled_silence_fit_the_speech() {
+        let Some((models, audio)) = models_and_fixture() else {
+            return;
+        };
+        let first = 48_000;
+        let detector = models.detector(SampleIndex::new(first)).unwrap();
+        assert!(format!("{detector:?}").starts_with("SileroDetector"));
+        assert!(format!("{models:?}").contains("Parakeet"));
+        let (segments, silent) = detect(detector, first, &audio);
+        // Four sentences; the 0.2 s pause may or may not split two.
+        assert!((3..=4).contains(&segments.len()), "{segments:?}");
+        // 0.5 s of silence leads.
+        assert!(segments[0].0 >= first + 4_000, "{segments:?}");
+        // Every loud 30 ms frame is in a segment or past settled silence.
+        let end = first + audio.len() as u64;
+        assert!(silent + 2 * SETTLE_LAG >= end, "{silent}");
+        for (k, frame) in audio.chunks(480).enumerate() {
+            // Mean power over 0.01 (an RMS of 0.1), in a whole frame.
+            let energy: f32 = frame.iter().map(|s| s * s).sum();
+            let at = first + k as u64 * 480;
+            if energy > 4.8 {
+                let covered = at >= silent
+                    || segments
+                        .iter()
+                        .any(|&(from, to)| from <= at + 480 && at < to);
+                assert!(covered, "loud frame at {at} marked silent; {segments:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_reset_in_a_pause_changes_nothing() {
+        let Some((models, audio)) = models_and_fixture() else {
+            return;
+        };
+        let (plain, plain_silent) = detect(models.detector(SampleIndex::ZERO).unwrap(), 0, &audio);
+        let mut resetting = models.detector(SampleIndex::ZERO).unwrap();
+        resetting.reset_after = 8_000;
+        let (reset, reset_silent) = detect(resetting, 0, &audio);
+        assert_eq!(plain.len(), reset.len(), "{plain:?} vs {reset:?}");
+        // The same speech, starts possibly widened to cover what a reset
+        // hid.
+        for (a, b) in plain.iter().zip(&reset) {
+            assert!(b.0 <= a.0 + 2 * WINDOW as u64, "{plain:?} vs {reset:?}");
+            assert!(a.0 <= b.0 + BACKDATE, "{plain:?} vs {reset:?}");
+            assert!(
+                a.1.abs_diff(b.1) <= 2 * WINDOW as u64,
+                "{plain:?} vs {reset:?}"
+            );
+        }
+        assert!(plain_silent.abs_diff(reset_silent) <= 2 * WINDOW as u64);
+    }
+
+    #[test]
+    fn reset_after_is_an_hour() {
+        assert_eq!(RESET_AFTER, 57_600_000);
     }
 }

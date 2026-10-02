@@ -555,15 +555,19 @@ fn shutdown_stops_the_engine() {
 
 #[test]
 fn shutdown_kills_an_engine_that_ignores_its_stdin() {
-    let mut config = fake(&[]);
-    config.command.program = PathBuf::from("sleep");
-    config.command.args = vec!["30".into()];
-    let clock = SystemClock::start().unwrap();
-    let (supervisor, events) = start(config);
-    // Give it time to start.
-    let _ = events.rx.recv_timeout(Duration::from_millis(200));
-    let before = clock.now();
+    let (supervisor, mut events) = start(fake(&["deaf"]));
+    let pid = events.online();
+    let before = events.clock.now();
     supervisor.shutdown();
-    let took = clock.now().checked_duration_since(before).unwrap();
+    let took = events.clock.now().checked_duration_since(before).unwrap();
     assert!(took < Duration::from_secs(5), "{took:?}");
+    assert!(!alive(pid));
+}
+
+#[test]
+fn dropping_the_handle_stops_the_engine() {
+    let (supervisor, mut events) = start(fake(&["deaf"]));
+    let pid = events.online();
+    drop(supervisor);
+    assert!(!alive(pid));
 }
