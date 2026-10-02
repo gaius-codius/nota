@@ -12,8 +12,9 @@
 //! stand-in store, and the `LazyFS` runs check this one on a real filesystem.
 //!
 //! **One store per session.** Rows carry no session, so a store must hold
-//! one session's rows only. (Salvage also ignores a row whose segment file
-//! isn't in the session's directory.)
+//! one session's rows only. (Salvage also ignores a row unless its segment
+//! file is in the session's directory and matches it: its SHA-256, and the
+//! number of samples its FLAC header declares.)
 
 use std::fmt;
 use std::path::Path;
