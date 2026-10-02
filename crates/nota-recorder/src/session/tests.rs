@@ -395,3 +395,26 @@ fn sync_if_due_reports_durable_positions_per_journal() {
         Some(JournalId::new(1))
     );
 }
+
+#[test]
+fn a_failed_finish_still_hands_out_its_journals() {
+    // The last fsync fails and the replacement can't be created: `finish`
+    // fails, but the journal it ended is still handed out for publishing.
+    let inner = FakeFs::with_dirs([dir(), PathBuf::from("/db")]);
+    let fs = NoCreates {
+        inner: inner.clone(),
+        refuse: Arc::new(AtomicBool::new(false)),
+    };
+    let (_, dyn_clock) = clock();
+    let mut w = SessionWriter::open(fs.clone(), &dir(), rate(), length(), dyn_clock).unwrap();
+    w.start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .unwrap();
+    w.append(MIC, &samples(0, 100)).unwrap();
+    inner.fail_after(0, io::ErrorKind::Other);
+    fs.refuse.store(true, Ordering::SeqCst);
+    let err = w.finish().unwrap_err();
+    assert!(matches!(err.error(), SessionError::Journal(_)), "{err}");
+    assert_eq!(err.to_string(), err.error().to_string());
+    assert!(err.source().is_some());
+    assert_eq!(err.into_finished(), finished(&[0]));
+}
