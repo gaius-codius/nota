@@ -87,9 +87,9 @@ jobs:
           advanced-security: false
 
   no-gpl:
-    # Release builds link sherpa-onnx without text-to-speech, so no GPL code
-    # (espeak-ng, ucd-tools) ships in nota. Builds the release binary that way
-    # and checks its symbols.
+    # A nota for distribution links sherpa-onnx without text-to-speech, so no
+    # GPL code (espeak-ng, ucd-tools) ships in it. Builds the release binary
+    # that way and checks its symbols.
     name: No GPL in the release binary (Linux)
     runs-on: ubuntu-latest
     steps:

@@ -31,6 +31,9 @@ object espeak SherpaOnnxCreateOfflineRecognizer espeak_Initialize
 object espeak_ng SherpaOnnxCreateOfflineRecognizer espeak_ng_InitializePath
 object ucd SherpaOnnxCreateOfflineRecognizer ucd_tolower
 object no_engine main
+# Calls the recognizer without defining it, as a dynamically linked nota does.
+printf 'void SherpaOnnxCreateOfflineRecognizer(void);\nvoid f(void) { SherpaOnnxCreateOfflineRecognizer(); }\n' >"$dir/dynamic.c"
+cc -c -o "$dir/dynamic.o" "$dir/dynamic.c"
 object stripped SherpaOnnxCreateOfflineRecognizer
 strip "$dir/stripped.o"
 
@@ -39,6 +42,7 @@ expect fail espeak
 expect fail espeak_ng
 expect fail ucd
 expect fail no_engine
+expect fail dynamic
 expect fail stripped
 
 exit "$status"
