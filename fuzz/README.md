@@ -1,0 +1,49 @@
+# Fuzzing
+
+`fuzz/` is a separate Cargo workspace (it is excluded from the root one), so
+it is not built or run by CI or `cargo nextest`. It is for occasional long
+runs with AFL++ through `cargo-afl`.
+
+## journal_reader
+
+Feeds arbitrary bytes to `nota_recorder::journal::read_journal` and asserts
+the reader's contract on the result:
+
+- `valid_len()` is at most the input length
+- no header means no frames and `valid_len() == 0`
+- frame sequence numbers are 0, 1, 2, ... in order
+- each frame has between 1 and `MAX_FRAME_SAMPLES` samples, and as many as
+  its range says
+- within a track, each frame starts where the previous one ended
+- `valid_len()` equals the header plus the size of every frame
+- each returned frame's bytes in the input carry a matching CRC, checked
+  independently of the reader, and decode to the samples returned
+- `ReadEnd::Complete` means `valid_len()` equals the input length
+- re-reading `data[..valid_len()]` gives the same frames and `Complete`
+
+A violated assertion panics, which AFL saves as a crash.
+
+## Running it (Linux, no root)
+
+```sh
+cargo install cargo-afl
+cd fuzz
+cargo run --bin make_seeds        # writes synthetic seed journals to in/
+cargo afl build --release
+AFL_SKIP_CPUFREQ=1 AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 \
+  cargo afl fuzz -i in -o out target/release/journal_reader
+```
+
+The first `cargo afl build` builds the AFL++ runtime if it is missing
+(`cargo afl config --build`). A plain `cargo build` fails to link
+`journal_reader`, because the AFL runtime is only linked by `cargo afl build`.
+`make_seeds` builds with plain cargo.
+
+`in/`, `out/` and `target/` are git-ignored.
+
+## When it finds a crash
+
+Turn the crashing input into a unit test in `crates/nota-recorder/src/journal/`
+that passes the bytes to `read_journal`, then fix the reader. Seeds are
+synthetic. Never commit an input that contains recorded audio; write the
+minimal bytes into the test by hand instead.
