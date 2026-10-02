@@ -86,6 +86,24 @@ jobs:
           version: 1.30.1
           advanced-security: false
 
+  no-gpl:
+    # A nota for distribution links sherpa-onnx without text-to-speech, so no
+    # GPL code (espeak-ng, ucd-tools) ships in it. Builds the release binary
+    # that way and checks its symbols.
+    name: No GPL in the release binary (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: scripts/check-no-gpl.test.sh
+      - run: |
+          lib=$(scripts/sherpa-onnx-no-tts.sh "$RUNNER_TEMP/sherpa-onnx")
+          SHERPA_ONNX_LIB_DIR=$lib cargo build --release -p nota --locked
+      - run: scripts/check-no-gpl.sh target/release/nota
+
   build:
     name: Build (${{ matrix.os }})
     strategy:
