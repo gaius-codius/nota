@@ -26,10 +26,12 @@
 //! every journal left in a session's directory. The rules:
 //! - Committed rows claim their samples first, but only a row whose file is
 //!   in the session directory and matches it (its SHA-256, and the number of
-//!   samples its FLAC header declares). A row whose file is missing claims
-//!   nothing; so does one whose file doesn't match, and nothing is
-//!   published over its samples, so its file stays and so do the journals
-//!   holding them. Then journals claim theirs in
+//!   samples its FLAC header declares). A row whose file is missing or
+//!   doesn't match claims nothing, and nothing is published over its
+//!   samples, so its file, if any, stays and so do the journals holding
+//!   them; every other segment is published. Such rows are findings, kept
+//!   in the session directory for the app to show (see `findings`). Then
+//!   journals claim theirs in
 //!   descending [`JournalId`] order: after a crash a broken journal's
 //!   unsynced tail can survive alongside its replacement, and the
 //!   replacement, started later, wins.
@@ -46,6 +48,7 @@
 //! [`SessionStore`]: crate::session::SessionStore
 //! [`JournalId`]: crate::journal::JournalId
 
+mod findings;
 mod flac;
 mod plan;
 mod publish;
@@ -57,6 +60,10 @@ use std::path::{Path, PathBuf};
 
 use nota_core::{SampleIndex, SampleRange, SampleRate, TrackId};
 
+pub use findings::{
+    FILE_NAME as FINDINGS_FILE_NAME, Finding, Findings, FindingsError, Problem, Status,
+    Verification, read_findings,
+};
 pub use flac::FlacError;
 pub use publish::DurableSegment;
 pub use salvage::{PublishError, Published, needs_salvage, publish_journals, salvage};

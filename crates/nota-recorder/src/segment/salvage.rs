@@ -15,6 +15,7 @@ use nota_core::SampleRate;
 use nota_store::SegmentRow;
 use sha2::{Digest, Sha256};
 
+use super::findings::{self, Finding, Problem, Verification};
 use super::flac::{self, FlacError};
 use super::plan::{self, JournalSummary, PlannedSegment};
 use super::publish::{Committed, DeletableJournal, TempSegment, delete_journals};
@@ -31,7 +32,8 @@ pub struct Published {
     segments: Vec<SegmentRow>,
     deleted: Vec<JournalId>,
     quarantined: Vec<PathBuf>,
-    mismatched: Vec<SegmentRow>,
+    findings: Vec<Finding>,
+    findings_unsaved: Option<io::ErrorKind>,
 }
 
 impl Published {
@@ -57,13 +59,24 @@ impl Published {
         &self.quarantined
     }
 
-    /// Committed rows whose file is in the session directory but doesn't
-    /// match them: another SHA-256, or another length. They claim nothing,
-    /// the file is left as it is, and no segment is published over their
-    /// samples, so the journals holding those samples are kept.
+    /// The committed rows this run checked that claim nothing: their file
+    /// is missing from the session directory, or doesn't match them
+    /// (another SHA-256, or another length). No segment was published over
+    /// their samples, so the file, if any, is as it was and the journals
+    /// holding those samples are kept. They're also recorded in the
+    /// session's findings file (see
+    /// [`read_findings`](super::read_findings)), with any found before.
     #[must_use]
-    pub fn mismatched(&self) -> &[SegmentRow] {
-        &self.mismatched
+    pub fn findings(&self) -> &[Finding] {
+        &self.findings
+    }
+
+    /// Why the findings file couldn't be updated, if it couldn't. Publishing
+    /// carried on: the rows are checked again on every run, so the next one
+    /// records them.
+    #[must_use]
+    pub const fn findings_unsaved(&self) -> Option<io::ErrorKind> {
+        self.findings_unsaved
     }
 }
 
@@ -129,8 +142,8 @@ fn store_error<E: Error + Send + Sync + 'static>(e: E) -> PublishError {
 
 /// Recovers a session after a crash: publishes every journal left in its
 /// directory as segments, adds the rows missing from its store, and deletes
-/// the journals once their rows are committed. Leftover segment temp files are
-/// removed first; they're never the only copy of anything.
+/// the journals once their rows are committed. Leftover segment and findings
+/// temp files are removed first; they're never the only copy of anything.
 ///
 /// Safe to run again after it fails or the machine crashes partway: every
 /// step is repeatable, and a second run on a recovered session changes
@@ -147,7 +160,11 @@ pub fn salvage<S: Fs, T: SegmentStore>(
     let (fs, dir) = (session.session().fs(), session.session().dir());
     let mut journals = Vec::new();
     for path in fs.list(dir)? {
-        if is_temp_segment(&path) {
+        if findings::is_temp(&path) {
+            // Best effort: the next findings write removes it anyway, and
+            // the findings must never hold up publishing.
+            let _gone = fs.remove(&path);
+        } else if is_temp_segment(&path) {
             match fs.remove(&path) {
                 Ok(()) => {}
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -185,10 +202,16 @@ pub fn needs_salvage<S: Fs>(session: &SessionDir<S>) -> io::Result<bool> {
 /// directory and matches it: the file's SHA-256 is the row's, and its FLAC
 /// header declares the row's number of samples. Only rows that overlap the
 /// journals' samples are checked, so the cost is bounded by what's being
-/// published. A row whose file is missing claims nothing. A row whose file
-/// doesn't match claims nothing either, and is reported in
-/// [`Published::mismatched`]; no segment is published over its samples, so
-/// its file is never replaced and the journals holding them are kept.
+/// published. A row whose file is missing or doesn't match claims nothing,
+/// and is a finding: reported in [`Published::findings`] and recorded in the
+/// session's findings file before anything is published. No segment is
+/// published over its samples, so its file, if any, is never replaced and
+/// the journals holding them are kept; every other segment is published.
+///
+/// If the store can't be read, the findings file records that verification
+/// was unavailable, keeping every earlier finding, and nothing is published
+/// or deleted. Failing to write the findings file doesn't stop publishing
+/// (see [`Published::findings_unsaved`]).
 ///
 /// It takes [`FinishedJournal`]s, from
 /// [`SessionWriter::take_finished`](crate::session::SessionWriter::take_finished),
@@ -253,8 +276,20 @@ pub fn publish_journals<S: Fs, T: SegmentStore>(
             _ => unreadable.push(path),
         }
     }
+    let rows = match store.rows() {
+        Ok(rows) => rows,
+        Err(e) => {
+            // Nothing can be checked: say so, keeping what was found before.
+            // The store's error is the one to report.
+            let _unsaved = findings::record(fs, dir, &[], Verification::Unavailable);
+            return Err(store_error(e));
+        }
+    };
     let mut published = Published::default();
-    let rows = claims(fs, dir, store, &summaries, &mut published)?;
+    let rows = claims(fs, dir, rows, &summaries, &mut published)?;
+    published.findings_unsaved = findings::record(fs, dir, &published.findings, Verification::Done)
+        .err()
+        .map(|e| e.kind());
     let plan = plan::plan(&rows, &summaries, length);
 
     let mut committed = Committed::default();
@@ -270,7 +305,7 @@ pub fn publish_journals<S: Fs, T: SegmentStore>(
 
     // Pass 2: one segment at a time.
     for segment in &plan.segments {
-        if overlaps_any(&published.mismatched, segment) {
+        if overlaps_any(&published.findings, segment) {
             // Its samples stay in their journals, which need it and so
             // aren't deleted.
             continue;
@@ -298,18 +333,19 @@ pub fn publish_journals<S: Fs, T: SegmentStore>(
     Ok(published)
 }
 
-/// The committed rows that claim samples in this run: those overlapping a
-/// journal in `summaries` whose file is in `dir` and matches them. Rows
-/// whose file is there but doesn't match go to `published.mismatched`.
-fn claims<S: Fs, T: SegmentStore>(
+/// Of the committed `rows`, those that claim samples in this run: those
+/// overlapping a journal in `summaries` whose file is in `dir` and matches
+/// them. Overlapping rows whose file is missing or doesn't match go to
+/// `published.findings`.
+fn claims<S: Fs>(
     fs: &S,
     dir: &Path,
-    store: &mut T,
+    rows: Vec<SegmentRow>,
     summaries: &[JournalSummary],
     published: &mut Published,
 ) -> Result<Vec<SegmentRow>, PublishError> {
-    let mut rows = Vec::new();
-    for row in store.rows().map_err(store_error)? {
+    let mut claiming = Vec::new();
+    for row in rows {
         let overlaps = summaries
             .iter()
             .any(|j| j.track == row.track() && j.range.is_some_and(|r| overlap(r, row.range())));
@@ -318,23 +354,30 @@ fn claims<S: Fs, T: SegmentStore>(
         }
         let path = dir.join(segment_file_name(row.track(), row.range()));
         let Some(bytes) = read_if_present(fs, &path)? else {
+            published.findings.push(Finding::new(row, Problem::Missing));
             continue;
         };
         let digest: [u8; 32] = Sha256::digest(&bytes).into();
-        if &digest == row.sha256().as_bytes()
-            && flac::stream_len(&bytes) == Some(row.range().len().get())
-        {
-            rows.push(row);
+        if &digest != row.sha256().as_bytes() {
+            published
+                .findings
+                .push(Finding::new(row, Problem::HashMismatch));
+        } else if flac::stream_len(&bytes) != Some(row.range().len().get()) {
+            published
+                .findings
+                .push(Finding::new(row, Problem::LengthMismatch));
         } else {
-            published.mismatched.push(row);
+            claiming.push(row);
         }
     }
-    Ok(rows)
+    Ok(claiming)
 }
 
-/// Whether `segment` shares a sample with any of `rows`.
-fn overlaps_any(rows: &[SegmentRow], segment: &PlannedSegment) -> bool {
-    rows.iter()
+/// Whether `segment` shares a sample with any of `findings`' rows.
+fn overlaps_any(findings: &[Finding], segment: &PlannedSegment) -> bool {
+    findings
+        .iter()
+        .map(Finding::row)
         .any(|r| r.track() == segment.track && overlap(r.range(), segment.range))
 }
 
