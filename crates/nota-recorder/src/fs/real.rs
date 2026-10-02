@@ -38,6 +38,8 @@ impl Fs for StdFs {
     fn create_dir(&self, path: &Path) -> io::Result<()> {
         valid_path(path)?;
         let mut builder = DirBuilder::new();
+        // One level only: a missing parent is an error, as on the fake.
+        builder.recursive(false);
         #[cfg(unix)]
         std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
         builder.create(path)
