@@ -29,7 +29,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use nota_core::{Clock, EpochId, SampleCount, SampleIndex, SampleRate, TrackId};
@@ -37,6 +37,10 @@ use nota_core::{Clock, EpochId, SampleCount, SampleIndex, SampleRate, TrackId};
 use crate::fs::Fs;
 use crate::journal::{DurablePosition, JournalError, JournalHeader, JournalId, JournalWriter};
 use crate::segment::SegmentLength;
+
+mod handle;
+
+pub use handle::{SessionDir, SessionStore};
 
 /// A journal no writer will append to again: ended by a [`SessionWriter`],
 /// or found on disk by salvage at startup, when nothing is recording.
@@ -160,22 +164,29 @@ pub struct SessionWriter<S: Fs> {
 }
 
 impl<S: Fs> SessionWriter<S> {
-    /// A writer recording into `dir`, at `rate`, rotating every `length`.
-    /// New journal ids continue after the highest one already in `dir`
-    /// (journals and those salvage set aside), so they stay in order across
-    /// a restart. Salvage `dir` first.
+    /// A writer recording into `session`'s directory, at `rate`, rotating
+    /// every `length`. New journal ids continue after the highest one
+    /// already there (journals and those salvage set aside), so they stay in
+    /// order across a restart. Salvage the session first.
+    ///
+    /// It takes the session's directory, not its [`SessionStore`]: recording
+    /// never depends on the store.
     ///
     /// # Errors
     ///
-    /// [`SessionError::Io`] if `dir` can't be listed;
+    /// [`SessionError::Io`] if the directory can't be listed;
     /// [`SessionError::Overflow`] if its highest id is the last one.
     pub fn open(
-        fs: S,
-        dir: &Path,
+        session: &SessionDir<S>,
         rate: SampleRate,
         length: SegmentLength,
         clock: Arc<dyn Clock>,
-    ) -> Result<Self, SessionError> {
+    ) -> Result<Self, SessionError>
+    where
+        S: Clone,
+    {
+        let fs = session.fs().clone();
+        let dir = session.dir();
         let highest = fs
             .list(dir)
             .map_err(SessionError::Io)?

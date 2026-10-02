@@ -8,7 +8,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use nota_core::{
-    Clock, EpochId, FakeClock, SampleCount, SampleIndex, SampleRate, SessionTime, TrackId,
+    Clock, EpochId, FakeClock, SampleCount, SampleIndex, SampleRate, SessionId, SessionTime,
+    TrackId,
 };
 
 use super::*;
@@ -18,6 +19,7 @@ use crate::journal::read_journal;
 use crate::segment::{FakeStore, SegmentLength, SegmentStore, salvage, segment_file_name};
 
 const MIC: TrackId = TrackId::new(0);
+const SESSION: SessionId = SessionId::new(1);
 
 fn rate() -> SampleRate {
     SampleRate::new(1_000).unwrap()
@@ -29,6 +31,10 @@ fn length() -> SegmentLength {
 
 fn dir() -> PathBuf {
     PathBuf::from("/session")
+}
+
+fn session_dir<S: Fs + Clone>(fs: &S) -> SessionDir<S> {
+    SessionDir::new(SESSION, fs.clone(), &dir())
 }
 
 fn sample(index: u64) -> i16 {
@@ -56,7 +62,11 @@ fn clock() -> (Arc<FakeClock>, Arc<dyn Clock>) {
 /// whether its samples are the ones recorded.
 fn salvaged(fs: &FakeFs) -> Vec<(u64, u64)> {
     let mut store = FakeStore::new(fs, Path::new("/db"));
-    salvage(fs, &mut store, &dir(), length()).unwrap();
+    salvage(
+        &mut SessionStore::new(session_dir(fs), &mut store),
+        length(),
+    )
+    .unwrap();
     let rows = store.rows().unwrap();
     let mut out = Vec::new();
     for row in rows {
@@ -105,7 +115,7 @@ fn nth_op(run: impl Fn(&FakeFs), n: usize, wanted: impl Fn(&Op) -> bool) -> usiz
 /// 2,000, and timed syncs between.
 fn record(fs: &FakeFs) -> Result<(), Box<dyn std::error::Error>> {
     let (clock, dyn_clock) = clock();
-    let mut w = SessionWriter::open(fs.clone(), &dir(), rate(), length(), dyn_clock)?;
+    let mut w = SessionWriter::open(&session_dir(fs), rate(), length(), dyn_clock)?;
     w.start_track(MIC, EpochId::new(0), SampleIndex::ZERO)?;
     let mut at = 0;
     for len in [300_u64, 300, 300, 300, 300, 300, 700] {
@@ -207,7 +217,7 @@ fn when_the_replacement_fails_too_the_samples_are_a_gap_and_recording_goes_on() 
         refuse: Arc::new(AtomicBool::new(false)),
     };
     let (clock, dyn_clock) = clock();
-    let mut w = SessionWriter::open(fs.clone(), &dir(), rate(), length(), dyn_clock).unwrap();
+    let mut w = SessionWriter::open(&session_dir(&fs), rate(), length(), dyn_clock).unwrap();
     w.start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
         .unwrap();
     w.append(MIC, &samples(0, 300)).unwrap();
@@ -243,7 +253,7 @@ fn when_the_replacement_fails_too_the_samples_are_a_gap_and_recording_goes_on() 
 fn a_new_journal_whose_first_write_fails_is_replaced() {
     let fs = FakeFs::with_dirs([dir(), PathBuf::from("/db")]);
     let (_, dyn_clock) = clock();
-    let mut w = SessionWriter::open(fs.clone(), &dir(), rate(), length(), dyn_clock).unwrap();
+    let mut w = SessionWriter::open(&session_dir(&fs), rate(), length(), dyn_clock).unwrap();
     w.start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
         .unwrap();
     // Create (0), header write (1), sync (2), directory sync (3), then the
@@ -272,7 +282,7 @@ fn a_new_journal_whose_first_write_fails_is_replaced() {
 fn a_replacement_replays_only_what_wasnt_synced() {
     let fs = FakeFs::with_dirs([dir(), PathBuf::from("/db")]);
     let (clock, dyn_clock) = clock();
-    let mut w = SessionWriter::open(fs.clone(), &dir(), rate(), length(), dyn_clock).unwrap();
+    let mut w = SessionWriter::open(&session_dir(&fs), rate(), length(), dyn_clock).unwrap();
     w.start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
         .unwrap();
     w.append(MIC, &samples(0, 300)).unwrap();
@@ -303,7 +313,7 @@ fn a_replacement_replays_only_what_wasnt_synced() {
 fn track_errors() {
     let fs = FakeFs::with_dirs([dir()]);
     let (_, dyn_clock) = clock();
-    let mut w = SessionWriter::open(fs.clone(), &dir(), rate(), length(), dyn_clock).unwrap();
+    let mut w = SessionWriter::open(&session_dir(&fs), rate(), length(), dyn_clock).unwrap();
     assert!(matches!(
         w.append(MIC, &[1]),
         Err(SessionError::UnknownTrack(MIC))
@@ -326,8 +336,7 @@ fn track_errors() {
     assert!(fs.paths().is_empty());
     assert!(matches!(
         SessionWriter::open(
-            fs.clone(),
-            Path::new("/missing"),
+            &SessionDir::new(SESSION, fs.clone(), Path::new("/missing")),
             rate(),
             length(),
             clock().1
@@ -359,7 +368,7 @@ fn the_last_journal_id_is_refused() {
         .create(&dir().join(JournalId::new(u64::MAX).file_name()))
         .unwrap();
     assert!(matches!(
-        SessionWriter::open(fs, &dir(), rate(), length(), clock().1),
+        SessionWriter::open(&session_dir(&fs), rate(), length(), clock().1),
         Err(SessionError::Overflow)
     ));
 }
@@ -368,7 +377,7 @@ fn the_last_journal_id_is_refused() {
 fn sync_if_due_reports_durable_positions_per_journal() {
     let fs = FakeFs::with_dirs([dir()]);
     let (clock, dyn_clock) = clock();
-    let mut w = SessionWriter::open(fs.clone(), &dir(), rate(), length(), dyn_clock).unwrap();
+    let mut w = SessionWriter::open(&session_dir(&fs), rate(), length(), dyn_clock).unwrap();
     w.start_track(MIC, EpochId::new(0), SampleIndex::new(1_900))
         .unwrap();
     w.append(MIC, &samples(1_900, 50)).unwrap();
@@ -406,7 +415,7 @@ fn a_failed_finish_still_hands_out_its_journals() {
         refuse: Arc::new(AtomicBool::new(false)),
     };
     let (_, dyn_clock) = clock();
-    let mut w = SessionWriter::open(fs.clone(), &dir(), rate(), length(), dyn_clock).unwrap();
+    let mut w = SessionWriter::open(&session_dir(&fs), rate(), length(), dyn_clock).unwrap();
     w.start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
         .unwrap();
     w.append(MIC, &samples(0, 100)).unwrap();

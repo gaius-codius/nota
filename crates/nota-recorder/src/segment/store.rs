@@ -45,6 +45,20 @@ impl SegmentStore for nota_store::Store {
     }
 }
 
+/// A store lent to a [`SessionStore`](crate::session::SessionStore), so the
+/// caller keeps it when the session ends.
+impl<T: SegmentStore + ?Sized> SegmentStore for &mut T {
+    type Error = T::Error;
+
+    fn rows(&mut self) -> Result<Vec<SegmentRow>, Self::Error> {
+        (**self).rows()
+    }
+
+    fn insert(&mut self, segment: &DurableSegment) -> Result<(), Self::Error> {
+        (**self).insert(segment)
+    }
+}
+
 #[cfg(any(test, feature = "fake-fs"))]
 pub use fake::FakeStore;
 

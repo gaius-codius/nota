@@ -32,19 +32,22 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 
 use nota_core::{
-    Clock, EpochId, FakeClock, SampleCount, SampleIndex, SampleRate, SessionTime, TrackId,
+    Clock, EpochId, FakeClock, SampleCount, SampleIndex, SampleRate, SessionId, SessionTime,
+    TrackId,
 };
 use nota_recorder::fs::{Fs, FsFile, StdFile, StdFs, Synced};
 use nota_recorder::journal::{JournalId, read_journal};
 use nota_recorder::segment::{
     Published, SegmentLength, publish_journals, salvage, segment_file_name,
 };
-use nota_recorder::session::SessionWriter;
+use nota_recorder::session::{SessionDir, SessionStore, SessionWriter};
 use nota_store::{SegmentRow, Store};
 use sha2::{Digest, Sha256};
 
 type Res<T> = Result<T, Box<dyn Error>>;
 
+/// The one session every run records; the store is private to it.
+const SESSION: SessionId = SessionId::new(1);
 const MIC: TrackId = TrackId::new(0);
 const SYSTEM: TrackId = TrackId::new(1);
 const TRACKS: [(TrackId, u64); 2] = [(MIC, 0), (SYSTEM, 700)];
@@ -366,7 +369,9 @@ fn record(fs: &CountingFs, store: &mut Store, session: &Path, log: &mut PromiseL
     let (rate, length) = (rate()?, length()?);
     let clock = Arc::new(FakeClock::new(SessionTime::ZERO));
     let dyn_clock: Arc<dyn Clock> = Arc::clone(&clock) as Arc<dyn Clock>;
-    let mut writer = SessionWriter::open(fs.clone(), session, rate, length, dyn_clock)?;
+    let session = SessionDir::new(SESSION, fs.clone(), session);
+    let mut writer = SessionWriter::open(&session, rate, length, dyn_clock)?;
+    let mut store = SessionStore::new(session, store);
     for (track, at) in TRACKS {
         writer.start_track(track, EpochId::new(0), SampleIndex::new(at))?;
         log.start(track, SampleIndex::new(at))?;
@@ -391,7 +396,7 @@ fn record(fs: &CountingFs, store: &mut Store, session: &Path, log: &mut PromiseL
         synced?;
         let finished = writer.take_finished();
         if !finished.is_empty() {
-            let done = publish_journals(fs, store, session, length, &finished)?;
+            let done = publish_journals(&mut store, length, &finished)?;
             log.rows(done.segments())?;
         }
     }
@@ -403,7 +408,7 @@ fn record(fs: &CountingFs, store: &mut Store, session: &Path, log: &mut PromiseL
     for (track, end) in ends {
         log.durable(track, end)?;
     }
-    let done = publish_journals(fs, store, session, length, &finished)?;
+    let done = publish_journals(&mut store, length, &finished)?;
     log.rows(done.segments())?;
     Ok(())
 }
@@ -585,14 +590,15 @@ fn check_command(args: &[String]) -> Res<()> {
         .into());
     }
 
-    let first = salvage(&StdFs, &mut store, &session, length)?;
+    let ours = SessionDir::new(SESSION, StdFs, &session);
+    let first = salvage(&mut SessionStore::new(ours.clone(), &mut store), length)?;
     let after = observe(&session, &store)?;
     check_after(&session, &promised, &after).map_err(|e| format!("after salvage: {e}"))?;
     if recovered && after != before {
         return Err("a completed salvage didn't last: salvage changed the disk again".into());
     }
 
-    let second = salvage(&StdFs, &mut store, &session, length)?;
+    let second = salvage(&mut SessionStore::new(ours, &mut store), length)?;
     if second != Published::default() || observe(&session, &store)? != after {
         return Err("a second salvage changed something".into());
     }

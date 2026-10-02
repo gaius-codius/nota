@@ -36,5 +36,5 @@ pub mod time;
 pub use clock::FakeClock;
 pub use clock::{Clock, ClockUnavailable, SystemClock};
 pub use epoch::{Epoch, EpochError, Gap, OpenedEpoch, TrackTimeline};
-pub use ids::{EpochId, TrackId};
+pub use ids::{EpochId, SessionId, TrackId};
 pub use time::{SampleCount, SampleIndex, SampleRange, SampleRate, SessionTime};

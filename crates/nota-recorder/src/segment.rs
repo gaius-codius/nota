@@ -24,7 +24,12 @@
 //! that aren't yet in the store, and publishes them. Live recording calls it
 //! for the journals the [`SessionWriter`] has finished; salvage calls it for
 //! every journal left in a session's directory. The rules:
-//! - Committed rows claim their samples first. Then journals claim theirs in
+//! - Committed rows claim their samples first, but only a row whose file is
+//!   in the session directory and matches it (its SHA-256, and the number of
+//!   samples its FLAC header declares). A row whose file is missing claims
+//!   nothing; so does one whose file doesn't match, and nothing is
+//!   published over its samples, so its file stays and so do the journals
+//!   holding them. Then journals claim theirs in
 //!   descending [`JournalId`] order: after a crash a broken journal's
 //!   unsynced tail can survive alongside its replacement, and the
 //!   replacement, started later, wins.
@@ -33,7 +38,12 @@
 //! - A journal is deleted once every sample it holds is claimed by
 //!   committed rows.
 //!
+//! Publishing and salvage take a [`SessionStore`], which binds a session's
+//! directory to the store holding its rows, so neither can be given a store
+//! and a directory from different sessions.
+//!
 //! [`SessionWriter`]: crate::session::SessionWriter
+//! [`SessionStore`]: crate::session::SessionStore
 //! [`JournalId`]: crate::journal::JournalId
 
 mod flac;

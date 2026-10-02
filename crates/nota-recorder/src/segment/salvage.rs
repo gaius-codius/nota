@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use nota_core::SampleRate;
 use nota_store::SegmentRow;
+use sha2::{Digest, Sha256};
 
 use super::flac::{self, FlacError};
 use super::plan::{self, JournalSummary, PlannedSegment};
@@ -22,7 +23,7 @@ use super::{SegmentLength, is_temp_segment, segment_file_name};
 use crate::fs::Fs;
 use crate::journal::format::{FRAME_HEADER_LEN, HEADER_LEN, MAX_FRAME_SAMPLES};
 use crate::journal::{JournalHeader, JournalId, read_journal};
-use crate::session::FinishedJournal;
+use crate::session::{FinishedJournal, SessionDir, SessionStore};
 
 /// What a publish run did.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -30,6 +31,7 @@ pub struct Published {
     segments: Vec<SegmentRow>,
     deleted: Vec<JournalId>,
     quarantined: Vec<PathBuf>,
+    mismatched: Vec<SegmentRow>,
 }
 
 impl Published {
@@ -53,6 +55,15 @@ impl Published {
     #[must_use]
     pub fn quarantined(&self) -> &[PathBuf] {
         &self.quarantined
+    }
+
+    /// Committed rows whose file is in the session directory but doesn't
+    /// match them: another SHA-256, or another length. They claim nothing,
+    /// the file is left as it is, and no segment is published over their
+    /// samples, so the journals holding those samples are kept.
+    #[must_use]
+    pub fn mismatched(&self) -> &[SegmentRow] {
+        &self.mismatched
     }
 }
 
@@ -107,9 +118,9 @@ fn store_error<E: Error + Send + Sync + 'static>(e: E) -> PublishError {
     PublishError::Store(Box::new(e))
 }
 
-/// Recovers a session after a crash: publishes every journal left in `dir`
-/// as segments, adds the rows missing from `store`, and deletes the
-/// journals once their rows are committed. Leftover segment temp files are
+/// Recovers a session after a crash: publishes every journal left in its
+/// directory as segments, adds the rows missing from its store, and deletes
+/// the journals once their rows are committed. Leftover segment temp files are
 /// removed first; they're never the only copy of anything.
 ///
 /// Safe to run again after it fails or the machine crashes partway: every
@@ -121,11 +132,10 @@ fn store_error<E: Error + Send + Sync + 'static>(e: E) -> PublishError {
 ///
 /// As [`publish_journals`].
 pub fn salvage<S: Fs, T: SegmentStore>(
-    fs: &S,
-    store: &mut T,
-    dir: &Path,
+    session: &mut SessionStore<S, T>,
     length: SegmentLength,
 ) -> Result<Published, PublishError> {
+    let (fs, dir) = (session.session().fs(), session.session().dir());
     let mut journals = Vec::new();
     for path in fs.list(dir)? {
         if is_temp_segment(&path) {
@@ -139,27 +149,37 @@ pub fn salvage<S: Fs, T: SegmentStore>(
             journals.push(FinishedJournal::new(id));
         }
     }
-    publish_journals(fs, store, dir, length, &journals)
+    publish_journals(session, length, &journals)
 }
 
-/// Whether `dir` holds journals: a session that was still recording when
-/// nota stopped, and needs [`salvage`].
+/// Whether the session's directory holds journals: a session that was still
+/// recording when nota stopped, and needs [`salvage`].
 ///
 /// # Errors
 ///
-/// Any I/O error listing `dir`.
-pub fn needs_salvage<S: Fs>(fs: &S, dir: &Path) -> io::Result<bool> {
-    Ok(fs
-        .list(dir)?
+/// Any I/O error listing the directory.
+pub fn needs_salvage<S: Fs>(session: &SessionDir<S>) -> io::Result<bool> {
+    Ok(session
+        .fs()
+        .list(session.dir())?
         .iter()
         .any(|p| p.file_name().and_then(JournalId::from_file_name).is_some()))
 }
 
-/// Publishes the audio in `journals` in `dir` as segments: plans
-/// the segments that `store` doesn't hold yet (see the module docs for the
-/// rules), publishes each in the fixed order, and deletes each journal once
-/// every sample it holds is in a committed row. A journal that isn't there
-/// any more is skipped.
+/// Publishes the audio in `journals` in the session's directory as
+/// segments: plans the segments that its store doesn't hold yet (see the
+/// module docs for the rules), publishes each in the fixed order, and
+/// deletes each journal once every sample it holds is in a committed row. A
+/// journal that isn't there any more is skipped.
+///
+/// A committed row claims its samples only if its file is in the session's
+/// directory and matches it: the file's SHA-256 is the row's, and its FLAC
+/// header declares the row's number of samples. Only rows that overlap the
+/// journals' samples are checked, so the cost is bounded by what's being
+/// published. A row whose file is missing claims nothing. A row whose file
+/// doesn't match claims nothing either, and is reported in
+/// [`Published::mismatched`]; no segment is published over its samples, so
+/// its file is never replaced and the journals holding them are kept.
 ///
 /// It takes [`FinishedJournal`]s, from
 /// [`SessionWriter::take_finished`](crate::session::SessionWriter::take_finished),
@@ -171,23 +191,13 @@ pub fn needs_salvage<S: Fs>(fs: &S, dir: &Path) -> io::Result<bool> {
 /// [`PublishError`]. What was done before the error is consistent: rows
 /// only for durable files, journals deleted only after their rows.
 pub fn publish_journals<S: Fs, T: SegmentStore>(
-    fs: &S,
-    store: &mut T,
-    dir: &Path,
+    session: &mut SessionStore<S, T>,
     length: SegmentLength,
     journals: &[FinishedJournal],
 ) -> Result<Published, PublishError> {
+    let (session, store) = session.parts();
+    let (fs, dir) = (session.fs(), session.dir());
     let ids: BTreeSet<JournalId> = journals.iter().map(|j| j.id()).collect();
-    // A row claims its samples only if its file is here: the store should
-    // hold this session's rows alone, and a row of another session (or one
-    // whose file went missing) must never let a journal be deleted.
-    let present: BTreeSet<PathBuf> = fs.list(dir)?.into_iter().collect();
-    let rows: Vec<SegmentRow> = store
-        .rows()
-        .map_err(store_error)?
-        .into_iter()
-        .filter(|r| present.contains(&dir.join(segment_file_name(r.track(), r.range()))))
-        .collect();
 
     // Pass 1: what each journal holds, without keeping its samples.
     let mut summaries = Vec::new();
@@ -227,9 +237,10 @@ pub fn publish_journals<S: Fs, T: SegmentStore>(
             _ => unreadable.push(path),
         }
     }
+    let mut published = Published::default();
+    let rows = claims(fs, dir, store, &summaries, &mut published)?;
     let plan = plan::plan(&rows, &summaries, length);
 
-    let mut published = Published::default();
     let mut committed = Committed::default();
     // Journals with no samples, or all of them in rows already, go first.
     release(
@@ -243,6 +254,11 @@ pub fn publish_journals<S: Fs, T: SegmentStore>(
 
     // Pass 2: one segment at a time.
     for segment in &plan.segments {
+        if overlaps_any(&published.mismatched, segment) {
+            // Its samples stay in their journals, which need it and so
+            // aren't deleted.
+            continue;
+        }
         let flac = encode(fs, dir, segment)?;
         let durable =
             TempSegment::write(fs, dir, segment.track, segment.epoch, segment.range, &flac)?
@@ -264,6 +280,50 @@ pub fn publish_journals<S: Fs, T: SegmentStore>(
 
     quarantine(fs, dir, &unreadable, &mut published)?;
     Ok(published)
+}
+
+/// The committed rows that claim samples in this run: those overlapping a
+/// journal in `summaries` whose file is in `dir` and matches them. Rows
+/// whose file is there but doesn't match go to `published.mismatched`.
+fn claims<S: Fs, T: SegmentStore>(
+    fs: &S,
+    dir: &Path,
+    store: &mut T,
+    summaries: &[JournalSummary],
+    published: &mut Published,
+) -> Result<Vec<SegmentRow>, PublishError> {
+    let mut rows = Vec::new();
+    for row in store.rows().map_err(store_error)? {
+        let overlaps = summaries
+            .iter()
+            .any(|j| j.track == row.track() && j.range.is_some_and(|r| overlap(r, row.range())));
+        if !overlaps {
+            continue;
+        }
+        let path = dir.join(segment_file_name(row.track(), row.range()));
+        let Some(bytes) = read_if_present(fs, &path)? else {
+            continue;
+        };
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        if &digest == row.sha256().as_bytes()
+            && flac::stream_len(&bytes) == Some(row.range().len().get())
+        {
+            rows.push(row);
+        } else {
+            published.mismatched.push(row);
+        }
+    }
+    Ok(rows)
+}
+
+/// Whether `segment` shares a sample with any of `rows`.
+fn overlaps_any(rows: &[SegmentRow], segment: &PlannedSegment) -> bool {
+    rows.iter()
+        .any(|r| r.track() == segment.track && overlap(r.range(), segment.range))
+}
+
+const fn overlap(a: nota_core::SampleRange, b: nota_core::SampleRange) -> bool {
+    a.start().get() < b.end().get() && b.start().get() < a.end().get()
 }
 
 /// Deletes every waiting journal whose segments are all committed.
