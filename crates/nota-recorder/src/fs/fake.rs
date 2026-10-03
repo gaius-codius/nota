@@ -1120,6 +1120,7 @@ mod tests {
             io::ErrorKind::IsADirectory
         );
         assert_eq!(fs.paths(), [p("/s/f")]);
+        assert_eq!(fs.list(&p("/s")).unwrap(), [p("/s/d"), p("/s/f")]);
         // A missing source is reported first.
         assert_eq!(
             fs.rename(&p("/s/none"), &p("/s/d")).unwrap_err().kind(),
@@ -1139,6 +1140,7 @@ mod tests {
             crate::fs::StdFs.rename(&file, &sub).unwrap_err().kind(),
             io::ErrorKind::IsADirectory
         );
+        assert!(sub.is_dir() && file.is_file());
         assert_eq!(
             crate::fs::StdFs
                 .rename(&dir.0.join("none"), &sub)

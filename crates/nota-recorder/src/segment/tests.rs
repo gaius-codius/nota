@@ -2044,6 +2044,9 @@ fn a_journal_read_failing_once_then_a_crash_anywhere_loses_nothing() {
     // The uninterrupted end state, with every read working.
     let settled = salvage_fake(&disk.copy_disk()).unwrap();
     check_after(&promised, &settled).unwrap();
+    // No journal overlaps another, so none of this one's samples is in a
+    // row until it reads.
+    assert!(overlapping_pairs(&disk).is_empty());
     // A journal read after another, and before the rest.
     let (at, path) = first_journal_reads(&disk)[1].clone();
     let bytes = disk.read(&path).unwrap();
