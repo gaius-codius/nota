@@ -530,10 +530,11 @@ impl Fs for FakeFs {
         same_directory(from, to)?;
         let mut state = self.lock();
         state.admit()?;
+        let id = *state.names.files.get(from).ok_or_else(not_found)?;
         if state.names.dirs.contains(to) {
             return Err(is_a_directory());
         }
-        let id = state.names.files.remove(from).ok_or_else(not_found)?;
+        state.names.files.remove(from);
         state.names.files.insert(to.to_path_buf(), id);
         state
             .pending
@@ -1119,6 +1120,11 @@ mod tests {
             io::ErrorKind::IsADirectory
         );
         assert_eq!(fs.paths(), [p("/s/f")]);
+        // A missing source is reported first.
+        assert_eq!(
+            fs.rename(&p("/s/none"), &p("/s/d")).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
         // StdFs agrees.
         let dir = crate::test_dir::TestDir::new("fake-remove-dir");
         let sub = dir.0.join("d");
@@ -1132,6 +1138,13 @@ mod tests {
         assert_eq!(
             crate::fs::StdFs.rename(&file, &sub).unwrap_err().kind(),
             io::ErrorKind::IsADirectory
+        );
+        assert_eq!(
+            crate::fs::StdFs
+                .rename(&dir.0.join("none"), &sub)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
         );
     }
 

@@ -1874,6 +1874,27 @@ fn first_journal_reads(disk: &FakeFs) -> Vec<(usize, PathBuf)> {
         .collect()
 }
 
+/// The journals on `disk` that overlap a newer one of their track, each
+/// with that newer one: (older, newer).
+fn overlapping_pairs(disk: &FakeFs) -> Vec<(JournalId, JournalId)> {
+    let mut ranges: Vec<(JournalId, TrackId, SampleRange)> = Vec::new();
+    for path in disk.paths().into_iter().filter(|p| is_journal(p)) {
+        let read = read_journal(&disk.read(&path).unwrap());
+        if let (Some(h), Some(r)) = (read.header(), read.range()) {
+            ranges.push((h.id(), h.track(), r));
+        }
+    }
+    let mut pairs = Vec::new();
+    for a in &ranges {
+        for b in &ranges {
+            if a.0 < b.0 && a.1 == b.1 && a.2.start() < b.2.end() && b.2.start() < a.2.end() {
+                pairs.push((a.0, b.0));
+            }
+        }
+    }
+    pairs
+}
+
 fn journal_id(path: &Path) -> JournalId {
     path.file_name()
         .and_then(JournalId::from_file_name)
@@ -1888,15 +1909,17 @@ fn a_journal_that_cant_be_read_is_kept_and_everything_else_published() {
         fail_at: None,
     };
     // Overlapping journals, so the one that can't be read is sometimes the
-    // newer of a pair, which wins the overlap when it reads.
+    // newer of a pair: the older one's copy of the overlap is published
+    // meanwhile, and when the newer one reads, only the rest of it is.
     let broken = Recording {
         fail_at: Some(a_write_after_unsynced_frames(plain)),
         ..plain
     };
     let mut tried = 0;
-    for how in [plain, broken] {
+    for (how, overlapping) in [(plain, false), (broken, true)] {
         let (fs, promised) = clean_run(how);
         let disk = fs.crash(CrashOutcome::KeepAll);
+        assert_eq!(!overlapping_pairs(&disk).is_empty(), overlapping);
         let reads = first_journal_reads(&disk);
         assert!(reads.len() >= 4, "{reads:?}");
         for (at, path) in reads {
@@ -1970,6 +1993,7 @@ fn a_directory_under_a_journals_name_never_stops_publishing_at_any_crash() {
 
     let probe = disk.copy_disk();
     let done = salvage(&mut session_store(&probe), length()).unwrap();
+    let ops = probe.attempted();
     assert_eq!(done.unread(), unread);
     assert!(done.quarantined().is_empty());
     for track in [MIC, SYSTEM] {
@@ -1989,16 +2013,23 @@ fn a_directory_under_a_journals_name_never_stops_publishing_at_any_crash() {
     // Crashed after every operation, under every outcome: the next run
     // ends where the uninterrupted one did, with every durable sample in a
     // row and the directory as it was.
-    let ops = salvage_crashed_everywhere(&disk, &promised);
+    check_after(&promised, &settled).unwrap();
     assert!(ops > 30, "{ops}");
-    for after in [0, ops / 2, ops] {
-        let run = disk.copy_disk();
-        run.crash_after(after);
-        let _ = salvage(&mut session_store(&run), length());
-        let survived = run.crash(CrashOutcome::LoseUnsynced);
-        let rerun = salvage(&mut session_store(&survived), length()).unwrap();
-        assert_eq!(rerun.unread(), unread);
-        assert!(is_dir(&survived));
+    for after in 0..=ops {
+        for crash in CrashOutcome::standard() {
+            let run = disk.copy_disk();
+            run.crash_after(after);
+            let _ = salvage(&mut session_store(&run), length());
+            let survived = run.crash(crash);
+            let rerun = salvage(&mut session_store(&survived), length())
+                .unwrap_or_else(|e| panic!("after {after} ops, {crash:?}: {e}"));
+            assert_eq!(rerun.unread(), unread, "after {after} ops, {crash:?}");
+            assert!(is_dir(&survived), "after {after} ops, {crash:?}");
+            assert!(
+                observe(&survived) == settled,
+                "salvage crashed after {after} ops, {crash:?}, ended differently"
+            );
+        }
     }
 }
 
@@ -2045,6 +2076,79 @@ fn a_journal_read_failing_once_then_a_crash_anywhere_loses_nothing() {
                 rerun == settled,
                 "after {after} ops, {crash:?}, ended differently"
             );
+        }
+    }
+}
+
+#[test]
+fn a_journal_that_is_gone_is_skipped_not_reported() {
+    let (fs, promised) = clean_run(Recording {
+        steps: 4,
+        publish: false,
+        fail_at: None,
+    });
+    let disk = fs.crash(CrashOutcome::KeepAll);
+    let mut store = session_store(&disk);
+    // Published already, by an earlier run that deleted it.
+    let done = publish_journals(&mut store, length(), &finished(&[99])).unwrap();
+    assert_eq!(done, Published::default());
+    let done = salvage(&mut store, length()).unwrap();
+    assert!(done.unread().is_empty());
+    check_after(&promised, &observe(&disk)).unwrap();
+}
+
+#[test]
+fn an_unread_journal_of_an_overlapping_pair_then_a_crash_anywhere_loses_nothing() {
+    let plain = Recording {
+        steps: 4,
+        publish: false,
+        fail_at: None,
+    };
+    let how = Recording {
+        fail_at: Some(a_write_after_unsynced_frames(plain)),
+        ..plain
+    };
+    let (fs, promised) = clean_run(how);
+    let disk = fs.crash(CrashOutcome::KeepAll);
+    let pairs = overlapping_pairs(&disk);
+    let &(older, newer) = pairs.first().unwrap();
+    let reads = first_journal_reads(&disk);
+
+    // Either of the pair fails its read once; the other is published, its
+    // window split from the unread one's samples, which the run after the
+    // restart publishes. Crashed after every operation of the failing run,
+    // under every outcome: that run ends with every durable sample in
+    // exactly one row, no journal left, and a second run changes nothing.
+    for id in [older, newer] {
+        let (at, _) = reads.iter().find(|(_, p)| journal_id(p) == id).unwrap();
+        let failed = disk.copy_disk();
+        failed.fail_after(*at, io::ErrorKind::Other);
+        let done = salvage(&mut session_store(&failed), length()).unwrap();
+        assert_eq!(
+            done.unread(),
+            [(FinishedJournal::new(SESSION, id), io::ErrorKind::Other)]
+        );
+        assert!(!done.segments().is_empty());
+        let ops = failed.attempted();
+        for after in 0..=ops {
+            for crash in CrashOutcome::standard() {
+                let run = disk.copy_disk();
+                run.fail_after(*at, io::ErrorKind::Other);
+                run.crash_after(after);
+                let _ = salvage(&mut session_store(&run), length());
+                let survived = run.crash(crash);
+                let rerun = salvage_fake(&survived).unwrap_or_else(|e| {
+                    panic!("journal {}, after {after} ops, {crash:?}: {e}", id.get())
+                });
+                check_after(&promised, &rerun).unwrap_or_else(|e| {
+                    panic!("journal {}, after {after} ops, {crash:?}: {e}", id.get())
+                });
+                assert!(
+                    salvage_fake(&survived) == Ok(rerun),
+                    "journal {}, after {after} ops, {crash:?}: a second salvage changed something",
+                    id.get()
+                );
+            }
         }
     }
 }

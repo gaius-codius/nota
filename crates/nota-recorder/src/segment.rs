@@ -41,8 +41,11 @@
 //! - A journal that's there but can't be read (`EIO`, `EACCES`, a directory
 //!   under its name) is left as it is and reported, and the rest is planned
 //!   without it. What it holds isn't known, so a window it shares may be
-//!   published without its samples; a later run that reads it publishes
-//!   them as further segments of that window.
+//!   published without its samples, and where it overlaps an older journal
+//!   the older one's copy is published; a later run that reads it publishes
+//!   the rest as further segments of that window. Both copies of an overlap
+//!   hold the same samples (the replacement replays them), so nothing is
+//!   lost either way.
 //!
 //! Publishing and salvage take a [`SessionStore`], which binds a session's
 //! directory to the store holding its rows, so neither can be given a store

@@ -67,8 +67,11 @@ impl Published {
     /// isn't known. Every other segment is published; where this journal
     /// holds samples of a window, the window's other samples may be
     /// published without them, and a later run that reads it publishes the
-    /// rest of the window as further segments. Pass them again to retry;
-    /// salvage finds them again by name.
+    /// rest of the window as further segments. A committed row that only
+    /// they overlap isn't checked, so it isn't a finding this run. Pass them
+    /// again to retry; salvage finds them again by name. Not to be confused
+    /// with [`Self::quarantined`]: journals that did read, but whose contents
+    /// couldn't be.
     #[must_use]
     pub fn unread(&self) -> &[(FinishedJournal, io::ErrorKind)] {
         &self.unread
@@ -417,6 +420,8 @@ fn claims<S: Fs>(
 /// on its track. The whole window is left alone, not only the samples a row
 /// claims: a window can hold several segments (an epoch change, a gap), and
 /// none of them is published while a row over that window is unresolved.
+/// Only rows this run checked are findings: those overlapping a journal it
+/// read (see [`claims`]).
 fn in_a_bad_window(findings: &[Finding], segment: &PlannedSegment, length: SegmentLength) -> bool {
     let start = segment.range.start();
     let from = SampleIndex::new(length.window_of(start).saturating_mul(length.samples()));
