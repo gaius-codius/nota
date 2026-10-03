@@ -61,10 +61,10 @@ impl Published {
 
     /// The committed rows this run checked that claim nothing: their file
     /// is missing from the session directory, can't be read, or doesn't
-    /// match them (another SHA-256, or another length). No segment was published over
-    /// their samples, so the file, if any, is as it was and the journals
-    /// holding those samples are kept. They're also recorded in the
-    /// session's findings file (see
+    /// match them (another SHA-256, or another length). No segment was
+    /// published over their samples, so the file, if any, is as it was and
+    /// the journals holding those samples are kept. They're also recorded in
+    /// the session's findings file (see
     /// [`read_findings`](super::read_findings)), with any found before.
     #[must_use]
     pub fn findings(&self) -> &[Finding] {
@@ -204,9 +204,9 @@ pub fn needs_salvage<S: Fs>(session: &SessionDir<S>) -> io::Result<bool> {
 /// overlap the journals' samples are checked, so the cost is bounded by
 /// what's being published. A row whose file is missing, can't be read (for
 /// any reason, even one that may pass: the next run checks it again) or
-/// doesn't match claims nothing,
-/// and is a finding: reported in [`Published::findings`] and recorded in the
-/// session's findings file before anything is published. No segment is
+/// doesn't match claims nothing, and is a finding: reported in
+/// [`Published::findings`] and recorded in the session's findings file
+/// before anything is published. No segment is
 /// published over its samples, so its file, if any, is never replaced and
 /// the journals holding them are kept; every other segment is published.
 ///

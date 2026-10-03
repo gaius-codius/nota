@@ -2,10 +2,13 @@
 //! directory so the app can show it.
 //!
 //! A committed row claims its samples only if its file is in the session's
-//! directory, can be read, and matches it. A row that doesn't is a [`Finding`]: nothing is
-//! published over its samples, its file is left alone, and the journals
-//! holding those samples are kept, until it's resolved (not in this
-//! version: every finding is [`Status::Unresolved`]).
+//! directory, can be read, and matches it. A row that doesn't is a
+//! [`Finding`]: while it fails that check, nothing is published over its
+//! samples, its file is left alone, and the journals holding those samples
+//! are kept. Resolving a finding isn't in this version: every finding is
+//! [`Status::Unresolved`], and stays recorded even if a later run finds the
+//! row's file readable and matching (after a transient read error, or a
+//! file put back), which lets the row claim its samples again.
 //!
 //! The findings live in one file, `salvage-findings`, written like a
 //! segment: temp file, fsync, rename, directory fsync. So a crash leaves the
@@ -71,9 +74,10 @@ pub enum Problem {
     /// The file's SHA-256 is the row's, but its FLAC header doesn't declare
     /// the row's number of samples.
     LengthMismatch,
-    /// There's something under the row's name, but reading it failed. It may
-    /// be transient (a later run that reads it and finds it matching lets
-    /// the row claim its samples again), but it's recorded either way.
+    /// There's something under the row's name, but reading it failed. The
+    /// error may be transient: a later run that reads the file and finds it
+    /// matching lets the row claim its samples again, but the finding stays
+    /// recorded.
     Unreadable(ReadFailure),
 }
 

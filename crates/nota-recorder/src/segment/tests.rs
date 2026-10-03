@@ -1773,3 +1773,65 @@ fn a_directory_under_a_rows_name_never_lets_its_journals_go_at_any_crash() {
         }
     }
 }
+
+#[test]
+fn a_transient_read_error_then_a_crash_anywhere_loses_nothing() {
+    let (fs, promised, row, path, flac) = recording_with_a_good_row();
+    let probe = fs.copy_disk();
+    salvage(&mut session_store(&probe), length()).unwrap();
+    let at = probe
+        .ops()
+        .iter()
+        .position(|op| *op == Op::Read(path.clone()))
+        .unwrap();
+    let planted = BTreeMap::from([(path, Some(flac))]);
+    let unreadable = [(row, Problem::Unreadable(ReadFailure::Other))];
+    let findings_path = session().join(FINDINGS_FILE_NAME);
+    let without_findings = |seen: &Observed| {
+        let mut seen = seen.clone();
+        seen.files.remove(&findings_path);
+        seen
+    };
+
+    // Uninterrupted: the read fails once, then a restart reads it.
+    let failed = fs.copy_disk();
+    failed.fail_after(at, io::ErrorKind::Other);
+    salvage(&mut session_store(&failed), length()).unwrap();
+    let ops = failed.attempted();
+    let restarted = failed.crash(CrashOutcome::LoseUnsynced);
+    salvage(&mut session_store(&restarted), length()).unwrap();
+    let settled = without_findings(&observe(&restarted));
+
+    // The same, crashed after every operation of the failing run: the run
+    // after the restart reads the file, and ends where the uninterrupted
+    // one does, with the finding recorded or not yet, never anything else.
+    let mut kept = 0;
+    for after in 0..=ops {
+        for crash in CrashOutcome::standard() {
+            let run = fs.copy_disk();
+            run.fail_after(at, io::ErrorKind::Other);
+            run.crash_after(after);
+            let _ = salvage(&mut session_store(&run), length());
+            let survived = run.crash(crash);
+            let rerun = salvage(&mut session_store(&survived), length())
+                .unwrap_or_else(|e| panic!("after {after} ops, {crash:?}: {e}"));
+            assert!(rerun.findings().is_empty(), "after {after} ops, {crash:?}");
+            let seen = observe(&survived);
+            check_mismatch_kept(&promised, &[], &[], &planted, &seen)
+                .unwrap_or_else(|e| panic!("after {after} ops, {crash:?}: {e}"));
+            let recorded = as_found(read_findings(&session_dir(&survived)).unwrap().found());
+            assert!(
+                recorded.is_empty() || recorded == unreadable,
+                "after {after} ops, {crash:?}: {recorded:?}"
+            );
+            kept += usize::from(!recorded.is_empty());
+            assert!(
+                without_findings(&seen) == settled,
+                "after {after} ops, {crash:?}, ended differently"
+            );
+        }
+    }
+    // Crashes landed both before the finding was durable and after.
+    let runs = (ops + 1) * CrashOutcome::standard().len();
+    assert!(kept > 0 && kept < runs, "{kept} of {runs}");
+}
