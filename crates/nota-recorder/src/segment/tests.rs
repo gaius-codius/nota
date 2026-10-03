@@ -338,11 +338,11 @@ fn check_after(promised: &Promised, after: &Observed) -> Result<(), String> {
         .iter()
         .map(|r| session().join(segment_file_name(r.track(), r.range())))
         .collect();
-    if let Some(orphan) = after
-        .files
-        .keys()
-        .find(|p| p.starts_with(session()) && !named.contains(*p))
-    {
+    if let Some(orphan) = after.files.keys().find(|p| {
+        p.starts_with(session())
+            && !named.contains(*p)
+            && p.file_name() != Some(FINDINGS_FILE_NAME.as_ref())
+    }) {
         return Err(format!("a file without a row: {}", orphan.display()));
     }
     Ok(())
@@ -600,10 +600,14 @@ fn journals_rotate_at_every_window_even_when_publishing_fails() {
     }
     writer.finish().unwrap();
     assert_eq!(failures, 7);
+    // Every failed run said the rows couldn't be checked.
+    let findings = read_findings(&session_dir(&fs)).unwrap();
+    assert_eq!(findings.verification(), Verification::Unavailable);
+    assert!(findings.found().is_empty());
 
     let mut covered = 100;
     let mut journals = 0;
-    for path in fs.paths() {
+    for path in fs.paths().into_iter().filter(|p| is_journal(p)) {
         let bytes = fs.read(&path).unwrap();
         let read = read_journal(&bytes);
         let range = read.range().unwrap();
@@ -928,14 +932,30 @@ fn a_row_without_its_file_here_claims_nothing() {
     .unwrap();
     assert_eq!(FakeStore::new(&fs, &db()).rows().unwrap(), row);
     let mut store = session_store(&fs);
-    let journals_before: Vec<_> = fs.paths().into_iter().filter(|p| is_journal(p)).collect();
-    // Salvage plans a segment over the row's samples, and the store refuses
-    // it: nothing is deleted.
-    let err = salvage(&mut store, length()).unwrap_err();
-    assert!(matches!(err, PublishError::Store(_)), "{err}");
+    // Salvage publishes nothing over the row's samples (the store would
+    // refuse it anyway), keeps the journal holding them, records the row,
+    // and publishes the rest.
+    let done = salvage(&mut store, length()).unwrap();
+    assert_eq!(
+        done.findings()
+            .iter()
+            .map(|f| (*f.row(), f.problem()))
+            .collect::<Vec<_>>(),
+        [(row[0], Problem::Missing)]
+    );
+    assert_eq!(done.findings_unsaved(), None);
+    // The mic's audio is all in the row's window; the system track's isn't.
+    assert!(!done.segments().is_empty());
+    assert!(done.segments().iter().all(|r| r.track() == SYSTEM));
     let journals_after: Vec<_> = fs.paths().into_iter().filter(|p| is_journal(p)).collect();
     assert!(journals_after.contains(&session().join(JournalId::new(0).file_name())));
-    assert!(!journals_before.is_empty());
+    assert!(
+        !fs.paths()
+            .contains(&session().join("seg-t0-000000000000.flac"))
+    );
+    let recorded = read_findings(&session_dir(&fs)).unwrap();
+    assert_eq!(recorded.found(), done.findings());
+    assert_eq!(recorded.verification(), Verification::Done);
 }
 
 #[test]
@@ -1112,14 +1132,26 @@ fn flac_of(track: TrackId, from: u64, len: u64) -> Vec<u8> {
     flac::encode(rate(), &[&samples(track, from, len)]).unwrap()
 }
 
+/// Plants a committed row on `fs` for `range` of `track`, with no file
+/// under its name.
+fn plant_missing_row(fs: &FakeFs, track: TrackId, range: SampleRange) -> SegmentRow {
+    let row = plant_row(fs, track, range, b"gone", b"gone");
+    fs.remove(&durable_path(track, range)).unwrap();
+    fs.sync_dir(&session()).unwrap();
+    row
+}
+
 #[test]
-fn a_row_whose_file_doesnt_match_never_lets_a_journal_go_at_any_crash() {
+fn rows_that_claim_nothing_never_let_a_journal_go_at_any_crash() {
     let (fs, promised) = clean_run(Recording {
-        steps: 4,
+        steps: 7,
         publish: false,
         fail_at: None,
     });
     let range = |a, b| SampleRange::new(SampleIndex::new(a), SampleIndex::new(b)).unwrap();
+    // Mic 0..2,750 (windows 0 and 1), system 700..3,450 (windows 0 to 2).
+    assert_eq!(promised.durable[&MIC].get(), 2_750);
+    assert_eq!(promised.durable[&SYSTEM].get(), 3_450);
     for outcome in [
         CrashOutcome::LoseUnsynced,
         CrashOutcome::KeepAll,
@@ -1143,7 +1175,15 @@ fn a_row_whose_file_doesnt_match_never_lets_a_journal_go_at_any_crash() {
         // before ends.
         let short = flac_of(SYSTEM, 1_500, 300);
         let wrong_range = plant_row(&disk, SYSTEM, range(1_500, 2_300), &short, &short);
-        let bad = [wrong_hash, wrong_range];
+        // No file at all, partway through a window: the store refuses a
+        // segment over it, which used to stop every later segment.
+        let missing = plant_missing_row(&disk, SYSTEM, range(3_100, 3_300));
+        let bad = [wrong_hash, wrong_range, missing];
+        let expected = [
+            (wrong_hash, Problem::HashMismatch),
+            (wrong_range, Problem::LengthMismatch),
+            (missing, Problem::Missing),
+        ];
         // Rows overlapping no journal of their own track are never read,
         // so their files, which don't match either, aren't reported: one
         // right after the mic's last sample, and one on the system track
@@ -1153,31 +1193,53 @@ fn a_row_whose_file_doesnt_match_never_lets_a_journal_go_at_any_crash() {
             plant_row(&disk, MIC, range(mic_end, mic_end + 10), b"a", b"b"),
             plant_row(&disk, SYSTEM, range(0, 700), b"c", b"d"),
         ];
-        let planted: BTreeMap<PathBuf, Vec<u8>> = bad
+        let planted: BTreeMap<PathBuf, Option<Vec<u8>>> = bad
             .iter()
             .chain(&unread)
             .map(|r| {
                 let path = durable_path(r.track(), r.range());
-                let bytes = disk.read(&path).unwrap();
+                let bytes = disk.read(&path).ok();
                 (path, bytes)
             })
             .collect();
         let ignored: Vec<SegmentRow> = bad.iter().chain(&unread).copied().collect();
+        let as_found = |f: &[Finding]| -> Vec<(SegmentRow, Problem)> {
+            f.iter().map(|f| (*f.row(), f.problem())).collect()
+        };
 
-        // Uninterrupted: both rows are reported, claim nothing, and keep
-        // their journals and files; the rest is published.
+        // Uninterrupted: the bad rows are reported, claim nothing, and keep
+        // their journals and files; the rest is published on both tracks.
         let probe = disk.copy_disk();
         let done = salvage(&mut session_store(&probe), length()).unwrap();
-        assert_eq!(done.mismatched(), bad, "{outcome:?}");
-        assert!(!done.segments().is_empty());
+        let ops = probe.attempted();
+        assert_eq!(as_found(done.findings()), expected, "{outcome:?}");
+        assert_eq!(done.findings_unsaved(), None);
+        for track in [MIC, SYSTEM] {
+            assert!(done.segments().iter().any(|r| r.track() == track));
+        }
         assert!(!done.deleted().is_empty());
+        let recorded = read_findings(&session_dir(&probe)).unwrap();
+        assert_eq!(as_found(recorded.found()), expected);
+        assert!(
+            recorded
+                .found()
+                .iter()
+                .all(|f| f.status() == Status::Unresolved)
+        );
+        assert_eq!(recorded.verification(), Verification::Done);
         let uninterrupted = observe(&probe);
         check_mismatch_kept(&promised, &bad, &ignored, &planted, &uninterrupted)
             .unwrap_or_else(|e| panic!("{outcome:?}: {e}"));
+        // Any number of salvages after it change nothing.
+        for _ in 0..2 {
+            let again = salvage(&mut session_store(&probe), length()).unwrap();
+            assert_eq!(as_found(again.findings()), expected);
+            assert!(again.segments().is_empty() && again.deleted().is_empty());
+            assert!(observe(&probe) == uninterrupted, "{outcome:?}");
+        }
 
         // Crashed after every operation, under every outcome, then run
-        // again: the same end state.
-        let ops = probe.attempted();
+        // again: the same end state, findings file included.
         for after in 0..=ops {
             for crash in CrashOutcome::standard() {
                 let run = disk.copy_disk();
@@ -1187,7 +1249,7 @@ fn a_row_whose_file_doesnt_match_never_lets_a_journal_go_at_any_crash() {
                 let mut again = session_store(&survived);
                 let rerun = salvage(&mut again, length())
                     .unwrap_or_else(|e| panic!("after {after} ops, {crash:?}: {e}"));
-                assert_eq!(rerun.mismatched(), bad);
+                assert_eq!(as_found(rerun.findings()), expected);
                 let seen = observe(&survived);
                 check_mismatch_kept(&promised, &bad, &ignored, &planted, &seen)
                     .unwrap_or_else(|e| panic!("after {after} ops, {crash:?}: {e}"));
@@ -1200,20 +1262,21 @@ fn a_row_whose_file_doesnt_match_never_lets_a_journal_go_at_any_crash() {
     }
 }
 
-/// After salvage with mismatched rows `bad`, and `ignored` rows (`bad` and
-/// those never read) whose files were `planted`: those files are as they
-/// were, every sample in a window a bad row overlaps is still in a journal
-/// and in no row, and every other promised sample is in a good row's file,
-/// with no journal left holding it.
+/// After salvage with bad rows `bad` (missing or mismatched files), and
+/// `ignored` rows (`bad` and those never read) whose files were `planted`
+/// (`None`: no file): those files are as they were, every sample in a
+/// window a bad row overlaps is still in a journal and in no row, and
+/// every other promised sample is in a good row's file, with no journal
+/// left holding it.
 fn check_mismatch_kept(
     promised: &Promised,
     bad: &[SegmentRow],
     ignored: &[SegmentRow],
-    planted: &BTreeMap<PathBuf, Vec<u8>>,
+    planted: &BTreeMap<PathBuf, Option<Vec<u8>>>,
     seen: &Observed,
 ) -> Result<(), String> {
     for (path, bytes) in planted {
-        if seen.files.get(path) != Some(bytes) {
+        if seen.files.get(path) != bytes.as_ref() {
             return Err(format!("{} changed", path.display()));
         }
     }
@@ -1348,4 +1411,212 @@ fn another_sessions_journals_are_refused_before_anything_is_done() {
     assert_eq!(done.deleted(), [JournalId::FIRST]);
     assert_eq!(done.segments().len(), 1);
     assert_eq!(done.segments()[0].range().len().get(), 200);
+}
+
+fn as_found(f: &[Finding]) -> Vec<(SegmentRow, Problem)> {
+    f.iter().map(|f| (*f.row(), f.problem())).collect()
+}
+
+/// A recording with a row whose file is missing, on the system track's
+/// third window, and the findings salvage makes of it.
+fn recording_with_a_missing_row() -> (FakeFs, Vec<(SegmentRow, Problem)>) {
+    let (fs, _) = clean_run(Recording {
+        steps: 7,
+        publish: false,
+        fail_at: None,
+    });
+    let range = SampleRange::new(SampleIndex::new(3_100), SampleIndex::new(3_300)).unwrap();
+    let missing = plant_missing_row(&fs, SYSTEM, range);
+    (fs, vec![(missing, Problem::Missing)])
+}
+
+#[test]
+fn findings_survive_any_later_failure_and_their_own_never_stops_publishing() {
+    let (fs, expected) = recording_with_a_missing_row();
+    let findings_path = session().join(FINDINGS_FILE_NAME);
+    let probe = fs.copy_disk();
+    salvage(&mut session_store(&probe), length()).unwrap();
+    let ops = probe.attempted();
+    let uninterrupted = observe(&probe);
+    assert!(
+        probe
+            .ops()
+            .iter()
+            .any(|op| matches!(op, Op::Rename { to, .. } if *to == findings_path))
+    );
+
+    // Fail each operation in turn. Before some point the findings aren't
+    // durable yet; from it on, they are, and every later failure is a
+    // publish error that leaves them.
+    let mut durable_from = None;
+    let mut unsaved = 0;
+    for at in 0..ops {
+        let run = fs.copy_disk();
+        run.fail_after(at, io::ErrorKind::Other);
+        let result = salvage(&mut session_store(&run), length());
+        let on_disk = read_findings(&session_dir(&run)).unwrap();
+        let present = as_found(on_disk.found()) == expected;
+        match durable_from {
+            None if present => durable_from = Some(at),
+            None => assert!(on_disk.found().is_empty(), "failing op {at}"),
+            Some(_) => {
+                assert!(present, "failing op {at} lost the findings");
+                assert!(result.is_err(), "failing op {at} went unnoticed");
+            }
+        }
+        if let Ok(done) = &result
+            && done.findings_unsaved().is_some()
+        {
+            // The findings write failed: publishing carried on regardless.
+            assert_eq!(done.findings_unsaved(), Some(io::ErrorKind::Other));
+            assert_eq!(as_found(done.findings()), expected);
+            assert!(!done.segments().is_empty());
+            assert!(!done.deleted().is_empty());
+            unsaved += 1;
+        }
+        // Whatever failed, the next run ends where an uninterrupted one
+        // does, and the findings are there.
+        salvage(&mut session_store(&run), length()).unwrap();
+        assert!(observe(&run) == uninterrupted, "failing op {at}");
+    }
+    let durable_from = durable_from.unwrap();
+    // Publishing comes after the findings, so failures there were tried.
+    assert!(ops - durable_from > 20, "{durable_from} of {ops}");
+    assert!(unsaved >= 4, "{unsaved}");
+}
+
+#[test]
+fn an_unreadable_store_is_recorded_and_clears_no_finding() {
+    let (fs, expected) = recording_with_a_missing_row();
+    salvage(&mut session_store(&fs), length()).unwrap();
+    let after_first = observe(&fs);
+
+    // A row file the store can't read: nothing can be checked.
+    let bad_row = db().join("t9-00000000000000000000.row");
+    let mut file = fs.create(&bad_row).unwrap();
+    file.write_all(b"torn").unwrap();
+    let err = salvage(&mut session_store(&fs), length()).unwrap_err();
+    assert!(matches!(err, PublishError::Store(_)), "{err}");
+    let findings = read_findings(&session_dir(&fs)).unwrap();
+    assert_eq!(findings.verification(), Verification::Unavailable);
+    assert_eq!(as_found(findings.found()), expected);
+    // Nothing else changed: no journal deleted, no segment published.
+    let now = observe(&fs);
+    for (path, bytes) in &after_first.files {
+        if path.file_name() != Some(FINDINGS_FILE_NAME.as_ref()) {
+            assert_eq!(now.files.get(path), Some(bytes), "{}", path.display());
+        }
+    }
+
+    // The store readable again: checked, and the finding still stands.
+    fs.remove(&bad_row).unwrap();
+    let done = salvage(&mut session_store(&fs), length()).unwrap();
+    assert_eq!(as_found(done.findings()), expected);
+    let findings = read_findings(&session_dir(&fs)).unwrap();
+    assert_eq!(findings.verification(), Verification::Done);
+    assert_eq!(as_found(findings.found()), expected);
+    assert_eq!(observe(&fs), after_first);
+}
+
+#[test]
+fn recording_starts_and_rotates_with_the_store_down_and_the_findings_unwritable() {
+    // No store directory, and a directory where the findings' temp file
+    // goes, so the findings can't be written either.
+    let fs = FakeFs::with_dirs([session()]);
+    fs.create_dir(&session().join("salvage-findings.tmp"))
+        .unwrap();
+    let err = salvage(&mut session_store(&fs), length()).unwrap_err();
+    assert!(matches!(err, PublishError::Store(_)), "{err}");
+
+    let (clock, dyn_clock) = fake_clock();
+    let mut writer = SessionWriter::open(&session_dir(&fs), rate(), length(), dyn_clock).unwrap();
+    writer
+        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .unwrap();
+    let mut store = session_store(&fs);
+    let mut pending = Vec::new();
+    for _ in 0..5 {
+        let from = writer.next_sample(MIC).unwrap().get();
+        writer.append(MIC, &samples(MIC, from, 1_000)).unwrap();
+        clock.advance(SampleCount::new(1_000).duration_at(rate()).unwrap());
+        writer.sync_if_due().unwrap();
+        pending.extend(writer.take_finished());
+        let err = publish_journals(&mut store, length(), &pending).unwrap_err();
+        assert!(matches!(err, PublishError::Store(_)), "{err}");
+    }
+    pending.extend(writer.finish().unwrap());
+    // 5,000 samples in windows of 1,500: four journals.
+    assert_eq!(pending.len(), 4);
+    assert_eq!(fs.paths().into_iter().filter(|p| is_journal(p)).count(), 4);
+    assert_eq!(
+        read_findings(&session_dir(&fs)).unwrap(),
+        Findings::default()
+    );
+
+    // The store back, with a row whose file is missing in the first
+    // window: the rest publishes, and the findings failure is reported,
+    // not fatal.
+    fs.create_dir(&db()).unwrap();
+    let range = SampleRange::new(SampleIndex::new(100), SampleIndex::new(200)).unwrap();
+    let missing = plant_missing_row(&fs, MIC, range);
+    let done = publish_journals(&mut store, length(), &pending).unwrap();
+    assert_eq!(as_found(done.findings()), [(missing, Problem::Missing)]);
+    assert_eq!(done.findings_unsaved(), Some(io::ErrorKind::AlreadyExists));
+    assert_eq!(done.deleted().len(), 3);
+    assert_eq!(
+        done.segments()
+            .iter()
+            .map(|r| r.range().len().get())
+            .sum::<u64>(),
+        3_500
+    );
+}
+
+#[test]
+fn nothing_in_a_bad_rows_window_is_published_even_in_another_segment() {
+    // One window, two epochs: two segments, only the first under the row.
+    let fs = FakeFs::with_dirs([session(), db()]);
+    let (_, clock) = fake_clock();
+    let mut writer = SessionWriter::open(&session_dir(&fs), rate(), length(), clock).unwrap();
+    writer
+        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .unwrap();
+    writer.append(MIC, &samples(MIC, 0, 500)).unwrap();
+    writer.new_epoch(MIC, EpochId::new(1)).unwrap();
+    writer.append(MIC, &samples(MIC, 500, 500)).unwrap();
+    // The next window, which publishes.
+    writer.append(MIC, &samples(MIC, 1_000, 1_000)).unwrap();
+    let finished = writer.finish().unwrap();
+    assert_eq!(finished.len(), 3);
+    let range = SampleRange::new(SampleIndex::new(100), SampleIndex::new(200)).unwrap();
+    let missing = plant_missing_row(&fs, MIC, range);
+
+    let done = publish_journals(&mut session_store(&fs), length(), &finished).unwrap();
+    assert_eq!(as_found(done.findings()), [(missing, Problem::Missing)]);
+    assert_eq!(
+        done.segments()
+            .iter()
+            .map(|r| (r.range().start().get(), r.range().end().get()))
+            .collect::<Vec<_>>(),
+        [(1_500, 2_000)]
+    );
+    // Both journals of the first window are kept (the second runs on to
+    // the window's end); the next window's is published and deleted.
+    assert_eq!(done.deleted(), [JournalId::new(2)]);
+    assert_eq!(fs.paths().into_iter().filter(|p| is_journal(p)).count(), 2);
+}
+
+#[test]
+fn salvage_removes_a_findings_temp_a_crash_left() {
+    let (fs, expected) = recording_with_a_missing_row();
+    salvage(&mut session_store(&fs), length()).unwrap();
+    let clean = observe(&fs);
+    // A crash during a findings write that, rerun, has nothing to change.
+    let temp = session().join("salvage-findings.tmp");
+    let mut file = fs.create(&temp).unwrap();
+    file.write_all(b"half").unwrap();
+    let done = salvage(&mut session_store(&fs), length()).unwrap();
+    assert_eq!(as_found(done.findings()), expected);
+    assert!(!fs.paths().contains(&temp));
+    assert_eq!(observe(&fs), clean);
 }

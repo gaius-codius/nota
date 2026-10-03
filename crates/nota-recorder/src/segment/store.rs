@@ -29,7 +29,8 @@ pub trait SegmentStore {
     /// # Errors
     ///
     /// The store's error, including a different row for the same track and
-    /// first sample.
+    /// first sample, and a row of the same track whose samples overlap this
+    /// one's.
     fn insert(&mut self, segment: &DurableSegment) -> Result<(), Self::Error>;
 }
 
@@ -80,7 +81,9 @@ mod fake {
     /// Segment rows as files on a [`FakeFs`], one per row, each published
     /// by temp file, fsync, rename and directory fsync: a commit that's
     /// atomic and durable when it returns, as SQLite's with
-    /// `synchronous=FULL`, and that a simulated crash can interrupt.
+    /// `synchronous=FULL`, and that a simulated crash can interrupt. Like
+    /// SQLite, it refuses a row whose samples overlap another row of the
+    /// same track.
     #[derive(Debug, Clone)]
     pub struct FakeStore {
         fs: FakeFs,
@@ -174,6 +177,18 @@ mod fake {
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e),
             }
+            let range = row.range();
+            let overlaps = self.rows()?.iter().any(|other| {
+                other.track() == row.track()
+                    && other.range().start() < range.end()
+                    && other.range().end() > range.start()
+            });
+            if overlaps {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "a row of this track overlaps this one's samples",
+                ));
+            }
             let temp = path.with_extension("tmp");
             match self.fs.remove(&temp) {
                 Ok(()) => {}
@@ -226,6 +241,68 @@ mod fake {
             let rows = SegmentStore::rows(&mut lent).unwrap();
             assert_eq!(rows, [*durable.row()]);
             assert_eq!(store.rows().unwrap(), rows);
+        }
+
+        #[test]
+        fn overlapping_rows_are_refused_as_sqlite_does() {
+            use crate::fs::fake::FakeFs;
+            use crate::segment::publish::TempSegment;
+
+            let fs = FakeFs::with_dirs(["/s", "/db"]);
+            let make = |track: u32, start: u64, end: u64| {
+                let range =
+                    SampleRange::new(SampleIndex::new(start), SampleIndex::new(end)).unwrap();
+                TempSegment::write(
+                    &fs,
+                    Path::new("/s"),
+                    TrackId::new(track),
+                    EpochId::new(0),
+                    range,
+                    b"flac",
+                )
+                .unwrap()
+                .sync()
+                .unwrap()
+                .rename(&fs)
+                .unwrap()
+                .sync_dir(&fs)
+                .unwrap()
+            };
+            let mut store = FakeStore::new(&fs, Path::new("/db"));
+            let a = make(1, 10, 20);
+            store.insert(&a).unwrap();
+            store.insert(&a).unwrap();
+            let before = fs.paths();
+
+            for (start, end) in [(15, 25), (5, 11), (12, 18)] {
+                let err = store.insert(&make(1, start, end)).unwrap_err();
+                assert_eq!(err.kind(), io::ErrorKind::AlreadyExists, "{start}..{end}");
+            }
+            assert_eq!(store.rows().unwrap(), [*a.row()]);
+            let db_files = |paths: &[PathBuf]| -> Vec<PathBuf> {
+                paths
+                    .iter()
+                    .filter(|p| p.starts_with("/db"))
+                    .cloned()
+                    .collect()
+            };
+            assert_eq!(db_files(&fs.paths()), db_files(&before));
+
+            let touching_after = make(1, 20, 30);
+            let touching_before = make(1, 0, 10);
+            let other_track = make(2, 10, 20);
+            store.insert(&touching_after).unwrap();
+            store.insert(&touching_before).unwrap();
+            store.insert(&other_track).unwrap();
+            assert_eq!(
+                store.rows().unwrap(),
+                [
+                    *touching_before.row(),
+                    *a.row(),
+                    *touching_after.row(),
+                    *other_track.row()
+                ]
+            );
         }
 
         #[test]
