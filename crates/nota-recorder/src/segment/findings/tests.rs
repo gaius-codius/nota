@@ -33,7 +33,10 @@ fn problem() -> impl Strategy<Value = Problem> {
     prop_oneof![
         Just(Problem::Missing),
         Just(Problem::HashMismatch),
-        Just(Problem::LengthMismatch)
+        Just(Problem::LengthMismatch),
+        Just(Problem::Unreadable(ReadFailure::PermissionDenied)),
+        Just(Problem::Unreadable(ReadFailure::IsADirectory)),
+        Just(Problem::Unreadable(ReadFailure::Other)),
     ]
 }
 
@@ -92,7 +95,7 @@ proptest! {
         verification in 0_u8..3,
         count in 0_u32..4,
         body in prop::collection::vec(any::<u8>(), 0..300),
-        entries in prop::collection::vec((any::<u32>(), any::<u32>(), 0_u64..50, 0_u64..50, 0_u8..4, 0_u8..2), 0..4),
+        entries in prop::collection::vec((any::<u32>(), any::<u32>(), 0_u64..50, 0_u64..50, 0_u8..7, 0_u8..2), 0..4),
     ) {
         // Past the CRC and magic, so the field checks are what's tested.
         let mut bytes = MAGIC.to_vec();
@@ -108,7 +111,7 @@ proptest! {
             bytes.extend_from_slice(&[u8::try_from(start).unwrap(); 32]);
             bytes.push(problem);
             bytes.push(status);
-            valid &= start < end && problem < 3 && status == 0;
+            valid &= start < end && problem < 6 && status == 0;
         }
         if body.len() % 2 == 1 {
             // Sometimes trailing junk too.
@@ -192,7 +195,7 @@ fn well_formed_but_invalid_fields_are_refused() {
         ("empty range", &|b| {
             b[ENTRY + 16..ENTRY + 24].copy_from_slice(&0_u64.to_le_bytes());
         }),
-        ("problem", &|b| b[ENTRY + 56] = 3),
+        ("problem", &|b| b[ENTRY + 56] = 6),
         ("status", &|b| b[ENTRY + 57] = 1),
     ];
     for (what, edit) in cases {
@@ -211,6 +214,45 @@ fn well_formed_but_invalid_fields_are_refused() {
     assert_eq!(good[ENTRY..ENTRY + 4], 0_u32.to_le_bytes());
     assert_eq!(good[ENTRY + 4..ENTRY + 8], 1_u32.to_le_bytes());
     assert_eq!(good[ENTRY + 24..ENTRY + 56], [1; 32]);
+}
+
+/// The problem codes are the ones the module docs give, and an unreadable
+/// file's error kind maps to the failure kept for it.
+#[test]
+fn problem_codes_and_read_failures() {
+    let codes = [
+        (Problem::Missing, 0),
+        (Problem::HashMismatch, 1),
+        (Problem::LengthMismatch, 2),
+        (Problem::Unreadable(ReadFailure::PermissionDenied), 3),
+        (Problem::Unreadable(ReadFailure::IsADirectory), 4),
+        (Problem::Unreadable(ReadFailure::Other), 5),
+    ];
+    for (problem, code) in codes {
+        assert_eq!(problem.code(), code, "{problem:?}");
+        assert_eq!(Problem::from_code(code), Some(problem));
+        let f = Findings::from_parts(
+            vec![Finding::new(row(0, 0, 10, 1), problem)],
+            Verification::Done,
+        );
+        assert_eq!(f.encode()[HEADER_LEN + 56], code);
+    }
+    assert_eq!(Problem::from_code(6), None);
+    assert_eq!(
+        ReadFailure::of(io::ErrorKind::PermissionDenied),
+        ReadFailure::PermissionDenied
+    );
+    assert_eq!(
+        ReadFailure::of(io::ErrorKind::IsADirectory),
+        ReadFailure::IsADirectory
+    );
+    for kind in [
+        io::ErrorKind::Other,
+        io::ErrorKind::Interrupted,
+        io::ErrorKind::InvalidData,
+    ] {
+        assert_eq!(ReadFailure::of(kind), ReadFailure::Other, "{kind:?}");
+    }
 }
 
 #[test]

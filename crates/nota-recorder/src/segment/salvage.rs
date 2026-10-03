@@ -15,7 +15,7 @@ use nota_core::{SampleIndex, SampleRate};
 use nota_store::SegmentRow;
 use sha2::{Digest, Sha256};
 
-use super::findings::{self, Finding, Problem, Verification};
+use super::findings::{self, Finding, Problem, ReadFailure, Verification};
 use super::flac::{self, FlacError};
 use super::plan::{self, JournalSummary, PlannedSegment};
 use super::publish::{Committed, DeletableJournal, TempSegment, delete_journals};
@@ -60,8 +60,8 @@ impl Published {
     }
 
     /// The committed rows this run checked that claim nothing: their file
-    /// is missing from the session directory, or doesn't match them
-    /// (another SHA-256, or another length). No segment was published over
+    /// is missing from the session directory, can't be read, or doesn't
+    /// match them (another SHA-256, or another length). No segment was published over
     /// their samples, so the file, if any, is as it was and the journals
     /// holding those samples are kept. They're also recorded in the
     /// session's findings file (see
@@ -199,10 +199,12 @@ pub fn needs_salvage<S: Fs>(session: &SessionDir<S>) -> io::Result<bool> {
 /// journal that isn't there any more is skipped.
 ///
 /// A committed row claims its samples only if its file is in the session's
-/// directory and matches it: the file's SHA-256 is the row's, and its FLAC
-/// header declares the row's number of samples. Only rows that overlap the
-/// journals' samples are checked, so the cost is bounded by what's being
-/// published. A row whose file is missing or doesn't match claims nothing,
+/// directory, can be read, and matches it: the file's SHA-256 is the row's,
+/// and its FLAC header declares the row's number of samples. Only rows that
+/// overlap the journals' samples are checked, so the cost is bounded by
+/// what's being published. A row whose file is missing, can't be read (for
+/// any reason, even one that may pass: the next run checks it again) or
+/// doesn't match claims nothing,
 /// and is a finding: reported in [`Published::findings`] and recorded in the
 /// session's findings file before anything is published. No segment is
 /// published over its samples, so its file, if any, is never replaced and
@@ -286,7 +288,7 @@ pub fn publish_journals<S: Fs, T: SegmentStore>(
         }
     };
     let mut published = Published::default();
-    let rows = claims(fs, dir, rows, &summaries, &mut published)?;
+    let rows = claims(fs, dir, rows, &summaries, &mut published);
     published.findings_unsaved = findings::record(fs, dir, &published.findings, Verification::Done)
         .err()
         .map(|e| e.kind());
@@ -334,16 +336,16 @@ pub fn publish_journals<S: Fs, T: SegmentStore>(
 }
 
 /// Of the committed `rows`, those that claim samples in this run: those
-/// overlapping a journal in `summaries` whose file is in `dir` and matches
-/// them. Overlapping rows whose file is missing or doesn't match go to
-/// `published.findings`.
+/// overlapping a journal in `summaries` whose file is in `dir`, reads, and
+/// matches them. Overlapping rows whose file is missing, unreadable or
+/// doesn't match go to `published.findings`.
 fn claims<S: Fs>(
     fs: &S,
     dir: &Path,
     rows: Vec<SegmentRow>,
     summaries: &[JournalSummary],
     published: &mut Published,
-) -> Result<Vec<SegmentRow>, PublishError> {
+) -> Vec<SegmentRow> {
     let mut claiming = Vec::new();
     for row in rows {
         let overlaps = summaries
@@ -353,9 +355,16 @@ fn claims<S: Fs>(
             continue;
         }
         let path = dir.join(segment_file_name(row.track(), row.range()));
-        let Some(bytes) = read_if_present(fs, &path)? else {
-            published.findings.push(Finding::new(row, Problem::Missing));
-            continue;
+        let bytes = match fs.read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                let problem = match e.kind() {
+                    io::ErrorKind::NotFound => Problem::Missing,
+                    kind => Problem::Unreadable(ReadFailure::of(kind)),
+                };
+                published.findings.push(Finding::new(row, problem));
+                continue;
+            }
         };
         let digest: [u8; 32] = Sha256::digest(&bytes).into();
         if &digest != row.sha256().as_bytes() {
@@ -370,7 +379,7 @@ fn claims<S: Fs>(
             claiming.push(row);
         }
     }
-    Ok(claiming)
+    claiming
 }
 
 /// Whether `segment`'s window shares a sample with any of `findings`' rows

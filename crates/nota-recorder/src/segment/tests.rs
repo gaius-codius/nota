@@ -1450,11 +1450,33 @@ fn findings_survive_any_later_failure_and_their_own_never_stops_publishing() {
     // publish error that leaves them.
     let mut durable_from = None;
     let mut unsaved = 0;
+    let mut row_reads = 0;
+    let unreadable = [(expected[0].0, Problem::Unreadable(ReadFailure::Other))];
     for at in 0..ops {
         let run = fs.copy_disk();
         run.fail_after(at, io::ErrorKind::Other);
         let result = salvage(&mut session_store(&run), length());
         let on_disk = read_findings(&session_dir(&run)).unwrap();
+        if let Ok(done) = &result
+            && as_found(done.findings()) == unreadable
+        {
+            // The failed operation was the read of the row's file: that's
+            // a finding too, recorded, and publishing carried on.
+            assert_eq!(as_found(on_disk.found()), unreadable);
+            assert!(!done.segments().is_empty());
+            assert!(!done.deleted().is_empty());
+            // The next run finds the file missing, and keeps both.
+            let again = salvage(&mut session_store(&run), length()).unwrap();
+            assert_eq!(as_found(again.findings()), expected);
+            let on_disk = read_findings(&session_dir(&run)).unwrap();
+            assert_eq!(
+                as_found(on_disk.found()),
+                [expected[0], unreadable[0]],
+                "failing op {at}"
+            );
+            row_reads += 1;
+            continue;
+        }
         let present = as_found(on_disk.found()) == expected;
         match durable_from {
             None if present => durable_from = Some(at),
@@ -1483,6 +1505,7 @@ fn findings_survive_any_later_failure_and_their_own_never_stops_publishing() {
     // Publishing comes after the findings, so failures there were tried.
     assert!(ops - durable_from > 20, "{durable_from} of {ops}");
     assert!(unsaved >= 4, "{unsaved}");
+    assert_eq!(row_reads, 1);
 }
 
 #[test]
@@ -1619,4 +1642,134 @@ fn salvage_removes_a_findings_temp_a_crash_left() {
     assert_eq!(as_found(done.findings()), expected);
     assert!(!fs.paths().contains(&temp));
     assert_eq!(observe(&fs), clean);
+}
+
+/// A recording with a committed row over the mic's first window whose file
+/// is there and matches, and that file's path and bytes.
+fn recording_with_a_good_row() -> (FakeFs, Promised, SegmentRow, PathBuf, Vec<u8>) {
+    let (fs, promised) = clean_run(Recording {
+        steps: 7,
+        publish: false,
+        fail_at: None,
+    });
+    let range = SampleRange::new(SampleIndex::ZERO, SampleIndex::new(1_500)).unwrap();
+    let flac = flac_of(MIC, 0, 1_500);
+    let row = plant_row(&fs, MIC, range, &flac, &flac);
+    (fs, promised, row, durable_path(MIC, range), flac)
+}
+
+#[test]
+fn an_unreadable_segment_file_claims_nothing_until_it_reads_and_matches() {
+    let (fs, promised, row, path, flac) = recording_with_a_good_row();
+    // Where salvage reads the row's file: every operation before it
+    // succeeds, so its place in the log is its place in the count.
+    let probe = fs.copy_disk();
+    salvage(&mut session_store(&probe), length()).unwrap();
+    let at = probe
+        .ops()
+        .iter()
+        .position(|op| *op == Op::Read(path.clone()))
+        .unwrap();
+    let planted = BTreeMap::from([(path.clone(), Some(flac))]);
+    for kind in [
+        io::ErrorKind::PermissionDenied,
+        io::ErrorKind::IsADirectory,
+        io::ErrorKind::Other,
+    ] {
+        let run = fs.copy_disk();
+        run.fail_after(at, kind);
+        // The read fails: the row claims nothing and is recorded, and
+        // every segment outside its window is published.
+        let done = salvage(&mut session_store(&run), length()).unwrap();
+        let expected = [(row, Problem::Unreadable(ReadFailure::of(kind)))];
+        assert_eq!(as_found(done.findings()), expected, "{kind:?}");
+        assert_eq!(done.findings_unsaved(), None);
+        for track in [MIC, SYSTEM] {
+            assert!(done.segments().iter().any(|r| r.track() == track));
+        }
+        check_mismatch_kept(&promised, &[row], &[row], &planted, &observe(&run))
+            .unwrap_or_else(|e| panic!("{kind:?}: {e}"));
+
+        // The finding survives a restart.
+        let restarted = run.crash(CrashOutcome::LoseUnsynced);
+        let recorded = read_findings(&session_dir(&restarted)).unwrap();
+        assert_eq!(as_found(recorded.found()), expected);
+
+        // Read now, and matching: the row claims its samples again, so the
+        // journals holding them go and nothing is published over it. The
+        // finding stays recorded; nothing new is found.
+        let again = salvage(&mut session_store(&restarted), length()).unwrap();
+        assert!(again.findings().is_empty(), "{kind:?}");
+        assert!(again.segments().is_empty());
+        assert!(!again.deleted().is_empty());
+        let seen = observe(&restarted);
+        check_mismatch_kept(&promised, &[], &[], &planted, &seen)
+            .unwrap_or_else(|e| panic!("{kind:?}, read again: {e}"));
+        assert!(seen.rows.clone().unwrap().contains(&row));
+        let recorded = read_findings(&session_dir(&restarted)).unwrap();
+        assert_eq!(as_found(recorded.found()), expected);
+        // And it stays that way.
+        assert_eq!(
+            salvage(&mut session_store(&restarted), length()).unwrap(),
+            Published::default()
+        );
+        assert!(
+            observe(&restarted) == seen,
+            "{kind:?}: a third salvage changed the disk"
+        );
+    }
+}
+
+#[test]
+fn a_directory_under_a_rows_name_never_lets_its_journals_go_at_any_crash() {
+    // A file that can never be read: a directory where the row's file
+    // should be.
+    let (disk, promised, row, path, _) = recording_with_a_good_row();
+    disk.remove(&path).unwrap();
+    disk.create_dir(&path).unwrap();
+    disk.sync_dir(&session()).unwrap();
+    let expected = [(row, Problem::Unreadable(ReadFailure::IsADirectory))];
+    let planted = BTreeMap::from([(path.clone(), None)]);
+    let is_dir = |fs: &FakeFs| {
+        fs.read(&path)
+            .is_err_and(|e| e.kind() == io::ErrorKind::IsADirectory)
+    };
+
+    let probe = disk.copy_disk();
+    let done = salvage(&mut session_store(&probe), length()).unwrap();
+    let ops = probe.attempted();
+    assert_eq!(as_found(done.findings()), expected);
+    for track in [MIC, SYSTEM] {
+        assert!(done.segments().iter().any(|r| r.track() == track));
+    }
+    let uninterrupted = observe(&probe);
+    check_mismatch_kept(&promised, &[row], &[row], &planted, &uninterrupted).unwrap();
+    assert!(is_dir(&probe));
+    let again = salvage(&mut session_store(&probe), length()).unwrap();
+    assert_eq!(as_found(again.findings()), expected);
+    assert!(again.segments().is_empty() && again.deleted().is_empty());
+    assert!(
+        observe(&probe) == uninterrupted,
+        "a second salvage changed the disk"
+    );
+
+    for after in 0..=ops {
+        for crash in CrashOutcome::standard() {
+            let run = disk.copy_disk();
+            run.crash_after(after);
+            let _ = salvage(&mut session_store(&run), length());
+            let survived = run.crash(crash);
+            let rerun = salvage(&mut session_store(&survived), length())
+                .unwrap_or_else(|e| panic!("after {after} ops, {crash:?}: {e}"));
+            assert_eq!(as_found(rerun.findings()), expected);
+            let seen = observe(&survived);
+            check_mismatch_kept(&promised, &[row], &[row], &planted, &seen)
+                .unwrap_or_else(|e| panic!("after {after} ops, {crash:?}: {e}"));
+            assert!(is_dir(&survived));
+            assert!(
+                seen == uninterrupted,
+                "salvage crashed after {after} ops, {crash:?}, ended differently"
+            );
+        }
+    }
 }

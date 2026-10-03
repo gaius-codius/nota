@@ -2,7 +2,7 @@
 //! directory so the app can show it.
 //!
 //! A committed row claims its samples only if its file is in the session's
-//! directory and matches it. A row that doesn't is a [`Finding`]: nothing is
+//! directory, can be read, and matches it. A row that doesn't is a [`Finding`]: nothing is
 //! published over its samples, its file is left alone, and the journals
 //! holding those samples are kept, until it's resolved (not in this
 //! version: every finding is [`Status::Unresolved`]).
@@ -24,8 +24,12 @@
 //! | 2 | version, 1 |
 //! | 1 | the last run's verification: 0 done, 1 unavailable |
 //! | 4 | the number of findings, `n` |
-//! | `n` × 58 | each finding: track (4), epoch (4), first sample (8), end sample (8), the row's SHA-256 (32), problem (1: 0 missing, 1 hash mismatch, 2 length mismatch), status (1: 0 unresolved) |
+//! | `n` × 58 | each finding: track (4), epoch (4), first sample (8), end sample (8), the row's SHA-256 (32), problem (1, below), status (1: 0 unresolved) |
 //! | 4 | CRC-32 of everything before it |
+//!
+//! The problem codes: 0 missing, 1 hash mismatch, 2 length mismatch, and
+//! for a file that couldn't be read, 3 permission denied, 4 a directory, 5
+//! any other I/O error.
 //!
 //! The file comes from disk, so it's parsed into typed values and anything
 //! else is refused: a wrong length, CRC, magic, version or count, an empty
@@ -67,6 +71,34 @@ pub enum Problem {
     /// The file's SHA-256 is the row's, but its FLAC header doesn't declare
     /// the row's number of samples.
     LengthMismatch,
+    /// There's something under the row's name, but reading it failed. It may
+    /// be transient (a later run that reads it and finds it matching lets
+    /// the row claim its samples again), but it's recorded either way.
+    Unreadable(ReadFailure),
+}
+
+/// Why a row's file couldn't be read: the error's kind, as far as the
+/// findings file keeps it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ReadFailure {
+    /// `EACCES` or `EPERM`.
+    PermissionDenied,
+    /// A directory is under the row's name.
+    IsADirectory,
+    /// Any other error (`EIO`, for one).
+    Other,
+}
+
+impl ReadFailure {
+    /// The failure an error of `kind` is.
+    #[must_use]
+    pub fn of(kind: io::ErrorKind) -> Self {
+        match kind {
+            io::ErrorKind::PermissionDenied => Self::PermissionDenied,
+            io::ErrorKind::IsADirectory => Self::IsADirectory,
+            _ => Self::Other,
+        }
+    }
 }
 
 impl Problem {
@@ -75,6 +107,9 @@ impl Problem {
             Self::Missing => 0,
             Self::HashMismatch => 1,
             Self::LengthMismatch => 2,
+            Self::Unreadable(ReadFailure::PermissionDenied) => 3,
+            Self::Unreadable(ReadFailure::IsADirectory) => 4,
+            Self::Unreadable(ReadFailure::Other) => 5,
         }
     }
 
@@ -83,6 +118,9 @@ impl Problem {
             0 => Some(Self::Missing),
             1 => Some(Self::HashMismatch),
             2 => Some(Self::LengthMismatch),
+            3 => Some(Self::Unreadable(ReadFailure::PermissionDenied)),
+            4 => Some(Self::Unreadable(ReadFailure::IsADirectory)),
+            5 => Some(Self::Unreadable(ReadFailure::Other)),
             _ => None,
         }
     }
