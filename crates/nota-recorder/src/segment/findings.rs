@@ -133,11 +133,14 @@ impl Problem {
 /// Whether a finding has been dealt with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Status {
-    /// Not yet: the row claims nothing, and its samples stay in journals.
+    /// Not yet dealt with. That says nothing about the row now: while its
+    /// file fails the check it claims nothing and its samples stay in
+    /// journals, but a later run that finds the file readable and matching
+    /// lets it claim them again, and the finding stays.
     Unresolved,
 }
 
-/// A committed row that claims nothing, and why.
+/// A committed row that claimed nothing when a run checked it, and why.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Finding {
     row: SegmentRow,
