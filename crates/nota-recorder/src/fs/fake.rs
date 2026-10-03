@@ -573,6 +573,13 @@ impl Fs for FakeFs {
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         let mut state = self.lock();
         state.admit()?;
+        if state.names.dirs.contains(path) {
+            // As Linux's read(2) on a directory: EISDIR.
+            return Err(io::Error::new(
+                io::ErrorKind::IsADirectory,
+                "is a directory",
+            ));
+        }
         let id = *state.names.files.get(path).ok_or_else(not_found)?;
         let data = state.inode(id)?.data.clone();
         state.log.push(Op::Read(path.to_path_buf()));
@@ -1074,6 +1081,25 @@ mod tests {
             hole_then_data |= blocks.windows(2).any(|w| w[0] && !w[1]);
         }
         assert!(hole_then_data, "no crash kept data after a lost block");
+    }
+
+    #[test]
+    fn reading_a_directory_fails_as_on_linux() {
+        let fs = FakeFs::with_dirs(["/s", "/s/d"]);
+        assert_eq!(
+            fs.read(&p("/s/d")).unwrap_err().kind(),
+            io::ErrorKind::IsADirectory
+        );
+        assert_eq!(
+            fs.read(&p("/s/none")).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        // StdFs agrees.
+        let dir = crate::test_dir::TestDir::new("fake-read-dir");
+        assert_eq!(
+            crate::fs::StdFs.read(&dir.0).unwrap_err().kind(),
+            io::ErrorKind::IsADirectory
+        );
     }
 
     #[test]

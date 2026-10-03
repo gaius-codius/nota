@@ -25,16 +25,15 @@
 //! for the journals the [`SessionWriter`] has finished; salvage calls it for
 //! every journal left in a session's directory. The rules:
 //! - Committed rows claim their samples first, but only a row whose file is
-//!   in the session directory and matches it (its SHA-256, and the number of
-//!   samples its FLAC header declares). A row whose file is missing or
-//!   doesn't match claims nothing, and nothing is published over its
-//!   samples, so its file, if any, stays and so do the journals holding
-//!   them; every other segment is published. Such rows are findings, kept
-//!   in the session directory for the app to show (see `findings`). Then
-//!   journals claim theirs in
-//!   descending [`JournalId`] order: after a crash a broken journal's
-//!   unsynced tail can survive alongside its replacement, and the
-//!   replacement, started later, wins.
+//!   in the session directory, can be read, and matches it (its SHA-256, and
+//!   the number of samples its FLAC header declares). A row whose file is
+//!   missing, can't be read or doesn't match claims nothing, and nothing is
+//!   published over its samples, so its file, if any, stays and so do the
+//!   journals holding them; every other segment is published. Such rows are
+//!   findings, kept in the session directory for the app to show (see
+//!   `findings`). Then journals claim theirs in descending [`JournalId`]
+//!   order: after a crash a broken journal's unsynced tail can survive
+//!   alongside its replacement, and the replacement, started later, wins.
 //! - What's left is split at window boundaries and grouped by epoch; each
 //!   continuous run in a group is one segment.
 //! - A journal is deleted once every sample it holds is claimed by
@@ -61,8 +60,8 @@ use std::path::{Path, PathBuf};
 use nota_core::{SampleIndex, SampleRange, SampleRate, TrackId};
 
 pub use findings::{
-    FILE_NAME as FINDINGS_FILE_NAME, Finding, Findings, FindingsError, Problem, Status,
-    Verification, read_findings,
+    FILE_NAME as FINDINGS_FILE_NAME, Finding, Findings, FindingsError, Problem, ReadFailure,
+    Status, Verification, read_findings,
 };
 pub use flac::FlacError;
 pub use publish::DurableSegment;
