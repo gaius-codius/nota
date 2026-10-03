@@ -376,6 +376,11 @@ fn exists() -> io::Error {
     io::Error::new(io::ErrorKind::AlreadyExists, "the name exists")
 }
 
+/// As Linux's read(2), unlink(2) and rename(2) onto a directory: `EISDIR`.
+fn is_a_directory() -> io::Error {
+    io::Error::new(io::ErrorKind::IsADirectory, "is a directory")
+}
+
 impl FakeFs {
     /// An empty filesystem holding only the root directory, `/`. It never
     /// crashes until told to.
@@ -526,7 +531,7 @@ impl Fs for FakeFs {
         let mut state = self.lock();
         state.admit()?;
         if state.names.dirs.contains(to) {
-            return Err(exists());
+            return Err(is_a_directory());
         }
         let id = state.names.files.remove(from).ok_or_else(not_found)?;
         state.names.files.insert(to.to_path_buf(), id);
@@ -564,6 +569,9 @@ impl Fs for FakeFs {
     fn remove(&self, path: &Path) -> io::Result<()> {
         let mut state = self.lock();
         state.admit()?;
+        if state.names.dirs.contains(path) {
+            return Err(is_a_directory());
+        }
         state.names.files.remove(path).ok_or_else(not_found)?;
         state.pending.push(NameOp::Unlink(path.to_path_buf()));
         state.log.push(Op::Remove(path.to_path_buf()));
@@ -574,11 +582,7 @@ impl Fs for FakeFs {
         let mut state = self.lock();
         state.admit()?;
         if state.names.dirs.contains(path) {
-            // As Linux's read(2) on a directory: EISDIR.
-            return Err(io::Error::new(
-                io::ErrorKind::IsADirectory,
-                "is a directory",
-            ));
+            return Err(is_a_directory());
         }
         let id = *state.names.files.get(path).ok_or_else(not_found)?;
         let data = state.inode(id)?.data.clone();
@@ -1009,7 +1013,7 @@ mod tests {
         fs.create_dir(&p("/rec/sub")).unwrap();
         assert_eq!(
             fs.rename(&p("/rec/j"), &p("/rec/sub")).unwrap_err().kind(),
-            io::ErrorKind::AlreadyExists
+            io::ErrorKind::IsADirectory
         );
         assert_eq!(fs.list(&p("/rec")).unwrap(), [p("/rec/j"), p("/rec/sub")]);
         assert_eq!(fs.list(&p("/")).unwrap(), [p("/rec")]);
@@ -1098,6 +1102,35 @@ mod tests {
         let dir = crate::test_dir::TestDir::new("fake-read-dir");
         assert_eq!(
             crate::fs::StdFs.read(&dir.0).unwrap_err().kind(),
+            io::ErrorKind::IsADirectory
+        );
+    }
+
+    #[test]
+    fn removing_or_renaming_onto_a_directory_fails_as_on_linux() {
+        let fs = FakeFs::with_dirs(["/s", "/s/d"]);
+        let _file = fs.create(&p("/s/f")).unwrap();
+        assert_eq!(
+            fs.remove(&p("/s/d")).unwrap_err().kind(),
+            io::ErrorKind::IsADirectory
+        );
+        assert_eq!(
+            fs.rename(&p("/s/f"), &p("/s/d")).unwrap_err().kind(),
+            io::ErrorKind::IsADirectory
+        );
+        assert_eq!(fs.paths(), [p("/s/f")]);
+        // StdFs agrees.
+        let dir = crate::test_dir::TestDir::new("fake-remove-dir");
+        let sub = dir.0.join("d");
+        let file = dir.0.join("f");
+        crate::fs::StdFs.create_dir(&sub).unwrap();
+        let _file = crate::fs::StdFs.create(&file).unwrap();
+        assert_eq!(
+            crate::fs::StdFs.remove(&sub).unwrap_err().kind(),
+            io::ErrorKind::IsADirectory
+        );
+        assert_eq!(
+            crate::fs::StdFs.rename(&file, &sub).unwrap_err().kind(),
             io::ErrorKind::IsADirectory
         );
     }
