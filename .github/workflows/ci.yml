@@ -114,6 +114,11 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    env:
+      # Warnings stay warnings here: a mutant that leaves a parameter unused
+      # would otherwise fail to build and count as unviable, not tested.
+      # Lint and test still deny them.
+      CARGO_BUILD_WARNINGS: warn
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -100,9 +100,9 @@ fn distance(a: &[String], b: &[String]) -> usize {
     row[b.len()]
 }
 
-/// The real engine, from this build.
+/// The real engine, from this build, with the shipped timings.
 fn engine_config(root: &Path) -> EngineConfig {
-    let mut config = EngineConfig::new(EngineCommand {
+    EngineConfig::new(EngineCommand {
         program: PathBuf::from(env!("CARGO_BIN_EXE_nota")),
         args: [
             "engine",
@@ -118,9 +118,7 @@ fn engine_config(root: &Path) -> EngineConfig {
         .map(OsString::from)
         .collect(),
         stderr: EngineStderr::Null,
-    });
-    config.initial_backoff = Duration::from_millis(100);
-    config
+    })
 }
 
 /// Acceptance (GAI-128) with the real engine.
@@ -169,11 +167,19 @@ fn killed_mid_chunk_the_real_engine_resumes_without_losing_audio() {
         feed(&mut supervisor, k);
     }
     let sent_at_kill = 80 * 1_600;
-    let mut confirmed = 0;
+    // The supervisor sends each text before the confirmation that releases
+    // it, so wait for that confirmation too.
+    let mut confirmed;
+    let mut heard = false;
     loop {
         match next_event(Duration::from_secs(30)) {
-            EngineEvent::Transcript(_) => break,
-            EngineEvent::Confirmed { up_to, .. } => confirmed = up_to.get(),
+            EngineEvent::Transcript(_) => heard = true,
+            EngineEvent::Confirmed { up_to, .. } => {
+                confirmed = up_to.get();
+                if heard {
+                    break;
+                }
+            }
             _ => {}
         }
     }
@@ -215,6 +221,13 @@ fn killed_mid_chunk_the_real_engine_resumes_without_losing_audio() {
         }
     }
     assert!(offline);
+    // Every sample was dealt with: none skipped, all confirmed.
+    assert!(
+        !seen
+            .iter()
+            .any(|(_, e)| matches!(e, EngineEvent::Skipped { .. })),
+        "audio skipped"
+    );
     let took = resumed.unwrap().checked_duration_since(killed_at).unwrap();
     assert!(
         took < Duration::from_secs(10),

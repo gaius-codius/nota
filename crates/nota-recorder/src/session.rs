@@ -266,6 +266,12 @@ impl<S: Fs> SessionWriter<S> {
         ended
     }
 
+    /// The rate stamped on every journal this writer starts.
+    #[must_use]
+    pub const fn rate(&self) -> SampleRate {
+        self.rate
+    }
+
     /// The next sample `track` will record, or `None` if it wasn't started.
     #[must_use]
     pub fn next_sample(&self, track: TrackId) -> Option<SampleIndex> {

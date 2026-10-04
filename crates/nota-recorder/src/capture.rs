@@ -154,15 +154,25 @@ impl CaptureSender {
     }
 }
 
-/// The recorder thread's end of the channel.
+/// The recorder thread's end of the channel, and the rate the stream
+/// captures at.
 #[derive(Debug)]
-pub struct CaptureReceiver(mpsc::Receiver<CaptureEvent>);
+pub struct CaptureReceiver {
+    events: mpsc::Receiver<CaptureEvent>,
+    rate: SampleRate,
+}
 
 impl CaptureReceiver {
+    /// The rate the stream captures at.
+    #[must_use]
+    pub const fn rate(&self) -> SampleRate {
+        self.rate
+    }
+
     /// The next event, waiting at most `timeout`. `None` if none came in
     /// time. A channel every sender has left reads as [`CaptureEvent::Stopped`].
     fn next(&self, timeout: Duration) -> Option<CaptureEvent> {
-        match self.0.recv_timeout(timeout) {
+        match self.events.recv_timeout(timeout) {
             Ok(event) => Some(event),
             Err(mpsc::RecvTimeoutError::Timeout) => None,
             Err(mpsc::RecvTimeoutError::Disconnected) => Some(CaptureEvent::Stopped),
@@ -232,7 +242,7 @@ pub fn start<B: CaptureBackend>(
             stopped: tx,
             stopping,
         },
-        CaptureReceiver(rx),
+        CaptureReceiver { events: rx, rate },
     ))
 }
 
@@ -260,6 +270,14 @@ pub enum RecordError {
     /// The track can't be recorded (it wasn't started, or ran out of sample
     /// numbers or journal ids).
     Session(SessionError),
+    /// The stream captures at another rate than the writer stamps on its
+    /// journals, so its samples would be timed wrongly. Nothing is recorded.
+    RateMismatch {
+        /// The stream's rate.
+        capture: SampleRate,
+        /// The writer's.
+        journal: SampleRate,
+    },
 }
 
 impl fmt::Display for RecordError {
@@ -267,6 +285,12 @@ impl fmt::Display for RecordError {
         match self {
             Self::Capture(e) => e.fmt(f),
             Self::Session(e) => e.fmt(f),
+            Self::RateMismatch { capture, journal } => write!(
+                f,
+                "the stream captures at {} Hz but journals are written at {} Hz",
+                capture.hz(),
+                journal.hz()
+            ),
         }
     }
 }
@@ -276,6 +300,7 @@ impl std::error::Error for RecordError {
         match self {
             Self::Capture(e) => Some(e),
             Self::Session(e) => Some(e),
+            Self::RateMismatch { .. } => None,
         }
     }
 }
@@ -291,8 +316,15 @@ impl std::error::Error for RecordError {
 /// [`SessionWriter::finish`](crate::session::SessionWriter::finish) for the
 /// last journals.
 ///
+/// `report` runs on this thread, between appends: return quickly (hand
+/// finished journals to another thread to publish). Audio that arrives
+/// meanwhile waits in memory, not yet counted as captured, and is lost if
+/// the process dies.
+///
 /// # Errors
 ///
+/// [`RecordError::RateMismatch`], before anything is recorded, if the
+/// stream and `writer` run at different rates;
 /// [`RecordError::Capture`] if the stream failed;
 /// [`RecordError::Session`] if `track` can't be recorded. A journal that
 /// breaks isn't an error here: it's reported, and recording goes on.
@@ -302,6 +334,12 @@ pub fn record_track<S: Fs>(
     events: &CaptureReceiver,
     report: &mut dyn FnMut(RecorderEvent),
 ) -> Result<(), RecordError> {
+    if events.rate() != writer.rate() {
+        return Err(RecordError::RateMismatch {
+            capture: events.rate(),
+            journal: writer.rate(),
+        });
+    }
     loop {
         let event = events.next(IDLE_SYNC_CHECK);
         let outcome = match event {
