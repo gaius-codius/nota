@@ -184,34 +184,39 @@ where
         self
     }
 
-    /// Crashes recovery as [`Self::crash_recovery`] does, but with each of
-    /// these outcomes at each point, whatever the scenario's crash left:
-    /// recovery from a crash that kept everything may itself lose what it
-    /// didn't sync, and the other way round.
+    /// Crashes recovery as [`Self::crash_recovery`] does (turning it on),
+    /// but with each of these outcomes at each point, whatever the
+    /// scenario's crash left: recovery from a crash that kept everything may
+    /// itself lose what it didn't sync, and the other way round. An empty
+    /// list means the scenario's own outcome.
     #[must_use]
     pub fn recovery_outcomes(mut self, outcomes: Vec<CrashOutcome>) -> Self {
-        self.recovery_crashes().outcomes = Some(outcomes);
+        self.recovery_crashes().outcomes = (!outcomes.is_empty()).then_some(outcomes);
         self
     }
 
-    /// Of each case's recovery crashes, numbered by point then outcome,
-    /// keeps only every `every`th, starting one further along in each case:
-    /// over any `every` cases in a row, each number is kept once. Every case
-    /// still runs recovery uncrashed too. For a test with too many recovery
-    /// crashes to run them all.
+    /// Crashes recovery (turning [`Self::crash_recovery`] on) only at every
+    /// `every`th of its crash points, each with every recovery outcome,
+    /// starting one point further along in each case (wrapping round when
+    /// recovery has fewer points): every case crashes recovery at least
+    /// once, and cases in a row whose recovery takes as many operations
+    /// crash it at different points. Every case still runs recovery
+    /// uncrashed too. For a test with too
+    /// many recovery crashes to run them all.
     #[must_use]
     pub fn sample_recovery(mut self, every: usize) -> Self {
         self.recovery_crashes().every = every.max(1);
         self
     }
 
-    /// For every `every`th recovery crash kept, also crashes the re-run,
-    /// after each of its operations (and before the first), with each
-    /// recovery outcome, and runs recovery a third time on what survived.
-    /// With several outcomes they mix: a first run that lost what it didn't
-    /// sync, then a re-run that kept it, and so on. With
-    /// [`Self::sample_recovery`], the re-run's crashes are sampled the same
-    /// way.
+    /// For every `every`th recovery crash kept (turning
+    /// [`Self::crash_recovery`] on), also crashes the re-run, after each of
+    /// its operations (and before the first), with each recovery outcome,
+    /// and runs recovery a third time on what survived. With several
+    /// outcomes they mix: a first run that lost what it didn't sync, then a
+    /// re-run that kept it, and so on. With [`Self::sample_recovery`], the
+    /// re-run's crash points are sampled the same way, the start moving on
+    /// by one per crashed re-run.
     #[must_use]
     pub fn crash_rerun(mut self, every: usize) -> Self {
         self.recovery_crashes().rerun_every = Some(every.max(1));
@@ -243,9 +248,10 @@ where
             recovery_crashed: 0,
             rerun_crashed: 0,
         };
-        // Cases so far, and recovery crashes kept.
+        // Cases so far, recovery crashes kept, and re-runs crashed.
         let mut case_index = 0;
         let mut kept = 0;
+        let mut reruns = 0;
         for after_ops in 0..=scenario_ops {
             // One run per crash point: what survives depends only on the
             // filesystem's state at the crash, and each outcome is taken
@@ -280,10 +286,14 @@ where
                 };
                 let own = [outcome];
                 let recovery_outcomes = plan.outcomes.as_deref().unwrap_or(&own);
-                let offset = case_index % plan.every;
+                let points = self.recovery_points(&survived, plan.every, case_index);
                 case_index += 1;
-                let points = self.recovery_points(&survived, recovery_outcomes);
-                for first in points.into_iter().skip(offset).step_by(plan.every) {
+                let crashes = points.iter().flat_map(|&after_ops| {
+                    recovery_outcomes
+                        .iter()
+                        .map(move |&outcome| RecoveryCrash { after_ops, outcome })
+                });
+                for first in crashes {
                     kept += 1;
                     let disk = self.crash_one(&survived, first);
                     self.check_one(&case(vec![first], disk.copy_disk()), &observed)?;
@@ -293,9 +303,14 @@ where
                     if plan.rerun_every.is_none_or(|n| (kept - 1) % n != 0) {
                         continue;
                     }
-                    let rerun = self.recovery_points(&disk, recovery_outcomes);
-                    let offset = kept % plan.every;
-                    for second in rerun.into_iter().skip(offset).step_by(plan.every) {
+                    let points = self.recovery_points(&disk, plan.every, reruns);
+                    reruns += 1;
+                    let crashes = points.iter().flat_map(|&after_ops| {
+                        recovery_outcomes
+                            .iter()
+                            .map(move |&outcome| RecoveryCrash { after_ops, outcome })
+                    });
+                    for second in crashes {
                         let last = self.crash_one(&disk, second);
                         self.check_one(&case(vec![first, second], last), &observed)?;
                         summary.cases += 1;
@@ -307,19 +322,15 @@ where
         Ok(summary)
     }
 
-    /// Every point recovery of `disk` can crash at, with an outcome each:
-    /// with one outcome, each point with it; with several, each point with
-    /// each of them.
-    fn recovery_points(&self, disk: &FakeFs, outcomes: &[CrashOutcome]) -> Vec<RecoveryCrash> {
+    /// The points recovery of `disk` is crashed at: of every point it can
+    /// crash at (after 0 operations, 1, and so on to the end), every
+    /// `every`th, the `nth` sample starting `nth` points further along
+    /// (wrapping round, so there's always at least one).
+    fn recovery_points(&self, disk: &FakeFs, every: usize, nth: usize) -> Vec<usize> {
         let probe = disk.copy_disk();
         (self.recover)(&probe);
-        (0..=probe.attempted())
-            .flat_map(|after_ops| {
-                outcomes
-                    .iter()
-                    .map(move |&outcome| RecoveryCrash { after_ops, outcome })
-            })
-            .collect()
+        let count = probe.attempted() + 1;
+        (nth % every % count..count).step_by(every).collect()
     }
 
     /// Runs recovery on a copy of `disk`, crashed as `crash` says, and
@@ -682,12 +693,12 @@ mod tests {
     }
 
     #[test]
-    fn crash_rerun_catches_a_recovery_unsafe_to_crash_twice() {
+    fn crash_rerun_catches_a_recovery_that_cant_be_crashed_twice() {
         // Recovery that moves the temp file aside, then into place: safe to
         // crash. But when it finds the file aside, from a crashed run, it
-        // copies it the unsafe way: the source is gone before the copy is
+        // copies it carelessly: the source is gone before the copy is
         // durable.
-        let twice_unsafe = |fs: &FakeFs| {
+        let careless_on_rerun = |fs: &FakeFs| {
             let dir = Path::new("/s");
             let (tmp, aside, seg) = (dir.join("seg.tmp"), dir.join("seg.bak"), dir.join("seg"));
             if let Ok(bytes) = fs.read(&aside) {
@@ -706,7 +717,7 @@ mod tests {
             published(fs)
         };
         let test = || {
-            CrashTest::new(durable_temp, twice_unsafe, MUST_PUBLISH)
+            CrashTest::new(durable_temp, careless_on_rerun, MUST_PUBLISH)
                 .dirs(["/s"])
                 .outcomes(vec![CrashOutcome::KeepAll])
                 .crash_recovery()
@@ -753,46 +764,116 @@ mod tests {
     }
 
     #[test]
+    fn crash_rerun_starts_with_the_first_recovery_crash_and_takes_every_nth() {
+        use std::cell::RefCell;
+        // Per recovery crash, in order: whether its re-run was crashed.
+        let reruns: RefCell<Vec<bool>> = RefCell::new(Vec::new());
+        CrashTest::new(
+            |fs| publish(fs, true).is_ok(),
+            |fs| finish_publish(fs, true),
+            |case: &CrashCase, done: &bool, got: &Option<Vec<u8>>| {
+                let mut reruns = reruns.borrow_mut();
+                match case.recovery_crashes.len() {
+                    1 => reruns.push(false),
+                    2 => {
+                        if let Some(last) = reruns.last_mut() {
+                            *last = true;
+                        }
+                    }
+                    _ => {}
+                }
+                ALWAYS_PUBLISHED(case, done, got)
+            },
+        )
+        .dirs(["/s"])
+        .outcomes(vec![CrashOutcome::LoseUnsynced])
+        .crash_rerun(3)
+        .run()
+        .unwrap();
+        let reruns = reruns.into_inner();
+        assert!(reruns.len() > 6, "{reruns:?}");
+        let want: Vec<bool> = (0..reruns.len()).map(|i| i % 3 == 0).collect();
+        assert_eq!(reruns, want);
+    }
+
+    #[test]
     fn sample_recovery_keeps_every_nth_and_still_reaches_every_point() {
         use std::cell::RefCell;
         use std::collections::BTreeSet;
+        let outcomes = vec![
+            CrashOutcome::LoseUnsynced,
+            CrashOutcome::KeepAll,
+            CrashOutcome::Partial { seed: 1 },
+        ];
         let run = |every: usize| {
+            // (scenario outcome, recovery point, recovery outcome) of each
+            // first recovery crash.
             let seen = RefCell::new(BTreeSet::new());
             let summary = CrashTest::new(
                 |fs| publish(fs, true).is_ok(),
                 |fs| finish_publish(fs, true),
-                |case: &CrashCase, done: &bool, got: &Option<Vec<u8>>| {
+                |case: &CrashCase, _: &bool, _: &Option<Vec<u8>>| {
                     if let Some(first) = case.recovery_crashes.first() {
-                        seen.borrow_mut()
-                            .insert((first.after_ops, format!("{:?}", first.outcome)));
+                        seen.borrow_mut().insert((
+                            format!("{:?}", case.outcome),
+                            first.after_ops,
+                            format!("{:?}", first.outcome),
+                        ));
                     }
-                    ALWAYS_PUBLISHED(case, done, got)
+                    Ok(())
                 },
             )
             .dirs(["/s"])
-            .outcomes(vec![CrashOutcome::LoseUnsynced])
-            .recovery_outcomes(vec![CrashOutcome::KeepAll, CrashOutcome::LoseUnsynced])
+            .outcomes(outcomes.clone())
+            .recovery_outcomes(outcomes[..2].to_vec())
             .sample_recovery(every)
             .run()
             .unwrap();
             (summary, seen.into_inner())
         };
         let (all, every_crash) = run(1);
-        let (sampled, sampled_crashes) = run(3);
+        let (sampled, sampled_crashes) = run(2);
         assert_eq!(sampled.scenario_ops, all.scenario_ops);
-        // About a third of the recovery crashes...
-        assert!(
-            3 * sampled.recovery_crashed <= all.recovery_crashed + 3 * (all.scenario_ops + 1),
-            "{sampled:?} {all:?}"
-        );
+        // About half the recovery crashes, and at least one per case...
+        let cases = 3 * (all.scenario_ops + 1);
         assert!(
             sampled.recovery_crashed < all.recovery_crashed,
             "{sampled:?}"
         );
-        // ...yet every point and outcome is crashed in some case.
-        assert!(every_crash.len() > 4, "{every_crash:?}");
-        assert_eq!(sampled_crashes, every_crash);
+        assert!(
+            2 * sampled.recovery_crashed <= all.recovery_crashed + 2 * 2 * cases,
+            "{sampled:?} {all:?}"
+        );
+        assert!(sampled.recovery_crashed >= 2 * cases, "{sampled:?}");
+        // ...yet every point is crashed in some case, and every scenario
+        // outcome meets every recovery outcome.
+        let points = |s: &BTreeSet<(String, usize, String)>| -> BTreeSet<usize> {
+            s.iter().map(|c| c.1).collect()
+        };
+        let pairs = |s: &BTreeSet<(String, usize, String)>| -> BTreeSet<(String, String)> {
+            s.iter().map(|c| (c.0.clone(), c.2.clone())).collect()
+        };
+        assert!(points(&every_crash).len() > 4, "{every_crash:?}");
+        assert_eq!(points(&sampled_crashes), points(&every_crash));
+        assert_eq!(pairs(&sampled_crashes).len(), 3 * 2);
+        assert_eq!(pairs(&sampled_crashes), pairs(&every_crash));
         // A stride of zero is taken as one.
         assert_eq!(run(0).0, all);
+    }
+
+    #[test]
+    fn an_empty_list_of_recovery_outcomes_means_the_scenarios_own() {
+        let test = || {
+            CrashTest::new(
+                |fs| publish(fs, true).is_ok(),
+                |fs| finish_publish(fs, true),
+                ALWAYS_PUBLISHED,
+            )
+            .dirs(["/s"])
+            .outcomes(vec![CrashOutcome::LoseUnsynced])
+        };
+        let own = test().crash_recovery().run().unwrap();
+        assert!(own.recovery_crashed > 0, "{own:?}");
+        assert_eq!(test().recovery_outcomes(Vec::new()).run().unwrap(), own);
     }
 }

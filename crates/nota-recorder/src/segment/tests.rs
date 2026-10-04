@@ -485,6 +485,8 @@ fn worst_lag(promised: &Promised) -> u64 {
         .captured
         .iter()
         .map(|(track, captured)| {
+            // Every started track has a durable position; a missing one
+            // counts from zero, so it can only fail the check.
             let durable = promised.durable.get(track).map_or(0, |d| d.get());
             captured.get().saturating_sub(durable)
         })
@@ -492,9 +494,79 @@ fn worst_lag(promised: &Promised) -> u64 {
         .unwrap_or(0)
 }
 
+/// No track's journals hold more than [`LAG_LIMIT`] written past what was
+/// fsync'd, measured on the disk the crash left when it kept everything
+/// (`seen`), from the scenario's operations: for frames a call wrote before
+/// it failed, which the writer's word doesn't cover.
+fn check_written_lag(case: &CrashCase, promised: &Promised, seen: &Observed) -> Result<(), String> {
+    // Per journal, how many of its bytes an fsync covered.
+    let mut written: BTreeMap<&Path, usize> = BTreeMap::new();
+    let mut synced: BTreeMap<&Path, usize> = BTreeMap::new();
+    for op in &case.ops {
+        match op {
+            Op::Write { path, len } if is_journal(path) => {
+                *written.entry(path).or_default() += len;
+            }
+            Op::Sync(path) if is_journal(path) => {
+                synced.insert(path, written.get(path.as_path()).copied().unwrap_or(0));
+            }
+            _ => {}
+        }
+    }
+    // Per track, the furthest sample written, and the furthest durable:
+    // in a row (its journal synced before it was published), or in an
+    // fsync'd part of a journal.
+    let mut ends: BTreeMap<TrackId, (u64, u64)> = promised
+        .durable
+        .iter()
+        .map(|(&t, d)| (t, (d.get(), d.get())))
+        .collect();
+    let mut note = |track: TrackId, end: u64, durable: bool| {
+        let e = ends.entry(track).or_insert((0, 0));
+        e.0 = e.0.max(end);
+        if durable {
+            e.1 = e.1.max(end);
+        }
+    };
+    for row in seen.rows.as_ref().map_or(&[][..], Vec::as_slice) {
+        note(row.track(), row.range().end().get(), true);
+    }
+    for (path, bytes) in &seen.files {
+        if !is_journal(path) {
+            continue;
+        }
+        let read = read_journal(bytes);
+        let Some(track) = read.header().map(crate::journal::JournalHeader::track) else {
+            continue;
+        };
+        if let Some(r) = read.range() {
+            note(track, r.end().get(), false);
+        }
+        let len = synced
+            .get(path.as_path())
+            .copied()
+            .unwrap_or(0)
+            .min(bytes.len());
+        if let Some(r) = read_journal(&bytes[..len]).range() {
+            note(track, r.end().get(), true);
+        }
+    }
+    for (track, (end, durable)) in ends {
+        let lag = end.saturating_sub(durable);
+        if lag > LAG_LIMIT {
+            return Err(format!(
+                "track {}: {lag} samples written but not durable (written to {end}, durable to {durable})",
+                track.get()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The invariants, at any crash point:
 /// - at the crash: no track had more than [`LAG_LIMIT`] captured but not
-///   durable;
+///   durable, counting what the writer accepted and, when the crash kept
+///   everything, every journal frame written, even by a call that failed;
 /// - before salvage: no row without its file; every durable sample is in a
 ///   row's file or a journal; nothing misread;
 /// - after salvage: only segments and rows are left, holding every durable
@@ -512,6 +584,10 @@ fn check(case: &CrashCase, promised: &Promised, got: &Recovered) -> Result<(), S
     }
     let in_rows = row_samples(&got.before).map_err(|e| format!("before salvage: {e}"))?;
     let in_journals = journal_samples(&got.before).map_err(|e| format!("before salvage: {e}"))?;
+    if case.outcome == CrashOutcome::KeepAll && case.recovery_crashes.is_empty() {
+        // The disk as the crash found it: frames written mid-call count.
+        check_written_lag(case, promised, &got.before)?;
+    }
     let held = in_rows.union(&in_journals);
     check_durable(promised, &held).map_err(|e| format!("before salvage: {e}"))?;
     let after = got.after.clone()?;
@@ -588,10 +664,10 @@ fn recording_and_salvage_crashed_anywhere_end_as_an_uninterrupted_salvage() {
         .unwrap();
     assert!(first_row < last_journal, "nothing published live");
 
-    // Every crash point and outcome of the recording. Salvage is crashed
-    // after each of its operations with three outcomes, a sample of them
-    // per case (every point and outcome in some case), and some of those
-    // re-runs crashed at every point too.
+    // Every crash point and outcome of the recording. Salvage is crashed at
+    // a sample of its points per case, the sample moving along from case to
+    // case, each with three outcomes; the re-runs of some of those are
+    // crashed at a sample of their points too.
     let worst = std::cell::Cell::new(0);
     let summary = CrashTest::new(
         move |fs: &FakeFs| record(fs, how),
@@ -651,7 +727,7 @@ fn a_recording_in_small_chunks_never_lags_past_the_limit_at_any_crash() {
 }
 
 const SAMPLE: usize = 200;
-const RERUN: usize = 5;
+const RERUN: usize = 20;
 
 /// Crashes salvage of `disk` after each of its operations, under every
 /// standard outcome, and runs it again: the end state must be byte for byte
@@ -733,33 +809,26 @@ fn salvage_crashed_after_every_operation_ends_as_an_uninterrupted_run() {
 
 #[test]
 fn recovery_crashed_at_every_point_of_a_short_recording() {
-    // Nearly the full product, on a short recording with live publishing:
-    // every crash point of the recording with three outcomes, then every
-    // sixth of salvage's crash points and outcomes (each in some case), and
-    // the re-run of every 25th of those crashed the same way.
+    // The full product on a short recording with live publishing: every
+    // crash point of the recording with three outcomes, and salvage crashed
+    // after each of its operations with the same outcome. Mixed outcomes and
+    // crashed re-runs are in the long test above.
     let how = Recording {
         steps: 2,
         publish: true,
         fail_at: None,
     };
-    let outcomes = vec![
-        CrashOutcome::LoseUnsynced,
-        CrashOutcome::KeepAll,
-        CrashOutcome::Partial { seed: 3 },
-    ];
     let summary = crash_test(how)
-        .outcomes(outcomes.clone())
-        .recovery_outcomes(outcomes)
-        .sample_recovery(6)
-        .crash_rerun(25)
+        .outcomes(vec![
+            CrashOutcome::LoseUnsynced,
+            CrashOutcome::KeepAll,
+            CrashOutcome::Partial { seed: 3 },
+        ])
+        .crash_recovery()
         .run()
         .unwrap_or_else(|failure| panic!("{failure}"));
     assert!(
         summary.recovery_crashed > 3 * (summary.scenario_ops + 1),
-        "{summary:?}"
-    );
-    assert!(
-        summary.rerun_crashed > summary.recovery_crashed / 25,
         "{summary:?}"
     );
 }

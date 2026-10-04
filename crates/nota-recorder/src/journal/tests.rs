@@ -201,7 +201,13 @@ fn worst_lag(promised: &Promised) -> SampleCount {
         .captured
         .iter()
         .map(|(track, &captured)| {
-            let durable = promised.durable.get(track).copied().unwrap_or(captured);
+            // Every created journal has a durable position; a missing one
+            // counts from zero, so it can only fail the check.
+            let durable = promised
+                .durable
+                .get(track)
+                .copied()
+                .unwrap_or(SampleIndex::ZERO);
             captured
                 .checked_count_since(durable)
                 .unwrap_or(SampleCount::ZERO)
