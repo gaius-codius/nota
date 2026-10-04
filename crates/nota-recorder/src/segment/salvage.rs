@@ -32,6 +32,7 @@ pub struct Published {
     segments: Vec<SegmentRow>,
     deleted: Vec<JournalId>,
     quarantined: Vec<PathBuf>,
+    unread: Vec<(FinishedJournal, io::ErrorKind)>,
     findings: Vec<Finding>,
     findings_unsaved: Option<io::ErrorKind>,
 }
@@ -57,6 +58,23 @@ impl Published {
     #[must_use]
     pub fn quarantined(&self) -> &[PathBuf] {
         &self.quarantined
+    }
+
+    /// The journals that are there but couldn't be read (`EIO`, `EACCES`, a
+    /// directory under a journal's name), with the error's kind. Each is
+    /// left as it is, not renamed or deleted, and nothing in it is
+    /// published or planned around: the failure may pass, and what it holds
+    /// isn't known. Every other segment is published; where this journal
+    /// holds samples of a window, the window's other samples may be
+    /// published without them, and a later run that reads it publishes the
+    /// rest of the window as further segments. A committed row that only
+    /// they overlap isn't checked, so it isn't a finding this run. Pass them
+    /// again to retry; salvage finds them again by name. Not to be confused
+    /// with [`Self::quarantined`]: journals that did read, but whose contents
+    /// couldn't be.
+    #[must_use]
+    pub fn unread(&self) -> &[(FinishedJournal, io::ErrorKind)] {
+        &self.unread
     }
 
     /// The committed rows this run checked that claim nothing: their file
@@ -196,7 +214,9 @@ pub fn needs_salvage<S: Fs>(session: &SessionDir<S>) -> io::Result<bool> {
 /// segments: plans the segments that its store doesn't hold yet (see the
 /// module docs for the rules), publishes each in the fixed order, and
 /// deletes each journal once every sample it holds is in a committed row. A
-/// journal that isn't there any more is skipped.
+/// journal that isn't there any more is skipped. One that's there but can't
+/// be read is left as it is and reported in [`Published::unread`]; every
+/// other segment is published.
 ///
 /// A committed row claims its samples only if its file is in the session's
 /// directory, can be read, and matches it: the file's SHA-256 is the row's,
@@ -227,7 +247,10 @@ pub fn needs_salvage<S: Fs>(session: &SessionDir<S>) -> io::Result<bool> {
 /// [`PublishError::OtherSession`], before anything is done, if a journal is
 /// another session's. Otherwise [`PublishError`]: what was done before the
 /// error is consistent, rows only for durable files, journals deleted only
-/// after their rows.
+/// after their rows. A journal that read in the first pass but can't be
+/// read again when its segment is encoded (something changed it, or a
+/// transient error) stops the run with [`PublishError::Changed`] or
+/// [`PublishError::Io`]; the next run reads it again from the start.
 pub fn publish_journals<S: Fs, T: SegmentStore>(
     session: &mut SessionStore<S, T>,
     length: SegmentLength,
@@ -243,12 +266,20 @@ pub fn publish_journals<S: Fs, T: SegmentStore>(
     // Pass 1: what each journal holds, without keeping its samples.
     let mut summaries = Vec::new();
     let mut unreadable = Vec::new();
+    let mut unread = Vec::new();
     // Journals to delete once their segments are committed.
     let mut waiting: BTreeMap<JournalId, PathBuf> = BTreeMap::new();
     for &id in &ids {
         let path = dir.join(id.file_name());
-        let Some(bytes) = read_if_present(fs, &path)? else {
-            continue;
+        let bytes = match fs.read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                // Left as it is: the failure may pass, and renaming it aside
+                // may fail too. Not in the plan, so it's never deleted.
+                unread.push((FinishedJournal::new(session.id(), id), e.kind()));
+                continue;
+            }
         };
         let read = read_journal(&bytes);
         match read.header() {
@@ -287,7 +318,10 @@ pub fn publish_journals<S: Fs, T: SegmentStore>(
             return Err(store_error(e));
         }
     };
-    let mut published = Published::default();
+    let mut published = Published {
+        unread,
+        ..Published::default()
+    };
     let rows = claims(fs, dir, rows, &summaries, &mut published);
     published.findings_unsaved = findings::record(fs, dir, &published.findings, Verification::Done)
         .err()
@@ -386,6 +420,8 @@ fn claims<S: Fs>(
 /// on its track. The whole window is left alone, not only the samples a row
 /// claims: a window can hold several segments (an epoch change, a gap), and
 /// none of them is published while a row over that window is unresolved.
+/// Only rows this run checked are findings: those overlapping a journal it
+/// read (see [`claims`]).
 fn in_a_bad_window(findings: &[Finding], segment: &PlannedSegment, length: SegmentLength) -> bool {
     let start = segment.range.start();
     let from = SampleIndex::new(length.window_of(start).saturating_mul(length.samples()));
