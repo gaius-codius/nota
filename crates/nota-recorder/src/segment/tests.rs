@@ -597,7 +597,7 @@ fn check(case: &CrashCase, promised: &Promised, got: &Recovered) -> Result<(), S
     }
     // Uncrashed, salvage ran on that very disk: nothing to compare.
     if !case.recovery_crashes.is_empty() {
-        let uninterrupted = salvage_fake(&case.survived.copy_disk())?;
+        let uninterrupted = uninterrupted_salvage(&case.survived)?;
         if after != uninterrupted {
             return Err(format!(
                 "ended differently from an uninterrupted salvage: {}",
@@ -606,6 +606,27 @@ fn check(case: &CrashCase, promised: &Promised, got: &Recovered) -> Result<(), S
         }
     }
     Ok(())
+}
+
+/// What an uninterrupted salvage of `disk` ends with. A case's recovery
+/// crashes all start from the same disk, so the last answer is kept, keyed
+/// by the whole disk.
+fn uninterrupted_salvage(disk: &FakeFs) -> Result<Observed, String> {
+    thread_local! {
+        static LAST: std::cell::RefCell<Option<(Observed, Observed)>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    let before = observe(disk);
+    if let Some(after) = LAST.with_borrow(|last| {
+        last.as_ref()
+            .filter(|(seen, _)| *seen == before)
+            .map(|(_, after)| after.clone())
+    }) {
+        return Ok(after);
+    }
+    let after = salvage_fake(&disk.copy_disk())?;
+    LAST.set(Some((before, after.clone())));
+    Ok(after)
 }
 
 /// What differs between two disks, briefly: the paths whose bytes differ,
@@ -726,8 +747,13 @@ fn a_recording_in_small_chunks_never_lags_past_the_limit_at_any_crash() {
     assert!(worst.get() >= 975, "{}", worst.get());
 }
 
+/// Salvage takes fewer than this many operations here, so each case crashes
+/// it at one point, with each of three outcomes.
 const SAMPLE: usize = 200;
-const RERUN: usize = 20;
+/// Coprime with the three recovery outcomes and the ten scenario outcomes,
+/// so the crashed re-runs fall on every combination of them, not a fixed
+/// few.
+const RERUN: usize = 23;
 
 /// Crashes salvage of `disk` after each of its operations, under every
 /// standard outcome, and runs it again: the end state must be byte for byte

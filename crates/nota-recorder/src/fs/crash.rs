@@ -201,8 +201,8 @@ where
     /// recovery has fewer points): every case crashes recovery at least
     /// once, and cases in a row whose recovery takes as many operations
     /// crash it at different points. Every case still runs recovery
-    /// uncrashed too. For a test with too
-    /// many recovery crashes to run them all.
+    /// uncrashed too. For a test with too many recovery crashes to run them
+    /// all.
     #[must_use]
     pub fn sample_recovery(mut self, every: usize) -> Self {
         self.recovery_crashes().every = every.max(1);
@@ -859,6 +859,64 @@ mod tests {
         assert_eq!(pairs(&sampled_crashes), pairs(&every_crash));
         // A stride of zero is taken as one.
         assert_eq!(run(0).0, all);
+    }
+
+    #[test]
+    fn sampled_crash_points_start_one_further_along_each_time() {
+        use std::cell::RefCell;
+        // A recovery that always takes five operations: six crash points.
+        let five_reads = |fs: &FakeFs| {
+            for _ in 0..5 {
+                let _ = fs.read(Path::new("/s/x"));
+            }
+        };
+        // Each case's recovery crashes, as the points crashed in turn.
+        let seen: RefCell<Vec<Vec<usize>>> = RefCell::new(Vec::new());
+        let summary = CrashTest::new(
+            |fs| publish(fs, true).is_ok(),
+            five_reads,
+            |case: &CrashCase, _: &bool, (): &()| {
+                let points = case.recovery_crashes.iter().map(|c| c.after_ops).collect();
+                seen.borrow_mut().push(points);
+                Ok(())
+            },
+        )
+        .dirs(["/s"])
+        .outcomes(vec![CrashOutcome::LoseUnsynced])
+        .sample_recovery(4)
+        .crash_rerun(1)
+        .run()
+        .unwrap();
+        assert_eq!(summary.scenario_ops, 5);
+        // Per case: uncrashed, then each first crash followed by its
+        // re-run's crashes. The first crashes start at the case's number
+        // (mod 4), every 4th point; each re-run starts one further on than
+        // the last.
+        let firsts: Vec<Vec<usize>> = seen
+            .borrow()
+            .split(Vec::is_empty)
+            .skip(1)
+            .map(|case| case.iter().filter(|c| c.len() == 1).map(|c| c[0]).collect())
+            .collect();
+        assert_eq!(
+            firsts,
+            [
+                vec![0, 4],
+                vec![1, 5],
+                vec![2],
+                vec![3],
+                vec![0, 4],
+                vec![1, 5]
+            ]
+        );
+        let rerun_starts: Vec<usize> = seen
+            .borrow()
+            .windows(2)
+            .filter(|w| w[0].len() == 1 && w[1].len() == 2)
+            .map(|w| w[1][1])
+            .collect();
+        let want: Vec<usize> = (0..rerun_starts.len()).map(|n| n % 4).collect();
+        assert_eq!(rerun_starts, want);
     }
 
     #[test]
