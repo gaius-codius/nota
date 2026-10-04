@@ -30,8 +30,9 @@
 //!   left, in order and without gaps from the first sample, holding at least
 //!   everything fsync'd and exactly the audio captured, and every committed
 //!   row; a second salvage changes nothing; the durable position was never
-//!   more than 1.1 s behind the captured one, counted both ways below; no
-//!   audio was lost before the journal. It prints one `result` line
+//!   more than the journal's sync interval (850 ms) behind the captured one,
+//!   nor more than 1.1 s behind the audio delivered (both below); no audio
+//!   was lost before the journal. It prints one `result` line
 //!   with the measurements and a digest of the files and rows. With
 //!   `--recovered yes`, for a disk that crashed again after a completed
 //!   salvage, salvage must also find nothing left to do.
@@ -50,8 +51,9 @@
 //! "Captured" is what the recorder has written to the journal. Audio still
 //! queued between the stream and the recorder isn't counted there, so the
 //! lag is also measured against the wall clock since the first frame was
-//! written (which slightly undercounts the queue at the start), and both
-//! must stay within 1.1 s. Fsync times only mean something on a real
+//! written (which slightly undercounts the queue at the start). That one
+//! is the bounded-loss rule, 1.1 s; behind the journal, durable must stay
+//! within the sync interval. Fsync times only mean something on a real
 //! disk: tmpfs makes every fsync free.
 
 #[cfg(target_os = "linux")]
@@ -78,7 +80,8 @@ mod linux {
 
     use nota_core::messages::AudioChunk;
     use nota_core::{
-        Clock, EpochId, SampleIndex, SampleRate, SessionId, SessionTime, SystemClock, TrackId,
+        Clock, EpochId, SampleCount, SampleIndex, SampleRate, SessionId, SessionTime, SystemClock,
+        TrackId,
     };
     use nota_recorder::capture::{
         CaptureNotice, CaptureReceiver, PipeWireBackend, RecordError, RecorderEvent, Source,
@@ -88,7 +91,7 @@ mod linux {
         EngineCommand, EngineConfig, EngineEvent, EngineStatus, EngineStderr, EngineSupervisor,
     };
     use nota_recorder::fs::{Fs, FsFile, StdFile, StdFs, Synced};
-    use nota_recorder::journal::{JournalId, read_journal};
+    use nota_recorder::journal::{JournalId, SYNC_INTERVAL, read_journal};
     use nota_recorder::segment::{
         DurableSegment, Published, SegmentLength, SegmentStore, publish_journals, salvage,
         segment_file_name,
@@ -102,7 +105,8 @@ mod linux {
     const SESSION: SessionId = SessionId::new(1);
     const TRACK: TrackId = TrackId::new(0);
     const RATE: SampleRate = SampleRate::SPEECH;
-    /// The bound on durable behind captured: 1.1 s at 16 kHz.
+    /// The bounded-loss rule, durable behind the audio delivered: 1.1 s at
+    /// 16 kHz.
     const MAX_LAG: u64 = 17_600;
     /// An operation slower than this is logged.
     const SLOW: Duration = Duration::from_millis(100);
@@ -1089,11 +1093,16 @@ mod linux {
         }
 
         let lag = Lag::of(promised);
-        if lag.max > MAX_LAG || lag.wall_max > MAX_LAG {
+        // The writer's own budget: the sync interval's worth of audio.
+        let max_journal_lag = SampleCount::started_within(SYNC_INTERVAL, RATE)
+            .ok_or("the sync interval overflows")?
+            .get();
+        if lag.max > max_journal_lag || lag.wall_max > MAX_LAG {
             let behind = format!(
-                "durable was {:.0} ms behind the journal and {:.0} ms behind the wall clock \
-                 (bound {:.0} ms)",
+                "durable was {:.0} ms behind the journal (bound {:.0} ms) and {:.0} ms behind \
+                 the wall clock (bound {:.0} ms)",
                 ms(lag.max),
+                ms(max_journal_lag),
                 ms(lag.wall_max),
                 ms(MAX_LAG)
             );

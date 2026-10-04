@@ -18,9 +18,10 @@
 //! # Journal breaks
 //!
 //! Each track keeps the samples written since its journal's last fsync: at
-//! most a second of audio, by the journal's sync rule. When a journal
-//! breaks, a replacement starts at the durable position and those samples
-//! are written to it again, so a failed write or fsync loses nothing. If
+//! most [`SYNC_INTERVAL`](crate::journal::SYNC_INTERVAL)'s worth of audio,
+//! by the journal's sync rule. When a journal breaks, a replacement starts
+//! at the durable position and those samples are written to it again, so a
+//! failed write or fsync loses nothing. If
 //! the broken journal's unsynced tail survives a crash as well, the two
 //! journals overlap, and the replacement's higher id wins in salvage. If
 //! the replacement fails too, the error is returned and the samples from

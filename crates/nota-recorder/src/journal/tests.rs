@@ -179,8 +179,11 @@ fn recover(fs: &FakeFs) -> Recovered {
         .collect()
 }
 
-/// The most audio that may be captured but not durable: 1.1 s at 16 kHz.
-const LAG_LIMIT: SampleCount = SampleCount::new(17_600);
+/// The most audio that may be captured but not durable: the 850 ms sync
+/// interval at 16 kHz. Kept below the 1.1 s bounded-loss rule so the
+/// stream's buffering and a slow fsync still fit within it against the
+/// audio delivered.
+const LAG_LIMIT: SampleCount = SampleCount::new(13_600);
 
 /// The journal's crash invariants. A closure, to match `CrashTest`'s check
 /// signature without clippy's by-reference lints.
@@ -327,8 +330,8 @@ fn crash_after_every_operation_recovers_to_the_durable_position() {
     .dirs(["/session"])
     .run()
     .unwrap_or_else(|failure| panic!("{failure}"));
-    // Not vacuous: some crash came with most of a second unsynced.
-    assert!(worst.get() >= SampleCount::new(15_000), "{:?}", worst.get());
+    // Not vacuous: some crash came with most of the sync interval unsynced.
+    assert!(worst.get() >= SampleCount::new(13_000), "{:?}", worst.get());
     // Not vacuous: dozens of writes and several syncs of each journal, each
     // crashed at.
     assert!(summary.scenario_ops > 40, "{summary:?}");
@@ -381,7 +384,7 @@ fn a_journal_without_its_directory_sync_fails_the_crash_test() {
 }
 
 #[test]
-fn durable_stays_within_a_second_of_captured_in_a_timed_run() {
+fn durable_stays_within_the_sync_interval_of_captured_in_a_timed_run() {
     let fs = FakeFs::with_dirs(["/session"]);
     let (clock, dyn_clock) = fake_clock();
     let mut journal = create(&fs, 0, MIC, 0, dyn_clock).unwrap();
@@ -398,18 +401,18 @@ fn durable_stays_within_a_second_of_captured_in_a_timed_run() {
         worst = worst.max(lag);
         assert!(lag <= limit, "at chunk {i}: {lag:?} unsynced");
     }
-    // A minute of audio, synced about once a second.
+    // A minute of audio, synced every 850 ms: about 70 times.
     let syncs = fs
         .ops()
         .iter()
         .filter(|op| matches!(op, Op::Sync(_)))
         .count();
-    assert!((58..=62).contains(&syncs), "{syncs} syncs in 60 s");
-    assert!(worst >= SampleCount::new(15_000), "never lagged: {worst:?}");
+    assert!((68..=73).contains(&syncs), "{syncs} syncs in 60 s");
+    assert!(worst >= SampleCount::new(13_000), "never lagged: {worst:?}");
 }
 
 #[test]
-fn a_burst_faster_than_real_time_still_syncs_each_second_of_audio() {
+fn a_burst_faster_than_real_time_still_syncs_each_interval_of_audio() {
     // The clock stands still; the audio bound alone keeps durable close.
     let fs = FakeFs::with_dirs(["/session"]);
     let (_clock, dyn_clock) = fake_clock();
@@ -420,8 +423,36 @@ fn a_burst_faster_than_real_time_still_syncs_each_second_of_audio() {
             .captured()
             .checked_count_since(durable_end(&journal))
             .unwrap();
-        assert!(lag < SampleCount::new(16_000), "at {i}: {lag:?}");
+        assert!(lag < LAG_LIMIT, "at {i}: {lag:?}");
     }
+}
+
+#[test]
+fn a_rate_too_low_for_one_sample_per_interval_still_records() {
+    // At 1 Hz the sync interval holds no whole sample; the budget is still
+    // one, so each sample is written and synced rather than the writer
+    // syncing forever without writing.
+    let fs = FakeFs::with_dirs(["/session"]);
+    let (_clock, dyn_clock) = fake_clock();
+    let slow = SampleRate::new(1).unwrap();
+    let mut journal = JournalWriter::create(
+        &fs,
+        &session(),
+        JournalHeader::new(JournalId::new(0), MIC, EPOCH, slow),
+        SampleIndex::ZERO,
+        dyn_clock,
+    )
+    .unwrap();
+    journal.append(&samples(MIC, 0, 3)).unwrap();
+    assert_eq!(journal.captured(), SampleIndex::new(3));
+    assert_eq!(durable_end(&journal), SampleIndex::new(3));
+    let read = read_journal(&fs.read(&journal_path(0)).unwrap());
+    let lens: Vec<_> = read
+        .frames()
+        .iter()
+        .map(|f| f.range().len().get())
+        .collect();
+    assert_eq!(lens, [1, 1, 1]);
 }
 
 #[test]
@@ -437,7 +468,7 @@ fn sync_if_due_syncs_a_stalled_track_after_the_interval() {
         "an append alone isn't durable"
     );
     assert_eq!(at_create.end(), SampleIndex::ZERO);
-    clock.advance(Duration::from_millis(999));
+    clock.advance(Duration::from_millis(849));
     assert!(!journal.sync_if_due().unwrap());
     clock.advance(Duration::from_millis(1));
     assert!(journal.sync_if_due().unwrap());
@@ -511,11 +542,10 @@ fn a_full_disk_breaks_the_journal_but_not_the_process() {
 }
 
 #[test]
-fn a_long_append_never_leaves_more_than_a_second_unsynced() {
+fn a_long_append_never_leaves_more_than_the_sync_interval_unsynced() {
     // One append of ten seconds, crashed after every operation: whatever
-    // the writer reports, captured is never more than a second ahead of
-    // durable, and the durable part survives.
-    let second = SampleCount::new(16_000);
+    // the writer reports, captured is never more than the sync interval
+    // ahead of durable, and the durable part survives.
     for crash_at in 0..60 {
         let fs = FakeFs::with_dirs(["/session"]);
         let (_clock, dyn_clock) = fake_clock();
@@ -525,7 +555,7 @@ fn a_long_append_never_leaves_more_than_a_second_unsynced() {
         let captured = journal.captured();
         let durable = durable_end(&journal);
         let lag = captured.checked_count_since(durable).unwrap();
-        assert!(lag <= second, "crash at {crash_at}: {lag:?} unsynced");
+        assert!(lag <= LAG_LIMIT, "crash at {crash_at}: {lag:?} unsynced");
         let after = fs.crash(CrashOutcome::LoseUnsynced);
         let read = read_journal(&after.read(&journal_path(0)).unwrap());
         let end = read.range().map_or(SampleIndex::ZERO, SampleRange::end);
@@ -583,9 +613,10 @@ fn long_appends_split_into_frames() {
         .iter()
         .map(|f| f.range().len().get())
         .collect();
-    // A full frame, then what's left of the first second (16 000 samples),
-    // a sync, and the rest.
-    assert_eq!(lens, [max, 16_000 - max, 2 * max + 1 - 16_000]);
+    // A full frame, then what's left of the first sync interval (13 600
+    // samples), a sync, and the rest.
+    let budget = LAG_LIMIT.get();
+    assert_eq!(lens, [max, budget - max, 2 * max + 1 - budget]);
     let syncs = fs
         .ops()
         .iter()
@@ -593,7 +624,7 @@ fn long_appends_split_into_frames() {
         .count();
     assert_eq!(
         syncs, 2,
-        "the header's sync and the one at a second of audio"
+        "the header's sync and the one at the sync interval's audio"
     );
     let (range, got) = read.audio().unwrap();
     assert_eq!(

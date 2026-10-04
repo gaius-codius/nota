@@ -311,8 +311,9 @@ impl std::error::Error for RecordError {
 /// track on `writer` first.
 ///
 /// Journals are fsync'd as audio arrives, and also when it stops arriving,
-/// so durable stays within about a second of captured either way. The
-/// writer isn't finished on return: call
+/// so durable stays within about
+/// [`SYNC_INTERVAL`](crate::journal::SYNC_INTERVAL) of captured either
+/// way. The writer isn't finished on return: call
 /// [`SessionWriter::finish`](crate::session::SessionWriter::finish) for the
 /// last journals.
 ///

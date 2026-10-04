@@ -474,9 +474,10 @@ fn check_after(promised: &Promised, after: &Observed) -> Result<(), String> {
     Ok(())
 }
 
-/// The most audio that may be captured but not durable: 1.1 s at the
-/// test's rate.
-const LAG_LIMIT: u64 = 1_100;
+/// The most audio that may be captured but not durable: the journal's
+/// 850 ms sync interval at the test's rate, which keeps durable within the
+/// 1.1 s bounded-loss rule of the audio delivered.
+const LAG_LIMIT: u64 = 850;
 
 /// The most any track had captured but not durable when the recording
 /// stopped, in samples.
@@ -611,14 +612,11 @@ fn the_written_lag_counts_frames_past_the_last_fsync() {
         assert_eq!(worst_lag(&promised), 0);
         check_written_lag(&case, &promised, &observe(&fs))
     };
-    // 1,000 past the fsync: within the limit.
-    lag_of(1_600).unwrap();
-    // 1,101: past it.
-    let err = lag_of(1_701).unwrap_err();
-    assert!(
-        err.contains("1101 samples written but not durable"),
-        "{err}"
-    );
+    // 850 past the fsync: within the limit.
+    lag_of(1_450).unwrap();
+    // 851: past it.
+    let err = lag_of(1_451).unwrap_err();
+    assert!(err.contains("851 samples written but not durable"), "{err}");
 }
 
 /// The invariants, at any crash point:
@@ -769,8 +767,8 @@ fn recording_and_salvage_crashed_anywhere_end_as_an_uninterrupted_salvage() {
     assert!(summary.scenario_ops > 100, "{summary:?}");
     assert!(summary.recovery_crashed > 1_000, "{summary:?}");
     assert!(summary.rerun_crashed > 100, "{summary:?}");
-    // Not vacuous: some crash came with most of a second unsynced.
-    assert!(worst.get() >= 800, "{}", worst.get());
+    // Not vacuous: some crash came with most of the sync interval unsynced.
+    assert!(worst.get() >= 700, "{}", worst.get());
 }
 
 #[test]
@@ -802,7 +800,8 @@ fn a_recording_in_small_chunks_never_lags_past_the_limit_at_any_crash() {
     .run()
     .unwrap_or_else(|failure| panic!("{failure}"));
     assert!(summary.scenario_ops > 240, "{summary:?}");
-    assert!(worst.get() >= 975, "{}", worst.get());
+    // Within one chunk of the limit: the budget is what bounds the lag.
+    assert!(worst.get() >= LAG_LIMIT - 25, "{}", worst.get());
 }
 
 /// Salvage takes fewer than this many operations here, so each case crashes
@@ -1382,17 +1381,18 @@ fn a_journal_corrupt_before_its_end_is_published_then_set_aside() {
     writer
         .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
         .unwrap();
-    for k in 0..60 {
-        writer.append(MIC, &samples(MIC, k * 1_000, 1_000)).unwrap();
-        clock.advance(std::time::Duration::from_secs(1));
+    // Half a sync interval at a time, so every frame is 425 samples.
+    for k in 0..120 {
+        writer.append(MIC, &samples(MIC, k * 425, 425)).unwrap();
+        clock.advance(std::time::Duration::from_millis(425));
         writer.sync_if_due().unwrap();
     }
     writer.finish().unwrap();
     let path = session().join(JournalId::FIRST.file_name());
     let mut bytes = fs.read(&path).unwrap();
-    // Flip a sample byte in the third frame: two frames read, then 57
-    // seconds of audio that can't be.
-    let frame = FRAME_HEADER_LEN + 2_000;
+    // Flip a sample byte in the third frame: two frames read, then 117
+    // frames of audio that can't be.
+    let frame = FRAME_HEADER_LEN + 850;
     bytes[HEADER_LEN + 2 * frame + FRAME_HEADER_LEN + 7] ^= 0x40;
     let disk = FakeFs::with_dirs([session(), db()]);
     let mut file = disk.create(&path).unwrap();
@@ -1405,7 +1405,7 @@ fn a_journal_corrupt_before_its_end_is_published_then_set_aside() {
         .iter()
         .map(|r| (r.range().start().get(), r.range().end().get()))
         .collect();
-    assert_eq!(ranges, [(0, 2_000)]);
+    assert_eq!(ranges, [(0, 850)]);
     assert!(done.deleted().is_empty());
     let aside = PathBuf::from("/session/journal-000000.unreadable");
     assert_eq!(done.quarantined(), std::slice::from_ref(&aside));
