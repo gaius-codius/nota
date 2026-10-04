@@ -1,13 +1,14 @@
-//! Writing the journal: frames appended as audio arrives, fsync'd about
-//! every second.
+//! Writing the journal: frames appended as audio arrives, fsync'd every
+//! [`SYNC_INTERVAL`].
 
 use std::fmt;
 use std::io;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use nota_core::{Clock, SampleCount, SampleIndex, SessionTime, TrackId};
+use nota_core::{Clock, SampleCount, SampleIndex, SampleRate, SessionTime, TrackId};
 
 use super::JournalId;
 use super::format::{JournalHeader, MAX_FRAME_SAMPLES, encode_frame, encode_header};
@@ -15,7 +16,21 @@ use crate::fs::{Fs, FsFile, Synced};
 
 /// How often the journal is fsync'd while audio arrives: at most this long,
 /// or this much audio, goes unsynced.
-pub const SYNC_INTERVAL: Duration = Duration::from_secs(1);
+///
+/// Durable may trail the audio the stream has delivered by this, plus the
+/// stream's buffering (about 40 ms), plus however long the fsync takes.
+/// 850 ms keeps that within the 1.1 s bounded-loss rule for fsyncs up to
+/// about 200 ms; at a full second, one ~105 ms fsync was enough to break it.
+pub const SYNC_INTERVAL: Duration = Duration::from_millis(850);
+
+/// The most audio a journal at `rate` may hold unsynced, in samples:
+/// [`SYNC_INTERVAL`]'s worth, and at least one, so even a very low rate
+/// makes progress (a zero budget would sync forever without writing).
+/// Salvage judges torn tails by it too.
+pub(crate) fn sync_budget(rate: SampleRate) -> NonZeroU64 {
+    let samples = SampleCount::started_within(SYNC_INTERVAL, rate).map_or(0, SampleCount::get);
+    NonZeroU64::new(samples).unwrap_or(NonZeroU64::MIN)
+}
 
 /// How far one journal has been fsync'd: every sample it holds for its
 /// track, up to `end`, is on disk. Only a completed fsync of that journal
@@ -95,14 +110,14 @@ impl std::error::Error for JournalError {
     }
 }
 
-/// Appends one track's audio to a journal file and fsyncs it about every
-/// second.
+/// Appends one track's audio to a journal file and fsyncs it every
+/// [`SYNC_INTERVAL`].
 ///
 /// It keeps two positions: **captured**, the end of what was written, and
 /// **durable**, the end of what an fsync has confirmed. Each
 /// [`Self::append`] syncs when [`SYNC_INTERVAL`] has passed since the last
-/// sync or that much audio is unsynced, so durable stays within about a
-/// second of captured. Call [`Self::sync_if_due`] on a timer too, so audio
+/// sync or that much audio is unsynced, so durable stays within
+/// [`SYNC_INTERVAL`] of captured. Call [`Self::sync_if_due`] on a timer too, so audio
 /// that stops arriving still gets synced.
 ///
 /// After any failed write or fsync the writer is broken: every later call
@@ -225,8 +240,8 @@ impl<F: FsFile> JournalWriter<F> {
     }
 
     /// Appends `samples`, continuing where the track left off, syncing
-    /// whenever one is due, so no more than a second of audio is ever
-    /// unsynced.
+    /// whenever one is due, so no more than [`SYNC_INTERVAL`]'s worth of
+    /// audio is ever unsynced.
     ///
     /// # Errors
     ///
@@ -245,13 +260,13 @@ impl<F: FsFile> JournalWriter<F> {
 
         // The max is a u32, so it fits in usize on every platform nota builds for.
         let max = usize::try_from(MAX_FRAME_SAMPLES).unwrap_or(usize::MAX);
-        let second = u64::from(self.header.rate().hz());
+        let budget = sync_budget(self.header.rate()).get();
         let mut rest = samples;
         while !rest.is_empty() {
-            // Never more than a second unsynced, even within one long
-            // append: a frame never runs past the budget, and the sync check
-            // runs after every frame.
-            let room = second.saturating_sub(self.unsynced().get());
+            // Never more than the budget unsynced, even within one long
+            // append: a frame never runs past it, and the sync check runs
+            // after every frame.
+            let room = budget.saturating_sub(self.unsynced().get());
             if room == 0 {
                 self.sync()?;
                 continue;
@@ -309,8 +324,8 @@ impl<F: FsFile> JournalWriter<F> {
             .now()
             .checked_duration_since(self.last_sync)
             .unwrap_or(Duration::ZERO);
-        let second_of_audio = SampleCount::new(u64::from(self.header.rate().hz()));
-        let due = waited >= SYNC_INTERVAL || self.unsynced() >= second_of_audio;
+        let due = waited >= SYNC_INTERVAL
+            || self.unsynced().get() >= sync_budget(self.header.rate()).get();
         if due {
             self.sync()?;
         }

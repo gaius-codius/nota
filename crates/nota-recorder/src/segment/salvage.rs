@@ -23,7 +23,7 @@ use super::store::SegmentStore;
 use super::{SegmentLength, is_temp_segment, segment_file_name};
 use crate::fs::Fs;
 use crate::journal::format::{FRAME_HEADER_LEN, HEADER_LEN, MAX_FRAME_SAMPLES, frames_after};
-use crate::journal::{JournalHeader, JournalId, JournalRead, read_journal};
+use crate::journal::{JournalHeader, JournalId, JournalRead, read_journal, sync_budget};
 use crate::session::{FinishedJournal, SessionDir, SessionStore};
 
 /// What a publish run did.
@@ -507,24 +507,31 @@ fn quarantine<S: Fs>(
 }
 
 /// The most bytes a crash can leave after a journal's last valid frame: the
-/// unsynced tail, at most a second of audio (the writer's sync rule), even
-/// if every sample were a frame of its own, plus one more largest frame.
+/// unsynced tail, at most the writer's sync budget of audio
+/// ([`SYNC_INTERVAL`](crate::journal::SYNC_INTERVAL)), even if every sample
+/// were a frame of its own, plus one more largest frame.
 fn max_torn_tail(rate: SampleRate) -> usize {
     let per_sample = FRAME_HEADER_LEN + 2;
     let largest = FRAME_HEADER_LEN + 2 * usize::try_from(MAX_FRAME_SAMPLES).unwrap_or(usize::MAX);
-    usize::try_from(rate.hz())
+    usize::try_from(sync_budget(rate).get())
         .unwrap_or(usize::MAX)
         .saturating_mul(per_sample)
         .saturating_add(largest)
 }
 
 /// Whether a frame after the valid ones, though they stop at damage, holds
-/// audio a crash can't have left unsynced. The writer never has more than a
-/// second of audio unsynced, and everything before that is intact after a
-/// crash, so a torn tail's frames all start within a second of where the
-/// valid frames end (or, with none valid, of each other). A frame starting
-/// later was fsync'd: the damage is corruption, and the journal is kept.
-/// Damage in the last second can't be told from a crash this way.
+/// audio a crash can't have left unsynced. The writer never has more than
+/// its sync budget of audio unsynced
+/// ([`SYNC_INTERVAL`](crate::journal::SYNC_INTERVAL)), and everything
+/// before that is intact after a crash, so a torn tail's frames all start
+/// within the budget of where the valid frames end (or, with none valid, of
+/// each other). A frame starting later was fsync'd: the damage is
+/// corruption, and the journal is kept. Damage in the last interval can't be
+/// told from a crash this way.
+///
+/// A journal written under the earlier one-second rule can have a torn tail
+/// longer than the budget; it is then kept as unreadable rather than
+/// deleted, which loses nothing.
 fn audio_past_a_crash(bytes: &[u8], read: &JournalRead, header: JournalHeader) -> bool {
     let starts: Vec<SampleIndex> = frames_after(bytes, read.valid_len(), header.track())
         .iter()
@@ -534,8 +541,8 @@ fn audio_past_a_crash(bytes: &[u8], read: &JournalRead, header: JournalHeader) -
         .range()
         .map(SampleRange::end)
         .or_else(|| starts.iter().min().copied());
-    let second = SampleCount::new(u64::from(header.rate().hz()));
-    base.and_then(|b| b.checked_add(second))
+    let budget = SampleCount::new(sync_budget(header.rate()).get());
+    base.and_then(|b| b.checked_add(budget))
         .is_some_and(|limit| starts.iter().any(|&s| s >= limit))
 }
 
