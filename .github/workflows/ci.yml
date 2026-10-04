@@ -64,6 +64,7 @@ jobs:
             ~/.local/share/nota/test-models/silero_vad_v6.onnx
             ~/.local/share/nota/test-models/fixtures
           key: test-models-${{ hashFiles('scripts/fetch-test-models.sh', 'crates/nota-engine/tests/fixtures/invented-lecture.txt') }}
+      # After install-linux-build-deps.sh, which updates the package lists.
       - name: Install ffmpeg for the fixture
         if: steps.test-models.outputs.cache-hit != 'true'
         run: sudo apt-get install -y -qq --no-install-recommends ffmpeg

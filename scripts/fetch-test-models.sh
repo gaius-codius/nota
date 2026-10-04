@@ -50,16 +50,18 @@ mkdir -p "$root/fixtures" "$dl"
 
 verify() { # file sha256
   local got
-  got=$(sha256sum "$1") && got=${got%% *}
+  got=$(sha256sum <"$1") && got=${got%% *}
   [[ $got == "$2" ]] || {
     echo "checksum mismatch: $1 is ${got:-unreadable}, expected $2" >&2
+    echo "(a file from an older or interrupted run? delete it and run again)" >&2
     return 1
   }
 }
 
 fetch() { # url dest sha256
   if [[ ! -e $2 ]]; then
-    curl -fsSL -o "$2.part" "$1"
+    curl -fsSL --proto '=https' --retry 3 --retry-all-errors --connect-timeout 30 \
+      -o "$2.part" "$1"
     verify "$2.part" "$3" || { rm -f "$2.part"; exit 1; }
     mv "$2.part" "$2"
   fi

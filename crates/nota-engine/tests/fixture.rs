@@ -19,6 +19,7 @@ use nota_engine::sherpa::{ModelPaths, SherpaModels};
 /// The test-models directory, if it holds everything.
 fn test_models() -> Option<(ModelPaths, PathBuf)> {
     let root = std::env::var_os("NOTA_TEST_MODELS")
+        .filter(|v| !v.is_empty())
         .map(PathBuf::from)
         .or_else(|| {
             std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/nota/test-models"))

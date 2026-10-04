@@ -306,6 +306,7 @@ mod tests {
     /// they're absent. Fails instead when `NOTA_REQUIRE_TEST_MODELS=1`.
     fn models_and_fixture() -> Option<(SherpaModels, Vec<f32>)> {
         let root = std::env::var_os("NOTA_TEST_MODELS")
+            .filter(|v| !v.is_empty())
             .map(PathBuf::from)
             .or_else(|| {
                 std::env::var_os("HOME")

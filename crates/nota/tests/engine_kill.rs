@@ -24,6 +24,7 @@ use nota_recorder::engine::{
 
 fn test_models() -> Option<PathBuf> {
     let root = std::env::var_os("NOTA_TEST_MODELS")
+        .filter(|v| !v.is_empty())
         .map(PathBuf::from)
         .or_else(|| {
             std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/nota/test-models"))
