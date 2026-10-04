@@ -7,10 +7,13 @@
 //!   16 kHz for `S` seconds into `<dir>/session`, with the store at
 //!   `<dir>/nota.db`, publishing each finished journal on a publisher
 //!   thread as it goes, in `K`-second segment windows. Every recorder
-//!   operation that changes the disk, and every row commit, is counted,
-//!   one at a time under one lock; the thread that runs the Nth keeps the
-//!   lock, `<log>.stopped` is created, and the script SIGKILLs the process,
-//!   so the disk holds exactly operations 1..N. Keep `K` small: the tap
+//!   operation that changes the disk, and every row commit, is counted.
+//!   After the Nth, every thread stops before its next operation,
+//!   `<log>.stopped` is created, and the script SIGKILLs the process.
+//!   Operations run concurrently, as in the recorder, so the recorder's
+//!   timing is real; an operation another thread already had under way may
+//!   still land after the Nth, and is logged as late. Operations slower
+//!   than 100 ms are logged with their time. Keep `K` small: the tap
 //!   rereads a journal at each fsync. Each journal write is copied to
 //!   `<ref>` (unsynced), the audio
 //!   the recorder captured, to check the recovered audio against. `<log>`
@@ -101,6 +104,8 @@ mod linux {
     const RATE: SampleRate = SampleRate::SPEECH;
     /// The bound on durable behind captured: 1.1 s at 16 kHz.
     const MAX_LAG: u64 = 17_600;
+    /// An operation slower than this is logged.
+    const SLOW: Duration = Duration::from_millis(100);
     /// The quietest peak that counts as audio playing: -70 dBFS.
     const MIN_PEAK: i16 = 10;
 
@@ -259,6 +264,8 @@ mod linux {
     ///   row <epoch> <start> <end> <sha256 hex>
     ///   overrun <t ns>
     ///   journal-failed <t ns>
+    ///   slow <kind> <class> <t ns> <took ns>
+    ///   late <op> <kind> <class>
     ///   stop <op> <kind> <class> <t ns> <captured> <durable>
     ///   end <t ns> <captured> <durable>
     #[derive(Debug)]
@@ -278,11 +285,11 @@ mod linux {
     #[derive(Debug)]
     struct Tap {
         clock: Arc<dyn Clock>,
-        /// Held for the whole of each counted operation, and for good by the
-        /// thread that reaches the crash point, so every other thread stops
-        /// before its next operation: the disk holds exactly operations
-        /// 1..N.
-        op: Mutex<()>,
+        /// Set at the crash point: every thread stops before its next
+        /// operation. Operations run concurrently, as in the recorder, so
+        /// one already under way on another thread may still land; it's
+        /// logged as late.
+        halted: AtomicBool,
         ops: AtomicUsize,
         stop_after: Option<usize>,
         marker: Option<PathBuf>,
@@ -317,7 +324,7 @@ mod linux {
         fn new(clock: Arc<dyn Clock>) -> Self {
             Self {
                 clock,
-                op: Mutex::new(()),
+                halted: AtomicBool::new(false),
                 ops: AtomicUsize::new(0),
                 stop_after: None,
                 marker: None,
@@ -367,26 +374,44 @@ mod linux {
     }
 
     impl TapFs {
-        /// Runs one operation that changes the disk, and counts it. At the
-        /// crash point it logs it, marks it and never returns, keeping the
-        /// operation lock so no other thread gets further.
+        /// Runs one operation that changes the disk, and counts it; logs it
+        /// if it took over 100 ms. At the crash point it logs it, marks it
+        /// and never returns; so does an operation that ends after it.
         fn counted<T>(
             &self,
             kind: &str,
             path: &Path,
             op: impl FnOnce() -> io::Result<T>,
         ) -> io::Result<T> {
-            let held = self.0.op.lock().map_err(poisoned)?;
-            let result = op();
-            let done = self.0.ops.fetch_add(1, Ordering::SeqCst) + 1;
-            if self.0.stop_after == Some(done) {
-                self.stop(done, kind, path)?;
+            if self.0.halted.load(Ordering::SeqCst) {
                 block_forever();
-                drop(held);
-                return Err(io::Error::other("the crash point returned"));
             }
-            drop(held);
-            result
+            let began = self.0.clock.now();
+            let result = op();
+            let ended = self.0.clock.now();
+            let done = self.0.ops.fetch_add(1, Ordering::SeqCst) + 1;
+            let took = ended.checked_duration_since(began).unwrap_or_default();
+            if took > SLOW {
+                self.0.log(&format!(
+                    "slow {kind} {} {} {}",
+                    class(path),
+                    nanos(began),
+                    took.as_nanos()
+                ))?;
+            }
+            match self.0.stop_after {
+                Some(n) if done == n => {
+                    self.0.halted.store(true, Ordering::SeqCst);
+                    self.stop(done, kind, path)?;
+                }
+                Some(n) if done > n => {
+                    self.0.halted.store(true, Ordering::SeqCst);
+                    self.0.log(&format!("late {done} {kind} {}", class(path)))?;
+                }
+                _ => return result,
+            }
+            block_forever();
+            Err(io::Error::other("the crash point returned"))
         }
 
         fn stop(&self, op: usize, kind: &str, path: &Path) -> io::Result<()> {
@@ -804,6 +829,9 @@ mod linux {
         end: Option<(u64, u64, u64)>,
         overruns: usize,
         journal_failures: usize,
+        /// (kind:class, t, took ns), slowest first after reading.
+        slow: Vec<(String, u64, u64)>,
+        late: usize,
     }
 
     fn read_log(path: &Path) -> Res<Promised> {
@@ -831,6 +859,8 @@ mod linux {
                 }
                 Some("row") => p.rows.push((n(1)?, n(2)?, n(3)?, s(4)?)),
                 Some("overrun") => p.overruns += 1,
+                Some("slow") => p.slow.push((format!("{}:{}", s(1)?, s(2)?), n(3)?, n(4)?)),
+                Some("late") => p.late += 1,
                 Some("journal-failed") => p.journal_failures += 1,
                 Some("stop") => p.stop = Some((n(1)?, s(2)?, s(3)?, n(4)?, n(5)?, n(6)?)),
                 Some("end") => {
@@ -1060,14 +1090,14 @@ mod linux {
 
         let lag = Lag::of(promised);
         if lag.max > MAX_LAG || lag.wall_max > MAX_LAG {
-            return Err(format!(
+            let behind = format!(
                 "durable was {:.0} ms behind the journal and {:.0} ms behind the wall clock \
                  (bound {:.0} ms)",
                 ms(lag.max),
                 ms(lag.wall_max),
                 ms(MAX_LAG)
-            )
-            .into());
+            );
+            return Err((behind + &slow_ops(promised)).into());
         }
         if promised.overruns > 0 || promised.journal_failures > 0 {
             return Err(format!(
@@ -1092,7 +1122,8 @@ mod linux {
         Ok(format!(
             "stop={stop} captured={captured_at_end} durable={} recovered={recovered} \
              loss_ms={:.1} beyond_durable_ms={:.1} lag_max_ms={:.1} wall_lag_max_ms={:.1} \
-             syncs={} rows={} salvaged={} deleted={} peak_dbfs={:.1} state={}",
+             syncs={} rows={} salvaged={} deleted={} late_ops={} slowest_op={} peak_dbfs={:.1} \
+             state={}",
             promised.durable,
             ms(captured_at_end.saturating_sub(recovered)),
             ms(recovered.saturating_sub(promised.durable)),
@@ -1102,9 +1133,34 @@ mod linux {
             after.rows.len(),
             first.segments().len(),
             first.deleted().len(),
+            promised.late,
+            promised
+                .slow
+                .iter()
+                .max_by_key(|(_, _, took)| *took)
+                .map_or_else(
+                    || "none".to_owned(),
+                    |(what, _, took)| format!("{what}:{}ms", took / 1_000_000)
+                ),
             20.0 * (f64::from(peak.max(1)) / 32_768.0).log10(),
             after.digest()
         ))
+    }
+
+    /// The operations that took over 100 ms, for a failure message.
+    fn slow_ops(p: &Promised) -> String {
+        let t0 = p.first.map_or(0, |(t, _)| t);
+        p.slow
+            .iter()
+            .fold(String::new(), |mut out, (what, t, took)| {
+                let _ = write!(
+                    out,
+                    "; slow {what} at {:.3} s took {} ms",
+                    ms(t.saturating_sub(t0) * u64::from(RATE.hz()) / 1_000_000_000) / 1_000.0,
+                    took / 1_000_000
+                );
+                out
+            })
     }
 
     /// Every committed row is still there, and every file has its row.

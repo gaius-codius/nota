@@ -385,6 +385,11 @@ for mode in "${MODES[@]}"; do
       if (v["wall_lag_max_ms"] + 0 > wall) wall = v["wall_lag_max_ms"] + 0
       if (v["loss_ms"] + 0 > loss) loss = v["loss_ms"] + 0
       if (v["loss_ms"] + 0 > 0) lossy++
+      late += v["late_ops"]
+      if (v["slowest_op"] != "none") {
+        n_slow = split(v["slowest_op"], so, ":"); sms = so[n_slow] + 0
+        if (sms > slowest) { slowest = sms; slowest_what = v["slowest_op"] }
+      }
       if (v["beyond_durable_ms"] + 0 > beyond) beyond = v["beyond_durable_ms"] + 0
       if (v["cut_state"] != "") cut++
       split(v["stop"], s, ":"); kinds[s[2] ":" s[3]]++
@@ -393,7 +398,8 @@ for mode in "${MODES[@]}"; do
     END {
       printf "  %s: %d points passed; max lag %.1f ms (wall clock %.1f ms); max loss %.1f ms;", mode, n, lag, wall, loss
       printf " recovered past durable up to %.1f ms; interrupted salvage matched %d times\n", beyond, cut
-      printf "    points that lost unsynced audio: %d\n", lossy
+      printf "    points that lost unsynced audio: %d; operations that landed after the crash point: %d\n", lossy, late
+      printf "    slowest disk operation: %s\n", (slowest_what == "" ? "none over 100 ms" : slowest_what)
       printf "    crash points by operation:"
       for (k in kinds) printf " %s=%d", k, kinds[k]
       printf "\n"
