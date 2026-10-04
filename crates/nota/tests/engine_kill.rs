@@ -1,7 +1,8 @@
 //! The real engine child (`nota engine asr`) under the recorder's
 //! supervisor: killed with SIGKILL mid-chunk, it's restarted, no audio goes
 //! untranscribed, and text resumes within 10 s. Skips (and says so on
-//! stderr) when the test models or the fixture are absent; see
+//! stderr) when the test models or the fixture are absent, and fails instead
+//! when `NOTA_REQUIRE_TEST_MODELS=1`, as in CI; see
 //! `scripts/fetch-test-models.sh`.
 
 // Test code throughout: clippy allows unwraps and panics in it.
@@ -23,16 +24,23 @@ use nota_recorder::engine::{
 
 fn test_models() -> Option<PathBuf> {
     let root = std::env::var_os("NOTA_TEST_MODELS")
+        .filter(|v| !v.is_empty())
         .map(PathBuf::from)
         .or_else(|| {
             std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/nota/test-models"))
-        })?;
+        })
+        .unwrap_or_default();
     let present = root
         .join("parakeet-tdt-0.6b-v3-int8/encoder.int8.onnx")
         .is_file()
         && root.join("silero_vad_v6.onnx").is_file()
         && root.join("fixtures/invented-lecture.wav").is_file();
     if !present {
+        assert!(
+            std::env::var_os("NOTA_REQUIRE_TEST_MODELS").is_none_or(|v| v != "1"),
+            "NOTA_REQUIRE_TEST_MODELS=1 but no test models in {} (run scripts/fetch-test-models.sh)",
+            root.display()
+        );
         let _ = writeln!(
             std::io::stderr(),
             "skipped: no test models in {} (run scripts/fetch-test-models.sh)",

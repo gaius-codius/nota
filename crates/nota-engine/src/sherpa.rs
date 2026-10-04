@@ -303,14 +303,16 @@ mod tests {
     use super::*;
 
     /// The models and the fixture's audio, or `None` (said on stderr) if
-    /// they're absent.
+    /// they're absent. Fails instead when `NOTA_REQUIRE_TEST_MODELS=1`.
     fn models_and_fixture() -> Option<(SherpaModels, Vec<f32>)> {
         let root = std::env::var_os("NOTA_TEST_MODELS")
+            .filter(|v| !v.is_empty())
             .map(PathBuf::from)
             .or_else(|| {
                 std::env::var_os("HOME")
                     .map(|h| PathBuf::from(h).join(".local/share/nota/test-models"))
-            })?;
+            })
+            .unwrap_or_default();
         let wav = root.join("fixtures/invented-lecture.wav");
         let paths = ModelPaths {
             parakeet_dir: root.join("parakeet-tdt-0.6b-v3-int8"),
@@ -318,6 +320,11 @@ mod tests {
             threads: 2,
         };
         if !wav.is_file() || !paths.vad_model.is_file() {
+            assert!(
+                std::env::var_os("NOTA_REQUIRE_TEST_MODELS").is_none_or(|v| v != "1"),
+                "NOTA_REQUIRE_TEST_MODELS=1 but no test models in {}",
+                root.display()
+            );
             let _ = writeln!(
                 std::io::stderr(),
                 "skipped: no test models in {}",

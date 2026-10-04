@@ -2,9 +2,15 @@
 # Fills the test-models directory used by the engine tests: the Parakeet and
 # Silero VAD models, and a synthetic speech fixture (invented-lecture.wav)
 # spoken by a permissively licensed TTS voice. Tests skip when these are
-# absent. Everything lands outside the repo; nothing it writes is committed.
+# absent, or fail when NOTA_REQUIRE_TEST_MODELS=1. Everything lands outside
+# the repo; nothing it writes is committed.
 #
-# Requires: bash, curl, tar (bzip2), ffmpeg.
+# Every download is checked against the SHA-256 pinned below before it's
+# used, and the model files are checked again on every run, including when
+# they're already there or linked from NOTA_MODEL_SOURCE. A mismatch fails.
+# The fixture is generated from pinned inputs; it isn't pinned itself.
+#
+# Requires: bash, curl, tar (bzip2), sha256sum, ffmpeg.
 #
 # Env:
 #   NOTA_TEST_MODELS     target dir (default ~/.local/share/nota/test-models)
@@ -13,6 +19,20 @@
 #   SHERPA_ONNX_BIN_DIR  dir holding sherpa-onnx-offline-tts (default: downloaded
 #                        from the sherpa-onnx v1.13.8 release)
 set -euo pipefail
+
+# SHA-256 of each download, and of each model file the tests load.
+parakeet_archive_sha=5793d0fd397c5778d2cf2126994d58e9d56b1be7c04d13c7a15bb1b4eafb16bf
+sherpa_archive_sha=c0bdb7907d3a74bba1d55d22bf4d9fa75586cf1530614ebe88a27b9118e015c4
+voice_archive_sha=f35dac93754fe2ac97c66e1f468311d0d2130f7f0f5a89bfa1197e09a0cbdec5
+declare -A model_sha=(
+  [parakeet-tdt-0.6b-v3-int8/encoder.int8.onnx]=acfc2b4456377e15d04f0243af540b7fe7c992f8d898d751cf134c3a55fd2247
+  [parakeet-tdt-0.6b-v3-int8/decoder.int8.onnx]=179e50c43d1a9de79c8a24149a2f9bac6eb5981823f2a2ed88d655b24248db4e
+  [parakeet-tdt-0.6b-v3-int8/joiner.int8.onnx]=3164c13fc2821009440d20fcb5fdc78bff28b4db2f8d0f0b329101719c0948b3
+  [parakeet-tdt-0.6b-v3-int8/tokens.txt]=d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d
+  [silero_vad_v6.onnx]=1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3
+)
+# Silero VAD v6.2.3, by commit: a tag can move.
+silero_commit=5cd7945676eb32225748052e2e6a0580e4686a08
 
 root=${NOTA_TEST_MODELS:-$HOME/.local/share/nota/test-models}
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -28,8 +48,24 @@ sid=${NOTA_TTS_SID:-0}
 
 mkdir -p "$root/fixtures" "$dl"
 
-fetch() { # url dest
-  [[ -e $2 ]] || { curl -fsSL -o "$2.part" "$1" && mv "$2.part" "$2"; }
+verify() { # file sha256
+  local got
+  got=$(sha256sum <"$1") && got=${got%% *}
+  [[ $got == "$2" ]] || {
+    echo "checksum mismatch: $1 is ${got:-unreadable}, expected $2" >&2
+    echo "(a file from an older or interrupted run? delete it and run again)" >&2
+    return 1
+  }
+}
+
+fetch() { # url dest sha256
+  if [[ ! -e $2 ]]; then
+    curl -fsSL --proto '=https' --retry 3 --retry-all-errors --connect-timeout 30 \
+      -o "$2.part" "$1"
+    verify "$2.part" "$3" || { rm -f "$2.part"; exit 1; }
+    mv "$2.part" "$2"
+  fi
+  verify "$2" "$3" || exit 1
 }
 
 # Parakeet TDT 0.6b v3 (int8)
@@ -37,7 +73,8 @@ if [[ ! -e $root/parakeet-tdt-0.6b-v3-int8 ]]; then
   if [[ -n ${NOTA_MODEL_SOURCE:-} ]]; then
     ln -s "$NOTA_MODEL_SOURCE/$parakeet_name" "$root/parakeet-tdt-0.6b-v3-int8"
   else
-    fetch "$gh/asr-models/$parakeet_name.tar.bz2" "$dl/$parakeet_name.tar.bz2"
+    fetch "$gh/asr-models/$parakeet_name.tar.bz2" "$dl/$parakeet_name.tar.bz2" \
+      "$parakeet_archive_sha"
     tar -xjf "$dl/$parakeet_name.tar.bz2" -C "$dl"
     mkdir -p "$root/parakeet-tdt-0.6b-v3-int8.tmp"
     for f in encoder.int8.onnx decoder.int8.onnx joiner.int8.onnx tokens.txt; do
@@ -47,15 +84,20 @@ if [[ ! -e $root/parakeet-tdt-0.6b-v3-int8 ]]; then
   fi
 fi
 
-# Silero VAD v6 (MIT), from the upstream v6.0 tag
+# Silero VAD v6 (MIT), from upstream at the commit above
 if [[ ! -e $root/silero_vad_v6.onnx ]]; then
   if [[ -n ${NOTA_MODEL_SOURCE:-} ]]; then
     ln -s "$NOTA_MODEL_SOURCE/silero_vad_v6.onnx" "$root/silero_vad_v6.onnx"
   else
-    fetch "https://raw.githubusercontent.com/snakers4/silero-vad/v6.0/src/silero_vad/data/silero_vad.onnx" \
-      "$root/silero_vad_v6.onnx"
+    fetch "https://raw.githubusercontent.com/snakers4/silero-vad/$silero_commit/src/silero_vad/data/silero_vad.onnx" \
+      "$root/silero_vad_v6.onnx" "${model_sha[silero_vad_v6.onnx]}"
   fi
 fi
+
+# The model files, however they got here.
+for f in "${!model_sha[@]}"; do
+  verify "$root/$f" "${model_sha[$f]}" || exit 1
+done
 
 # Speech fixture
 wav=$root/fixtures/invented-lecture.wav
@@ -64,18 +106,19 @@ if [[ ! -e $wav ]]; then
 
   bin_dir=${SHERPA_ONNX_BIN_DIR:-}
   if [[ -z $bin_dir ]]; then
+    # Extracted afresh from the checked archive, so the binary that runs
+    # is the pinned one.
     bin_dir=$dl/$sherpa_archive/bin
-    if [[ ! -x $bin_dir/sherpa-onnx-offline-tts ]]; then
-      fetch "$gh/$sherpa_ver/$sherpa_archive.tar.bz2" "$dl/$sherpa_archive.tar.bz2"
-      tar -xjf "$dl/$sherpa_archive.tar.bz2" -C "$dl"
-    fi
+    fetch "$gh/$sherpa_ver/$sherpa_archive.tar.bz2" "$dl/$sherpa_archive.tar.bz2" \
+      "$sherpa_archive_sha"
+    rm -rf "${dl:?}/$sherpa_archive"
+    tar -xjf "$dl/$sherpa_archive.tar.bz2" -C "$dl"
   fi
   export LD_LIBRARY_PATH="$bin_dir/../lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
-  if [[ ! -e $dl/$voice/model.fp16.onnx ]]; then
-    fetch "$gh/tts-models/$voice.tar.bz2" "$dl/$voice.tar.bz2"
-    tar -xjf "$dl/$voice.tar.bz2" -C "$dl"
-  fi
+  fetch "$gh/tts-models/$voice.tar.bz2" "$dl/$voice.tar.bz2" "$voice_archive_sha"
+  rm -rf "${dl:?}/$voice"
+  tar -xjf "$dl/$voice.tar.bz2" -C "$dl"
 
   work=$dl/synth
   mkdir -p "$work"
