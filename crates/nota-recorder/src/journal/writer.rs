@@ -3,6 +3,7 @@
 
 use std::fmt;
 use std::io;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,13 +23,13 @@ use crate::fs::{Fs, FsFile, Synced};
 /// about 200 ms; at a full second, one ~105 ms fsync was enough to break it.
 pub const SYNC_INTERVAL: Duration = Duration::from_millis(850);
 
-/// The most audio a journal at `rate` may hold unsynced: [`SYNC_INTERVAL`]'s
-/// worth, and at least one sample, so even a very low rate makes progress.
+/// The most audio a journal at `rate` may hold unsynced, in samples:
+/// [`SYNC_INTERVAL`]'s worth, and at least one, so even a very low rate
+/// makes progress (a zero budget would sync forever without writing).
 /// Salvage judges torn tails by it too.
-pub(crate) fn sync_budget(rate: SampleRate) -> SampleCount {
-    SampleCount::started_within(SYNC_INTERVAL, rate)
-        .unwrap_or(SampleCount::ZERO)
-        .max(SampleCount::new(1))
+pub(crate) fn sync_budget(rate: SampleRate) -> NonZeroU64 {
+    let samples = SampleCount::started_within(SYNC_INTERVAL, rate).map_or(0, SampleCount::get);
+    NonZeroU64::new(samples).unwrap_or(NonZeroU64::MIN)
 }
 
 /// How far one journal has been fsync'd: every sample it holds for its
@@ -231,11 +232,6 @@ impl<F: FsFile> JournalWriter<F> {
         self.broken
     }
 
-    /// The most audio that may go unsynced, at the journal's rate.
-    fn sync_budget(&self) -> SampleCount {
-        sync_budget(self.header.rate())
-    }
-
     /// Samples captured but not yet fsync'd.
     fn unsynced(&self) -> SampleCount {
         self.captured
@@ -264,7 +260,7 @@ impl<F: FsFile> JournalWriter<F> {
 
         // The max is a u32, so it fits in usize on every platform nota builds for.
         let max = usize::try_from(MAX_FRAME_SAMPLES).unwrap_or(usize::MAX);
-        let budget = self.sync_budget().get();
+        let budget = sync_budget(self.header.rate()).get();
         let mut rest = samples;
         while !rest.is_empty() {
             // Never more than the budget unsynced, even within one long
@@ -328,7 +324,8 @@ impl<F: FsFile> JournalWriter<F> {
             .now()
             .checked_duration_since(self.last_sync)
             .unwrap_or(Duration::ZERO);
-        let due = waited >= SYNC_INTERVAL || self.unsynced() >= self.sync_budget();
+        let due = waited >= SYNC_INTERVAL
+            || self.unsynced().get() >= sync_budget(self.header.rate()).get();
         if due {
             self.sync()?;
         }

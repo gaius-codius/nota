@@ -11,7 +11,7 @@ use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use nota_core::{SampleIndex, SampleRange, SampleRate};
+use nota_core::{SampleCount, SampleIndex, SampleRange, SampleRate};
 use nota_store::SegmentRow;
 use sha2::{Digest, Sha256};
 
@@ -541,7 +541,7 @@ fn audio_past_a_crash(bytes: &[u8], read: &JournalRead, header: JournalHeader) -
         .range()
         .map(SampleRange::end)
         .or_else(|| starts.iter().min().copied());
-    let budget = sync_budget(header.rate());
+    let budget = SampleCount::new(sync_budget(header.rate()).get());
     base.and_then(|b| b.checked_add(budget))
         .is_some_and(|limit| starts.iter().any(|&s| s >= limit))
 }
