@@ -563,6 +563,64 @@ fn check_written_lag(case: &CrashCase, promised: &Promised, seen: &Observed) -> 
     Ok(())
 }
 
+#[test]
+fn the_written_lag_counts_frames_past_the_last_fsync() {
+    // A journal holding `to` samples of MIC, fsync'd only up to 600: the
+    // writer's word (nothing captured) hides the rest, the disk doesn't.
+    let lag_of = |to: u64| {
+        let fs = FakeFs::with_dirs([session(), db()]);
+        let path = session().join(JournalId::new(0).file_name());
+        let header =
+            crate::journal::JournalHeader::new(JournalId::new(0), MIC, EpochId::new(0), rate());
+        let mut file = fs.create(&path).unwrap();
+        file.write_all(&crate::journal::format::encode_header(header))
+            .unwrap();
+        let mut frames = Vec::new();
+        crate::journal::format::encode_frame(
+            &mut frames,
+            0,
+            MIC,
+            SampleIndex::ZERO,
+            &samples(MIC, 0, 600),
+        );
+        file.write_all(&frames).unwrap();
+        file.sync().unwrap();
+        frames.clear();
+        crate::journal::format::encode_frame(
+            &mut frames,
+            1,
+            MIC,
+            SampleIndex::new(600),
+            &samples(MIC, 600, to - 600),
+        );
+        file.write_all(&frames).unwrap();
+        let case = CrashCase {
+            after_ops: fs.attempted(),
+            ops: fs.ops(),
+            outcome: CrashOutcome::KeepAll,
+            recovery_crashes: Vec::new(),
+            survived: fs.copy_disk(),
+            fs: fs.copy_disk(),
+        };
+        let promised = Promised {
+            started: BTreeMap::from([(MIC, SampleIndex::ZERO)]),
+            durable: BTreeMap::from([(MIC, SampleIndex::ZERO)]),
+            captured: BTreeMap::from([(MIC, SampleIndex::ZERO)]),
+            rows: Vec::new(),
+        };
+        assert_eq!(worst_lag(&promised), 0);
+        check_written_lag(&case, &promised, &observe(&fs))
+    };
+    // 1,000 past the fsync: within the limit.
+    lag_of(1_600).unwrap();
+    // 1,101: past it.
+    let err = lag_of(1_701).unwrap_err();
+    assert!(
+        err.contains("1101 samples written but not durable"),
+        "{err}"
+    );
+}
+
 /// The invariants, at any crash point:
 /// - at the crash: no track had more than [`LAG_LIMIT`] captured but not
 ///   durable, counting what the writer accepted and, when the crash kept

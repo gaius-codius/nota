@@ -9,9 +9,10 @@
 //! With [`CrashTest::crash_recovery`], recovery itself is crashed after each
 //! of its operations too, and run again on what survived that: salvage must
 //! be safe to repeat. [`CrashTest::recovery_outcomes`] crashes recovery with
-//! other outcomes than the scenario's, [`CrashTest::sample_recovery`] keeps
-//! only some of those crashes when there are too many to run, and
-//! [`CrashTest::crash_rerun`] crashes the re-run as well.
+//! other outcomes than the scenario's, [`CrashTest::sample_recovery`] crashes
+//! it at only some of its points when there are too many to run, and
+//! [`CrashTest::crash_rerun`] crashes the re-run as well. Each of the three
+//! turns recovery crashes on.
 //!
 //! The tests below show the shape: a segment publish (temp file, fsync,
 //! rename, directory sync) and a recovery that finishes it.
