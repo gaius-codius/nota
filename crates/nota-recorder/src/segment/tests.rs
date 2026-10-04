@@ -97,12 +97,19 @@ struct Promised {
     /// writer reported.
     started: BTreeMap<TrackId, SampleIndex>,
     durable: BTreeMap<TrackId, SampleIndex>,
+    /// Per track, the end of what the writer accepted: every call that
+    /// returned without an error. A failed call's samples are a gap the
+    /// writer reported, not a promise.
+    captured: BTreeMap<TrackId, SampleIndex>,
     /// Rows publishing reported committed.
     rows: Vec<SegmentRow>,
 }
 
 impl Promised {
     fn note<S: Fs>(&mut self, writer: &SessionWriter<S>, track: TrackId, ok: bool) {
+        if ok && let Some(next) = writer.next_sample(track) {
+            self.captured.insert(track, next);
+        }
         // Between journals, a successful call has ended the last one with a
         // sync: everything up to the next sample is durable.
         let end = match writer.durable(track) {
@@ -146,6 +153,16 @@ fn record(fs: &FakeFs, how: Recording) -> Promised {
 }
 
 fn record_into(fs: &FakeFs, how: Recording, promised: &mut Promised) -> Result<(), Box<dyn Error>> {
+    record_chunks(fs, how, &[250, 100, 400, 1_600, 50], promised)
+}
+
+/// Records as [`record_into`] does, in chunks of `sizes`, in turn.
+fn record_chunks(
+    fs: &FakeFs,
+    how: Recording,
+    sizes: &[u64],
+    promised: &mut Promised,
+) -> Result<(), Box<dyn Error>> {
     let (clock, dyn_clock) = fake_clock();
     let mut writer = SessionWriter::open(&session_dir(fs), rate(), length(), dyn_clock)?;
     let mut store = session_store(fs);
@@ -153,8 +170,8 @@ fn record_into(fs: &FakeFs, how: Recording, promised: &mut Promised) -> Result<(
         writer.start_track(track, EpochId::new(0), SampleIndex::new(at))?;
         promised.started.insert(track, SampleIndex::new(at));
         promised.durable.insert(track, SampleIndex::new(at));
+        promised.captured.insert(track, SampleIndex::new(at));
     }
-    let sizes = [250_u64, 100, 400, 1_600, 50];
     let mut pending: Vec<FinishedJournal> = Vec::new();
     let mut publish = |writer: &mut SessionWriter<FakeFs>,
                        promised: &mut Promised|
@@ -190,6 +207,7 @@ fn record_into(fs: &FakeFs, how: Recording, promised: &mut Promised) -> Result<(
     let finished = writer.finish()?;
     for (track, end) in ends {
         promised.durable.insert(track, end);
+        promised.captured.insert(track, end);
     }
     pending.extend(finished);
     if how.publish {
@@ -250,10 +268,105 @@ fn is_journal(path: &Path) -> bool {
         .is_some()
 }
 
+/// A set of samples, per track: sorted, merged ranges rather than a
+/// node per sample, so checking a disk costs per range.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct Held(BTreeMap<TrackId, Vec<(u64, u64)>>);
+
+impl Held {
+    /// The samples of `ranges`, which may overlap.
+    fn of(ranges: impl IntoIterator<Item = (TrackId, u64, u64)>) -> Self {
+        let mut by_track: BTreeMap<TrackId, Vec<(u64, u64)>> = BTreeMap::new();
+        for (track, from, to) in ranges {
+            if from < to {
+                by_track.entry(track).or_default().push((from, to));
+            }
+        }
+        for ranges in by_track.values_mut() {
+            ranges.sort_unstable();
+            let mut merged: Vec<(u64, u64)> = Vec::with_capacity(ranges.len());
+            for &(from, to) in ranges.iter() {
+                match merged.last_mut() {
+                    Some(last) if from <= last.1 => last.1 = last.1.max(to),
+                    _ => merged.push((from, to)),
+                }
+            }
+            *ranges = merged;
+        }
+        Self(by_track)
+    }
+
+    fn ranges(&self) -> impl Iterator<Item = (TrackId, u64, u64)> + '_ {
+        self.0
+            .iter()
+            .flat_map(|(&t, ranges)| ranges.iter().map(move |&(a, b)| (t, a, b)))
+    }
+
+    fn union(&self, other: &Self) -> Self {
+        Self::of(self.ranges().chain(other.ranges()))
+    }
+
+    fn contains(&self, &(track, s): &(TrackId, u64)) -> bool {
+        let Some(ranges) = self.0.get(&track) else {
+            return false;
+        };
+        // The last range starting at or before `s`.
+        let i = ranges.partition_point(|&(from, _)| from <= s);
+        i > 0 && s < ranges[i - 1].1
+    }
+
+    /// The first of `track`'s samples `from..to` not held.
+    fn first_missing(&self, track: TrackId, from: u64, to: u64) -> Option<u64> {
+        let mut at = from;
+        for &(a, b) in self.0.get(&track).map_or(&[][..], Vec::as_slice) {
+            if at >= to || a > at {
+                break;
+            }
+            at = at.max(b);
+        }
+        (at < to).then_some(at)
+    }
+}
+
+proptest::proptest! {
+    /// `Held` answers as a set of every sample would.
+    #[test]
+    fn held_answers_like_a_set_of_samples(
+        a in proptest::collection::vec((0_u32..2, 0_u64..60, 0_u64..20), 0..8),
+        b in proptest::collection::vec((0_u32..2, 0_u64..60, 0_u64..20), 0..8),
+        from in 0_u64..80,
+        len in 0_u64..40,
+    ) {
+        let ranges = |v: &[(u32, u64, u64)]| -> Vec<(TrackId, u64, u64)> {
+            v.iter().map(|&(t, at, n)| (TrackId::new(t), at, at + n)).collect()
+        };
+        let set = |v: &[(TrackId, u64, u64)]| -> BTreeSet<(TrackId, u64)> {
+            v.iter().flat_map(|&(t, x, y)| (x..y).map(move |s| (t, s))).collect()
+        };
+        let (ra, rb) = (ranges(&a), ranges(&b));
+        let (ha, hb) = (Held::of(ra.clone()), Held::of(rb.clone()));
+        let (sa, sb) = (set(&ra), set(&rb));
+        let union = ha.union(&hb);
+        let su: BTreeSet<_> = sa.union(&sb).copied().collect();
+        for track in [TrackId::new(0), TrackId::new(1)] {
+            for s in 0..100 {
+                proptest::prop_assert_eq!(ha.contains(&(track, s)), sa.contains(&(track, s)));
+                proptest::prop_assert_eq!(union.contains(&(track, s)), su.contains(&(track, s)));
+            }
+            let want = (from..from + len).find(|&s| !su.contains(&(track, s)));
+            proptest::prop_assert_eq!(union.first_missing(track, from, from + len), want);
+        }
+        // Merged: no two ranges of a track touch or overlap.
+        for ranges in union.0.values() {
+            proptest::prop_assert!(ranges.windows(2).all(|w| w[0].1 < w[1].0));
+        }
+    }
+}
+
 /// Per track, the samples held by valid journal frames, each checked
 /// against what was recorded.
-fn journal_samples(seen: &Observed) -> Result<BTreeSet<(TrackId, u64)>, String> {
-    let mut held = BTreeSet::new();
+fn journal_samples(seen: &Observed) -> Result<Held, String> {
+    let mut held = Vec::new();
     for (path, bytes) in &seen.files {
         if !is_journal(path) {
             continue;
@@ -265,17 +378,17 @@ fn journal_samples(seen: &Observed) -> Result<BTreeSet<(TrackId, u64)>, String> 
             if frame.samples() != want {
                 return Err(format!("{} misread at {:?}", path.display(), r));
             }
-            held.extend((r.start().get()..r.end().get()).map(|s| (frame.track(), s)));
+            held.push((frame.track(), r.start().get(), r.end().get()));
         }
     }
-    Ok(held)
+    Ok(Held::of(held))
 }
 
-/// Checks every row has its file, holding exactly the row's audio; returns
-/// the samples the rows hold.
-fn row_samples(seen: &Observed) -> Result<BTreeSet<(TrackId, u64)>, String> {
+/// Checks every row has its file, holding exactly the row's audio, and no
+/// two rows overlap; returns the samples the rows hold.
+fn row_samples(seen: &Observed) -> Result<Held, String> {
     let rows = seen.rows.clone()?;
-    let mut held = BTreeSet::new();
+    let mut held = Vec::new();
     for row in &rows {
         let path = session().join(segment_file_name(row.track(), row.range()));
         let Some(bytes) = seen.files.get(&path) else {
@@ -290,23 +403,36 @@ fn row_samples(seen: &Observed) -> Result<BTreeSet<(TrackId, u64)>, String> {
         if hz != rate().hz() || got != samples(row.track(), r.start().get(), r.len().get()) {
             return Err(format!("{} holds the wrong audio", path.display()));
         }
-        for s in r.start().get()..r.end().get() {
-            if !held.insert((row.track(), s)) {
-                return Err(format!(
-                    "rows overlap at track {} sample {s}",
-                    row.track().get()
-                ));
-            }
-        }
+        held.push((row.track(), r.start().get(), r.end().get()));
     }
-    Ok(held)
+    // Sorted by track then start, a row overlaps an earlier one if it
+    // starts before the furthest end so far.
+    held.sort_unstable();
+    let mut furthest: Option<(TrackId, u64)> = None;
+    for &(track, from, to) in &held {
+        if let Some((t, end)) = furthest
+            && t == track
+            && from < end
+        {
+            return Err(format!(
+                "rows overlap at track {} sample {from}",
+                track.get()
+            ));
+        }
+        let end = match furthest {
+            Some((t, end)) if t == track => end.max(to),
+            _ => to,
+        };
+        furthest = Some((track, end));
+    }
+    Ok(Held::of(held))
 }
 
 /// Every promised-durable sample is in `held`.
-fn check_durable(promised: &Promised, held: &BTreeSet<(TrackId, u64)>) -> Result<(), String> {
+fn check_durable(promised: &Promised, held: &Held) -> Result<(), String> {
     for (&track, &start) in &promised.started {
         let end = promised.durable[&track];
-        if let Some(s) = (start.get()..end.get()).find(|&s| !held.contains(&(track, s))) {
+        if let Some(s) = held.first_missing(track, start.get(), end.get()) {
             return Err(format!(
                 "track {} lost sample {s} (durable to {})",
                 track.get(),
@@ -348,23 +474,229 @@ fn check_after(promised: &Promised, after: &Observed) -> Result<(), String> {
     Ok(())
 }
 
+/// The most audio that may be captured but not durable: 1.1 s at the
+/// test's rate.
+const LAG_LIMIT: u64 = 1_100;
+
+/// The most any track had captured but not durable when the recording
+/// stopped, in samples.
+fn worst_lag(promised: &Promised) -> u64 {
+    promised
+        .captured
+        .iter()
+        .map(|(track, captured)| {
+            // Every started track has a durable position; a missing one
+            // counts from zero, so it can only fail the check.
+            let durable = promised.durable.get(track).map_or(0, |d| d.get());
+            captured.get().saturating_sub(durable)
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// No track's journals hold more than [`LAG_LIMIT`] written past what was
+/// fsync'd, measured on the disk the crash left when it kept everything
+/// (`seen`), from the scenario's operations: for frames a call wrote before
+/// it failed, which the writer's word doesn't cover.
+fn check_written_lag(case: &CrashCase, promised: &Promised, seen: &Observed) -> Result<(), String> {
+    // Per journal, how many of its bytes an fsync covered.
+    let mut written: BTreeMap<&Path, usize> = BTreeMap::new();
+    let mut synced: BTreeMap<&Path, usize> = BTreeMap::new();
+    for op in &case.ops {
+        match op {
+            Op::Write { path, len } if is_journal(path) => {
+                *written.entry(path).or_default() += len;
+            }
+            Op::Sync(path) if is_journal(path) => {
+                synced.insert(path, written.get(path.as_path()).copied().unwrap_or(0));
+            }
+            _ => {}
+        }
+    }
+    // Per track, the furthest sample written, and the furthest durable:
+    // in a row (its journal synced before it was published), or in an
+    // fsync'd part of a journal.
+    let mut ends: BTreeMap<TrackId, (u64, u64)> = promised
+        .durable
+        .iter()
+        .map(|(&t, d)| (t, (d.get(), d.get())))
+        .collect();
+    let mut note = |track: TrackId, end: u64, durable: bool| {
+        let e = ends.entry(track).or_insert((0, 0));
+        e.0 = e.0.max(end);
+        if durable {
+            e.1 = e.1.max(end);
+        }
+    };
+    for row in seen.rows.as_ref().map_or(&[][..], Vec::as_slice) {
+        note(row.track(), row.range().end().get(), true);
+    }
+    for (path, bytes) in &seen.files {
+        if !is_journal(path) {
+            continue;
+        }
+        let read = read_journal(bytes);
+        let Some(track) = read.header().map(crate::journal::JournalHeader::track) else {
+            continue;
+        };
+        if let Some(r) = read.range() {
+            note(track, r.end().get(), false);
+        }
+        let len = synced
+            .get(path.as_path())
+            .copied()
+            .unwrap_or(0)
+            .min(bytes.len());
+        if let Some(r) = read_journal(&bytes[..len]).range() {
+            note(track, r.end().get(), true);
+        }
+    }
+    for (track, (end, durable)) in ends {
+        let lag = end.saturating_sub(durable);
+        if lag > LAG_LIMIT {
+            return Err(format!(
+                "track {}: {lag} samples written but not durable (written to {end}, durable to {durable})",
+                track.get()
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn the_written_lag_counts_frames_past_the_last_fsync() {
+    // A journal holding `to` samples of MIC, fsync'd only up to 600: the
+    // writer's word (nothing captured) hides the rest, the disk doesn't.
+    let lag_of = |to: u64| {
+        let fs = FakeFs::with_dirs([session(), db()]);
+        let path = session().join(JournalId::new(0).file_name());
+        let header =
+            crate::journal::JournalHeader::new(JournalId::new(0), MIC, EpochId::new(0), rate());
+        let mut file = fs.create(&path).unwrap();
+        file.write_all(&crate::journal::format::encode_header(header))
+            .unwrap();
+        let mut frames = Vec::new();
+        crate::journal::format::encode_frame(
+            &mut frames,
+            0,
+            MIC,
+            SampleIndex::ZERO,
+            &samples(MIC, 0, 600),
+        );
+        file.write_all(&frames).unwrap();
+        file.sync().unwrap();
+        frames.clear();
+        crate::journal::format::encode_frame(
+            &mut frames,
+            1,
+            MIC,
+            SampleIndex::new(600),
+            &samples(MIC, 600, to - 600),
+        );
+        file.write_all(&frames).unwrap();
+        let case = CrashCase {
+            after_ops: fs.attempted(),
+            ops: fs.ops(),
+            outcome: CrashOutcome::KeepAll,
+            recovery_crashes: Vec::new(),
+            survived: fs.copy_disk(),
+            fs: fs.copy_disk(),
+        };
+        let promised = Promised {
+            started: BTreeMap::from([(MIC, SampleIndex::ZERO)]),
+            durable: BTreeMap::from([(MIC, SampleIndex::ZERO)]),
+            captured: BTreeMap::from([(MIC, SampleIndex::ZERO)]),
+            rows: Vec::new(),
+        };
+        assert_eq!(worst_lag(&promised), 0);
+        check_written_lag(&case, &promised, &observe(&fs))
+    };
+    // 1,000 past the fsync: within the limit.
+    lag_of(1_600).unwrap();
+    // 1,101: past it.
+    let err = lag_of(1_701).unwrap_err();
+    assert!(
+        err.contains("1101 samples written but not durable"),
+        "{err}"
+    );
+}
+
 /// The invariants, at any crash point:
+/// - at the crash: no track had more than [`LAG_LIMIT`] captured but not
+///   durable, counting what the writer accepted and, when the crash kept
+///   everything, every journal frame written, even by a call that failed;
 /// - before salvage: no row without its file; every durable sample is in a
 ///   row's file or a journal; nothing misread;
 /// - after salvage: only segments and rows are left, holding every durable
 ///   sample and every committed row;
-/// - salvage again changes nothing.
-fn check(_: &CrashCase, promised: &Promised, got: &Recovered) -> Result<(), String> {
+/// - salvage again changes nothing;
+/// - if salvage was crashed, it ended byte for byte as an uninterrupted
+///   salvage of what the recording's crash left.
+fn check(case: &CrashCase, promised: &Promised, got: &Recovered) -> Result<(), String> {
+    let lag = worst_lag(promised);
+    if lag > LAG_LIMIT {
+        return Err(format!(
+            "{lag} samples captured but not durable: captured {:?}, durable {:?}",
+            promised.captured, promised.durable
+        ));
+    }
     let in_rows = row_samples(&got.before).map_err(|e| format!("before salvage: {e}"))?;
     let in_journals = journal_samples(&got.before).map_err(|e| format!("before salvage: {e}"))?;
-    let held = in_rows.union(&in_journals).copied().collect();
+    if case.outcome == CrashOutcome::KeepAll && case.recovery_crashes.is_empty() {
+        // The disk as the crash found it: frames written mid-call count.
+        check_written_lag(case, promised, &got.before)?;
+    }
+    let held = in_rows.union(&in_journals);
     check_durable(promised, &held).map_err(|e| format!("before salvage: {e}"))?;
     let after = got.after.clone()?;
     check_after(promised, &after).map_err(|e| format!("after salvage: {e}"))?;
     if got.again.as_ref() != Ok(&after) {
         return Err("a second salvage changed something".to_owned());
     }
+    // Uncrashed, salvage ran on that very disk: nothing to compare.
+    if !case.recovery_crashes.is_empty() {
+        let uninterrupted = uninterrupted_salvage(&case.survived)?;
+        if after != uninterrupted {
+            return Err(format!(
+                "ended differently from an uninterrupted salvage: {}",
+                differences(&after, &uninterrupted)
+            ));
+        }
+    }
     Ok(())
+}
+
+/// What an uninterrupted salvage of `disk` ends with. A case's recovery
+/// crashes all start from the same disk, so the last answer is kept, keyed
+/// by the whole disk.
+fn uninterrupted_salvage(disk: &FakeFs) -> Result<Observed, String> {
+    thread_local! {
+        static LAST: std::cell::RefCell<Option<(Observed, Observed)>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    let before = observe(disk);
+    if let Some(after) = LAST.with_borrow(|last| {
+        last.as_ref()
+            .filter(|(seen, _)| *seen == before)
+            .map(|(_, after)| after.clone())
+    }) {
+        return Ok(after);
+    }
+    let after = salvage_fake(&disk.copy_disk())?;
+    LAST.set(Some((before, after.clone())));
+    Ok(after)
+}
+
+/// What differs between two disks, briefly: the paths whose bytes differ,
+/// and whether the rows do.
+fn differences(a: &Observed, b: &Observed) -> String {
+    let paths: BTreeSet<&PathBuf> = a.files.keys().chain(b.files.keys()).collect();
+    let files: Vec<String> = paths
+        .into_iter()
+        .filter(|p| a.files.get(*p) != b.files.get(*p))
+        .map(|p| p.display().to_string())
+        .collect();
+    format!("files {files:?}, rows differ: {}", a.rows != b.rows)
 }
 
 fn crash_test(how: Recording) -> CrashTest<impl Fn(&FakeFs) -> Promised, RecoverFn, CheckFn> {
@@ -387,19 +719,99 @@ fn clean_run(how: Recording) -> (FakeFs, Promised) {
 }
 
 #[test]
-fn recording_and_publishing_crashed_after_every_operation_loses_nothing() {
+fn recording_and_salvage_crashed_anywhere_end_as_an_uninterrupted_salvage() {
     let how = Recording {
         steps: 7,
         publish: true,
         fail_at: None,
     };
-    let (_, promised) = clean_run(how);
+    let (clean, promised) = clean_run(how);
     // Several segments per track, published live, so crashes land in every
-    // publish step.
+    // publish step: a segment is published before the last audio is
+    // journaled.
     assert!(promised.rows.len() >= 4, "{:?}", promised.rows);
-    let summary = crash_test(how).run().unwrap();
+    let ops = clean.ops();
+    let first_row = ops
+        .iter()
+        .position(
+            |op| matches!(op, Op::Rename { to, .. } if to.extension().is_some_and(|e| e == "flac")),
+        )
+        .unwrap();
+    let last_journal = ops
+        .iter()
+        .rposition(|op| matches!(op, Op::Write { path, .. } if is_journal(path)))
+        .unwrap();
+    assert!(first_row < last_journal, "nothing published live");
+
+    // Every crash point and outcome of the recording. Salvage is crashed at
+    // a sample of its points per case, the sample moving along from case to
+    // case, each with three outcomes; the re-runs of some of those are
+    // crashed at a sample of their points too.
+    let worst = std::cell::Cell::new(0);
+    let summary = CrashTest::new(
+        move |fs: &FakeFs| record(fs, how),
+        recover,
+        |case: &CrashCase, promised: &Promised, got: &Recovered| {
+            worst.set(worst.get().max(worst_lag(promised)));
+            check(case, promised, got)
+        },
+    )
+    .dirs([session(), db()])
+    .recovery_outcomes(vec![
+        CrashOutcome::LoseUnsynced,
+        CrashOutcome::KeepAll,
+        CrashOutcome::Partial { seed: 5 },
+    ])
+    .sample_recovery(SAMPLE)
+    .crash_rerun(RERUN)
+    .run()
+    .unwrap_or_else(|failure| panic!("{failure}"));
     assert!(summary.scenario_ops > 100, "{summary:?}");
+    assert!(summary.recovery_crashed > 1_000, "{summary:?}");
+    assert!(summary.rerun_crashed > 100, "{summary:?}");
+    // Not vacuous: some crash came with most of a second unsynced.
+    assert!(worst.get() >= 800, "{}", worst.get());
 }
+
+#[test]
+fn a_recording_in_small_chunks_never_lags_past_the_limit_at_any_crash() {
+    // 25 ms chunks, as a capture callback might deliver them, over two
+    // windows with live publishing: the lag climbs to the sync budget
+    // before every sync, so a budget past the limit shows.
+    let how = Recording {
+        steps: 120,
+        publish: true,
+        fail_at: None,
+    };
+    let scenario = move |fs: &FakeFs| {
+        let mut promised = Promised::default();
+        let _ = record_chunks(fs, how, &[25], &mut promised);
+        promised
+    };
+    let worst = std::cell::Cell::new(0);
+    let summary = CrashTest::new(
+        scenario,
+        recover,
+        |case: &CrashCase, promised: &Promised, got: &Recovered| {
+            worst.set(worst.get().max(worst_lag(promised)));
+            check(case, promised, got)
+        },
+    )
+    .dirs([session(), db()])
+    .outcomes(vec![CrashOutcome::LoseUnsynced, CrashOutcome::KeepAll])
+    .run()
+    .unwrap_or_else(|failure| panic!("{failure}"));
+    assert!(summary.scenario_ops > 240, "{summary:?}");
+    assert!(worst.get() >= 975, "{}", worst.get());
+}
+
+/// Salvage takes fewer than this many operations here, so each case crashes
+/// it at one point, with each of three outcomes.
+const SAMPLE: usize = 200;
+/// Coprime with the three recovery outcomes and the ten scenario outcomes,
+/// so the crashed re-runs fall on every combination of them, not a fixed
+/// few.
+const RERUN: usize = 23;
 
 /// Crashes salvage of `disk` after each of its operations, under every
 /// standard outcome, and runs it again: the end state must be byte for byte
@@ -481,8 +893,10 @@ fn salvage_crashed_after_every_operation_ends_as_an_uninterrupted_run() {
 
 #[test]
 fn recovery_crashed_at_every_point_of_a_short_recording() {
-    // The full product: every crash point of a recording with live
-    // publishing, and salvage crashed after each of its operations too.
+    // The full product on a short recording with live publishing: every
+    // crash point of the recording with three outcomes, and salvage crashed
+    // after each of its operations with the same outcome. Mixed outcomes and
+    // crashed re-runs are in the long test above.
     let how = Recording {
         steps: 2,
         publish: true,
@@ -490,14 +904,15 @@ fn recovery_crashed_at_every_point_of_a_short_recording() {
     };
     let summary = crash_test(how)
         .outcomes(vec![
+            CrashOutcome::LoseUnsynced,
             CrashOutcome::KeepAll,
             CrashOutcome::Partial { seed: 3 },
         ])
         .crash_recovery()
         .run()
-        .unwrap();
+        .unwrap_or_else(|failure| panic!("{failure}"));
     assert!(
-        summary.cases > 2 * (summary.scenario_ops + 1),
+        summary.recovery_crashed > 3 * (summary.scenario_ops + 1),
         "{summary:?}"
     );
 }
@@ -2142,7 +2557,7 @@ fn a_journal_that_cant_be_read_is_kept_and_everything_else_published() {
                 assert_eq!(left, [&path]);
                 assert_eq!(seen.files[&path], bytes);
                 let in_rows = row_samples(&seen).unwrap();
-                check_durable(&promised, &in_rows.union(&in_it).copied().collect())
+                check_durable(&promised, &in_rows.union(&in_it))
                     .unwrap_or_else(|e| panic!("{}, {kind:?}: {e}", path.display()));
 
                 // Read now: its samples are published and it goes.

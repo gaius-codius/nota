@@ -179,16 +179,55 @@ fn recover(fs: &FakeFs) -> Recovered {
         .collect()
 }
 
+/// The most audio that may be captured but not durable: 1.1 s at 16 kHz.
+const LAG_LIMIT: SampleCount = SampleCount::new(17_600);
+
 /// The journal's crash invariants. A closure, to match `CrashTest`'s check
 /// signature without clippy's by-reference lints.
 const CHECK_RECOVERED: fn(&CrashCase, &Promised, &Recovered) -> Result<(), String> =
     |case, promised, recovered| {
+        check_lag(promised)?;
         for &(id, track, _) in &RECORDED {
             let read = recovered.get(&track).and_then(Option::as_ref);
             check_recovered(case, promised, header(id, track), read)?;
         }
         Ok(())
     };
+
+/// The most any track had captured but not durable when the scenario
+/// stopped.
+fn worst_lag(promised: &Promised) -> SampleCount {
+    promised
+        .captured
+        .iter()
+        .map(|(track, &captured)| {
+            // Every created journal has a durable position; a missing one
+            // counts from zero, so it can only fail the check.
+            let durable = promised
+                .durable
+                .get(track)
+                .copied()
+                .unwrap_or(SampleIndex::ZERO);
+            captured
+                .checked_count_since(durable)
+                .unwrap_or(SampleCount::ZERO)
+        })
+        .max()
+        .unwrap_or(SampleCount::ZERO)
+}
+
+/// At the crash, no track had more than [`LAG_LIMIT`] captured but not
+/// durable.
+fn check_lag(promised: &Promised) -> Result<(), String> {
+    let lag = worst_lag(promised);
+    if lag > LAG_LIMIT {
+        return Err(format!(
+            "{lag:?} captured but not durable: captured {:?}, durable {:?}",
+            promised.captured, promised.durable
+        ));
+    }
+    Ok(())
+}
 
 fn check_recovered(
     case: &CrashCase,
@@ -275,10 +314,21 @@ fn recovered_range(track: TrackId, read: &JournalRead) -> Result<Option<SampleRa
 
 #[test]
 fn crash_after_every_operation_recovers_to_the_durable_position() {
-    let summary = CrashTest::new(record, recover, CHECK_RECOVERED)
-        .dirs(["/session"])
-        .run()
-        .unwrap_or_else(|failure| panic!("{failure}"));
+    // The worst lag any crash point saw, to show the bound is approached.
+    let worst = std::cell::Cell::new(SampleCount::ZERO);
+    let summary = CrashTest::new(
+        record,
+        recover,
+        |case: &CrashCase, promised: &Promised, recovered: &Recovered| {
+            worst.set(worst.get().max(worst_lag(promised)));
+            CHECK_RECOVERED(case, promised, recovered)
+        },
+    )
+    .dirs(["/session"])
+    .run()
+    .unwrap_or_else(|failure| panic!("{failure}"));
+    // Not vacuous: some crash came with most of a second unsynced.
+    assert!(worst.get() >= SampleCount::new(15_000), "{:?}", worst.get());
     // Not vacuous: dozens of writes and several syncs of each journal, each
     // crashed at.
     assert!(summary.scenario_ops > 40, "{summary:?}");
@@ -335,7 +385,7 @@ fn durable_stays_within_a_second_of_captured_in_a_timed_run() {
     let fs = FakeFs::with_dirs(["/session"]);
     let (clock, dyn_clock) = fake_clock();
     let mut journal = create(&fs, 0, MIC, 0, dyn_clock).unwrap();
-    let limit = SampleCount::new(17_600); // 1.1 s at 16 kHz
+    let limit = LAG_LIMIT;
     let chunk = 160; // 10 ms, as a capture callback delivers it
     let mut worst = SampleCount::ZERO;
     for i in 0..6_000 {
