@@ -11,7 +11,7 @@ use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use nota_core::{SampleIndex, SampleRate};
+use nota_core::{SampleCount, SampleIndex, SampleRange, SampleRate};
 use nota_store::SegmentRow;
 use sha2::{Digest, Sha256};
 
@@ -22,8 +22,8 @@ use super::publish::{Committed, DeletableJournal, TempSegment, delete_journals};
 use super::store::SegmentStore;
 use super::{SegmentLength, is_temp_segment, segment_file_name};
 use crate::fs::Fs;
-use crate::journal::format::{FRAME_HEADER_LEN, HEADER_LEN, MAX_FRAME_SAMPLES};
-use crate::journal::{JournalHeader, JournalId, read_journal};
+use crate::journal::format::{FRAME_HEADER_LEN, HEADER_LEN, MAX_FRAME_SAMPLES, frames_after};
+use crate::journal::{JournalHeader, JournalId, JournalRead, read_journal};
 use crate::session::{FinishedJournal, SessionDir, SessionStore};
 
 /// What a publish run did.
@@ -53,8 +53,10 @@ impl Published {
     /// Journal files set aside: renamed with `.unreadable` appended, so
     /// they're kept but not salvaged again. Those whose header couldn't be
     /// read or named another id than the file's name, and those with more
-    /// unreadable bytes after their valid frames than a crash can leave
-    /// (corruption; what did read was published).
+    /// after their valid frames than a crash can leave: too many unreadable
+    /// bytes, or a frame of fsync'd audio past the damage (corruption; what
+    /// did read was published). One whose window has a bad row stays under
+    /// its name until that window publishes.
     #[must_use]
     pub fn quarantined(&self) -> &[PathBuf] {
         &self.quarantined
@@ -291,11 +293,13 @@ pub fn publish_journals<S: Fs, T: SegmentStore>(
                     rate: header.rate(),
                     range: read.range(),
                 });
-                if bytes.len() - read.valid_len() > max_torn_tail(header.rate()) {
-                    // More unreadable bytes after the valid frames than a
-                    // crash can leave: corruption, with audio after it that
-                    // can't be read. Publish what reads, but keep the file.
-                    unreadable.push(path);
+                if bytes.len() - read.valid_len() > max_torn_tail(header.rate())
+                    || audio_past_a_crash(&bytes, &read, header)
+                {
+                    // More after the valid frames than a crash can leave:
+                    // corruption, with audio after it that can't be read.
+                    // Publish what reads, but keep the file.
+                    unreadable.push((id, path));
                 } else {
                     waiting.insert(id, path);
                 }
@@ -306,7 +310,7 @@ pub fn publish_journals<S: Fs, T: SegmentStore>(
             None if bytes.len() <= HEADER_LEN => {
                 waiting.insert(id, path);
             }
-            _ => unreadable.push(path),
+            _ => unreadable.push((id, path)),
         }
     }
     let rows = match store.rows() {
@@ -365,6 +369,7 @@ pub fn publish_journals<S: Fs, T: SegmentStore>(
         )?;
     }
 
+    let unreadable = settled(unreadable, &plan.needs, &committed);
     quarantine(fs, dir, &unreadable, &mut published)?;
     Ok(published)
 }
@@ -460,6 +465,27 @@ fn release<S: Fs>(
     Ok(())
 }
 
+/// Of the `unreadable` journals, those to set aside: those nothing waits
+/// on, every segment they're needed for committed. One whose window has a
+/// bad row stays under its name, so a later run, after the row is
+/// resolved, still finds and publishes it.
+fn settled(
+    unreadable: Vec<(JournalId, PathBuf)>,
+    needs: &BTreeMap<JournalId, BTreeSet<plan::SegmentKey>>,
+    committed: &Committed,
+) -> Vec<PathBuf> {
+    let empty = BTreeSet::new();
+    unreadable
+        .into_iter()
+        .filter(|(id, path)| {
+            committed
+                .release(*id, path, needs.get(id).unwrap_or(&empty))
+                .is_some()
+        })
+        .map(|(_, path)| path)
+        .collect()
+}
+
 /// Renames unreadable journals aside, keeping their bytes.
 fn quarantine<S: Fs>(
     fs: &S,
@@ -490,6 +516,27 @@ fn max_torn_tail(rate: SampleRate) -> usize {
         .unwrap_or(usize::MAX)
         .saturating_mul(per_sample)
         .saturating_add(largest)
+}
+
+/// Whether a frame after the valid ones, though they stop at damage, holds
+/// audio a crash can't have left unsynced. The writer never has more than a
+/// second of audio unsynced, and everything before that is intact after a
+/// crash, so a torn tail's frames all start within a second of where the
+/// valid frames end (or, with none valid, of each other). A frame starting
+/// later was fsync'd: the damage is corruption, and the journal is kept.
+/// Damage in the last second can't be told from a crash this way.
+fn audio_past_a_crash(bytes: &[u8], read: &JournalRead, header: JournalHeader) -> bool {
+    let starts: Vec<SampleIndex> = frames_after(bytes, read.valid_len(), header.track())
+        .iter()
+        .map(|r| r.start())
+        .collect();
+    let base = read
+        .range()
+        .map(SampleRange::end)
+        .or_else(|| starts.iter().min().copied());
+    let second = SampleCount::new(u64::from(header.rate().hz()));
+    base.and_then(|b| b.checked_add(second))
+        .is_some_and(|limit| starts.iter().any(|&s| s >= limit))
 }
 
 fn read_if_present<S: Fs>(fs: &S, path: &Path) -> io::Result<Option<Vec<u8>>> {

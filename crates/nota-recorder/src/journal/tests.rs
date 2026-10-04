@@ -1053,3 +1053,27 @@ fn finish_syncs_what_was_captured() {
     assert!(journal.append(&[1]).is_err());
     assert!(matches!(journal.finish(), Err(JournalError::Broken)));
 }
+
+#[test]
+fn the_scan_skips_frames_out_of_range_and_of_other_tracks() {
+    let track = TrackId::new(3);
+    let frame = |track, first: u64, len: u32| {
+        let mut out = Vec::new();
+        let samples = vec![7; usize::try_from(len).unwrap()];
+        encode_frame(&mut out, 0, track, SampleIndex::new(first), &samples);
+        out
+    };
+    let mut bytes = Vec::new();
+    // The largest frame counts; one sample more, none at all, or another
+    // track's, each with a valid CRC, don't.
+    bytes.extend(frame(track, 0, MAX_FRAME_SAMPLES));
+    bytes.extend(frame(track, 100_000, MAX_FRAME_SAMPLES + 1));
+    bytes.extend(frame(track, 200_000, 0));
+    bytes.extend(frame(TrackId::new(4), 300_000, 5));
+    bytes.extend(frame(track, 400_000, 5));
+    let found: Vec<_> = format::frames_after(&bytes, 0, track)
+        .iter()
+        .map(|r| (r.start().get(), r.len().get()))
+        .collect();
+    assert_eq!(found, [(0, u64::from(MAX_FRAME_SAMPLES)), (400_000, 5)]);
+}

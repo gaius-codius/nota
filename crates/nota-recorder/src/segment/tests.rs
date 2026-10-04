@@ -1040,6 +1040,194 @@ fn a_row_whose_commit_failed_isnt_reported() {
     check_after(&promised, &after).unwrap();
 }
 
+/// A finished 16 kHz journal of `seconds`, a second per append, and the
+/// offsets where its frames start.
+fn journal_at_16_khz(seconds: u64) -> (Vec<u8>, Vec<(usize, u64)>) {
+    let fs = FakeFs::with_dirs([session(), db()]);
+    let (clock, dyn_clock) = fake_clock();
+    let hz = SampleRate::new(16_000).unwrap();
+    let long = SegmentLength::new(1_000_000_000).unwrap();
+    let mut writer = SessionWriter::open(&session_dir(&fs), hz, long, dyn_clock).unwrap();
+    writer
+        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .unwrap();
+    for k in 0..seconds {
+        writer
+            .append(MIC, &samples(MIC, k * 16_000, 16_000))
+            .unwrap();
+        clock.advance(std::time::Duration::from_secs(1));
+        writer.sync_if_due().unwrap();
+    }
+    writer.finish().unwrap();
+    let bytes = fs
+        .read(&session().join(JournalId::FIRST.file_name()))
+        .unwrap();
+    let mut starts = Vec::new();
+    let mut at = HEADER_LEN;
+    for frame in read_journal(&bytes).frames() {
+        starts.push((at, frame.range().start().get()));
+        at += FRAME_HEADER_LEN + 2 * frame.samples().len();
+    }
+    (bytes, starts)
+}
+
+/// Salvages `bytes` as the session's only journal.
+fn salvage_bytes(bytes: &[u8]) -> Published {
+    let disk = FakeFs::with_dirs([session(), db()]);
+    let mut file = disk
+        .create(&session().join(JournalId::FIRST.file_name()))
+        .unwrap();
+    file.write_all(bytes).unwrap();
+    salvage(
+        &mut session_store(&disk),
+        SegmentLength::new(1_000_000_000).unwrap(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_journal_corrupt_well_before_its_end_is_kept_whatever_its_frame_size() {
+    // At 16 kHz with real frame sizes, 15 s of frames are fewer bytes than
+    // a second of one-sample frames: the byte count alone can't see it.
+    let (bytes, starts) = journal_at_16_khz(20);
+    let (at, first) = *starts
+        .iter()
+        .find(|&&(_, first)| first >= 5 * 16_000)
+        .unwrap();
+    let mut corrupt = bytes.clone();
+    corrupt[at + FRAME_HEADER_LEN + 3] ^= 0x10;
+    let done = salvage_bytes(&corrupt);
+    let ranges: Vec<_> = done
+        .segments()
+        .iter()
+        .map(|r| (r.range().start().get(), r.range().end().get()))
+        .collect();
+    assert_eq!(ranges, [(0, first)]);
+    assert!(done.deleted().is_empty());
+    assert_eq!(done.quarantined().len(), 1);
+
+    // Damage within the last second can't be told from a crash's torn
+    // tail, whose frames may be written back out of order: deleted.
+    let (at, first) = *starts
+        .iter()
+        .find(|&&(_, first)| first >= 19 * 16_000)
+        .unwrap();
+    assert!(starts.last().unwrap().1 > first, "a frame after the damage");
+    let mut torn = bytes;
+    torn[at + FRAME_HEADER_LEN + 3] ^= 0x10;
+    let done = salvage_bytes(&torn);
+    assert_eq!(
+        done.segments()
+            .iter()
+            .map(|r| r.range().end().get())
+            .collect::<Vec<_>>(),
+        [first]
+    );
+    assert_eq!(done.deleted(), [JournalId::FIRST]);
+    assert!(done.quarantined().is_empty());
+}
+
+#[test]
+fn a_journal_corrupt_from_its_first_frame_is_kept_if_audio_after_was_synced() {
+    // No valid frame to measure from: the frames found after the damage
+    // are measured against each other. Over three seconds they span more
+    // than a crash can leave unsynced.
+    let corrupt_first = |seconds| {
+        let (mut bytes, _) = journal_at_16_khz(seconds);
+        bytes[HEADER_LEN + FRAME_HEADER_LEN + 3] ^= 0x10;
+        salvage_bytes(&bytes)
+    };
+    let done = corrupt_first(3);
+    assert!(done.segments().is_empty());
+    assert!(done.deleted().is_empty());
+    assert_eq!(done.quarantined().len(), 1);
+    // Within one second they could all be a torn tail: deleted.
+    let done = corrupt_first(1);
+    assert!(done.segments().is_empty());
+    assert_eq!(done.deleted(), [JournalId::FIRST]);
+    assert!(done.quarantined().is_empty());
+}
+
+#[test]
+fn unreadable_bytes_past_what_a_crash_can_leave_keep_the_journal() {
+    // No frame after the damage: only the byte count tells. The most a
+    // crash can leave at 16 kHz: a second of one-sample frames and one
+    // largest frame.
+    let (bytes, _) = journal_at_16_khz(2);
+    let most = 16_000 * (FRAME_HEADER_LEN + 2) + FRAME_HEADER_LEN + 2 * 8_192;
+    let with_tail = |n: usize| {
+        let mut out = bytes.clone();
+        out.extend(std::iter::repeat_n(0xA5, n));
+        out
+    };
+    let done = salvage_bytes(&with_tail(most));
+    assert_eq!(done.deleted(), [JournalId::FIRST]);
+    assert!(done.quarantined().is_empty());
+    let done = salvage_bytes(&with_tail(most + 1));
+    assert!(done.deleted().is_empty());
+    assert_eq!(done.quarantined().len(), 1);
+    assert_eq!(
+        done.segments()
+            .iter()
+            .map(|r| r.range().end().get())
+            .collect::<Vec<_>>(),
+        [32_000]
+    );
+}
+
+#[test]
+fn a_corrupt_journal_in_a_bad_window_keeps_its_name_until_it_publishes() {
+    let fs = FakeFs::with_dirs([session(), db()]);
+    let (_, clock) = fake_clock();
+    let mut writer = SessionWriter::open(&session_dir(&fs), rate(), length(), clock).unwrap();
+    writer
+        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .unwrap();
+    writer.append(MIC, &samples(MIC, 0, 1_000)).unwrap();
+    let finished = writer.finish().unwrap();
+    // Garbage well past what a crash can leave: corruption.
+    let path = session().join(JournalId::FIRST.file_name());
+    let mut bytes = fs.read(&path).unwrap();
+    bytes.extend(std::iter::repeat_n(0xA5, 200_000));
+    fs.remove(&path).unwrap();
+    let mut file = fs.create(&path).unwrap();
+    file.write_all(&bytes).unwrap();
+    file.sync().unwrap();
+    let range = SampleRange::new(SampleIndex::new(100), SampleIndex::new(200)).unwrap();
+    let flac = flac_of(MIC, 100, 100);
+    let missing = plant_row(&fs, MIC, range, &flac, &flac);
+    let row_path = durable_path(MIC, range);
+    fs.remove(&row_path).unwrap();
+    fs.sync_dir(&session()).unwrap();
+
+    for _ in 0..2 {
+        let done = publish_journals(&mut session_store(&fs), length(), &finished).unwrap();
+        assert_eq!(as_found(done.findings()), [(missing, Problem::Missing)]);
+        assert!(done.segments().is_empty());
+        assert!(done.quarantined().is_empty());
+        assert_eq!(fs.read(&path).unwrap(), bytes);
+    }
+
+    // The row's file is back: the rest of the window publishes around it,
+    // and only then is the journal set aside.
+    let mut file = fs.create(&row_path).unwrap();
+    file.write_all(&flac).unwrap();
+    file.sync().unwrap();
+    fs.sync_dir(&session()).unwrap();
+    let done = publish_journals(&mut session_store(&fs), length(), &finished).unwrap();
+    assert!(done.findings().is_empty());
+    assert_eq!(
+        done.segments()
+            .iter()
+            .map(|r| (r.range().start().get(), r.range().end().get()))
+            .collect::<Vec<_>>(),
+        [(0, 100), (200, 1_000)]
+    );
+    let aside = PathBuf::from("/session/journal-000000.unreadable");
+    assert_eq!(done.quarantined(), std::slice::from_ref(&aside));
+    assert_eq!(fs.read(&aside).unwrap(), bytes);
+}
+
 #[test]
 fn a_journal_break_while_publishing_live_loses_nothing_at_any_crash() {
     // The broken journal is held back until its replacement ends, so live

@@ -422,7 +422,11 @@ fn recording_an_unstarted_track_is_an_error() {
         SessionWriter::open(&session, rate(), SegmentLength::new(1_000).unwrap(), clock).unwrap();
     let (tx, rx) = mpsc::channel();
     tx.send(CaptureEvent::Audio(samples(0, 10))).unwrap();
-    let result = record_track(&mut writer, MIC, &CaptureReceiver(rx), &mut |_| {});
+    let events = CaptureReceiver {
+        events: rx,
+        rate: rate(),
+    };
+    let result = record_track(&mut writer, MIC, &events, &mut |_| {});
     assert!(matches!(
         result,
         Err(RecordError::Session(SessionError::UnknownTrack(MIC)))
@@ -432,7 +436,10 @@ fn recording_an_unstarted_track_is_an_error() {
 #[test]
 fn a_channel_with_no_senders_reads_as_stopped() {
     let (tx, rx) = mpsc::channel();
-    let rx = CaptureReceiver(rx);
+    let rx = CaptureReceiver {
+        events: rx,
+        rate: rate(),
+    };
     assert!(rx.next(Duration::from_millis(1)).is_none());
     let sender = CaptureSender {
         events: tx.clone(),
@@ -496,4 +503,33 @@ fn capture_errors_and_sources_read_plainly() {
     for (error, text) in cases {
         assert_eq!(error.to_string(), text);
     }
+}
+
+#[test]
+fn a_stream_at_another_rate_than_the_journals_records_nothing() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let session = SessionDir::new(SESSION, fs.clone(), &dir());
+    let mut writer =
+        SessionWriter::open(&session, rate(), SegmentLength::new(1_000).unwrap(), clock).unwrap();
+    writer
+        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .unwrap();
+    let (tx, rx) = mpsc::channel();
+    tx.send(CaptureEvent::Audio(samples(0, 10))).unwrap();
+    let other = SampleRate::new(rate().hz() * 2).unwrap();
+    let events = CaptureReceiver {
+        events: rx,
+        rate: other,
+    };
+    let result = record_track(&mut writer, MIC, &events, &mut |_| {});
+    let Err(error) = result else {
+        panic!("recorded at the wrong rate");
+    };
+    assert!(matches!(
+        error,
+        RecordError::RateMismatch { capture, journal } if capture == other && journal == rate()
+    ));
+    assert!(error.to_string().contains("Hz"));
+    assert_eq!(writer.next_sample(MIC), Some(SampleIndex::ZERO));
 }

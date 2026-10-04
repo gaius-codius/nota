@@ -349,6 +349,61 @@ pub fn read_journal(bytes: &[u8]) -> JournalRead {
     }
 }
 
+/// The sample ranges of the frames of `track` found anywhere in `bytes`
+/// from `from` on, each checked on its own: the right magic, a length in
+/// range, the whole frame present, a matching CRC and the track. Sequence
+/// and continuity aren't checked, so this finds the frames after damage
+/// that [`read_journal`] stops at. Salvage uses it to tell corruption,
+/// which can leave fsync'd audio after it, from a torn tail. Never panics,
+/// whatever the input.
+#[must_use]
+pub fn frames_after(bytes: &[u8], from: usize, track: TrackId) -> Vec<SampleRange> {
+    let mut found = Vec::new();
+    let mut offset = from;
+    while let Some(rest) = bytes.get(offset..) {
+        let Some(at) = rest
+            .windows(FRAME_MAGIC.len())
+            .position(|w| w == FRAME_MAGIC)
+        else {
+            break;
+        };
+        offset += at;
+        match frame_alone(&bytes[offset..], track) {
+            Some((range, len)) => {
+                found.push(range);
+                offset += len;
+            }
+            None => offset += 1,
+        }
+    }
+    found
+}
+
+/// The frame at the start of `bytes`, if it checks out on its own, and its
+/// length in bytes. See [`frames_after`].
+fn frame_alone(bytes: &[u8], track: TrackId) -> Option<(SampleRange, usize)> {
+    let head = bytes.get(..FRAME_HEADER_LEN)?;
+    if head[..4] != FRAME_MAGIC {
+        return None;
+    }
+    let (found, first, len, crc) = (
+        TrackId::new(u32::from_le_bytes(array(head, 12)?)),
+        SampleIndex::new(u64::from_le_bytes(array(head, 16)?)),
+        u32::from_le_bytes(array(head, 24)?),
+        u32::from_le_bytes(array(head, 28)?),
+    );
+    if len == 0 || len > MAX_FRAME_SAMPLES || found != track {
+        return None;
+    }
+    let total = FRAME_HEADER_LEN + usize::try_from(len).ok()? * SAMPLE_BYTES;
+    let payload = bytes.get(FRAME_HEADER_LEN..total)?;
+    if frame_crc(&head[..28], payload) != crc {
+        return None;
+    }
+    let range = SampleRange::starting_at(first, SampleCount::new(u64::from(len)))?;
+    Some((range, total))
+}
+
 fn parse_header(bytes: &[u8]) -> Option<JournalHeader> {
     let fields = bytes.get(..HEADER_FIELDS)?;
     if fields.get(..8)? != FILE_MAGIC

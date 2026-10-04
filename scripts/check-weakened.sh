@@ -17,7 +17,8 @@ while IFS= read -r f; do
   [[ -n $f ]] && findings+=("check config changed: $f")
 done < <(git diff --name-only "$base" "$head" -- \
   rust-toolchain.toml rustfmt.toml clippy.toml typos.toml deny.toml \
-  .config/nextest.toml lefthook.yml .github/workflows 'scripts/check-*' \
+  .config/nextest.toml .cargo/config.toml .cargo/mutants.toml lefthook.yml \
+  .github/workflows 'scripts/check-*' \
   | sort -u)
 
 # Lint table edits in any Cargo.toml.
