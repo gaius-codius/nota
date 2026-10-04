@@ -1521,13 +1521,13 @@ fn a_journal_corrupt_well_before_its_end_is_kept_whatever_its_frame_size() {
     assert!(done.deleted().is_empty());
     assert_eq!(done.quarantined().len(), 1);
 
-    // Damage within the last second can't be told from a crash's torn
-    // tail, whose frames may be written back out of order: deleted.
-    let (at, first) = *starts
-        .iter()
-        .find(|&&(_, first)| first >= 19 * 16_000)
-        .unwrap();
-    assert!(starts.last().unwrap().1 > first, "a frame after the damage");
+    // Damage within the last sync interval (13 600 samples) can't be told
+    // from a crash's torn tail, whose frames may be written back out of
+    // order: deleted.
+    let (at, first) = starts[starts.len() - 2];
+    let last = starts.last().unwrap().1;
+    assert!(last > first, "a frame after the damage");
+    assert!(last < first + 13_600, "{first}..{last}");
     let mut torn = bytes;
     torn[at + FRAME_HEADER_LEN + 3] ^= 0x10;
     let done = salvage_bytes(&torn);
@@ -1556,8 +1556,45 @@ fn a_journal_corrupt_from_its_first_frame_is_kept_if_audio_after_was_synced() {
     assert!(done.segments().is_empty());
     assert!(done.deleted().is_empty());
     assert_eq!(done.quarantined().len(), 1);
-    // Within one second they could all be a torn tail: deleted.
+    // A second of audio, in frames starting 5 408 samples apart after the
+    // damage: within the sync interval, so they could all be a torn tail:
+    // deleted.
     let done = corrupt_first(1);
+    assert!(done.segments().is_empty());
+    assert_eq!(done.deleted(), [JournalId::FIRST]);
+    assert!(done.quarantined().is_empty());
+}
+
+#[test]
+fn frames_spanning_the_sync_interval_after_damage_keep_the_journal() {
+    // At 1 kHz the writer syncs every 850 samples. Damage in the first of
+    // `count` 50-sample frames: the frames after it start at 50, 100, ...;
+    // once they reach 50 + 850, one of them must have been fsync'd, so the
+    // damage is corruption and the journal is kept. Short of that, it could
+    // all be a torn tail, and the journal is deleted.
+    let corrupt_first = |count: u64| {
+        let header =
+            crate::journal::JournalHeader::new(JournalId::FIRST, MIC, EpochId::new(0), rate());
+        let mut bytes = crate::journal::format::encode_header(header).to_vec();
+        for k in 0..count {
+            crate::journal::format::encode_frame(
+                &mut bytes,
+                k,
+                MIC,
+                SampleIndex::new(k * 50),
+                &samples(MIC, k * 50, 50),
+            );
+        }
+        bytes[HEADER_LEN + FRAME_HEADER_LEN + 3] ^= 0x10;
+        salvage_bytes(&bytes)
+    };
+    // Frames start up to 900: kept.
+    let done = corrupt_first(19);
+    assert!(done.segments().is_empty());
+    assert!(done.deleted().is_empty());
+    assert_eq!(done.quarantined().len(), 1);
+    // Up to 850: within the interval, so deleted.
+    let done = corrupt_first(18);
     assert!(done.segments().is_empty());
     assert_eq!(done.deleted(), [JournalId::FIRST]);
     assert!(done.quarantined().is_empty());
@@ -1566,10 +1603,10 @@ fn a_journal_corrupt_from_its_first_frame_is_kept_if_audio_after_was_synced() {
 #[test]
 fn unreadable_bytes_past_what_a_crash_can_leave_keep_the_journal() {
     // No frame after the damage: only the byte count tells. The most a
-    // crash can leave at 16 kHz: a second of one-sample frames and one
-    // largest frame.
+    // crash can leave at 16 kHz: the sync interval's 13 600 samples as
+    // one-sample frames, and one largest frame.
     let (bytes, _) = journal_at_16_khz(2);
-    let most = 16_000 * (FRAME_HEADER_LEN + 2) + FRAME_HEADER_LEN + 2 * 8_192;
+    let most = 13_600 * (FRAME_HEADER_LEN + 2) + FRAME_HEADER_LEN + 2 * 8_192;
     let with_tail = |n: usize| {
         let mut out = bytes.clone();
         out.extend(std::iter::repeat_n(0xA5, n));

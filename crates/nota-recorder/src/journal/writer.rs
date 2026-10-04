@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use nota_core::{Clock, SampleCount, SampleIndex, SessionTime, TrackId};
+use nota_core::{Clock, SampleCount, SampleIndex, SampleRate, SessionTime, TrackId};
 
 use super::JournalId;
 use super::format::{JournalHeader, MAX_FRAME_SAMPLES, encode_frame, encode_header};
@@ -21,6 +21,15 @@ use crate::fs::{Fs, FsFile, Synced};
 /// 850 ms keeps that within the 1.1 s bounded-loss rule for fsyncs up to
 /// about 200 ms; at a full second, one ~105 ms fsync was enough to break it.
 pub const SYNC_INTERVAL: Duration = Duration::from_millis(850);
+
+/// The most audio a journal at `rate` may hold unsynced: [`SYNC_INTERVAL`]'s
+/// worth, and at least one sample, so even a very low rate makes progress.
+/// Salvage judges torn tails by it too.
+pub(crate) fn sync_budget(rate: SampleRate) -> SampleCount {
+    SampleCount::started_within(SYNC_INTERVAL, rate)
+        .unwrap_or(SampleCount::ZERO)
+        .max(SampleCount::new(1))
+}
 
 /// How far one journal has been fsync'd: every sample it holds for its
 /// track, up to `end`, is on disk. Only a completed fsync of that journal
@@ -222,13 +231,9 @@ impl<F: FsFile> JournalWriter<F> {
         self.broken
     }
 
-    /// The most audio that may go unsynced: [`SYNC_INTERVAL`]'s worth at
-    /// the journal's rate, and at least one sample, so even a very low rate
-    /// makes progress.
+    /// The most audio that may go unsynced, at the journal's rate.
     fn sync_budget(&self) -> SampleCount {
-        SampleCount::started_within(SYNC_INTERVAL, self.header.rate())
-            .unwrap_or(SampleCount::ZERO)
-            .max(SampleCount::new(1))
+        sync_budget(self.header.rate())
     }
 
     /// Samples captured but not yet fsync'd.

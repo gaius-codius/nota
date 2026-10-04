@@ -14,6 +14,7 @@ mod writer;
 
 pub use format::{Frame, Invalid, JournalHeader, JournalRead, ReadEnd, read_journal};
 pub use id::JournalId;
+pub(crate) use writer::sync_budget;
 pub use writer::{DurablePosition, JournalError, JournalWriter, SYNC_INTERVAL};
 
 #[cfg(test)]
