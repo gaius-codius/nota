@@ -1,7 +1,8 @@
 //! The real models on the invented-lecture fixture: speech the engine has
 //! never heard, synthesized from `fixtures/invented-lecture.txt` by
 //! `scripts/fetch-test-models.sh`. Skips (and says so on stderr) when the
-//! models or the fixture are absent; they're never committed.
+//! models or the fixture are absent, and fails instead when
+//! `NOTA_REQUIRE_TEST_MODELS=1`, as in CI; they're never committed.
 
 // Test code throughout: clippy allows unwraps and panics in it.
 #![cfg(test)]
@@ -21,7 +22,8 @@ fn test_models() -> Option<(ModelPaths, PathBuf)> {
         .map(PathBuf::from)
         .or_else(|| {
             std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/nota/test-models"))
-        })?;
+        })
+        .unwrap_or_default();
     let paths = ModelPaths {
         parakeet_dir: root.join("parakeet-tdt-0.6b-v3-int8"),
         vad_model: root.join("silero_vad_v6.onnx"),
@@ -32,6 +34,11 @@ fn test_models() -> Option<(ModelPaths, PathBuf)> {
         && paths.vad_model.is_file()
         && wav.is_file();
     if !present {
+        assert!(
+            std::env::var_os("NOTA_REQUIRE_TEST_MODELS").is_none_or(|v| v != "1"),
+            "NOTA_REQUIRE_TEST_MODELS=1 but no test models in {} (run scripts/fetch-test-models.sh)",
+            root.display()
+        );
         let _ = writeln!(
             std::io::stderr(),
             "skipped: no test models in {} (run scripts/fetch-test-models.sh)",

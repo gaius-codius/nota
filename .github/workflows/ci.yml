@@ -51,10 +51,31 @@ jobs:
               -prune -exec rm -rf {} +
           fi
       - run: scripts/install-linux-build-deps.sh
+      # The engine tests' models and speech fixture. The script checks every
+      # model file against its pinned SHA-256 on each run, cached or not, and
+      # fails on a mismatch. The fixture is generated (text-to-speech from
+      # pinned inputs, then ffmpeg) only when the cache misses.
+      - name: Restore the test models
+        id: test-models
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.local/share/nota/test-models/parakeet-tdt-0.6b-v3-int8
+            ~/.local/share/nota/test-models/silero_vad_v6.onnx
+            ~/.local/share/nota/test-models/fixtures
+          key: test-models-${{ hashFiles('scripts/fetch-test-models.sh', 'crates/nota-engine/tests/fixtures/invented-lecture.txt') }}
+      - name: Install ffmpeg for the fixture
+        if: steps.test-models.outputs.cache-hit != 'true'
+        run: sudo apt-get install -y -qq --no-install-recommends ffmpeg
+      - run: scripts/fetch-test-models.sh
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: cargo-nextest
+      # With the variable set, an engine test whose models are missing fails
+      # instead of skipping.
       - run: cargo nextest run --workspace --locked --profile ci --no-tests=fail
+        env:
+          NOTA_REQUIRE_TEST_MODELS: "1"
       # nextest does not run doctests.
       - run: cargo test --workspace --locked --doc
 
