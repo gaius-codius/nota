@@ -19,8 +19,18 @@
 # what the recorder captured, the fsync'd positions it logged and the rows
 # it committed, and that a second salvage changes nothing. A copy of the
 # crashed disk is also salvaged with salvage itself killed partway (after
-# operation 1 + N mod its operation count) and re-run; it must end in the
-# same files and rows.
+# operation 1 + N mod its operation count, row commits included) and re-run;
+# it must end in the same files and rows.
+#
+# Operations are numbered as they happen, and their count varies a little
+# from run to run (capture timing), so the points are numbered from one
+# uncrashed run; a point past the end of a shorter run is reported as
+# unreached, not failed. The summary counts points by the operation they
+# stopped at.
+#
+# Run it on a real disk: on tmpfs every fsync is free, so the lag measures
+# nothing. The default scratch directory is under ~/.cache, and tmpfs is
+# refused unless --allow-tmpfs.
 #
 # Not run in CI: it needs a running PipeWire (with pipewire-pulse for
 # `pactl`), `pw-play`, `ffmpeg`, the test fixture
@@ -30,7 +40,7 @@
 #
 # Usage: scripts/real-capture-crash.sh [--mode kill|power|both] [--seconds S]
 #          [--segment-seconds K] [--step K] [--from N] [--to N]
-#          [--scratch DIR] [--keep]
+#          [--scratch DIR] [--allow-tmpfs] [--keep]
 #   --mode             which crashes (default both)
 #   --seconds S        recording length per point (default 8)
 #   --segment-seconds  segment window, short so publishing runs (default 2)
@@ -51,7 +61,8 @@ SEGMENT=2
 STEP=1
 FROM=1
 TO=
-SCRATCH=${TMPDIR:-/tmp}
+SCRATCH=${XDG_CACHE_HOME:-$HOME/.cache}/nota
+ALLOW_TMPFS=0
 KEEP=0
 
 usage() { sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; }
@@ -65,6 +76,7 @@ while [[ $# -gt 0 ]]; do
     --from) FROM=$2; shift 2 ;;
     --to) TO=$2; shift 2 ;;
     --scratch) SCRATCH=$2; shift 2 ;;
+    --allow-tmpfs) ALLOW_TMPFS=1; shift ;;
     --keep) KEEP=1; shift ;;
     -h | --help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -93,6 +105,10 @@ cargo build --manifest-path "$REPO/Cargo.toml" --release --locked --quiet \
 BIN=${CARGO_TARGET_DIR:-$REPO/target}/release/examples/real_capture
 [[ -x $BIN ]] || die "built, but no binary at $BIN"
 
+mkdir -p "$SCRATCH"
+if [[ $(findmnt -n -o FSTYPE --target "$SCRATCH") == tmpfs && $ALLOW_TMPFS -eq 0 ]]; then
+  die "$SCRATCH is on tmpfs, where fsync is free (use --scratch on a real disk, or --allow-tmpfs)"
+fi
 WORK=$(mktemp -d "$SCRATCH/nota-real-crash.XXXXXX")
 SINK="nota_real_crash_$$"
 
@@ -114,6 +130,9 @@ unmount() {
   fi
   if [[ -n $LZ_PID ]]; then
     # LazyFS exits once unmounted (with status 134: it aborts on every exit).
+    # One that never mounted, or hangs, is killed by its PID.
+    lazyfs_gone() { ! kill -0 "$LZ_PID" 2> /dev/null; }
+    wait_for 10 lazyfs_gone || kill -9 "$LZ_PID" 2> /dev/null || true
     wait "$LZ_PID" 2> /dev/null || true
     LZ_PID=
   fi
@@ -192,6 +211,8 @@ clear_cache() {
 default_before=$(pactl get-default-sink)
 MODULE=$(pactl load-module module-null-sink "sink_name=$SINK" \
   "sink_properties=node.description=nota-real-crash priority.session=1 priority.driver=1")
+# PLAYER is pw-play, the pipeline's last process; ffmpeg ends on the broken
+# pipe once it's gone.
 ffmpeg -loglevel quiet -stream_loop -1 -i "$FIXTURE" -t 86400 -f wav - |
   pw-play --target "$SINK" - &
 PLAYER=$!
@@ -208,6 +229,12 @@ TOTAL=$("$BIN" write "$WORK/count/rec" "$WORK/count/log" "$WORK/count/ref" "${WR
 check "$WORK/count/rec" "$WORK/count/log" "$WORK/count/ref" > "$WORK/count/check.out" ||
   die "an uncrashed run fails its own check: $(cat "$WORK/count/check.out")"
 echo "uncrashed: $(sed 's/^result //' "$WORK/count/check.out")"
+# The baseline must have recorded something worth crashing: nearly all of
+# its seconds, published as segments.
+base_recovered=$(sed -n 's/.* recovered=\([0-9]*\) .*/\1/p' "$WORK/count/check.out")
+base_rows=$(sed -n 's/.* rows=\([0-9]*\) .*/\1/p' "$WORK/count/check.out")
+[[ ${base_recovered:-0} -ge $(((SECONDS_PER_POINT - 1) * 16000)) && ${base_rows:-0} -ge 2 ]] ||
+  die "the uncrashed run recorded too little (recovered ${base_recovered:-0} samples, ${base_rows:-0} rows)"
 TO=${TO:-$TOTAL}
 
 echo "Real-capture crash checks: modes ${MODES[*]}; $TOTAL operations in ${SECONDS_PER_POINT}s;" \
@@ -218,16 +245,18 @@ RESULTS=$WORK/results
 FAILED=()
 START=$SECONDS
 
-# interrupted DIR LOG REF N: salvages a copy of DIR with salvage killed
-# partway, re-runs it, and prints the state it ends in.
+# interrupted DIR LOG REF N OUT: salvages a copy of DIR with salvage killed
+# partway, re-runs it, and writes the state it ends in to OUT. Fails if
+# salvage didn't stop where asked, or the re-run fails its check. Not run in
+# a subshell, so WRITER_PID stays visible to cleanup.
 interrupted() {
-  local dir=$1 log=$2 ref=$3 n=$4 ops k
+  local dir=$1 log=$2 ref=$3 n=$4 out=$5 ops k
   cp -a "$dir" "$dir.count"
   ops=$("$BIN" salvage "$dir.count" --segment-seconds "$SEGMENT" | sed -n 's/^ops \([0-9]*\).*/\1/p')
   rm -rf "$dir.count"
   [[ $ops =~ ^[0-9]+$ ]] || return 1
   if [[ $ops -eq 0 ]]; then
-    echo "salvage_ops=0"
+    echo "salvage_ops=0" > "$out"
     return 0
   fi
   k=$((1 + n % ops))
@@ -235,11 +264,18 @@ interrupted() {
   "$BIN" salvage "$dir.cut" --segment-seconds "$SEGMENT" --stop-after "$k" \
     --marker "$dir.cut.stopped" > /dev/null 2>&1 &
   WRITER_PID=$!
-  stopped_or_done() { [[ -e $dir.cut.stopped ]] || ! kill -0 "$WRITER_PID" 2> /dev/null; }
-  wait_for 60 stopped_or_done || return 1
+  salvage_stopped_or_done() { [[ -e $dir.cut.stopped ]] || ! kill -0 "$WRITER_PID" 2> /dev/null; }
+  if ! wait_for 60 salvage_stopped_or_done || [[ ! -e $dir.cut.stopped ]]; then
+    kill_writer
+    echo "salvage_ops=$ops cut_at=$k never stopped there" > "$out"
+    return 1
+  fi
   kill_writer
-  echo "salvage_ops=$ops cut_at=$k $(check "$dir.cut" "$log" "$ref" | sed -n 's/^result ok .*\(state=[0-9a-f]*\).*/cut_\1/p')"
+  local state
+  state=$(check "$dir.cut" "$log" "$ref" | sed -n 's/^result ok .*\(state=[0-9a-f]*\).*/\1/p')
+  echo "salvage_ops=$ops cut_at=$k cut_$state" > "$out"
   rm -rf "$dir.cut" "$dir.cut.stopped"
+  [[ -n $state ]]
 }
 
 # run_point MODE N
@@ -259,12 +295,17 @@ run_point() {
   "$BIN" write "$rec" "$log" "$ref" "${WRITE_OPTS[@]}" --stop-after "$n" > "$dir/write.out" 2>&1 &
   WRITER_PID=$!
   stopped_or_done() { [[ -e $log.stopped ]] || ! kill -0 "$WRITER_PID" 2> /dev/null; }
-  wait_for $((SECONDS_PER_POINT + 60)) stopped_or_done || die "$mode $n: the writer neither stopped nor finished"
-  if [[ ! -e $log.stopped ]]; then
+  if ! wait_for $((SECONDS_PER_POINT + 60)) stopped_or_done; then
     kill_writer
-    echo "$mode $n: the writer finished without reaching its crash point" > "$dir/result"
+    echo "$mode $n: the writer neither stopped nor finished" > "$dir/result"
     unmount
     return 1
+  fi
+  if [[ ! -e $log.stopped ]]; then
+    kill_writer
+    unmount
+    [[ $KEEP -eq 1 ]] || rm -rf "$dir"
+    return 2
   fi
   kill_writer
   [[ $mode == power ]] && clear_cache "$dir"
@@ -279,18 +320,14 @@ run_point() {
   local line cut state
   line=$(sed -n 's/^result ok //p' "$dir/check.out")
   state=$(sed -n 's/.*state=\([0-9a-f]*\).*/\1/p' <<< "$line")
-  cut=$(interrupted "$dir/crashed" "$log" "$ref" "$n") || {
-    echo "$mode $n: interrupted salvage failed" > "$dir/result"
-    unmount
-    return 1
-  }
-  if [[ $cut == *cut_state=* && $cut != *cut_state=$state* ]]; then
-    { echo "$mode $n: salvage killed partway and re-run ends differently ($cut, uninterrupted state=$state)"; } > "$dir/result"
+  if ! interrupted "$dir/crashed" "$log" "$ref" "$n" "$dir/cut.out"; then
+    echo "$mode $n: salvage killed partway: $(cat "$dir/cut.out")" > "$dir/result"
     unmount
     return 1
   fi
-  if [[ $cut != salvage_ops=0 && $cut != *cut_state=* ]]; then
-    { echo "$mode $n: salvage killed partway and re-run fails its check ($cut)"; } > "$dir/result"
+  cut=$(cat "$dir/cut.out")
+  if [[ $cut == *cut_state=* && $cut != *cut_state=$state* ]]; then
+    echo "$mode $n: salvage killed partway and re-run ends differently ($cut, uninterrupted state=$state)" > "$dir/result"
     unmount
     return 1
   fi
@@ -299,14 +336,22 @@ run_point() {
   [[ $KEEP -eq 1 ]] || rm -rf "$dir"
 }
 
+UNREACHED=0
 for mode in "${MODES[@]}"; do
   for ((n = FROM; n <= TO; n += STEP)); do
-    if run_point "$mode" "$n"; then
-      tail -n 1 "$RESULTS"
-    else
-      FAILED+=("$mode-$n")
-      sed 's/^/FAIL /' "$WORK/$mode-$n/result" >&2
-    fi
+    status=0
+    run_point "$mode" "$n" || status=$?
+    case $status in
+      0) tail -n 1 "$RESULTS" ;;
+      2)
+        UNREACHED=$((UNREACHED + 1))
+        echo "$mode $n unreached: this run made fewer operations"
+        ;;
+      *)
+        FAILED+=("$mode-$n")
+        sed 's/^/FAIL /' "$WORK/$mode-$n/result" >&2
+        ;;
+    esac
   done
 done
 
@@ -324,6 +369,7 @@ for mode in "${MODES[@]}"; do
       if (v["lag_max_ms"] + 0 > lag) lag = v["lag_max_ms"] + 0
       if (v["wall_lag_max_ms"] + 0 > wall) wall = v["wall_lag_max_ms"] + 0
       if (v["loss_ms"] + 0 > loss) loss = v["loss_ms"] + 0
+      if (v["loss_ms"] + 0 > 0) lossy++
       if (v["beyond_durable_ms"] + 0 > beyond) beyond = v["beyond_durable_ms"] + 0
       if (v["cut_state"] != "") cut++
       split(v["stop"], s, ":"); kinds[s[2] ":" s[3]]++
@@ -332,11 +378,13 @@ for mode in "${MODES[@]}"; do
     END {
       printf "  %s: %d points passed; max lag %.1f ms (wall clock %.1f ms); max loss %.1f ms;", mode, n, lag, wall, loss
       printf " recovered past durable up to %.1f ms; interrupted salvage matched %d times\n", beyond, cut
+      printf "    points that lost unsynced audio: %d\n", lossy
       printf "    crash points by operation:"
       for (k in kinds) printf " %s=%d", k, kinds[k]
       printf "\n"
     }' "$RESULTS"
 done
+echo "  unreached: $UNREACHED"
 echo "  failed: ${#FAILED[@]}${FAILED[*]:+ (${FAILED[*]})}"
 echo "Results: $RESULTS"
 if [[ ${#FAILED[@]} -gt 0 ]]; then

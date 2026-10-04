@@ -3,8 +3,9 @@
 # the recorder captures it through PipeWire into journals and feeds each
 # frame to the real engine (`nota engine asr`) under its supervisor, and
 # the engine is SIGKILLed mid-sentence (the `real_capture engine` example).
-# Each run checks that text resumes within 10 s, that no audio was skipped
-# and all of it was confirmed, and that the text reads as the fixture.
+# Each run checks that the kill cut an utterance, that text resumes within
+# 10 s, that no audio was lost, skipped or left unconfirmed, and that the
+# text reads as the fixture.
 #
 # The fixture plays once into a temporary null sink, and the recorder
 # captures that sink by name, so nothing is heard and the user's devices,
@@ -18,14 +19,16 @@
 #
 # Usage: scripts/real-engine-kill.sh [KILL_AFTER_MS ...]
 #   one run per delay, from the first confirmed text to the kill
-#   (default: 0 250 500 1000 1500 2000 3000)
+#   (default: 250 500 1000 1500 2000 3000 4000). A delay of 0 kills at the
+#   pause that ended the first text, so it usually cuts nothing and fails.
+# Failed runs keep their directory; its path is printed.
 #   NOTA_TEST_MODELS   the test models (default ~/.local/share/nota/test-models)
 
 set -euo pipefail
 
 MODELS=${NOTA_TEST_MODELS:-$HOME/.local/share/nota/test-models}
 DELAYS=("$@")
-[[ ${#DELAYS[@]} -gt 0 ]] || DELAYS=(0 250 500 1000 1500 2000 3000)
+[[ ${#DELAYS[@]} -gt 0 ]] || DELAYS=(250 500 1000 1500 2000 3000 4000)
 
 die() { echo "real-engine-kill: $*" >&2; exit 2; }
 
@@ -44,6 +47,7 @@ ENGINE=$TARGET/nota
 [[ -x $BIN && -x $ENGINE ]] || die "built, but no binaries in $TARGET"
 
 WORK=$(mktemp -d)
+KEEP_WORK=0
 SINK="nota_real_engine_$$"
 MODULE=
 PLAYER=
@@ -53,7 +57,11 @@ cleanup() {
   [[ -n $RUNNER ]] && kill -9 "$RUNNER" 2> /dev/null || true
   [[ -n $PLAYER ]] && kill "$PLAYER" 2> /dev/null || true
   [[ -n $MODULE ]] && pactl unload-module "$MODULE" || true
-  rm -rf "$WORK"
+  if [[ $KEEP_WORK -eq 0 ]]; then
+    rm -rf "$WORK"
+  else
+    echo "Kept $WORK" >&2
+  fi
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
@@ -89,6 +97,7 @@ for delay in "${DELAYS[@]}"; do
   echo "kill_after=${delay}ms $(sed -n 's/^result //p' "$run/out")"
   if [[ $status -ne 0 ]]; then
     FAILED=$((FAILED + 1))
+    KEEP_WORK=1
     sed 's/^/  /' "$run/out" >&2
   fi
 done

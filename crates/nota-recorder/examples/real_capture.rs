@@ -7,14 +7,17 @@
 //!   16 kHz for `S` seconds into `<dir>/session`, with the store at
 //!   `<dir>/nota.db`, publishing each finished journal on a publisher
 //!   thread as it goes, in `K`-second segment windows. Every recorder
-//!   operation that changes the disk is counted; after the Nth, every
-//!   later one blocks before it runs, `<log>.stopped` is created, and the
-//!   script SIGKILLs the process, so the disk holds exactly operations
-//!   1..N. Each journal write is copied to `<ref>` (unsynced), the audio
+//!   operation that changes the disk, and every row commit, is counted,
+//!   one at a time under one lock; the thread that runs the Nth keeps the
+//!   lock, `<log>.stopped` is created, and the script SIGKILLs the process,
+//!   so the disk holds exactly operations 1..N. Keep `K` small: the tap
+//!   rereads a journal at each fsync. Each journal write is copied to
+//!   `<ref>` (unsynced), the audio
 //!   the recorder captured, to check the recovered audio against. `<log>`
 //!   gets one fsync'd line for each journal fsync (when, captured, durable
-//!   before and after), each committed row, and the stop. Keep `<log>` and
-//!   `<ref>` off the filesystem under test.
+//!   before and after), each committed row, each overrun or journal
+//!   failure, and the stop. Keep `<log>` and `<ref>` off the filesystem
+//!   under test.
 //! - `salvage <dir> --segment-seconds K [--stop-after N]` runs salvage,
 //!   counting its operations and stopping after the Nth as `write` does.
 //! - `check <dir> <log> <ref> --segment-seconds K` checks the bounded-loss
@@ -23,7 +26,8 @@
 //!   left, in order and without gaps from the first sample, holding at least
 //!   everything fsync'd and exactly the audio captured, and every committed
 //!   row; a second salvage changes nothing; the durable position was never
-//!   more than 1.1 s behind the captured one. It prints one `result` line
+//!   more than 1.1 s behind the captured one, counted both ways below; no
+//!   audio was lost before the journal. It prints one `result` line
 //!   with the measurements and a digest of the files and rows.
 //! - `engine <dir> --source NODE --seconds S --engine PROGRAM --parakeet DIR
 //!   --vad FILE --said TEXT --kill-after-ms MS --ready PATH` captures from
@@ -31,12 +35,18 @@
 //!   under its supervisor. Once the engine is online and capture has
 //!   started it creates `PATH`, so the script can start the speech. `MS`
 //!   after the first confirmed text it SIGKILLs the engine, then measures
-//!   how long until text resumes, and checks that nothing was skipped,
-//!   everything sent was confirmed, and the text reads as `TEXT`.
+//!   how long until the new engine's first text, and checks that the kill
+//!   cut an utterance (that text starts before the audio sent at the
+//!   kill), that no audio was lost before the journal or skipped, that the
+//!   journals fed the engine without a gap, that everything sent was
+//!   confirmed, and that the text reads as `TEXT`.
 //!
 //! "Captured" is what the recorder has written to the journal. Audio still
 //! queued between the stream and the recorder isn't counted there, so the
-//! lag is also measured against the wall clock since the first frame.
+//! lag is also measured against the wall clock since the first frame was
+//! written (which slightly undercounts the queue at the start), and both
+//! must stay within 1.1 s. Fsync times only mean something on a real
+//! disk: tmpfs makes every fsync free.
 
 #[cfg(target_os = "linux")]
 fn main() -> std::process::ExitCode {
@@ -51,7 +61,7 @@ mod linux {
     use std::collections::BTreeMap;
     use std::error::Error;
     use std::ffi::OsString;
-    use std::fmt::Write as _;
+    use std::fmt::{self, Write as _};
     use std::io::{self, Write as _};
     use std::path::{Path, PathBuf};
     use std::process::{Command, ExitCode};
@@ -65,7 +75,8 @@ mod linux {
         Clock, EpochId, SampleIndex, SampleRate, SessionId, SessionTime, SystemClock, TrackId,
     };
     use nota_recorder::capture::{
-        CaptureNotice, PipeWireBackend, RecorderEvent, Source, record_track, start,
+        CaptureNotice, CaptureReceiver, PipeWireBackend, RecordError, RecorderEvent, Source,
+        record_track, start,
     };
     use nota_recorder::engine::{
         EngineCommand, EngineConfig, EngineEvent, EngineStatus, EngineStderr, EngineSupervisor,
@@ -73,7 +84,8 @@ mod linux {
     use nota_recorder::fs::{Fs, FsFile, StdFile, StdFs, Synced};
     use nota_recorder::journal::{JournalId, read_journal};
     use nota_recorder::segment::{
-        Published, SegmentLength, publish_journals, salvage, segment_file_name,
+        DurableSegment, Published, SegmentLength, SegmentStore, publish_journals, salvage,
+        segment_file_name,
     };
     use nota_recorder::session::{FinishedJournal, SessionDir, SessionStore, SessionWriter};
     use nota_store::{SegmentRow, Store};
@@ -165,8 +177,10 @@ mod linux {
         }
 
         fn length(&self) -> Res<SegmentLength> {
-            SegmentLength::new(self.number("segment-seconds")? * u64::from(RATE.hz()))
-                .ok_or_else(|| "--segment-seconds must be positive".into())
+            self.number("segment-seconds")?
+                .checked_mul(u64::from(RATE.hz()))
+                .and_then(SegmentLength::new)
+                .ok_or_else(|| "--segment-seconds must be positive and not huge".into())
         }
     }
 
@@ -240,6 +254,8 @@ mod linux {
     ///   first <t ns> <end of the first frame>
     ///   sync <t ns> <captured> <durable before> <durable after>
     ///   row <epoch> <start> <end> <sha256 hex>
+    ///   overrun <t ns>
+    ///   journal-failed <t ns>
     ///   stop <op> <kind> <class> <t ns> <captured> <durable>
     ///   end <t ns> <captured> <durable>
     #[derive(Debug)]
@@ -259,14 +275,17 @@ mod linux {
     #[derive(Debug)]
     struct Tap {
         clock: Arc<dyn Clock>,
+        /// Held for the whole of each counted operation, and for good by the
+        /// thread that reaches the crash point, so every other thread stops
+        /// before its next operation: the disk holds exactly operations
+        /// 1..N.
+        op: Mutex<()>,
         ops: AtomicUsize,
         stop_after: Option<usize>,
         marker: Option<PathBuf>,
-        halted: AtomicBool,
         /// The bytes written to each journal still on disk.
         journals: Mutex<BTreeMap<PathBuf, Vec<u8>>>,
-        /// The end of the audio written, and of the audio fsync'd.
-        captured: AtomicU64,
+        /// The end of the audio fsync'd.
         durable: AtomicU64,
         anchored: AtomicBool,
         log: Option<Mutex<Log>>,
@@ -287,16 +306,19 @@ mod linux {
         fs: TapFs,
     }
 
+    fn poisoned<T>(_: T) -> io::Error {
+        io::Error::other("a lock was poisoned")
+    }
+
     impl Tap {
         fn new(clock: Arc<dyn Clock>) -> Self {
             Self {
                 clock,
+                op: Mutex::new(()),
                 ops: AtomicUsize::new(0),
                 stop_after: None,
                 marker: None,
-                halted: AtomicBool::new(false),
                 journals: Mutex::new(BTreeMap::new()),
-                captured: AtomicU64::new(0),
                 durable: AtomicU64::new(0),
                 anchored: AtomicBool::new(false),
                 log: None,
@@ -307,46 +329,60 @@ mod linux {
 
         fn log(&self, line: &str) -> io::Result<()> {
             match &self.log {
-                Some(log) => log
-                    .lock()
-                    .map_err(|_| io::Error::other("log lock poisoned"))?
-                    .line(line),
+                Some(log) => log.lock().map_err(poisoned)?.line(line),
                 None => Ok(()),
             }
         }
 
+        /// Logs `event` with the time.
+        fn note(&self, event: &str) -> io::Result<()> {
+            let t = nanos(self.clock.now());
+            self.log(&format!("{event} {t}"))
+        }
+
         /// The end of the valid frames written to `path`.
         fn written_end(&self, path: &Path) -> io::Result<Option<u64>> {
-            let journals = self
-                .journals
-                .lock()
-                .map_err(|_| io::Error::other("journals lock poisoned"))?;
+            let journals = self.journals.lock().map_err(poisoned)?;
             Ok(journals
                 .get(path)
                 .and_then(|bytes| read_journal(bytes).range())
                 .map(|r| r.end().get()))
         }
+
+        /// The end of everything written: the furthest valid frame in any
+        /// journal still on disk, or what's durable.
+        fn captured(&self) -> io::Result<u64> {
+            let journals = self.journals.lock().map_err(poisoned)?;
+            let written = journals
+                .values()
+                .filter_map(|bytes| read_journal(bytes).range())
+                .map(|r| r.end().get())
+                .max()
+                .unwrap_or(0);
+            Ok(written.max(self.durable.load(Ordering::SeqCst)))
+        }
     }
 
     impl TapFs {
-        /// Blocks for good once the run has stopped, so nothing after the
-        /// crash point reaches the disk.
-        fn gate(&self) {
-            if self.0.halted.load(Ordering::SeqCst) {
-                block_forever();
-            }
-        }
-
-        /// Counts one operation that has just run; at the crash point, logs
-        /// it, marks it and never returns.
-        fn counted<T>(&self, kind: &str, path: &Path, result: io::Result<T>) -> io::Result<T> {
+        /// Runs one operation that changes the disk, and counts it. At the
+        /// crash point it logs it, marks it and never returns, keeping the
+        /// operation lock so no other thread gets further.
+        fn counted<T>(
+            &self,
+            kind: &str,
+            path: &Path,
+            op: impl FnOnce() -> io::Result<T>,
+        ) -> io::Result<T> {
+            let held = self.0.op.lock().map_err(poisoned)?;
+            let result = op();
             let done = self.0.ops.fetch_add(1, Ordering::SeqCst) + 1;
             if self.0.stop_after == Some(done) {
-                self.0.halted.store(true, Ordering::SeqCst);
                 self.stop(done, kind, path)?;
                 block_forever();
+                drop(held);
                 return Err(io::Error::other("the crash point returned"));
             }
+            drop(held);
             result
         }
 
@@ -355,7 +391,7 @@ mod linux {
             let line = format!(
                 "stop {op} {kind} {} {t} {} {}",
                 class(path),
-                self.0.captured.load(Ordering::SeqCst),
+                self.0.captured()?,
                 self.0.durable.load(Ordering::SeqCst)
             );
             self.0.log(&line)?;
@@ -373,45 +409,42 @@ mod linux {
             self.0.ops.load(Ordering::SeqCst)
         }
 
-        /// Notes a journal write: the copy, the engine feed, the captured
-        /// position.
+        /// Notes a journal write: the copy, the engine feed, the first
+        /// frame's time.
         fn wrote(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+            self.0
+                .journals
+                .lock()
+                .map_err(poisoned)?
+                .entry(path.to_owned())
+                .or_default()
+                .extend(bytes);
+            if let Some((_, copies)) = &self.0.reference
+                && let Some(copy) = copies.lock().map_err(poisoned)?.get_mut(path)
             {
-                let mut journals = self
-                    .0
-                    .journals
-                    .lock()
-                    .map_err(|_| io::Error::other("journals lock poisoned"))?;
-                journals.entry(path.to_owned()).or_default().extend(bytes);
-            }
-            if let Some((_, copies)) = &self.0.reference {
-                let mut copies = copies
-                    .lock()
-                    .map_err(|_| io::Error::other("reference lock poisoned"))?;
-                if let Some(copy) = copies.get_mut(path) {
-                    copy.write_all(bytes)?;
-                }
+                copy.write_all(bytes)?;
             }
             if let Some(frames) = &self.0.frames {
-                let frames = frames
-                    .lock()
-                    .map_err(|_| io::Error::other("feed lock poisoned"))?;
                 // The engine side ending early isn't the recorder's problem.
-                let _ = frames.send(Feed::Bytes(path.to_owned(), bytes.to_vec()));
+                let _ = frames
+                    .lock()
+                    .map_err(poisoned)?
+                    .send(Feed::Bytes(path.to_owned(), bytes.to_vec()));
             }
             if self.0.log.is_some()
+                && !self.0.anchored.load(Ordering::SeqCst)
                 && let Some(end) = self.0.written_end(path)?
             {
-                self.0.captured.fetch_max(end, Ordering::SeqCst);
-                if !self.0.anchored.swap(true, Ordering::SeqCst) {
-                    let t = nanos(self.0.clock.now());
-                    self.0.log(&format!("first {t} {end}"))?;
-                }
+                self.0.anchored.store(true, Ordering::SeqCst);
+                let t = nanos(self.0.clock.now());
+                self.0.log(&format!("first {t} {end}"))?;
             }
             Ok(())
         }
 
-        /// Notes a journal fsync: everything written to it is durable.
+        /// Notes a journal fsync: everything written to it is durable, and
+        /// a journal is only written up to its sync before the next starts,
+        /// so its end is also everything captured.
         fn synced(&self, path: &Path) -> io::Result<()> {
             if self.0.log.is_none() {
                 return Ok(());
@@ -419,11 +452,10 @@ mod linux {
             let Some(end) = self.0.written_end(path)? else {
                 return Ok(());
             };
-            let captured = self.0.captured.load(Ordering::SeqCst);
             let before = self.0.durable.fetch_max(end, Ordering::SeqCst);
             if end > before {
                 let t = nanos(self.0.clock.now());
-                self.0.log(&format!("sync {t} {captured} {before} {end}"))?;
+                self.0.log(&format!("sync {t} {end} {before} {end}"))?;
             }
             Ok(())
         }
@@ -433,25 +465,26 @@ mod linux {
         type File = TapFile;
 
         fn create(&self, path: &Path) -> io::Result<TapFile> {
-            self.gate();
-            let made = StdFs.create(path);
-            if made.is_ok() && is_journal(path) {
-                if let Some((dir, copies)) = &self.0.reference
-                    && let Some(name) = path.file_name()
-                {
-                    let copy = StdFs.create(&dir.join(name))?;
-                    copies
+            let file = self.counted("create", path, || {
+                let file = StdFs.create(path)?;
+                if is_journal(path) {
+                    if let Some((dir, copies)) = &self.0.reference
+                        && let Some(name) = path.file_name()
+                    {
+                        let copy = StdFs.create(&dir.join(name))?;
+                        copies
+                            .lock()
+                            .map_err(poisoned)?
+                            .insert(path.to_owned(), copy);
+                    }
+                    self.0
+                        .journals
                         .lock()
-                        .map_err(|_| io::Error::other("reference lock poisoned"))?
-                        .insert(path.to_owned(), copy);
+                        .map_err(poisoned)?
+                        .insert(path.to_owned(), Vec::new());
                 }
-                self.0
-                    .journals
-                    .lock()
-                    .map_err(|_| io::Error::other("journals lock poisoned"))?
-                    .insert(path.to_owned(), Vec::new());
-            }
-            let file = self.counted("create", path, made)?;
+                Ok(file)
+            })?;
             Ok(TapFile {
                 file,
                 path: path.to_owned(),
@@ -460,31 +493,23 @@ mod linux {
         }
 
         fn create_dir(&self, path: &Path) -> io::Result<()> {
-            self.gate();
-            self.counted("mkdir", path, StdFs.create_dir(path))
+            self.counted("mkdir", path, || StdFs.create_dir(path))
         }
 
         fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
-            self.gate();
-            self.counted("rename", to, StdFs.rename(from, to))
+            self.counted("rename", to, || StdFs.rename(from, to))
         }
 
         fn sync_dir(&self, dir: &Path) -> io::Result<()> {
-            self.gate();
-            self.counted("dirsync", dir, StdFs.sync_dir(dir))
+            self.counted("dirsync", dir, || StdFs.sync_dir(dir))
         }
 
         fn remove(&self, path: &Path) -> io::Result<()> {
-            self.gate();
-            let removed = StdFs.remove(path);
-            if removed.is_ok() {
-                self.0
-                    .journals
-                    .lock()
-                    .map_err(|_| io::Error::other("journals lock poisoned"))?
-                    .remove(path);
-            }
-            self.counted("remove", path, removed)
+            self.counted("remove", path, || {
+                StdFs.remove(path)?;
+                self.0.journals.lock().map_err(poisoned)?.remove(path);
+                Ok(())
+            })
         }
 
         fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
@@ -498,24 +523,68 @@ mod linux {
 
     impl FsFile for TapFile {
         fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
-            self.fs.gate();
-            let result = self.file.write_all(bytes);
-            if result.is_ok() && is_journal(&self.path) {
-                self.fs.wrote(&self.path, bytes)?;
-            }
-            self.fs.counted("write", &self.path, result)
+            let (file, path, fs) = (&mut self.file, &self.path, &self.fs);
+            fs.counted("write", path, || {
+                file.write_all(bytes)?;
+                if is_journal(path) {
+                    fs.wrote(path, bytes)?;
+                }
+                Ok(())
+            })
         }
 
         fn sync(&mut self) -> io::Result<Synced> {
-            self.fs.gate();
-            let result = self.file.sync();
-            if result.is_ok() && is_journal(&self.path) {
-                self.fs.synced(&self.path)?;
-            }
-            self.fs.counted("fsync", &self.path, result)
+            let (file, path, fs) = (&mut self.file, &self.path, &self.fs);
+            fs.counted("fsync", path, || {
+                let synced = file.sync()?;
+                if is_journal(path) {
+                    fs.synced(path)?;
+                }
+                Ok(synced)
+            })
         }
     }
 
+    /// The store, with each row commit counted as one operation, so a
+    /// crash can fall between a row's commit and its journal's removal.
+    #[derive(Debug)]
+    struct CountedStore<'a> {
+        store: &'a mut Store,
+        fs: TapFs,
+    }
+
+    #[derive(Debug)]
+    struct CommitError(String);
+
+    impl fmt::Display for CommitError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(&self.0)
+        }
+    }
+
+    impl Error for CommitError {}
+
+    impl SegmentStore for CountedStore<'_> {
+        type Error = CommitError;
+
+        fn rows(&mut self) -> Result<Vec<SegmentRow>, CommitError> {
+            self.store
+                .segments()
+                .map_err(|e| CommitError(e.to_string()))
+        }
+
+        fn insert(&mut self, segment: &DurableSegment) -> Result<(), CommitError> {
+            let store = &mut *self.store;
+            self.fs
+                .counted("commit", segment.path(), || {
+                    store
+                        .insert_segment(segment.row())
+                        .map(|_| ())
+                        .map_err(io::Error::other)
+                })
+                .map_err(|e| CommitError(e.to_string()))
+        }
+    }
     // -----------------------------------------------------------------------
     // write
 
@@ -566,7 +635,11 @@ mod linux {
             let session = session.clone();
             thread::spawn(move || -> Res<()> {
                 let mut store = store;
-                let mut bound = SessionStore::new(session, &mut store);
+                let counted = CountedStore {
+                    store: &mut store,
+                    fs: fs.clone(),
+                };
+                let mut bound = SessionStore::new(session, counted);
                 for batch in finished {
                     let done = publish_journals(&mut bound, length, &batch)?;
                     for row in done.segments() {
@@ -580,25 +653,18 @@ mod linux {
         let (capture, events) = start(&PipeWireBackend, &source, RATE)?;
         let recorder = {
             let to_publish = to_publish.clone();
-            thread::spawn(move || {
-                let mut notices = Vec::new();
-                let mut failures = 0_usize;
-                let result = record_track(&mut writer, TRACK, &events, &mut |e| match e {
-                    RecorderEvent::Finished(j) => {
-                        let _ = to_publish.send(j);
-                    }
-                    RecorderEvent::JournalFailed(_) => failures += 1,
-                    RecorderEvent::Capture(n) => notices.push(n),
-                });
-                (writer, notices, failures, result)
-            })
+            let fs = fs.clone();
+            thread::spawn(move || record(writer, &events, &to_publish, &fs))
         };
         wait(Duration::from_secs(seconds));
         drop(capture);
-        let (writer, notices, failures, result) = recorder
+        let (writer, notices, failures, result, unlogged) = recorder
             .join()
             .map_err(|_| "the recorder thread panicked")?;
         result?;
+        if let Some(e) = unlogged {
+            return Err(e.into());
+        }
         let last = writer.finish()?;
         let _ = to_publish.send(last);
         drop(to_publish);
@@ -608,7 +674,7 @@ mod linux {
         let t = nanos(clock.now());
         fs.0.log(&format!(
             "end {t} {} {}",
-            fs.0.captured.load(Ordering::SeqCst),
+            fs.0.captured()?,
             fs.0.durable.load(Ordering::SeqCst)
         ))?;
         let overruns = notices
@@ -621,6 +687,55 @@ mod linux {
             fs.total()
         )?;
         Ok(failures == 0)
+    }
+
+    /// What the recorder thread hands back: the writer, the stream's
+    /// notices, the journal failures, how recording ended, and the first
+    /// failure to log a lost-audio event.
+    type Recorded = (
+        SessionWriter<TapFs>,
+        Vec<CaptureNotice>,
+        usize,
+        Result<(), RecordError>,
+        Option<io::Error>,
+    );
+
+    /// Records until the capture stops, handing finished journals to the
+    /// publisher and logging audio lost before the journal.
+    fn record(
+        mut writer: SessionWriter<TapFs>,
+        events: &CaptureReceiver,
+        to_publish: &mpsc::Sender<Vec<FinishedJournal>>,
+        fs: &TapFs,
+    ) -> Recorded {
+        let mut notices = Vec::new();
+        let mut failures = 0_usize;
+        let mut unlogged = None;
+        let result = record_track(&mut writer, TRACK, events, &mut |e| {
+            let logged = match e {
+                RecorderEvent::Finished(j) => {
+                    let _ = to_publish.send(j);
+                    Ok(())
+                }
+                RecorderEvent::JournalFailed(_) => {
+                    failures += 1;
+                    fs.0.note("journal-failed")
+                }
+                RecorderEvent::Capture(n) => {
+                    let logged = if n == CaptureNotice::Overrun {
+                        fs.0.note("overrun")
+                    } else {
+                        Ok(())
+                    };
+                    notices.push(n);
+                    logged
+                }
+            };
+            if let Err(e) = logged {
+                unlogged.get_or_insert(e);
+            }
+        });
+        (writer, notices, failures, result, unlogged)
     }
 
     fn row_line(row: &SegmentRow) -> String {
@@ -653,7 +768,11 @@ mod linux {
         let fs = TapFs(Arc::new(tap));
         let mut store = Store::open(&dir.join("nota.db"))?;
         let session = SessionDir::new(SESSION, fs.clone(), &dir.join("session"));
-        let done = salvage(&mut SessionStore::new(session, &mut store), length)?;
+        let counted = CountedStore {
+            store: &mut store,
+            fs: fs.clone(),
+        };
+        let done = salvage(&mut SessionStore::new(session, counted), length)?;
         writeln!(
             io::stdout(),
             "ops {} published {} deleted {}",
@@ -680,6 +799,8 @@ mod linux {
         stop: Option<(u64, String, String, u64, u64, u64)>,
         /// (t, captured, durable)
         end: Option<(u64, u64, u64)>,
+        overruns: usize,
+        journal_failures: usize,
     }
 
     fn read_log(path: &Path) -> Res<Promised> {
@@ -706,6 +827,8 @@ mod linux {
                     p.durable = p.durable.max(n(4)?);
                 }
                 Some("row") => p.rows.push((n(1)?, n(2)?, n(3)?, s(4)?)),
+                Some("overrun") => p.overruns += 1,
+                Some("journal-failed") => p.journal_failures += 1,
                 Some("stop") => p.stop = Some((n(1)?, s(2)?, s(3)?, n(4)?, n(5)?, n(6)?)),
                 Some("end") => {
                     p.end = Some((n(1)?, n(2)?, n(3)?));
@@ -946,11 +1069,20 @@ mod linux {
         }
 
         let lag = Lag::of(promised);
-        if lag.max > MAX_LAG {
+        if lag.max > MAX_LAG || lag.wall_max > MAX_LAG {
             return Err(format!(
-                "durable was {:.0} ms behind captured (bound {:.0} ms)",
+                "durable was {:.0} ms behind the journal and {:.0} ms behind the wall clock \
+                 (bound {:.0} ms)",
                 ms(lag.max),
+                ms(lag.wall_max),
                 ms(MAX_LAG)
+            )
+            .into());
+        }
+        if promised.overruns > 0 || promised.journal_failures > 0 {
+            return Err(format!(
+                "audio was lost before the journal: {} overruns, {} journal failures",
+                promised.overruns, promised.journal_failures
             )
             .into());
         }
@@ -1066,8 +1198,12 @@ mod linux {
             buf.extend(bytes);
             for frame in read_journal(buf).frames() {
                 let start = frame.range().start().get();
-                if start < sent.load(Ordering::SeqCst) {
+                let next = sent.load(Ordering::SeqCst);
+                if start < next {
                     continue;
+                }
+                if start != next {
+                    return Err(format!("the journals skip samples {next}..{start}").into());
                 }
                 let chunk =
                     AudioChunk::new(TRACK, frame.range().start(), RATE, frame.samples().to_vec())
@@ -1164,8 +1300,18 @@ mod linux {
         };
         let (capture, capture_events) = start(&PipeWireBackend, &source, RATE)?;
         let recorder = thread::spawn(move || {
-            let result = record_track(&mut writer, TRACK, &capture_events, &mut |_| {});
-            (writer, result)
+            // Audio lost before the journal: the engine never sees it either.
+            let mut lost = 0_usize;
+            let result = record_track(&mut writer, TRACK, &capture_events, &mut |e| {
+                if matches!(
+                    e,
+                    RecorderEvent::JournalFailed(_)
+                        | RecorderEvent::Capture(CaptureNotice::Overrun)
+                ) {
+                    lost += 1;
+                }
+            });
+            (writer, result, lost)
         });
         let started = clock.now();
         let stop_at = started
@@ -1179,6 +1325,9 @@ mod linux {
         let mut kill_due = None;
         let mut killed = None;
         let mut held_at_kill = 0;
+        let mut sent_at_kill = 0;
+        let mut resumed_from = None;
+        let mut lost = 0;
         let mut offline_at = None;
         let mut online_again = None;
         let mut resumed = None;
@@ -1194,8 +1343,8 @@ mod linux {
                 && let Some(due) = kill_due
                 && now >= due
             {
-                let at_kill = sent.load(Ordering::SeqCst);
-                held_at_kill = at_kill.saturating_sub(confirmed);
+                sent_at_kill = sent.load(Ordering::SeqCst);
+                held_at_kill = sent_at_kill.saturating_sub(confirmed);
                 let status = Command::new("kill")
                     .args(["-KILL", &pid.to_string()])
                     .status()?;
@@ -1208,10 +1357,11 @@ mod linux {
                 && let Some((capture, recorder)) = capturing.take()
             {
                 drop(capture);
-                let (writer, result) = recorder
+                let (writer, result, notices) = recorder
                     .join()
                     .map_err(|_| "the recorder thread panicked")?;
                 result?;
+                lost = notices;
                 writer.finish()?;
                 let _ = feed_tx.send(Feed::End);
                 if let Some(f) = feeding.take() {
@@ -1240,8 +1390,11 @@ mod linux {
             match event {
                 EngineEvent::Transcript(t) => {
                     heard = true;
-                    if killed.is_some() && resumed.is_none() {
+                    // Only text after the old engine is seen to go down:
+                    // anything before that it sent before it died.
+                    if offline_at.is_some() && resumed.is_none() {
                         resumed = Some(at);
+                        resumed_from = Some(t.range.start().get());
                     }
                     text.push(t.text);
                 }
@@ -1278,23 +1431,28 @@ mod linux {
             return Ok(false);
         };
         let took = resumed.map_or(f64::INFINITY, |r| since_ms(r, killed));
+        // The first text after the restart covers audio sent before the
+        // kill that the old engine hadn't confirmed: an utterance was cut.
+        let cut = resumed_from.is_some_and(|from| from < sent_at_kill);
         let ok = resumed.is_some()
             && took < 10_000.0
-            && held_at_kill > 0
-            && offline_at.is_some()
+            && cut
+            && lost == 0
             && skipped == 0
             && confirmed >= total
             && errors * 10 <= said.len();
         writeln!(
             io::stdout(),
             "result {} kill_after_first_text_ms={:.0} held_at_kill_ms={:.0} \
-             offline_ms={:.0} online_ms={:.0} text_resumed_ms={took:.0} skipped={skipped} \
-             confirmed={confirmed}/{total} word_errors={errors}/{}",
+             offline_ms={:.0} online_ms={:.0} text_resumed_ms={took:.0} cut_utterance={} \
+             skipped={skipped} lost_before_journal={lost} confirmed={confirmed}/{total} \
+             word_errors={errors}/{}",
             if ok { "ok" } else { "FAIL" },
             since_ms(killed, first_text),
             ms(held_at_kill),
             offline_at.map_or(f64::NAN, |t| since_ms(t, killed)),
             online_again.map_or(f64::NAN, |t| since_ms(t, killed)),
+            if cut { "yes" } else { "no" },
             said.len()
         )?;
         Ok(ok)
