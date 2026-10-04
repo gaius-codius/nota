@@ -236,6 +236,8 @@ base_rows=$(sed -n 's/.* rows=\([0-9]*\) .*/\1/p' "$WORK/count/check.out")
 [[ ${base_recovered:-0} -ge $(((SECONDS_PER_POINT - 1) * 16000)) && ${base_rows:-0} -ge 2 ]] ||
   die "the uncrashed run recorded too little (recovered ${base_recovered:-0} samples, ${base_rows:-0} rows)"
 TO=${TO:-$TOTAL}
+[[ $TO -le $TOTAL ]] || TO=$TOTAL
+[[ $FROM -le $TO ]] || die "no crash points in $FROM..$TO (a run makes $TOTAL operations)"
 
 echo "Real-capture crash checks: modes ${MODES[*]}; $TOTAL operations in ${SECONDS_PER_POINT}s;" \
   "points $FROM..$TO step $STEP; work dir $WORK"
@@ -320,6 +322,17 @@ run_point() {
   local line cut state
   line=$(sed -n 's/^result ok //p' "$dir/check.out")
   state=$(sed -n 's/.*state=\([0-9a-f]*\).*/\1/p' <<< "$line")
+  if [[ $mode == power ]]; then
+    # A second power cut after salvage: what salvage did must have been
+    # durable.
+    clear_cache "$dir"
+    if ! check "$rec" "$log" "$ref" --recovered yes > "$dir/recheck.out" 2>&1 ||
+      ! grep -q "state=$state" "$dir/recheck.out"; then
+      { echo "$mode $n: after salvage and a second power cut:"; cat "$dir/recheck.out"; } > "$dir/result"
+      unmount
+      return 1
+    fi
+  fi
   if ! interrupted "$dir/crashed" "$log" "$ref" "$n" "$dir/cut.out"; then
     echo "$mode $n: salvage killed partway: $(cat "$dir/cut.out")" > "$dir/result"
     unmount
@@ -356,7 +369,9 @@ for mode in "${MODES[@]}"; do
 done
 
 if [[ "$(pactl get-default-sink)" != "$default_before" ]]; then
+  # Not changed back: the user may have changed it themselves meanwhile.
   echo "real-capture-crash: the default sink changed during the run (was $default_before)" >&2
+  FAILED+=(default-sink)
 fi
 
 echo

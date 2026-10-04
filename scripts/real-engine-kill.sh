@@ -54,6 +54,9 @@ PLAYER=
 RUNNER=
 
 cleanup() {
+  # The engine child dies with its supervisor's stdin, but don't wait for
+  # that: kill the runner's children by its PID first.
+  [[ -n $RUNNER ]] && pkill -9 -P "$RUNNER" 2> /dev/null || true
   [[ -n $RUNNER ]] && kill -9 "$RUNNER" 2> /dev/null || true
   [[ -n $PLAYER ]] && kill "$PLAYER" 2> /dev/null || true
   [[ -n $MODULE ]] && pactl unload-module "$MODULE" || true
@@ -103,7 +106,9 @@ for delay in "${DELAYS[@]}"; do
 done
 
 if [[ "$(pactl get-default-sink)" != "$default_before" ]]; then
+  # Not changed back: the user may have changed it themselves meanwhile.
   echo "real-engine-kill: the default sink changed during the run (was $default_before)" >&2
+  FAILED=$((FAILED + 1))
 fi
 echo "${#DELAYS[@]} runs, $FAILED failed"
 [[ $FAILED -eq 0 ]]

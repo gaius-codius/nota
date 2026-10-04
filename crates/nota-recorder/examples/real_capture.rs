@@ -20,7 +20,8 @@
 //!   under test.
 //! - `salvage <dir> --segment-seconds K [--stop-after N]` runs salvage,
 //!   counting its operations and stopping after the Nth as `write` does.
-//! - `check <dir> <log> <ref> --segment-seconds K` checks the bounded-loss
+//! - `check <dir> <log> <ref> --segment-seconds K [--recovered yes]` checks
+//!   the bounded-loss
 //!   criteria: before salvage, every row has its file and every sample
 //!   fsync'd is in a row or a journal; after it, only segments and rows are
 //!   left, in order and without gaps from the first sample, holding at least
@@ -28,7 +29,9 @@
 //!   row; a second salvage changes nothing; the durable position was never
 //!   more than 1.1 s behind the captured one, counted both ways below; no
 //!   audio was lost before the journal. It prints one `result` line
-//!   with the measurements and a digest of the files and rows.
+//!   with the measurements and a digest of the files and rows. With
+//!   `--recovered yes`, for a disk that crashed again after a completed
+//!   salvage, salvage must also find nothing left to do.
 //! - `engine <dir> --source NODE --seconds S --engine PROGRAM --parakeet DIR
 //!   --vad FILE --said TEXT --kill-after-ms MS --ready PATH` captures from
 //!   `NODE` into journals and feeds every frame written to the real engine
@@ -989,8 +992,9 @@ mod linux {
         let audio = reference(&args.path(2, "<ref>")?)?;
         let length = args.length()?;
         let session = dir.join("session");
+        let recovered = args.flags.get("recovered").is_some_and(|v| v == "yes");
         let mut store = Store::open(&dir.join("nota.db"))?;
-        match run_checks(&session, &mut store, length, &promised, &audio) {
+        match run_checks(&session, &mut store, length, &promised, &audio, recovered) {
             Ok(line) => {
                 writeln!(io::stdout(), "result ok {line}")?;
                 Ok(true)
@@ -1008,6 +1012,7 @@ mod linux {
         length: SegmentLength,
         promised: &Promised,
         audio: &[i16],
+        recovered: bool,
     ) -> Res<String> {
         // Before salvage: rows only with their files, and nothing fsync'd
         // missing from the rows and journals together.
@@ -1027,6 +1032,9 @@ mod linux {
         let ours = SessionDir::new(SESSION, StdFs, session);
         let first = salvage(&mut SessionStore::new(ours.clone(), &mut *store), length)?;
         let after = Observed::read(session, store)?;
+        if recovered && after != before {
+            return Err("a completed salvage didn't last: salvage had to run again".into());
+        }
         if let Some(left) = after
             .files
             .keys()
@@ -1043,25 +1051,7 @@ mod linux {
             )
             .into());
         }
-        for (epoch, start, end, sha) in &promised.rows {
-            let found = after.rows.iter().any(|r| {
-                u64::from(r.epoch().get()) == *epoch
-                    && r.range().start().get() == *start
-                    && r.range().end().get() == *end
-                    && hex(r.sha256().as_bytes()) == *sha
-            });
-            if !found {
-                return Err(format!("a committed row disappeared: {start}..{end}").into());
-            }
-        }
-        let named: Vec<PathBuf> = after
-            .rows
-            .iter()
-            .map(|r| session.join(segment_file_name(r.track(), r.range())))
-            .collect();
-        if let Some(orphan) = after.files.keys().find(|p| !named.contains(*p)) {
-            return Err(format!("a file without a row: {}", orphan.display()).into());
-        }
+        rows_kept(session, promised, &after)?;
 
         let second = salvage(&mut SessionStore::new(ours, &mut *store), length)?;
         if second != Published::default() || Observed::read(session, store)? != after {
@@ -1115,6 +1105,30 @@ mod linux {
             20.0 * (f64::from(peak.max(1)) / 32_768.0).log10(),
             after.digest()
         ))
+    }
+
+    /// Every committed row is still there, and every file has its row.
+    fn rows_kept(session: &Path, promised: &Promised, after: &Observed) -> Res<()> {
+        for (epoch, start, end, sha) in &promised.rows {
+            let found = after.rows.iter().any(|r| {
+                u64::from(r.epoch().get()) == *epoch
+                    && r.range().start().get() == *start
+                    && r.range().end().get() == *end
+                    && hex(r.sha256().as_bytes()) == *sha
+            });
+            if !found {
+                return Err(format!("a committed row disappeared: {start}..{end}").into());
+            }
+        }
+        let named: Vec<PathBuf> = after
+            .rows
+            .iter()
+            .map(|r| session.join(segment_file_name(r.track(), r.range())))
+            .collect();
+        if let Some(orphan) = after.files.keys().find(|p| !named.contains(*p)) {
+            return Err(format!("a file without a row: {}", orphan.display()).into());
+        }
+        Ok(())
     }
 
     /// How far durable fell behind captured: just before each fsync, and at
