@@ -5,16 +5,22 @@
 //! That thread:
 //! - restarts the engine when it exits, sends something that doesn't parse
 //!   or doesn't fit, or hangs (no handshake within
-//!   [`EngineConfig::start_timeout`], or audio unconfirmed with no reply
-//!   at all for [`EngineConfig::request_timeout`]), after a backoff that doubles from
-//!   [`EngineConfig::initial_backoff`] up to [`EngineConfig::max_backoff`]
-//!   and resets once a new engine confirms audio;
+//!   [`EngineConfig::start_timeout`], or audio unconfirmed with nothing
+//!   confirmed for [`EngineConfig::request_timeout`]), or falls more than
+//!   [`EngineConfig::max_unconfirmed`] behind, after a backoff that
+//!   doubles from [`EngineConfig::initial_backoff`] up to
+//!   [`EngineConfig::max_backoff`], is cut to at most 2 s when a new engine
+//!   says hello, and resets once it confirms audio;
 //! - keeps each track's unconfirmed audio and resends it to the new engine,
 //!   so transcription resumes from the last sample the engine confirmed;
 //! - passes text on only once the engine has confirmed it, so no text is
 //!   lost or repeated across a restart;
 //! - reports [`EngineStatus::Offline`] (the "⚠ transcriber offline" state)
-//!   and [`EngineStatus::Online`] as [`EngineEvent`]s.
+//!   and [`EngineStatus::Online`] as [`EngineEvent`]s, with the end of the
+//!   engine's stderr when it exits.
+//!
+//! The engine's stderr is always captured, never passed through: the TUI
+//! owns the terminal.
 //!
 //! Audio goes to the journal separately and never through here, so the
 //! recording carries on whatever the engine does.
@@ -24,11 +30,11 @@ mod replay;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt;
-use std::io::{self, BufReader, BufWriter};
+use std::io::{self, BufReader, BufWriter, Read};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
-use std::sync::Arc;
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -45,17 +51,6 @@ pub struct EngineCommand {
     pub program: PathBuf,
     /// Its arguments, e.g. `engine asr --parakeet DIR --vad FILE`.
     pub args: Vec<OsString>,
-    /// Where its stderr goes. Never the TUI's terminal in normal use.
-    pub stderr: EngineStderr,
-}
-
-/// Where the engine's stderr goes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EngineStderr {
-    /// Discarded.
-    Null,
-    /// The recorder's own stderr (for tests and debugging).
-    Inherit,
 }
 
 /// How the supervisor runs the engine.
@@ -65,10 +60,10 @@ pub struct EngineConfig {
     pub command: EngineCommand,
     /// How long a new engine has to load its models and say hello.
     pub start_timeout: Duration,
-    /// How long audio may go unconfirmed, with no reply about anything,
-    /// before the engine counts as hung. The live chunker confirms within
-    /// its 10 s cap plus decoding; a slow engine working through a backlog
-    /// keeps replying, so it isn't hung. Session time counts through
+    /// How long audio may go unconfirmed, with nothing confirmed on any
+    /// track, before the engine counts as hung. Text alone doesn't count.
+    /// The live chunker confirms within its 10 s cap plus decoding; a slow
+    /// engine working through a backlog keeps confirming, so it isn't hung. Session time counts through
     /// suspend, so after a long sleep the engine is restarted; that's
     /// harmless, as it resumes from the last confirmed sample.
     pub request_timeout: Duration,
@@ -82,9 +77,15 @@ pub struct EngineConfig {
     /// recorder must deliver audio more often than this, or the flush cuts
     /// mid-speech.
     pub idle_flush: Duration,
-    /// The most unconfirmed audio kept per track while the engine is down;
-    /// older audio is dropped from the live view (it's still in the
-    /// recording) and reported as [`EngineEvent::Skipped`].
+    /// The most unconfirmed audio kept per track. While the engine is
+    /// down, older audio is dropped from the live view (it's still in the
+    /// recording) and reported as [`EngineEvent::Skipped`]. A new engine
+    /// is given at most half of it, the oldest dropped likewise, so it has
+    /// room to catch up; one that still falls further behind than this is
+    /// restarted. Half of it must be well over what a healthy engine holds
+    /// before it confirms (the live chunker's 10 s cap plus decoding), so
+    /// set it to at least 30 s of audio; less restarts every engine as
+    /// behind before it can confirm anything.
     pub max_unconfirmed: SampleCount,
 }
 
@@ -149,11 +150,19 @@ pub enum OfflineReason {
     /// It couldn't be started.
     SpawnFailed(String),
     /// It exited, or closed its output.
-    Exited(Option<ExitStatus>),
+    Exited {
+        /// How it ended, if known.
+        status: Option<ExitStatus>,
+        /// The end of what it wrote to stderr (up to [`STDERR_TAIL`]
+        /// bytes), which says why; empty if nothing.
+        stderr: String,
+    },
     /// No hello within the start timeout.
     StartTimeout,
     /// Audio went unconfirmed past the request timeout.
     Hung,
+    /// It fell more than [`EngineConfig::max_unconfirmed`] behind.
+    Behind,
     /// It speaks another protocol version.
     Version(ProtocolVersion),
     /// It sent something that doesn't parse or doesn't fit.
@@ -164,10 +173,19 @@ impl fmt::Display for OfflineReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::SpawnFailed(err) => write!(f, "couldn't start: {err}"),
-            Self::Exited(Some(status)) => write!(f, "exited ({status})"),
-            Self::Exited(None) => write!(f, "exited"),
+            Self::Exited { status, stderr } => {
+                match status {
+                    Some(status) => write!(f, "exited ({status})")?,
+                    None => write!(f, "exited")?,
+                }
+                match stderr.lines().rev().map(str::trim).find(|l| !l.is_empty()) {
+                    Some(last) => write!(f, ": {last}"),
+                    None => Ok(()),
+                }
+            }
             Self::StartTimeout => write!(f, "didn't start in time"),
             Self::Hung => write!(f, "stopped answering"),
+            Self::Behind => write!(f, "fell too far behind"),
             Self::Version(v) => write!(f, "speaks protocol v{}", v.get()),
             Self::Protocol(what) => write!(f, "protocol error: {what}"),
         }
@@ -186,6 +204,9 @@ pub enum AudioRefused {
     },
     /// It isn't at 16 kHz, the only rate the engine takes.
     Rate(SampleRate),
+    /// The supervisor thread has stopped (it panicked); nothing more is
+    /// transcribed.
+    Stopped,
 }
 
 impl fmt::Display for AudioRefused {
@@ -198,6 +219,7 @@ impl fmt::Display for AudioRefused {
                 expected.get()
             ),
             Self::Rate(rate) => write!(f, "audio at {} Hz; the engine takes 16 kHz", rate.hz()),
+            Self::Stopped => write!(f, "the engine supervisor has stopped"),
         }
     }
 }
@@ -248,8 +270,8 @@ impl EngineSupervisor {
     /// # Errors
     ///
     /// [`AudioRefused`] if it overlaps audio already sent or isn't at
-    /// 16 kHz; nothing is queued. Such audio would only make the engine
-    /// fail.
+    /// 16 kHz (such audio would only make the engine fail), or if the
+    /// supervisor thread has stopped; nothing is queued.
     pub fn send_audio(&mut self, chunk: AudioChunk) -> Result<(), AudioRefused> {
         let range = chunk.range();
         if chunk.rate() != SampleRate::SPEECH {
@@ -263,10 +285,13 @@ impl EngineSupervisor {
                 got: range.start(),
             });
         }
-        self.next.insert(chunk.track(), range.end());
-        // Fails only if the supervisor thread is gone, which happens only
-        // at shutdown.
-        let _ = self.inputs.send(Input::Audio(chunk));
+        let track = chunk.track();
+        // Fails only if the supervisor thread is gone: it ends only at
+        // shutdown, or by panicking.
+        self.inputs
+            .send(Input::Audio(chunk))
+            .map_err(|_| AudioRefused::Stopped)?;
+        self.next.insert(track, range.end());
         Ok(())
     }
 
@@ -276,8 +301,10 @@ impl EngineSupervisor {
         let _ = self.inputs.send(Input::Flush(track));
     }
 
-    /// Stops the engine: closes its stdin so it exits, and kills it if it
-    /// hasn't within three seconds.
+    /// Stops the engine: flushes every track, closes its stdin so it
+    /// exits, and kills it if it hasn't within three seconds. Text the
+    /// engine sends in that time is passed on; audio it never confirmed is
+    /// reported as [`EngineEvent::Skipped`].
     pub fn shutdown(mut self) {
         self.stop();
     }
@@ -299,6 +326,28 @@ impl Drop for EngineSupervisor {
 
 /// How long a closed engine gets to exit before it's killed.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
+
+/// The most the backoff can be once an engine has said hello: it started,
+/// so the next restart is quick enough for text to resume within 10 s,
+/// but an engine that dies after every hello still restarts no faster
+/// than this.
+const HELLO_BACKOFF: Duration = Duration::from_secs(2);
+
+/// How long a killed engine gets to be reaped. One stuck in the kernel
+/// is left to a thread of its own rather than holding up the supervisor.
+const REAP_WAIT: Duration = Duration::from_secs(2);
+
+/// How long a dead engine's stderr gets to reach its end.
+const STDERR_WAIT: Duration = Duration::from_millis(500);
+
+/// The engine's output ended; `fail` fills in how and why.
+const EXITED: OfflineReason = OfflineReason::Exited {
+    status: None,
+    stderr: String::new(),
+};
+
+/// How much of the end of the engine's stderr is kept.
+pub const STDERR_TAIL: usize = 2_048;
 
 /// What the supervisor thread waits on.
 #[derive(Debug)]
@@ -326,15 +375,31 @@ enum FromChild {
 #[derive(Debug)]
 struct Running {
     generation: u64,
-    process: Child,
+    pid: u32,
+    /// `None` once killed.
+    process: Option<Child>,
     /// Frames for the writer thread, which owns the child's stdin; dropping
     /// it closes stdin once queued frames are written.
     writer: Sender<Frame<ToEngine>>,
+    /// The end of its stderr, sent once stderr closes.
+    stderr: Receiver<String>,
+}
+
+impl Running {
+    /// Kills and reaps the engine; returns how it ended, if known.
+    fn kill(&mut self) -> Option<ExitStatus> {
+        self.process.take().and_then(kill)
+    }
+
+    /// The end of what the engine wrote to stderr, once it has closed.
+    fn stderr_tail(&self) -> String {
+        self.stderr.recv_timeout(STDERR_WAIT).unwrap_or_default()
+    }
 }
 
 impl Drop for Running {
     fn drop(&mut self) {
-        kill(&mut self.process);
+        self.kill();
     }
 }
 
@@ -356,14 +421,20 @@ struct Supervisor {
     phase: Phase,
     backoff: Duration,
     generation: u64,
-    /// When the running engine last made progress: said hello or replied.
-    /// A slow engine working through a backlog isn't hung.
+    /// When the running engine last made progress: said hello or confirmed
+    /// audio. A slow engine working through a backlog isn't hung; one that
+    /// sends text but never confirms it is.
     progress: SessionTime,
 }
 
 /// After this many engines in a row fail with a track's first unconfirmed
 /// sample unmoved, the audio from there is taken to be what kills them.
 const POISON_STRIKES: u32 = 3;
+
+/// The same for a run of failures ending in a hang. A hang can't be told
+/// from a stalled machine, so it takes more of them; but audio that always
+/// hangs the engine mustn't keep it offline for the rest of the session.
+const HANG_STRIKES: u32 = 5;
 
 /// How much of that audio is skipped: one chunk at the live cap, 10 s at
 /// 16 kHz, the most the engine decodes at once.
@@ -448,8 +519,8 @@ impl Supervisor {
     fn phase_deadline(&self) -> Option<SessionTime> {
         match &self.phase {
             Phase::Waiting(at) | Phase::Starting(_, at) => Some(*at),
-            // Hung: audio waiting for a reply for the whole timeout, with no
-            // reply about anything else in that time either.
+            // Hung: audio waiting for its confirmation for the whole
+            // timeout, with nothing else confirmed in that time either.
             Phase::Online(_) => self
                 .tracks
                 .values()
@@ -506,11 +577,23 @@ impl Supervisor {
     /// Sends what's new to a running engine, or bounds what's kept for the
     /// next one.
     fn after_push(&mut self, track: TrackId) {
+        let keep = self.config.max_unconfirmed;
         if matches!(self.phase, Phase::Online(_)) {
             self.send_unsent();
+            let behind = self
+                .tracks
+                .get(&track)
+                .is_some_and(|replay| replay.unconfirmed() > keep.get());
+            if behind {
+                self.fail(OfflineReason::Behind);
+            }
             return;
         }
-        let keep = self.config.max_unconfirmed;
+        self.trim(track, keep);
+    }
+
+    /// Drops the track's oldest audio down to `keep` samples, and says so.
+    fn trim(&mut self, track: TrackId, keep: SampleCount) {
         let dropped = self
             .tracks
             .get_mut(&track)
@@ -539,11 +622,11 @@ impl Supervisor {
     fn on_child(&mut self, event: FromChild) {
         let frame = match event {
             FromChild::Frame(frame) => frame,
-            FromChild::End => return self.fail(OfflineReason::Exited(None)),
+            FromChild::End => return self.fail(EXITED),
             // A crash can leave half a frame, or break the pipe: the engine
             // died, it didn't misspeak.
             FromChild::Failed(ReadError::Truncated | ReadError::Io(_)) => {
-                return self.fail(OfflineReason::Exited(None));
+                return self.fail(EXITED);
             }
             FromChild::Failed(err) => return self.fail(OfflineReason::Protocol(err.to_string())),
         };
@@ -569,19 +652,29 @@ impl Supervisor {
     fn online(&mut self) {
         let phase = std::mem::replace(&mut self.phase, Phase::Waiting(self.clock.now()));
         self.progress = self.clock.now();
+        // It started: if it dies before confirming anything, the restart
+        // still comes soon enough for text to resume within 10 s.
+        self.backoff = self.backoff.min(HELLO_BACKOFF);
         self.phase = match phase {
             Phase::Starting(running, _) => {
-                let pid = running.process.id();
+                let pid = running.pid;
                 self.emit(EngineEvent::Status(EngineStatus::Online { pid }));
                 Phase::Online(running)
             }
             other => other,
         };
+        // A new engine gets at most half the limit, so it has room to catch
+        // up rather than falling behind on the next audio however long the
+        // outage was.
+        let half = SampleCount::new(self.config.max_unconfirmed.get() / 2);
+        let tracks: Vec<TrackId> = self.tracks.keys().copied().collect();
+        for track in tracks {
+            self.trim(track, half);
+        }
         self.send_unsent();
     }
 
     fn on_message(&mut self, message: FromEngine) -> Result<(), &'static str> {
-        self.progress = self.clock.now();
         match message {
             FromEngine::Transcript(transcript) => {
                 let replay = self
@@ -596,6 +689,9 @@ impl Supervisor {
                     .get_mut(&track)
                     .ok_or("confirmed an unknown track")?;
                 let done = replay.on_confirmed(up_to).map_err(|v| v.0)?;
+                // Only confirmations count: text alone doesn't move the
+                // first unconfirmed sample.
+                self.progress = self.clock.now();
                 // The new engine works: the next failure starts the backoff
                 // afresh.
                 self.backoff = self.config.initial_backoff;
@@ -626,28 +722,41 @@ impl Supervisor {
         let now = self.clock.now();
         let restart = now.checked_add(self.backoff).unwrap_or(now);
         let phase = std::mem::replace(&mut self.phase, Phase::Waiting(restart));
-        // A track whose audio was sent to an engine that then crashed or
-        // misspoke, with the track's first unconfirmed sample unmoved, may
-        // hold the audio that kills it. A hang doesn't count: it can't be
-        // told from a stalled machine, and skipping would drop good audio.
-        let crashed = !matches!(reason, OfflineReason::Hung);
-        let poisoned: Vec<TrackId> = if crashed && matches!(phase, Phase::Online(_)) {
-            self.tracks
+        // A track whose audio was sent to an engine that then crashed,
+        // misspoke or hung, with the track's first unconfirmed sample
+        // unmoved, may hold the audio that kills it. Falling behind says
+        // nothing about the audio.
+        let strikes = match reason {
+            OfflineReason::Behind => None,
+            OfflineReason::Hung => Some(HANG_STRIKES),
+            _ => Some(POISON_STRIKES),
+        };
+        let poisoned: Vec<TrackId> = match strikes {
+            // Only audio sent to an engine counts against a track, and none
+            // is sent until it's online.
+            Some(limit) => self
+                .tracks
                 .iter_mut()
-                .filter_map(|(&track, replay)| replay.note_failure(POISON_STRIKES).then_some(track))
-                .collect()
-        } else {
-            Vec::new()
+                .filter_map(|(&track, replay)| replay.note_failure(limit).then_some(track))
+                .collect(),
+            None => Vec::new(),
         };
-        let status = match phase {
-            Phase::Starting(mut running, _) | Phase::Online(mut running) => {
-                kill(&mut running.process)
+        let reason = match (phase, reason) {
+            (
+                Phase::Starting(mut running, _) | Phase::Online(mut running),
+                OfflineReason::Exited { .. },
+            ) => {
+                let status = running.kill();
+                OfflineReason::Exited {
+                    status,
+                    stderr: running.stderr_tail(),
+                }
             }
-            Phase::Waiting(_) => None,
-        };
-        let reason = match reason {
-            OfflineReason::Exited(None) => OfflineReason::Exited(status),
-            other => other,
+            (Phase::Starting(mut running, _) | Phase::Online(mut running), reason) => {
+                running.kill();
+                reason
+            }
+            (Phase::Waiting(_), reason) => reason,
         };
         self.backoff = self.backoff.saturating_mul(2).min(self.config.max_backoff);
         for replay in self.tracks.values_mut() {
@@ -675,18 +784,35 @@ impl Supervisor {
         // Bound what's kept while down.
         let tracks: Vec<TrackId> = self.tracks.keys().copied().collect();
         for track in tracks {
-            self.after_push(track);
+            self.trim(track, self.config.max_unconfirmed);
         }
     }
 
-    /// Closes the engine's stdin so it exits, passing on its last replies
-    /// (to a flush just sent, say) for up to [`SHUTDOWN_GRACE`] until its
-    /// output ends, then kills it.
+    /// Flushes every track and closes the engine's stdin so it exits,
+    /// passing on its last replies for up to [`SHUTDOWN_GRACE`] until its
+    /// output ends, then kills it. Whatever is still unconfirmed is
+    /// reported as skipped.
     fn shut_down(mut self, rx: &Receiver<Input>) {
+        if matches!(self.phase, Phase::Online(_)) {
+            for replay in self.tracks.values_mut() {
+                replay.push_flush();
+            }
+            self.send_unsent();
+        }
         let phase = std::mem::replace(&mut self.phase, Phase::Waiting(self.clock.now()));
-        let (Phase::Starting(mut running, _) | Phase::Online(mut running)) = phase else {
-            return;
-        };
+        if let Phase::Starting(running, _) | Phase::Online(running) = phase {
+            self.drain(running, rx);
+        }
+        // Never transcribed live; it's still in the recording.
+        let tracks: Vec<TrackId> = self.tracks.keys().copied().collect();
+        for track in tracks {
+            self.trim(track, SampleCount::new(0));
+        }
+    }
+
+    /// Closes the engine's stdin and passes on its replies until its
+    /// output ends or [`SHUTDOWN_GRACE`] is up, then kills it.
+    fn drain(&mut self, mut running: Running, rx: &Receiver<Input>) {
         let generation = running.generation;
         // Closing the queue to the writer thread closes the engine's stdin
         // once the queued frames are written.
@@ -715,11 +841,56 @@ impl Supervisor {
     }
 }
 
-/// Kills and reaps the engine; returns how it ended, if known.
-fn kill(process: &mut Child) -> Option<ExitStatus> {
+/// Kills and reaps the engine; returns how it ended, if known. An engine
+/// that can't be reaped within [`REAP_WAIT`] (stuck in the kernel) is left
+/// to a thread that reaps it whenever it goes.
+fn kill(mut process: Child) -> Option<ExitStatus> {
     // Fails only if it has already exited, which is what's wanted.
     let _ = process.kill();
-    process.wait().ok()
+    if let Ok(Some(status)) = process.try_wait() {
+        return Some(status);
+    }
+    let shared = Arc::new(Mutex::new(Some(process)));
+    let reaper = Arc::clone(&shared);
+    match within(REAP_WAIT, move || reap(&reaper)) {
+        Ok(status) => status,
+        Err(Late::TooLong) => None,
+        // No thread to leave it to: wait here rather than leave it
+        // unreaped.
+        Err(Late::NoThread) => reap(&shared),
+    }
+}
+
+/// Waits for the engine in `slot`, if it's still there.
+fn reap(slot: &Mutex<Option<Child>>) -> Option<ExitStatus> {
+    let taken = slot.lock().unwrap_or_else(PoisonError::into_inner).take();
+    taken.and_then(|mut process| process.wait().ok())
+}
+
+/// Why [`within`] has no result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Late {
+    /// The work took longer than allowed; it carries on regardless.
+    TooLong,
+    /// No thread could be started, so the work never ran.
+    NoThread,
+}
+
+/// Runs `work` on a thread of its own and waits up to `limit` for its
+/// result.
+fn within<T: Send + 'static>(
+    limit: Duration,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, Late> {
+    let (tx, rx) = mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name("nota-engine-reaper".into())
+        .spawn(move || {
+            // Nobody may be waiting any more; that's fine.
+            let _ = tx.send(work());
+        })
+        .map_err(|_| Late::NoThread)?;
+    rx.recv_timeout(limit).map_err(|_| Late::TooLong)
 }
 
 fn start_child(
@@ -731,31 +902,77 @@ fn start_child(
         .args(&command.args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(match command.stderr {
-            EngineStderr::Null => Stdio::null(),
-            EngineStderr::Inherit => Stdio::inherit(),
-        })
+        .stderr(Stdio::piped())
         .spawn()?;
-    let pipes = process.stdin.take().zip(process.stdout.take());
-    let Some((stdin, stdout)) = pipes else {
-        let _ = process.kill();
-        let _ = process.wait();
+    let pipes = (
+        process.stdin.take(),
+        process.stdout.take(),
+        process.stderr.take(),
+    );
+    let (Some(stdin), Some(stdout), Some(stderr)) = pipes else {
+        kill(process);
         return Err(io::Error::other("engine started without pipes"));
     };
     let (writer, frames) = mpsc::channel();
+    let (tail, stderr_rx) = mpsc::sync_channel(1);
     let threads = spawn_writer(stdin, frames, generation)
-        .and_then(|()| spawn_reader(stdout, inputs.clone(), generation));
+        .and_then(|()| spawn_reader(stdout, inputs.clone(), generation))
+        .and_then(|()| spawn_stderr(stderr, tail, generation));
     if let Err(err) = threads {
-        let _ = process.kill();
-        let _ = process.wait();
+        kill(process);
         return Err(err);
     }
     let _ = writer.send(Frame::Hello(ProtocolVersion::CURRENT));
     Ok(Running {
         generation,
-        process,
+        pid: process.id(),
+        process: Some(process),
         writer,
+        stderr: stderr_rx,
     })
+}
+
+/// Reads the engine's stderr to its end, keeping the last [`STDERR_TAIL`]
+/// bytes, and sends them on once it closes.
+fn spawn_stderr(
+    stderr: ChildStderr,
+    tail: mpsc::SyncSender<String>,
+    generation: u64,
+) -> io::Result<()> {
+    thread::Builder::new()
+        .name(format!("nota-engine-stderr-{generation}"))
+        .spawn(move || {
+            // The supervisor may have stopped waiting; that's fine.
+            let _ = tail.send(read_tail(stderr, STDERR_TAIL));
+        })
+        .map(drop)
+}
+
+/// Reads `input` to its end (or a read error) and returns its last `keep`
+/// bytes as text, from the first whole line if the start was cut off.
+fn read_tail(mut input: impl Read, keep: usize) -> String {
+    let mut kept: Vec<u8> = Vec::new();
+    let mut cut = false;
+    let mut buf = [0_u8; 1_024];
+    loop {
+        let read = match input.read(&mut buf) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        };
+        kept.extend_from_slice(buf.get(..read).unwrap_or_default());
+        if let Some(over) = kept.len().checked_sub(keep).filter(|&over| over > 0) {
+            kept.drain(..over);
+            cut = true;
+        }
+    }
+    let text = String::from_utf8_lossy(&kept);
+    let text = match text.split_once('\n') {
+        Some((_, rest)) if cut => rest,
+        _ => &text,
+    };
+    text.trim().to_owned()
 }
 
 /// Writes queued frames to the engine's stdin until the queue closes or a
@@ -815,7 +1032,20 @@ mod tests {
             OfflineReason::Protocol("bad".into()).to_string(),
             "protocol error: bad"
         );
-        assert_eq!(OfflineReason::Exited(None).to_string(), "exited");
+        assert_eq!(EXITED.to_string(), "exited");
+        assert_eq!(
+            OfflineReason::Exited {
+                status: None,
+                stderr: "loading\nError: no model at /x\n  \n".into(),
+            }
+            .to_string(),
+            "exited: Error: no model at /x"
+        );
+        assert_eq!(OfflineReason::Behind.to_string(), "fell too far behind");
+        assert_eq!(
+            AudioRefused::Stopped.to_string(),
+            "the engine supervisor has stopped"
+        );
         assert_eq!(
             OfflineReason::SpawnFailed("no such file".into()).to_string(),
             "couldn't start: no such file"
@@ -837,5 +1067,98 @@ mod tests {
             rate.to_string(),
             "audio at 48000 Hz; the engine takes 16 kHz"
         );
+    }
+
+    #[test]
+    fn work_that_takes_too_long_is_left_behind() {
+        assert_eq!(within(Duration::from_secs(5), || 7), Ok(7));
+        // A wait stuck forever, as on an engine stuck in the kernel.
+        let (keep, stuck) = mpsc::channel::<()>();
+        let took = within(Duration::from_millis(50), move || stuck.recv().is_ok());
+        assert_eq!(took, Err(Late::TooLong));
+        drop(keep);
+    }
+
+    #[test]
+    fn an_engine_already_taken_is_not_waited_for() {
+        assert_eq!(reap(&Mutex::new(None)), None);
+    }
+
+    #[test]
+    fn a_killed_engine_is_reaped() {
+        let child = Command::new("sleep").arg("60").spawn().unwrap();
+        let pid = child.id();
+        let status = kill(child).unwrap();
+        assert!(!status.success());
+        assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+    }
+
+    #[test]
+    fn only_the_end_of_stderr_is_kept() {
+        assert_eq!(read_tail(&b"  one\ntwo  \n"[..], 100), "one\ntwo");
+        assert_eq!(read_tail(&b""[..], 100), "");
+        // Cut to the last 12 bytes ("e\nfour\nfive\n", from mid-line), then
+        // from the first whole line.
+        let long = b"one\ntwo\nthree\nfour\nfive\n";
+        assert_eq!(read_tail(&long[..], 12), "four\nfive");
+        // Longer than one read.
+        let many = (0..1_000).map(|i| format!("line {i}")).collect::<Vec<_>>();
+        let tail = read_tail(many.join("\n").as_bytes(), 20);
+        assert_eq!(tail, "line 998\nline 999");
+    }
+
+    /// A reader that gives each of `parts` in turn, then ends.
+    struct Scripted(std::collections::VecDeque<io::Result<&'static [u8]>>);
+
+    impl Read for Scripted {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            match self.0.pop_front() {
+                None => Ok(0),
+                Some(Err(err)) => Err(err),
+                Some(Ok(bytes)) => {
+                    buf[..bytes.len()].copy_from_slice(bytes);
+                    Ok(bytes.len())
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reading_stderr_retries_interruptions_and_stops_at_errors() {
+        let parts = vec![
+            Ok(&b"one\n"[..]),
+            Err(io::Error::from(io::ErrorKind::Interrupted)),
+            Ok(&b"two\n"[..]),
+            Err(io::Error::from(io::ErrorKind::BrokenPipe)),
+            Ok(&b"three\n"[..]),
+        ];
+        assert_eq!(read_tail(Scripted(parts.into()), 100), "one\ntwo");
+        // Exactly `keep` bytes: nothing was cut, so the first line stays.
+        assert_eq!(read_tail(&b"ab\ncd"[..], 5), "ab\ncd");
+    }
+
+    #[test]
+    fn audio_for_a_stopped_supervisor_is_refused() {
+        let (inputs, rx) = mpsc::channel();
+        // The thread ends, as a panic would end it, dropping its receiver.
+        let thread = thread::spawn(move || drop(rx));
+        thread.join().unwrap();
+        let mut supervisor = EngineSupervisor {
+            inputs,
+            thread: None,
+            next: BTreeMap::new(),
+        };
+        let chunk = |from| {
+            AudioChunk::new(
+                TrackId::new(0),
+                SampleIndex::new(from),
+                SampleRate::SPEECH,
+                vec![0; 10],
+            )
+            .unwrap()
+        };
+        assert_eq!(supervisor.send_audio(chunk(0)), Err(AudioRefused::Stopped));
+        // Nothing was taken as sent.
+        assert!(supervisor.next.is_empty());
     }
 }

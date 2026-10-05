@@ -357,7 +357,7 @@ pub fn record_track<S: Fs>(
         for result in [outcome, synced] {
             match result {
                 Ok(()) => {}
-                Err(error @ SessionError::Journal(_)) => {
+                Err(error @ (SessionError::Journal(_) | SessionError::Marks(_))) => {
                     report(RecorderEvent::JournalFailed(error));
                 }
                 Err(error) => return Err(RecordError::Session(error)),

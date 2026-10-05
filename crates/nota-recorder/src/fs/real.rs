@@ -15,8 +15,16 @@ pub struct StdFs;
 #[derive(Debug)]
 pub struct StdFile(File);
 
+/// A directory locked by [`StdFs::lock_dir`]: an open handle on it holding
+/// an exclusive `flock`, released when the handle closes.
+#[derive(Debug)]
+pub struct StdLock {
+    _handle: File,
+}
+
 impl Fs for StdFs {
     type File = StdFile;
+    type Lock = StdLock;
 
     #[expect(
         clippy::disallowed_methods,
@@ -76,6 +84,27 @@ impl Fs for StdFs {
             .collect::<io::Result<Vec<_>>>()?;
         entries.sort();
         Ok(entries)
+    }
+
+    fn lock_dir(&self, dir: &Path) -> io::Result<StdLock> {
+        valid_path(dir)?;
+        let handle = File::open(dir)?;
+        if !handle.metadata()?.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                "lock_dir needs a directory",
+            ));
+        }
+        // `flock(LOCK_EX | LOCK_NB)` on Unix: held per open file
+        // description, so a second open in this process is refused too.
+        match handle.try_lock() {
+            Ok(()) => Ok(StdLock { _handle: handle }),
+            Err(std::fs::TryLockError::WouldBlock) => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "the directory is locked",
+            )),
+            Err(std::fs::TryLockError::Error(e)) => Err(e),
+        }
     }
 }
 
@@ -229,6 +258,35 @@ mod tests {
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn a_locked_directory_refuses_a_second_lock_until_released() {
+        let dir = TestDir::new("lock");
+        let fs = StdFs;
+        let held = fs.lock_dir(&dir.0).unwrap();
+        // A second open of the directory, as another process would have.
+        assert_eq!(
+            fs.lock_dir(&dir.0).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(held);
+        let _again = fs.lock_dir(&dir.0).unwrap();
+    }
+
+    #[test]
+    fn lock_dir_needs_an_existing_directory() {
+        let dir = TestDir::new("lock-missing");
+        assert_eq!(
+            StdFs.lock_dir(&dir.0.join("nope")).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        let file = dir.0.join("journal");
+        let _f = StdFs.create(&file).unwrap();
+        assert_eq!(
+            StdFs.lock_dir(&file).unwrap_err().kind(),
+            io::ErrorKind::NotADirectory
         );
     }
 

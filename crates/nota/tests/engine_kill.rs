@@ -18,8 +18,7 @@ use std::time::Duration;
 use nota_core::messages::AudioChunk;
 use nota_core::{Clock, SampleIndex, SampleRate, SystemClock, TrackId};
 use nota_recorder::engine::{
-    EngineCommand, EngineConfig, EngineEvent, EngineStatus, EngineStderr, EngineSupervisor,
-    OfflineReason,
+    EngineCommand, EngineConfig, EngineEvent, EngineStatus, EngineSupervisor, OfflineReason,
 };
 
 fn test_models() -> Option<PathBuf> {
@@ -125,7 +124,6 @@ fn engine_config(root: &Path) -> EngineConfig {
         .into_iter()
         .map(OsString::from)
         .collect(),
-        stderr: EngineStderr::Null,
     })
 }
 
@@ -212,7 +210,7 @@ fn killed_mid_chunk_the_real_engine_resumes_without_losing_audio() {
     while confirmed < total {
         match next_event(Duration::from_secs(30)) {
             EngineEvent::Status(EngineStatus::Offline(reason)) => {
-                assert!(matches!(reason, OfflineReason::Exited(_)), "{reason:?}");
+                assert!(matches!(reason, OfflineReason::Exited { .. }), "{reason:?}");
                 offline = true;
             }
             EngineEvent::Transcript(_) if offline && resumed.is_none() => {

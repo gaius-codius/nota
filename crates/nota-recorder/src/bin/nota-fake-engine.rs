@@ -1,17 +1,20 @@
 //! A test double for the speech engine child, used by the supervisor's
 //! integration tests. It speaks the engine protocol with no models behind it.
 //!
-//! Usage: `nota-fake-engine MODE [--every N] [--after K] [--delay-ms D] [--poison V]`
+//! Usage: `nota-fake-engine MODE [--every N] [--after K] [--delay-ms D] [--poison V] [--on-poison exit|hang]`
 //!
 //! `D` (`--delay-ms`, default 0) is how long every answer takes: a slow but
-//! working engine. With `--poison V`, any mode exits 101 on receiving audio
-//! that holds the sample value `V`, as an engine might abort on some input.
+//! working engine. `--hello-delay-ms L` (default 0) is how long it takes to
+//! say hello, as loading models does. With `--poison V`, any mode exits 101 on receiving audio
+//! that holds the sample value `V`, as an engine might abort on some input;
+//! with `--on-poison hang` it goes silent instead.
 //!
 //! `K` (`--after`, default 0) counts the audio frames received.
 //!
 //! | Mode | Behaviour |
 //! |---|---|
 //! | `echo` | A good engine: every `N` audio frames per track (`--every`, default 1) it answers the buffered audio with a transcript of its range, text `"start-end"`, then a confirmation. `Flush` answers what is buffered and ends the track's stream. Exits 3 if a track's audio isn't contiguous. |
+//! | `text-only` | `echo`, but never confirms: it sends only the transcripts. |
 //! | `hang` | Sends `Hello`, then never writes again. |
 //! | `hang-after` | `echo` for `K` audio frames, then goes silent. |
 //! | `crash-after` | `echo`; exits 101 when audio frame `K + 1` arrives, unanswered. |
@@ -45,6 +48,7 @@ const GARBAGE: [u8; 7] = [0xff, 0xff, 0xff, 0x7f, 1, 2, 3];
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Echo,
+    TextOnly,
     Hang,
     HangAfter,
     CrashAfter,
@@ -60,6 +64,7 @@ impl Mode {
     fn parse(name: &str) -> Option<Self> {
         Some(match name {
             "echo" => Self::Echo,
+            "text-only" => Self::TextOnly,
             "hang" => Self::Hang,
             "hang-after" => Self::HangAfter,
             "crash-after" => Self::CrashAfter,
@@ -80,7 +85,10 @@ struct Args {
     every: u64,
     after: u64,
     delay_ms: u64,
+    hello_delay_ms: u64,
     poison: Option<i16>,
+    /// Whether poison hangs the engine rather than killing it.
+    poison_hangs: bool,
 }
 
 impl Args {
@@ -92,7 +100,9 @@ impl Args {
             every: 1,
             after: 0,
             delay_ms: 0,
+            hello_delay_ms: 0,
             poison: None,
+            poison_hangs: false,
         };
         while let Some(flag) = args.next() {
             let raw = args.next()?;
@@ -100,11 +110,20 @@ impl Args {
                 parsed.poison = Some(raw.parse().ok()?);
                 continue;
             }
+            if flag == "--on-poison" {
+                parsed.poison_hangs = match raw.as_str() {
+                    "exit" => false,
+                    "hang" => true,
+                    _ => return None,
+                };
+                continue;
+            }
             let value: u64 = raw.parse().ok()?;
             match flag.as_str() {
                 "--every" if value > 0 => parsed.every = value,
                 "--after" => parsed.after = value,
                 "--delay-ms" => parsed.delay_ms = value,
+                "--hello-delay-ms" => parsed.hello_delay_ms = value,
                 _ => return None,
             }
         }
@@ -152,6 +171,7 @@ impl<W: Write> Engine<W> {
     }
 
     fn hello(&mut self) -> io::Result<()> {
+        slow_down(self.args.hello_delay_ms);
         let version = match self.args.mode {
             Mode::NoHello => return Ok(()),
             Mode::WrongVersion => ProtocolVersion::new(ProtocolVersion::CURRENT.get() + 1),
@@ -178,6 +198,10 @@ impl<W: Write> Engine<W> {
                     .poison
                     .is_some_and(|v| chunk.samples().contains(&v))
                 {
+                    if self.args.poison_hangs {
+                        self.silent = true;
+                        return Ok(Step::Continue);
+                    }
                     return Ok(Step::Exit(EXIT_CRASH));
                 }
                 if self.audio_frames > self.args.after {
@@ -248,6 +272,9 @@ impl<W: Write> Engine<W> {
         }
         let text = format!("{}-{}", start.get(), end.get());
         self.send(FromEngine::Transcript(Transcript { track, range, text }))?;
+        if self.args.mode == Mode::TextOnly {
+            return Ok(());
+        }
         self.send(FromEngine::Confirmed { track, up_to: end })
     }
 }
@@ -320,7 +347,9 @@ mod tests {
                 every: 1,
                 after: 0,
                 delay_ms: 0,
-                poison: None
+                hello_delay_ms: 0,
+                poison: None,
+                poison_hangs: false,
             })
         );
         assert_eq!(
@@ -333,14 +362,18 @@ mod tests {
                 "--delay-ms",
                 "5",
                 "--poison",
-                "-7"
+                "-7",
+                "--on-poison",
+                "hang",
             ]),
             Some(Args {
                 mode: Mode::CrashAfter,
                 every: 2,
                 after: 3,
                 delay_ms: 5,
-                poison: Some(-7)
+                hello_delay_ms: 0,
+                poison: Some(-7),
+                poison_hangs: true,
             })
         );
     }
@@ -352,5 +385,10 @@ mod tests {
         assert_eq!(parse(&["echo", "--every", "0"]), None);
         assert_eq!(parse(&["echo", "--after"]), None);
         assert_eq!(parse(&["echo", "--bogus", "1"]), None);
+        assert_eq!(parse(&["echo", "--on-poison", "sulk"]), None);
+        assert_eq!(
+            parse(&["text-only", "--on-poison", "exit"]).map(|a| (a.mode, a.poison_hangs)),
+            Some((Mode::TextOnly, false))
+        );
     }
 }

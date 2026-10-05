@@ -24,6 +24,9 @@
 //! - [`Fs::remove`] unlinks a name; durable after a directory sync.
 //! - [`Fs::read`] reads a whole file, and [`Fs::list`] a directory's
 //!   entries, as the running system sees them.
+//! - [`Fs::lock_dir`] takes an advisory lock on a directory, without
+//!   waiting: one holder at a time, across processes too. It isn't durable;
+//!   it ends when its guard drops or the process dies.
 //!
 //! Paths are absolute, or at least have a non-empty directory part:
 //! `journal` alone is refused, so the fake and the real filesystem agree.
@@ -40,12 +43,15 @@ pub mod crash;
 pub mod fake;
 mod real;
 
-pub use real::{StdFile, StdFs};
+pub use real::{StdFile, StdFs, StdLock};
 
 /// A filesystem the recorder writes through.
 pub trait Fs: Send + Sync + fmt::Debug {
     /// An open file, written by appending.
     type File: FsFile;
+
+    /// A held directory lock ([`Fs::lock_dir`]); dropping it unlocks.
+    type Lock: Send + Sync + fmt::Debug;
 
     /// Creates a new, empty file at `path` for appending. Fails with
     /// [`io::ErrorKind::AlreadyExists`] if anything is there already. The
@@ -106,6 +112,19 @@ pub trait Fs: Send + Sync + fmt::Debug {
     ///
     /// Any I/O error, including [`io::ErrorKind::NotFound`].
     fn list(&self, dir: &Path) -> io::Result<Vec<PathBuf>>;
+
+    /// Locks the directory `dir` for whoever holds the returned guard, or
+    /// refuses at once if anyone else holds it: another process, or another
+    /// guard in this one (the real filesystem uses `flock`, which is held
+    /// per open of the directory). The lock is advisory: it keeps out only
+    /// those who ask for it. It lasts until the guard drops or the process
+    /// ends, crash included.
+    ///
+    /// # Errors
+    ///
+    /// [`io::ErrorKind::WouldBlock`] if the lock is held; any I/O error,
+    /// including a missing directory or one that's a file.
+    fn lock_dir(&self, dir: &Path) -> io::Result<Self::Lock>;
 }
 
 /// A file opened by [`Fs::create`].
