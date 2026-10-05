@@ -173,17 +173,17 @@ fn silence_is_confirmed_without_transcribing() {
     }
     let (result, frames) = run_on(&input);
     result.unwrap();
-    let mut last = 0;
-    for frame in &frames[1..] {
-        match frame {
-            Frame::Message(FromEngine::Confirmed { up_to, .. }) => last = up_to.get(),
+    let confirmed: Vec<u64> = frames[1..]
+        .iter()
+        .map(|frame| match frame {
+            Frame::Message(FromEngine::Confirmed { up_to, .. }) => up_to.get(),
             other => panic!("{other:?}"),
-        }
-    }
+        })
+        .collect();
     // 10 s of silence, confirmed without a flush: a silent chunk is cut
     // in the middle of the pause once that's past the 3 s target, so at 3 s
-    // and 6 s.
-    assert_eq!(last, 96_000);
+    // and 6 s. The rest is confirmed when stdin closes.
+    assert_eq!(confirmed, [48_000, 96_000, 160_000]);
 }
 
 #[test]
@@ -199,6 +199,35 @@ fn stdin_closing_ends_the_loop_cleanly() {
     })
     .unwrap();
     assert!(output.is_empty());
+}
+
+#[test]
+fn stdin_closing_transcribes_what_each_track_still_holds() {
+    let other = TrackId::new(4);
+    let mut input = hello();
+    input.extend(audio(0, SampleRate::SPEECH, vec![1_000; 1_600]));
+    let chunk = AudioChunk::new(other, SampleIndex::new(50), SampleRate::SPEECH, vec![0; 10]);
+    input.extend(encode(&Frame::Message(ToEngine::Audio(chunk.unwrap()))).unwrap());
+    let (result, frames) = run_on(&input);
+    result.unwrap();
+    assert_eq!(
+        frames[1..],
+        [
+            Frame::Message(FromEngine::Transcript(Transcript {
+                track: TRACK,
+                range: range(0, 1_600),
+                text: "1600 loud".into(),
+            })),
+            Frame::Message(FromEngine::Confirmed {
+                track: TRACK,
+                up_to: SampleIndex::new(1_600),
+            }),
+            Frame::Message(FromEngine::Confirmed {
+                track: other,
+                up_to: SampleIndex::new(60),
+            }),
+        ]
+    );
 }
 
 #[test]

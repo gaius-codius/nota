@@ -59,7 +59,8 @@ struct Track<D> {
 /// The recorder's `Hello` must come first; `load` is then called to load
 /// the models, and the engine's `Hello` tells the recorder it's ready.
 /// Every chunk is answered with its text (if any) and then a
-/// [`FromEngine::Confirmed`] up to its end.
+/// [`FromEngine::Confirmed`] up to its end. When `input` ends, every track
+/// still open is transcribed as if flushed, so the tail's text isn't lost.
 ///
 /// # Errors
 ///
@@ -99,15 +100,28 @@ pub fn run<M: Models>(
                 answer(&mut output, models.transcriber(), chunk.track(), done)?;
             }
             Frame::Message(ToEngine::Flush { track: id }) => {
-                if let Some(mut track) = tracks.remove(&id) {
-                    let labels = track.detector.flush();
-                    let done = track.chunker.finish(&labels);
-                    answer(&mut output, models.transcriber(), id, done)?;
+                if let Some(track) = tracks.remove(&id) {
+                    finish(&mut output, models.transcriber(), id, track)?;
                 }
             }
         }
     }
+    for (id, track) in tracks {
+        finish(&mut output, models.transcriber(), id, track)?;
+    }
     Ok(())
+}
+
+/// Ends a track's stream: transcribes and reports everything it holds.
+fn finish<D: Detector>(
+    output: &mut impl Write,
+    transcriber: &mut impl Transcriber,
+    id: TrackId,
+    mut track: Track<D>,
+) -> Result<(), EngineError> {
+    let labels = track.detector.flush();
+    let done = track.chunker.finish(&labels);
+    answer(output, transcriber, id, done)
 }
 
 /// Feeds a chunk of audio to its track.
