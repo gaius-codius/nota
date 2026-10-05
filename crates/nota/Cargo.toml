@@ -31,7 +31,7 @@ ratatui.workspace = true
 # SIGHUP, SIGTERM and SIGINT, read on a thread so the recording can stop
 # in order. Already in the tree through crossterm.
 [target.'cfg(unix)'.dependencies]
-signal-hook = "0.3"
+signal-hook.workspace = true
 
 [dev-dependencies]
 nota = { path = ".", features = ["fake-capture"] }
