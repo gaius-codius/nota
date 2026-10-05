@@ -339,17 +339,25 @@ mod tests {
         received.recv_timeout(Duration::from_secs(10)).unwrap()
     }
 
+    /// Gives a thread just started time to begin waiting, so a `next` that
+    /// returned without waiting would find nothing and say `Idle`.
+    fn let_it_wait() {
+        let (_keep, never) = std::sync::mpsc::channel::<()>();
+        let _ = never.recv_timeout(Duration::from_millis(200));
+    }
+
     #[test]
     fn a_waiting_recorder_wakes_when_audio_arrives() {
         let (queue, sender) = Queue::new();
         let waiting = Arc::clone(&queue);
         let woken = std::thread::spawn(move || next_woken(&waiting));
-        // Sent while the recorder may already be waiting, or not yet.
+        let_it_wait();
         sender.audio(MIC, &[7]);
         assert_eq!(audio(woken.join().unwrap()), [7]);
         let second = sender.clone();
         let waiting = Arc::clone(&queue);
         let woken = std::thread::spawn(move || next_woken(&waiting));
+        let_it_wait();
         second.send(MIC, CaptureEvent::Stopped);
         assert!(matches!(
             woken.join().unwrap(),
@@ -362,6 +370,7 @@ mod tests {
         let (queue, sender) = Queue::new();
         let waiting = Arc::clone(&queue);
         let woken = std::thread::spawn(move || next_woken(&waiting));
+        let_it_wait();
         drop(sender);
         assert!(matches!(woken.join().unwrap(), Received::Closed));
     }
