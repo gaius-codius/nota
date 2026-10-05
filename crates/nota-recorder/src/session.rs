@@ -53,6 +53,7 @@ use std::sync::Arc;
 use nota_core::{Clock, EpochId, SampleCount, SampleIndex, SampleRate, SessionId, TrackId};
 
 use crate::fs::Fs;
+use crate::journal::format::frames_after;
 use crate::journal::{
     DurablePosition, JournalError, JournalHeader, JournalId, JournalWriter, read_journal,
 };
@@ -113,8 +114,12 @@ pub enum SessionError {
     /// The journal failed, and so did its replacement. The samples since
     /// the last durable position were dropped.
     Journal(JournalError),
-    /// Reading the session directory, or writing its marks, failed.
+    /// Reading the session directory failed.
     Io(std::io::Error),
+    /// Writing the session's marks failed, so a journal couldn't start: like
+    /// [`Self::Journal`], the samples it would have held are a gap, and the
+    /// next call tries again.
+    Marks(std::io::Error),
     /// The session's owner is already using it: salvaging it, or recording
     /// it with another writer.
     InUse(Use),
@@ -145,9 +150,10 @@ impl fmt::Display for SessionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Journal(e) => write!(f, "recording to the journal failed: {e}"),
-            Self::Io(e) => write!(f, "reading or marking the session directory failed: {e}"),
+            Self::Io(e) => write!(f, "reading the session directory failed: {e}"),
             Self::InUse(Use::Salvaging) => f.write_str("the session is being salvaged"),
             Self::InUse(_) => f.write_str("the session is already being recorded"),
+            Self::Marks(e) => write!(f, "reserving the next journal's ids failed: {e}"),
             Self::UnknownTrack(t) => write!(f, "track {} wasn't started", t.get()),
             Self::TrackExists(t) => write!(f, "track {} was already started", t.get()),
             Self::EpochUsed { track, epoch } => write!(
@@ -171,7 +177,7 @@ impl std::error::Error for SessionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Journal(e) => Some(e),
-            Self::Io(e) => Some(e),
+            Self::Io(e) | Self::Marks(e) => Some(e),
             _ => None,
         }
     }
@@ -278,8 +284,8 @@ impl<S: Fs> SessionWriter<S> {
     ///
     /// [`SessionError::InUse`] if the owner is salvaging the session or
     /// already recording it; [`SessionError::Io`] if the directory, a
-    /// journal, a newest segment or the marks can't be read (a damaged
-    /// marks file or segment is [`std::io::ErrorKind::InvalidData`]);
+    /// journal still to publish or the marks can't be read (damaged marks
+    /// are [`std::io::ErrorKind::InvalidData`]);
     /// [`SessionError::Overflow`] if the journal ids have run out.
     pub fn open(
         session: &SessionLock<S>,
@@ -304,8 +310,7 @@ impl<S: Fs> SessionWriter<S> {
         for (&track, &epoch) in &marks.epochs {
             earlier.entry(track).or_default().epoch = Some(epoch);
         }
-        let ends = crate::segment::published_ends(&fs, &dir, &paths).map_err(SessionError::Io)?;
-        for (track, end) in ends {
+        for (track, end) in crate::segment::published_ends(&fs, &dir, &paths, length) {
             earlier.entry(track).or_default().raise_end(end);
         }
         let mut next_id = marks.journals_below;
@@ -314,13 +319,25 @@ impl<S: Fs> SessionWriter<S> {
                 continue;
             };
             next_id = next_id.max(journal.next().ok_or(SessionError::Overflow)?);
-            let read = read_journal(&fs.read(path).map_err(SessionError::Io)?);
+            let bytes = match fs.read(path) {
+                Ok(bytes) => bytes,
+                // One salvage set aside is never published again: its name
+                // is enough. A journal still to publish must be read.
+                Err(_) if is_set_aside(path) => continue,
+                Err(e) => return Err(SessionError::Io(e)),
+            };
+            let read = read_journal(&bytes);
             // A journal whose header can't be read holds nothing salvage
             // can publish, so nothing new can collide with it.
             if let Some(header) = read.header() {
                 let held = earlier.entry(header.track()).or_default();
                 held.epoch = held.epoch.max(Some(header.epoch()));
                 if let Some(range) = read.range() {
+                    held.raise_end(range.end());
+                }
+                // Frames past damage that salvage kept: unreadable now,
+                // but still that track's samples.
+                for range in frames_after(&bytes, read.valid_len(), header.track()) {
                     held.raise_end(range.end());
                 }
             }
@@ -342,7 +359,12 @@ impl<S: Fs> SessionWriter<S> {
     }
 
     /// The first sample `track` may start at: after everything it already
-    /// holds from earlier recordings of the session.
+    /// holds from earlier recordings of the session, as its directory shows
+    /// it: its journals (those set aside too, frames past their damage
+    /// included) and its newest published segment. Recording never reads
+    /// the store, so a committed row whose file is gone isn't seen; new
+    /// audio over it stays in its journals, since nothing is published over
+    /// a row that claims nothing (see the `segment` module).
     #[must_use]
     pub fn first_free_sample(&self, track: TrackId) -> SampleIndex {
         self.earlier
@@ -652,7 +674,7 @@ impl<S: Fs> SessionWriter<S> {
         if wanted != self.marks {
             wanted
                 .write(&self.fs, &self.dir)
-                .map_err(SessionError::Io)?;
+                .map_err(SessionError::Marks)?;
             self.marks = wanted;
         }
         Ok(())
@@ -728,8 +750,18 @@ fn hand_out(
 /// (`journal-000042.unreadable`): new ids must not reuse either.
 fn journal_id_in_name(name: &std::ffi::OsStr) -> Option<JournalId> {
     let name = name.to_str()?;
-    let name = name.strip_suffix(".unreadable").unwrap_or(name);
+    let name = name.strip_suffix(SET_ASIDE).unwrap_or(name);
     JournalId::from_file_name(std::ffi::OsStr::new(name))
+}
+
+/// The suffix salvage gives a journal it sets aside.
+const SET_ASIDE: &str = ".unreadable";
+
+/// Whether `path` is a journal salvage set aside.
+fn is_set_aside(path: &std::path::Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.ends_with(SET_ASIDE))
 }
 
 impl Earlier {

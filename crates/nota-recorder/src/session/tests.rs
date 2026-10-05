@@ -391,6 +391,8 @@ fn track_errors() {
         SessionError::Journal(JournalError::Broken),
         SessionError::InUse(Use::Recording),
         SessionError::InUse(Use::Salvaging),
+        SessionError::InUse(Use::Publishing),
+        SessionError::Marks(io::Error::other("x")),
         SessionError::EpochUsed {
             track: MIC,
             epoch: EpochId::new(1),

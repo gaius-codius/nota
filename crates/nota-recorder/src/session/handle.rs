@@ -10,10 +10,10 @@
 //! directory, refused at once (never waited for) while anyone else holds it,
 //! in this process or another. Clones of a [`SessionLock`] are the same
 //! owner, so a writer and the thread publishing its finished journals can
-//! share it. Within the owner, salvage and recording exclude each other:
-//! [`salvage`](crate::segment::salvage) refuses while a
-//! [`SessionWriter`](super::SessionWriter) is open, and a writer can't open
-//! while salvage runs or another writer is open.
+//! share it. Within the owner, [`salvage`](crate::segment::salvage)
+//! refuses while a [`SessionWriter`](super::SessionWriter) is open or
+//! journals are being published, and nothing else starts while it runs;
+//! there's one writer at a time, and one publishing run (see [`Use`]).
 //!
 //! # The store
 //!
@@ -103,7 +103,7 @@ impl<S: Fs> SessionDir<S> {
             session: self.clone(),
             held: Arc::new(Held {
                 _guard: guard,
-                using: AtomicU8::new(Use::Idle as u8),
+                using: AtomicU8::new(0),
             }),
         })
     }
@@ -137,19 +137,19 @@ impl<S: Fs> SessionLock<S> {
     }
 
     /// Marks the session as in use for `what`, until the returned guard
-    /// drops; refused if it's already in use for anything.
+    /// drops; refused, with the use in the way, if it's in use for anything
+    /// `what` excludes (see [`Use`]).
     pub(crate) fn begin(&self, what: Use) -> Result<InUse<S::Lock>, Use> {
+        let bit = what.bit();
         self.held
             .using
-            .compare_exchange(
-                Use::Idle as u8,
-                what as u8,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .map_err(Use::from_u8)?;
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |now| {
+                (now & what.excludes() == 0).then_some(now | bit)
+            })
+            .map_err(|now| Use::in_the_way(now & what.excludes()))?;
         Ok(InUse {
             held: Arc::clone(&self.held),
+            bit,
         })
     }
 }
@@ -161,38 +161,61 @@ struct Held<L> {
     using: AtomicU8,
 }
 
-/// What a session's owner is doing with it: at most one of these at a time.
+/// What a session's owner is doing with it. Each excludes another of its
+/// kind; salvage excludes everything, since it takes every journal as
+/// finished and decides what the directory holds. Recording and publishing
+/// its finished journals run together.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
 pub enum Use {
-    /// Nothing that excludes the others.
-    Idle = 0,
     /// A [`SessionWriter`](super::SessionWriter) is open.
-    Recording = 1,
+    Recording,
+    /// [`publish_journals`](crate::segment::publish_journals) is running.
+    Publishing,
     /// [`salvage`](crate::segment::salvage) is running.
-    Salvaging = 2,
+    Salvaging,
 }
 
 impl Use {
-    const fn from_u8(n: u8) -> Self {
-        match n {
-            1 => Self::Recording,
-            2 => Self::Salvaging,
-            _ => Self::Idle,
+    const fn bit(self) -> u8 {
+        match self {
+            Self::Recording => 1,
+            Self::Publishing => 2,
+            Self::Salvaging => 4,
+        }
+    }
+
+    /// The uses this one can't run alongside, as bits.
+    const fn excludes(self) -> u8 {
+        match self {
+            Self::Recording => Self::Recording.bit() | Self::Salvaging.bit(),
+            Self::Publishing => Self::Publishing.bit() | Self::Salvaging.bit(),
+            Self::Salvaging => 7,
+        }
+    }
+
+    /// One of the uses in `bits`, which isn't empty.
+    const fn in_the_way(bits: u8) -> Self {
+        if bits & 4 != 0 {
+            Self::Salvaging
+        } else if bits & 1 != 0 {
+            Self::Recording
+        } else {
+            Self::Publishing
         }
     }
 }
 
-/// The session in use for one thing; back to idle when dropped. Holds the
-/// lock too, so the session stays owned while it's in use.
+/// The session in use for one thing, until dropped. Holds the lock too, so
+/// the session stays owned while it's in use.
 #[derive(Debug)]
 pub(crate) struct InUse<L> {
     held: Arc<Held<L>>,
+    bit: u8,
 }
 
 impl<L> Drop for InUse<L> {
     fn drop(&mut self) {
-        self.held.using.store(Use::Idle as u8, Ordering::Release);
+        self.held.using.fetch_and(!self.bit, Ordering::AcqRel);
     }
 }
 

@@ -406,9 +406,9 @@ fn journals_are_synced_while_no_audio_arrives() {
 #[test]
 fn a_journal_that_cant_be_replaced_is_reported_and_the_track_moves_on() {
     let fs = FakeFs::with_dirs([dir()]);
-    // Lets the reads at open (the marks, the listing), the marks' write
-    // (five operations), the first journal's creation and a few writes
-    // through, then fails everything.
+    // Lets the listing at open, the marks' write (five operations) and the
+    // first journal's creation (four) through, then fails everything from
+    // the first frame write on.
     fs.crash_after(10);
     let script = (0..5).map(|i| Step::Audio(samples(i * 10, 10))).collect();
     let run = run(&fs, script, Vec::new(), |_| {});
@@ -421,6 +421,30 @@ fn a_journal_that_cant_be_replaced_is_reported_and_the_track_moves_on() {
         run.reported
     );
     assert_eq!(run.writer.next_sample(MIC), Some(SampleIndex::new(50)));
+}
+
+#[test]
+fn a_marks_write_that_fails_is_a_gap_and_the_track_moves_on() {
+    let fs = FakeFs::with_dirs([dir()]);
+    // Lets the listing at open through, then fails creating the marks'
+    // temp file once: the first audio has no journal to go to.
+    fs.fail_after(1, io::ErrorKind::StorageFull);
+    let script = (0..3).map(|i| Step::Audio(samples(i * 10, 10))).collect();
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    assert!(
+        run.reported
+            .iter()
+            .any(|e| matches!(e, RecorderEvent::JournalFailed(SessionError::Marks(_)))),
+        "{:?}",
+        run.reported
+    );
+    assert_eq!(run.writer.next_sample(MIC), Some(SampleIndex::new(30)));
+    // The next audio reserved its id and started a journal at sample 10.
+    let finished = run.writer.finish().unwrap();
+    let bytes = fs.read(&dir().join(finished[0].id().file_name())).unwrap();
+    let (range, _) = read_journal(&bytes).audio().unwrap();
+    assert_eq!(range.start(), SampleIndex::new(10));
 }
 
 #[test]

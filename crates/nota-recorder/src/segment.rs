@@ -64,7 +64,6 @@ mod store;
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
-use std::io;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
@@ -162,17 +161,15 @@ fn segment_in_file_name(name: &OsStr) -> Option<(TrackId, SampleIndex)> {
 /// For each track with segments published in `dir`, whose listing is
 /// `paths`, the first sample after all of them: where a resumed track may
 /// start without landing inside one. Segments of a track never overlap, so
-/// only each track's newest file is read.
-///
-/// # Errors
-///
-/// Any I/O error reading a newest segment; [`io::ErrorKind::InvalidData`]
-/// if one isn't a FLAC stream whose length can be read.
+/// only each track's newest file is read. If it can't be read, or its
+/// length can't, the end of its window under `length` stands in: no
+/// segment crosses a window boundary.
 pub(crate) fn published_ends<S: Fs>(
     fs: &S,
     dir: &Path,
     paths: &[PathBuf],
-) -> io::Result<BTreeMap<TrackId, SampleIndex>> {
+    length: SegmentLength,
+) -> BTreeMap<TrackId, SampleIndex> {
     let mut newest: BTreeMap<TrackId, SampleIndex> = BTreeMap::new();
     for path in paths {
         if let Some((track, start)) = path.file_name().and_then(segment_in_file_name) {
@@ -182,18 +179,16 @@ pub(crate) fn published_ends<S: Fs>(
     }
     let mut ends = BTreeMap::new();
     for (track, start) in newest {
-        let bytes = fs.read(&dir.join(name_starting_at(track, start)))?;
-        let end = flac::stream_len(&bytes)
+        let end = fs
+            .read(&dir.join(name_starting_at(track, start)))
+            .ok()
+            .and_then(|bytes| flac::stream_len(&bytes))
             .and_then(|len| start.checked_add(SampleCount::new(len)))
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "a segment's length can't be read",
-                )
-            })?;
+            .or_else(|| length.window_end(start))
+            .unwrap_or(SampleIndex::new(u64::MAX));
         ends.insert(track, end);
     }
-    Ok(ends)
+    ends
 }
 
 /// The temp name a segment is written under before its rename.

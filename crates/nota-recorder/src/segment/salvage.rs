@@ -116,9 +116,10 @@ pub enum PublishError {
     /// A journal finished in another session than the one being published.
     /// Nothing was done.
     OtherSession(FinishedJournal),
-    /// Salvage was refused, with nothing done: the session's owner is
-    /// recording it (or already salvaging it), so its journals aren't all
-    /// finished.
+    /// Refused, with nothing done: the session's owner is already using it
+    /// in a way this can't run alongside. Salvage needs the session to
+    /// itself, since a writer's journals aren't finished; publishing runs
+    /// one at a time, and never during salvage.
     InUse(Use),
 }
 
@@ -139,8 +140,11 @@ impl fmt::Display for PublishError {
                 j.id().file_name(),
                 j.session().get()
             ),
-            Self::InUse(Use::Salvaging) => f.write_str("the session is already being salvaged"),
-            Self::InUse(_) => f.write_str("the session is being recorded; it can't be salvaged"),
+            Self::InUse(Use::Salvaging) => f.write_str("the session is being salvaged"),
+            Self::InUse(Use::Publishing) => f.write_str("the session is being published"),
+            Self::InUse(Use::Recording) => {
+                f.write_str("the session is being recorded; it can't be salvaged")
+            }
         }
     }
 }
@@ -184,7 +188,7 @@ fn store_error<E: Error + Send + Sync + 'static>(e: E) -> PublishError {
 /// # Errors
 ///
 /// [`PublishError::InUse`], before anything is done, if the owner is
-/// recording the session or already salvaging it. Otherwise as
+/// recording, publishing or already salvaging the session. Otherwise as
 /// [`publish_journals`].
 ///
 /// [`SessionLock`]: crate::session::SessionLock
@@ -214,7 +218,7 @@ pub fn salvage<S: Fs, T: SegmentStore>(
             journals.push(FinishedJournal::new(session.session().id(), id));
         }
     }
-    publish_journals(session, length, &journals)
+    publish(session, length, &journals)
 }
 
 /// Whether the session's directory holds journals: a session that was still
@@ -263,8 +267,13 @@ pub fn needs_salvage<S: Fs>(session: &SessionDir<S>) -> io::Result<bool> {
 /// numbered per session, so another session's would name a journal here
 /// that may still be recording.
 ///
+/// Within the session's owner, one publishing run goes at a time, and none
+/// while salvage runs; it runs alongside recording.
+///
 /// # Errors
 ///
+/// [`PublishError::InUse`], before anything is done, if the owner is
+/// already publishing or salvaging the session.
 /// [`PublishError::OtherSession`], before anything is done, if a journal is
 /// another session's. Otherwise [`PublishError`]: what was done before the
 /// error is consistent, rows only for durable files, journals deleted only
@@ -273,6 +282,19 @@ pub fn needs_salvage<S: Fs>(session: &SessionDir<S>) -> io::Result<bool> {
 /// transient error) stops the run with [`PublishError::Changed`] or
 /// [`PublishError::Io`]; the next run reads it again from the start.
 pub fn publish_journals<S: Fs, T: SegmentStore>(
+    session: &mut SessionStore<S, T>,
+    length: SegmentLength,
+    journals: &[FinishedJournal],
+) -> Result<Published, PublishError> {
+    let _publishing = session
+        .lock()
+        .begin(Use::Publishing)
+        .map_err(PublishError::InUse)?;
+    publish(session, length, journals)
+}
+
+/// [`publish_journals`], for a caller already using the session to itself.
+fn publish<S: Fs, T: SegmentStore>(
     session: &mut SessionStore<S, T>,
     length: SegmentLength,
     journals: &[FinishedJournal],

@@ -21,7 +21,7 @@ use crate::fs::crash::{CrashCase, CrashTest};
 use crate::fs::fake::{CrashOutcome, FakeFs, Op};
 use crate::fs::{Fs, FsFile, StdFs};
 use crate::journal::format::{FRAME_HEADER_LEN, HEADER_LEN};
-use crate::journal::{JournalId, read_journal};
+use crate::journal::{JournalHeader, JournalId, JournalWriter, read_journal};
 use crate::session::{
     FinishedJournal, MARKS_FILE_NAME, SessionDir, SessionError, SessionLock, SessionStore,
     SessionWriter, Use,
@@ -2890,6 +2890,41 @@ fn a_writer_cant_open_while_its_owner_salvages() {
     assert!(SessionWriter::open(&lock, rate(), length(), clock).is_ok());
 }
 
+#[test]
+fn publishing_runs_one_at_a_time_and_never_during_salvage() {
+    let fs = FakeFs::with_dirs([session(), db()]);
+    let lock = owned(&fs);
+    let held = |what: Use| lock.begin(what).unwrap();
+    let publish = |lock: &SessionLock<FakeFs>| {
+        publish_journals(&mut store_on(lock), length(), &finished(&[0])).map(|_| ())
+    };
+    for (busy, refused) in [
+        (Use::Salvaging, Use::Salvaging),
+        (Use::Publishing, Use::Publishing),
+    ] {
+        let _busy = held(busy);
+        let before = fs.attempted();
+        assert!(
+            matches!(publish(&lock), Err(PublishError::InUse(u)) if u == refused),
+            "{busy:?}"
+        );
+        assert_eq!(fs.attempted(), before, "{busy:?}");
+    }
+    {
+        let _publishing = held(Use::Publishing);
+        assert!(matches!(
+            salvage(&mut store_on(&lock), length()),
+            Err(PublishError::InUse(Use::Publishing))
+        ));
+    }
+    // Recording and publishing go together.
+    let recording = held(Use::Recording);
+    publish(&lock).unwrap();
+    // Each use ends with its guard.
+    drop(recording);
+    salvage(&mut store_on(&lock), length()).unwrap();
+}
+
 /// The first recording of the session that [`resume`] continues: 1,200
 /// samples on the mic in epoch 0, finished and published. Returns its
 /// finished journals, kept as a caller would for a retry.
@@ -3118,4 +3153,91 @@ fn a_damaged_marks_file_stops_a_writer_opening() {
         matches!(&err, SessionError::Io(e) if e.kind() == io::ErrorKind::InvalidData),
         "{err}"
     );
+}
+
+#[test]
+fn a_set_aside_journal_keeps_its_id_and_samples_from_reuse_even_unread() {
+    let fs = FakeFs::with_dirs([session(), db()]);
+    // Journal 90 of the system track: valid frames 0 to 100, damage, then
+    // frames 200 to 300 that salvage kept.
+    let bytes = journal_with_damage();
+    let aside = session().join(format!("{}.unreadable", JournalId::new(90).file_name()));
+    let mut file = fs.create(&aside).unwrap();
+    file.write_all(&bytes).unwrap();
+    let (_, clock) = fake_clock();
+    let lock = owned(&fs);
+    let mut writer = SessionWriter::open(&lock, rate(), length(), clock).unwrap();
+    assert_eq!(writer.first_free_sample(SYSTEM), SampleIndex::new(300));
+    writer
+        .start_track(SYSTEM, EpochId::new(1), SampleIndex::new(300))
+        .unwrap();
+    writer.append(SYSTEM, &[1]).unwrap();
+    assert!(writer.durable(SYSTEM).unwrap().journal() > JournalId::new(90));
+    drop(writer);
+
+    // Unreadable now (a directory under its name reads as EISDIR): the
+    // name still keeps its id, and the writer still opens.
+    let fs = FakeFs::with_dirs([session(), db(), aside]);
+    let (_, clock) = fake_clock();
+    let lock = owned(&fs);
+    let mut writer = SessionWriter::open(&lock, rate(), length(), clock).unwrap();
+    writer
+        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .unwrap();
+    writer.append(MIC, &[1]).unwrap();
+    assert!(writer.durable(MIC).unwrap().journal() > JournalId::new(90));
+}
+
+/// A system-track journal, id 90, holding frames 0 to 100, a damaged
+/// frame, then frames 200 to 300.
+fn journal_with_damage() -> Vec<u8> {
+    let fs = FakeFs::with_dirs([session()]);
+    let (clock, dyn_clock) = fake_clock();
+    let header = JournalHeader::new(JournalId::new(90), SYSTEM, EpochId::new(0), rate());
+    let mut journal =
+        JournalWriter::create(&fs, &session(), header, SampleIndex::ZERO, dyn_clock).unwrap();
+    journal.append(&samples(SYSTEM, 0, 100)).unwrap();
+    journal.sync().unwrap();
+    let valid = fs
+        .read(&session().join(JournalId::new(90).file_name()))
+        .unwrap();
+    // A second journal supplies well-formed frames for 200 to 300.
+    let fs2 = FakeFs::with_dirs([session()]);
+    let mut later = JournalWriter::create(
+        &fs2,
+        &session(),
+        header,
+        SampleIndex::new(200),
+        clock as Arc<dyn Clock>,
+    )
+    .unwrap();
+    later.append(&samples(SYSTEM, 200, 100)).unwrap();
+    later.sync().unwrap();
+    let tail = fs2
+        .read(&session().join(JournalId::new(90).file_name()))
+        .unwrap();
+    let mut bytes = valid;
+    bytes.extend_from_slice(&[0xAB; 40]);
+    bytes.extend_from_slice(&tail[HEADER_LEN..]);
+    bytes
+}
+
+#[test]
+fn a_newest_segment_that_cant_be_read_floors_the_track_at_its_window_end() {
+    let fs = FakeFs::with_dirs([session(), db()]);
+    let path = session().join("seg-t0-000000003000.flac");
+    let mut file = fs.create(&path).unwrap();
+    file.write_all(b"not flac").unwrap();
+    // Not segment names: ignored.
+    for stray in [
+        "seg-t0-3000.flac",
+        "seg-t0-000000009000.flac.tmp",
+        "seg-tx-000000009000.flac",
+    ] {
+        let _f = fs.create(&session().join(stray)).unwrap();
+    }
+    let (_, clock) = fake_clock();
+    let writer = SessionWriter::open(&owned(&fs), rate(), length(), clock).unwrap();
+    // Windows are 1,500 samples: 3,000 starts one, which ends at 4,500.
+    assert_eq!(writer.first_free_sample(MIC), SampleIndex::new(4_500));
 }

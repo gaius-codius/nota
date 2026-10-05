@@ -243,6 +243,27 @@ mod tests {
     }
 
     #[test]
+    fn a_marks_file_that_cant_be_read_is_an_error_not_no_marks() {
+        let fs = FakeFs::with_dirs([dir(), dir().join(FILE_NAME)]);
+        assert_eq!(
+            Marks::read(&fs, &dir()).unwrap_err().kind(),
+            io::ErrorKind::IsADirectory
+        );
+        assert!(!BadMarks.to_string().is_empty());
+    }
+
+    #[test]
+    fn a_failed_create_is_reported_as_it_failed() {
+        let fs = FakeFs::with_dirs([dir()]);
+        fs.fail_after(0, io::ErrorKind::StorageFull);
+        assert_eq!(
+            marks(64, &[]).write(&fs, &dir()).unwrap_err().kind(),
+            io::ErrorKind::StorageFull
+        );
+        assert!(fs.paths().is_empty());
+    }
+
+    #[test]
     fn a_crash_at_every_step_leaves_the_old_marks_or_the_new() {
         let old = marks(64, &[(0, 1)]);
         let new = marks(128, &[(0, 2)]);
