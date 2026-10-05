@@ -96,7 +96,9 @@ mod linux {
         DurableSegment, Published, SegmentLength, SegmentStore, publish_journals, salvage,
         segment_file_name,
     };
-    use nota_recorder::session::{FinishedJournal, SessionDir, SessionStore, SessionWriter};
+    use nota_recorder::session::{
+        FinishedJournal, MARKS_FILE_NAME, SessionDir, SessionStore, SessionWriter,
+    };
     use nota_store::{SegmentRow, Store};
     use sha2::{Digest, Sha256};
 
@@ -1195,7 +1197,13 @@ mod linux {
             .iter()
             .map(|r| session.join(segment_file_name(r.track(), r.range())))
             .collect();
-        if let Some(orphan) = after.files.keys().find(|p| !named.contains(*p)) {
+        // The session's marks are the one other file a recording leaves.
+        let marks = session.join(MARKS_FILE_NAME);
+        if let Some(orphan) = after
+            .files
+            .keys()
+            .find(|p| !named.contains(*p) && **p != marks)
+        {
             return Err(format!("a file without a row: {}", orphan.display()).into());
         }
         Ok(())
