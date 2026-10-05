@@ -10,7 +10,7 @@
 //! │ ◆ transcript, ◆/◇ in the margin of their line, newest      │
 //! │   brightest                                                │
 //! │   ░░░                                                      │  still transcribing
-//! ╰─ m mark  n note  ? keys ─────────────────── <source · size> ─╯  keys, status
+//! ╰─ m mark  n note ─────────────────────────── <source · size> ─╯  keys, status
 //! ```
 
 use ratatui::Frame;
@@ -129,7 +129,9 @@ impl Recording {
                     Span::styled(what, self.theme.text_hint),
                 ]
             };
-            let left = [key("m", " mark  "), key("n", " note  "), key("?", " keys")].concat();
+            // Only keys that work: `?` joins once the keys overlay exists
+            // (UI spec, "Not yet designed").
+            let left = [key("m", " mark  "), key("n", " note")].concat();
             frame_row(
                 Rect::new(area.x, y, area.width, 1),
                 ('╰', '╯'),
@@ -511,7 +513,7 @@ mod tests {
         let bottom = row(&draw(&screen, 60), 19);
         assert_eq!(
             bottom,
-            "╰─ m mark  n note  ? keys ─ alsa_input.usb-Focusrite_Sca… ─╯"
+            "╰─ m mark  n note ─ alsa_input.usb-Focusrite_Scarlett_2i… ─╯"
         );
         screen.draft = Some(crate::screen::Draft {
             at: secs(1),
