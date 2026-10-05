@@ -163,8 +163,11 @@ jobs:
   mutants-shard:
     # Every mutant of the lines this PR changes in the core and recorder
     # crates must be caught by a test. A missed or timed-out mutant fails.
-    # The mutants are split into consecutive slices, a quarter of them per
-    # shard, run side by side; the job below gathers the results.
+    # The mutants are dealt out round-robin to five shards that run side by
+    # side; the job below gathers the results. Round-robin, not cargo-mutants'
+    # default consecutive slices: a file's mutants tend to share slow tests,
+    # and slices put them on one shard. On one 88-mutant diff the slowest
+    # shard took 16 minutes as slices and 9 dealt round-robin.
     # The weekly full run is in mutants.yml.
     name: Mutation testing (shard ${{ strategy.job-index }} of ${{ strategy.job-total }})
     if: github.event_name == 'pull_request'
@@ -177,7 +180,7 @@ jobs:
       # One leg per shard. The shard number is the leg's index, so it can't
       # disagree with the count if the matrix grows another axis.
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4]
     env:
       # Warnings stay warnings here: a mutant that leaves a parameter unused
       # would otherwise fail to build and count as unviable, not tested.
@@ -202,14 +205,14 @@ jobs:
         env:
           PR_BASE: ${{ github.event.pull_request.base.sha }}
         run: git diff --src-prefix=a/ --dst-prefix=b/ "$PR_BASE...HEAD" > "$RUNNER_TEMP/pr.diff"
-      # A shard whose slice is empty finds no mutants and passes.
+      # A shard dealt no mutants (a small diff, or none in these crates) passes.
       - env:
           SHARD: ${{ strategy.job-index }}
           SHARDS: ${{ strategy.job-total }}
         run: >-
           cargo mutants --in-diff "$RUNNER_TEMP/pr.diff"
           -p nota-core -p nota-recorder
-          --shard "$SHARD/$SHARDS"
+          --shard "$SHARD/$SHARDS" --sharding round-robin
           --test-tool nextest --jobs 2 --output "$RUNNER_TEMP"
       - if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
