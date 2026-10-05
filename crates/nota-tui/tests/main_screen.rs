@@ -25,11 +25,15 @@ fn press(screen: &mut Recording, code: KeyCode) {
     let _ = screen.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
 }
 
+fn press_at(screen: &mut Recording, code: KeyCode, at: SessionTime) {
+    let _ = screen.handle_key_at(KeyEvent::new(code, KeyModifiers::NONE), at);
+}
+
 /// The mockup's moment: 1:12:48 into a session, five marks and notes
 /// already on the band, the newest two beside the transcript, and a chunk
 /// with the engine.
 fn main_screen() -> Recording {
-    let clock = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let clock = Arc::new(FakeClock::new(secs(4_368)));
     let mut screen = Recording::new(
         "Woodwork workshop".into(),
         "Brave".into(),
@@ -88,9 +92,8 @@ fn main_screen() -> Recording {
     screen.update(Update::Transcribing(true));
     screen.update(Update::Recorded(14_200_000));
 
-    // Marks and notes at their moments; a note's text is typed later than
-    // `n` was pressed. The last two fall beside the transcript.
-    let mut now = SessionTime::ZERO;
+    // Marks and notes at the moments their keys were pressed; a note's text
+    // is typed after `n`. The last two fall beside the transcript.
     for (at, note) in [
         (678, None),
         (1_657, Some("ask about the grain filler")),
@@ -99,22 +102,17 @@ fn main_screen() -> Recording {
         (4_143, None),
         (4_200, Some("sun on the table")),
     ] {
-        clock.advance(secs(at).checked_duration_since(now).unwrap());
-        now = secs(at);
         match note {
-            None => press(&mut screen, KeyCode::Char('m')),
+            None => press_at(&mut screen, KeyCode::Char('m'), secs(at)),
             Some(text) => {
-                press(&mut screen, KeyCode::Char('n'));
-                clock.advance(Duration::from_secs(4));
-                now = now.checked_add(Duration::from_secs(4)).unwrap();
+                press_at(&mut screen, KeyCode::Char('n'), secs(at));
                 for c in text.chars() {
-                    press(&mut screen, KeyCode::Char(c));
+                    press_at(&mut screen, KeyCode::Char(c), secs(at + 2));
                 }
-                press(&mut screen, KeyCode::Enter);
+                press_at(&mut screen, KeyCode::Enter, secs(at + 4));
             }
         }
     }
-    clock.advance(secs(4_368).checked_duration_since(now).unwrap());
     screen
 }
 

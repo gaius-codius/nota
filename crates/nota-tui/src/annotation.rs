@@ -14,10 +14,32 @@ pub struct Mark {
 /// not the moment typing finished.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Note {
+    at: SessionTime,
+    text: String,
+}
+
+impl Note {
+    /// A note at `at` with `text`, trimmed; `None` if it's blank.
+    #[must_use]
+    pub fn new(at: SessionTime, text: &str) -> Option<Self> {
+        let text = text.trim();
+        (!text.is_empty()).then(|| Self {
+            at,
+            text: text.to_owned(),
+        })
+    }
+
     /// When `n` was pressed.
-    pub at: SessionTime,
+    #[must_use]
+    pub fn at(&self) -> SessionTime {
+        self.at
+    }
+
     /// What was typed, trimmed; never empty.
-    pub text: String,
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
 }
 
 /// A mark or a note, as the screen hands it on to be stored.
@@ -35,7 +57,23 @@ impl Annotation {
     pub fn at(&self) -> SessionTime {
         match self {
             Self::Mark(mark) => mark.at,
-            Self::Note(note) => note.at,
+            Self::Note(note) => note.at(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notes_are_trimmed_and_never_blank() {
+        let at = SessionTime::from_nanos(9);
+        let note = Note::new(at, "  bring clamps \t").unwrap();
+        assert_eq!((note.at(), note.text()), (at, "bring clamps"));
+        assert_eq!(Note::new(at, " \n\t "), None);
+        assert_eq!(Note::new(at, ""), None);
+        assert_eq!(Annotation::Note(note).at(), at);
+        assert_eq!(Annotation::Mark(Mark { at }).at(), at);
     }
 }

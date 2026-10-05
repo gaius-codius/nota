@@ -18,12 +18,11 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
 
 use crate::annotation::Annotation;
 use crate::band::column_of;
 use crate::screen::Recording;
-use crate::text::{Utterance, wrap};
+use crate::text::{Utterance, display_width, graphemes, wrap};
 
 /// The smallest screen the layout fits (the spec's "about 60×20").
 pub(crate) const MIN_WIDTH: u16 = 60;
@@ -107,12 +106,11 @@ impl Recording {
             Span::styled(format!(" REC {h:02}:{m:02}:{s:02}"), self.theme.accent),
         ];
         frame_row(
-            area.x,
-            area.y,
-            area.width,
+            Rect::new(area.x, area.y, area.width, 1),
             ('╭', '╮'),
             left,
             right,
+            Keep::Right,
             self.theme.border,
             buf,
         );
@@ -133,23 +131,22 @@ impl Recording {
             };
             let left = [key("m", " mark  "), key("n", " note  "), key("?", " keys")].concat();
             frame_row(
-                area.x,
-                y,
-                area.width,
+                Rect::new(area.x, y, area.width, 1),
                 ('╰', '╯'),
                 left,
                 right,
+                Keep::Left,
                 self.theme.border,
                 buf,
             );
             return None;
         };
-        // While typing: the note on the left, its end kept in view.
+        // While typing: the note on the left, its end kept in view. It takes
+        // the room the source and size would have, if it needs it.
         let hint = "  ⏎ save  esc cancel";
-        let room = usize::from(area.width).saturating_sub(
-            // The frame, its fill, the ◇ and its space, the hint, the status.
-            FRAME_ROW_FIXED + 1 + 2 + hint.width() + right.iter().map(Span::width).sum::<usize>(),
-        );
+        let room = usize::from(area.width)
+            // The frame, its fill, the ◇ and its space, the hint.
+            .saturating_sub(FRAME_ROW_FIXED + 1 + 2 + display_width(hint));
         let shown = tail_within(&draft.text, room);
         let left = vec![
             Span::styled(NOTE, self.theme.gold),
@@ -158,16 +155,15 @@ impl Recording {
             Span::styled(hint, self.theme.text_hint),
         ];
         frame_row(
-            area.x,
-            y,
-            area.width,
+            Rect::new(area.x, y, area.width, 1),
             ('╰', '╯'),
             left,
             right,
+            Keep::Left,
             self.theme.border,
             buf,
         );
-        let cursor_x = area.x + 5 + u16::try_from(shown.width()).unwrap_or(u16::MAX);
+        let cursor_x = area.x + 5 + u16::try_from(display_width(shown)).unwrap_or(u16::MAX);
         Some(Position::new(cursor_x.min(area.right() - 1), y))
     }
 
@@ -268,61 +264,77 @@ impl Recording {
     }
 }
 
-/// Draws a frame's top or bottom row: `╭─ left ───── right ─╮`. The left
-/// side is cut short if both don't fit; the right (state) never is, since it
-/// carries warnings.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one row's geometry, corners, content and border style; a struct would only rename them"
-)]
+/// Which side of a frame row keeps its content when both don't fit.
+#[derive(Debug, Clone, Copy)]
+enum Keep {
+    /// The top row: its right side is the state, which carries warnings.
+    Right,
+    /// The bottom row: its left side is the keys or the note being typed;
+    /// the source and size give way.
+    Left,
+}
+
+/// Draws a frame's top or bottom row, `╭─ left ───── right ─╮`, across the
+/// width of `row`. If both sides don't fit, the side not kept is cut short
+/// with `…`, down to nothing.
 fn frame_row(
-    x: u16,
-    y: u16,
-    width: u16,
+    row: Rect,
     (left_corner, right_corner): (char, char),
     left: Vec<Span<'_>>,
     right: Vec<Span<'_>>,
+    keep: Keep,
     border: Style,
     buf: &mut Buffer,
 ) {
-    let width = usize::from(width);
-    let right_width: usize = right.iter().map(Span::width).sum();
+    let width = usize::from(row.width);
     // "╭─ " + left + " " + fill + " " + right + " ─╮", with at least one
     // "─" of fill.
-    let room = width.saturating_sub(right_width + FRAME_ROW_FIXED + 1);
-    let left = truncate(left, room);
-    let left_width: usize = left.iter().map(Span::width).sum();
+    let room = width.saturating_sub(FRAME_ROW_FIXED + 1);
+    let (left, right) = match keep {
+        Keep::Right => {
+            let right = truncate(right, room);
+            let left = truncate(left, room - spans_width(&right));
+            (left, right)
+        }
+        Keep::Left => {
+            let left = truncate(left, room);
+            let right = truncate(right, room - spans_width(&left));
+            (left, right)
+        }
+    };
     let fill = width
-        .saturating_sub(left_width + right_width + FRAME_ROW_FIXED)
+        .saturating_sub(spans_width(&left) + spans_width(&right) + FRAME_ROW_FIXED)
         .max(1);
     let mut spans = vec![Span::styled(format!("{left_corner}─ "), border)];
     spans.extend(left);
     spans.push(Span::styled(format!(" {} ", "─".repeat(fill)), border));
     spans.extend(right);
     spans.push(Span::styled(format!(" ─{right_corner}"), border));
-    let line = Line::from(spans);
-    buf.set_line(x, y, &line, u16::try_from(width).unwrap_or(u16::MAX));
+    buf.set_line(row.x, row.y, &Line::from(spans), row.width);
+}
+
+/// The columns `spans` take when drawn.
+fn spans_width(spans: &[Span<'_>]) -> usize {
+    spans.iter().map(|span| display_width(&span.content)).sum()
 }
 
 /// The spans cut to at most `room` columns, ending in `…` if anything was
-/// cut.
+/// cut. Cuts fall between grapheme clusters.
 fn truncate(spans: Vec<Span<'_>>, room: usize) -> Vec<Span<'_>> {
-    let total: usize = spans.iter().map(Span::width).sum();
-    if total <= room {
+    if spans_width(&spans) <= room {
         return spans;
     }
     let mut left = room.saturating_sub(1);
     let mut out = Vec::new();
     for span in spans {
         let mut text = String::new();
-        for c in span.content.chars() {
-            let c_width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
-            if c_width > left {
+        for (grapheme, width) in graphemes(&span.content) {
+            if width > left {
                 left = 0;
                 break;
             }
-            text.push(c);
-            left -= c_width;
+            text.push_str(grapheme);
+            left -= width;
         }
         out.push(Span::styled(text, span.style));
         if left == 0 {
@@ -335,16 +347,17 @@ fn truncate(spans: Vec<Span<'_>>, room: usize) -> Vec<Span<'_>> {
     out
 }
 
-/// The end of `text` that fits in `room` columns.
+/// The end of `text` that fits in `room` columns, cut between grapheme
+/// clusters.
 fn tail_within(text: &str, room: usize) -> &str {
     let mut width = 0;
     let mut start = text.len();
-    for (index, c) in text.char_indices().rev() {
-        width += unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+    for (grapheme, grapheme_width) in graphemes(text).rev() {
+        width += grapheme_width;
         if width > room {
             break;
         }
-        start = index;
+        start -= grapheme.len();
     }
     &text[start..]
 }
@@ -366,7 +379,158 @@ fn width_u16(line: &Line<'_>) -> u16 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use nota_core::{Clock, FakeClock, SessionTime};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
     use super::*;
+    use crate::annotation::{Mark, Note};
+    use crate::level::Level;
+    use crate::screen::Update;
+    use crate::theme::Theme;
+
+    fn secs(s: u64) -> SessionTime {
+        SessionTime::from_elapsed(Duration::from_secs(s)).unwrap()
+    }
+
+    /// A screen at 100 s with `source`, a level every second, and
+    /// utterances starting at 10 s, 20 s, … `count` of them.
+    fn screen(source: &str, utterances: u64) -> Recording {
+        let clock = Arc::new(FakeClock::new(secs(100)));
+        let mut screen = Recording::new(
+            "Styles".into(),
+            source.into(),
+            clock as Arc<dyn Clock>,
+            Theme::default(),
+        );
+        for s in 0..=100 {
+            screen.update(Update::Level {
+                at: secs(s),
+                level: Level::from_peak(1_000),
+            });
+        }
+        for i in 1..=utterances {
+            let text = format!("utterance {i}");
+            let utterance = Utterance::new(secs(i * 10), secs(i * 10 + 5), text).unwrap();
+            screen.update(Update::Text(utterance));
+        }
+        screen
+    }
+
+    fn draw(screen: &Recording, width: u16) -> Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, 20)).unwrap();
+        terminal.draw(|frame| screen.draw(frame)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn row(buf: &Buffer, y: u16) -> String {
+        (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    #[test]
+    fn colour_roles() {
+        let theme = Theme::default();
+        let mut screen = screen("Mic", 8);
+        screen
+            .annotations
+            .push(Annotation::Mark(Mark { at: secs(10) }));
+        screen
+            .annotations
+            .push(Annotation::Note(Note::new(secs(30), "n").unwrap()));
+        let buf = draw(&screen, 62);
+        // REC (100 s is even, so the dot is bright) and the live end.
+        assert_eq!(buf[(45, 0)].symbol(), "●");
+        assert_eq!(buf[(45, 0)].fg, theme.accent.fg.unwrap());
+        assert_eq!(buf[(59, 2)].fg, theme.accent.fg.unwrap());
+        assert_eq!(buf[(58, 2)].fg, theme.text_secondary.fg.unwrap());
+        // Marks in the accent, notes in gold, on the band and in the margin.
+        let mark_column = 2 + 5;
+        assert_eq!(buf[(mark_column, 1)].symbol(), "◆");
+        assert_eq!(buf[(mark_column, 1)].fg, theme.accent.fg.unwrap());
+        assert_eq!(buf[(2, 4)].symbol(), "◆");
+        assert_eq!(buf[(2, 4)].fg, theme.accent.fg.unwrap());
+        assert_eq!(buf[(2, 6)].symbol(), "◇");
+        assert_eq!(buf[(2, 6)].fg, theme.gold.fg.unwrap());
+        // Text fades with age: newest bright, then normal, secondary, hint.
+        let text_fg = |y| buf[(4, y)].fg;
+        assert_eq!(text_fg(11), theme.text_bright.fg.unwrap());
+        assert_eq!(text_fg(10), theme.text.fg.unwrap());
+        assert_eq!(text_fg(9), theme.text.fg.unwrap());
+        assert_eq!(text_fg(8), theme.text_secondary.fg.unwrap());
+        assert_eq!(text_fg(6), theme.text_secondary.fg.unwrap());
+        assert_eq!(text_fg(5), theme.text_hint.fg.unwrap());
+        assert_eq!(text_fg(4), theme.text_hint.fg.unwrap());
+    }
+
+    #[test]
+    fn the_rec_dot_pulses() {
+        let theme = Theme::default();
+        let clock = Arc::new(FakeClock::new(secs(101)));
+        let screen = Recording::new("T".into(), "S".into(), clock as Arc<dyn Clock>, theme);
+        let buf = draw(&screen, 62);
+        assert_eq!(buf[(45, 0)].fg, theme.text_hint.fg.unwrap());
+    }
+
+    #[test]
+    fn a_mark_wins_over_a_note_in_the_same_place() {
+        let mut screen = screen("Mic", 2);
+        // Both in the second utterance and in the same band column, the note
+        // first in time.
+        screen
+            .annotations
+            .push(Annotation::Note(Note::new(secs(21), "n").unwrap()));
+        screen
+            .annotations
+            .push(Annotation::Mark(Mark { at: secs(22) }));
+        // And a note alone on the first.
+        screen
+            .annotations
+            .push(Annotation::Note(Note::new(secs(11), "n").unwrap()));
+        let buf = draw(&screen, 62);
+        assert_eq!(row(&buf, 1).matches('◆').count(), 1);
+        assert_eq!(row(&buf, 1).matches('◇').count(), 1);
+        assert!(
+            row(&buf, 4).starts_with("│ ◇ utterance 1"),
+            "{}",
+            row(&buf, 4)
+        );
+        assert!(
+            row(&buf, 5).starts_with("│ ◆ utterance 2"),
+            "{}",
+            row(&buf, 5)
+        );
+    }
+
+    #[test]
+    fn a_long_source_gives_way_to_the_keys_and_the_note() {
+        let source = "alsa_input.usb-Focusrite_Scarlett_2i2_USB_Y8ABCDEF-00.analog-stereo";
+        let mut screen = screen(source, 0);
+        let bottom = row(&draw(&screen, 60), 19);
+        assert_eq!(
+            bottom,
+            "╰─ m mark  n note  ? keys ─ alsa_input.usb-Focusrite_Sca… ─╯"
+        );
+        screen.draft = Some(crate::screen::Draft {
+            at: secs(1),
+            text: "typed".into(),
+        });
+        let bottom = row(&draw(&screen, 60), 19);
+        assert_eq!(
+            bottom,
+            "╰─ ◇ typed  ⏎ save  esc cancel ─ alsa_input.usb-Focusrit… ─╯"
+        );
+        // The top row keeps its state and cuts the title instead.
+        screen.title = "a very long title ".repeat(5);
+        let top = row(&draw(&screen, 60), 0);
+        assert!(top.ends_with("─ ● REC 00:01:40 ─╮"), "{top}");
+        assert!(
+            top.starts_with("╭─ ≈ nota · a very long title a very lo… ─ ●"),
+            "{top}"
+        );
+    }
 
     #[test]
     fn megabytes_are_decimal_and_switch_to_gigabytes() {

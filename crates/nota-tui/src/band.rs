@@ -1,6 +1,7 @@
 //! The timeline band: a level waveform of the whole session so far, with
 //! marks and notes placed above it, both squeezed into the screen's width.
 
+use std::ops::Range;
 use std::time::Duration;
 
 use nota_core::SessionTime;
@@ -34,16 +35,12 @@ impl LevelHistory {
     /// level in its share of the session, or `None` if nothing was heard
     /// there.
     pub(crate) fn columns(&self, now: SessionTime, width: usize) -> Vec<Option<Level>> {
-        // Bins up to and including the one `now` is in.
-        let total = bin_of(now).map_or(self.bins.len(), |bin| bin + 1);
+        let total = bins_until(now);
         (0..width)
             .map(|column| {
-                let start = share(column, total, width);
-                // At least one bin each, so a short session still fills the
-                // band rather than leaving gaps between columns.
-                let end = share(column + 1, total, width).max(start + 1);
+                let bins = column_bins(column, total, width);
                 self.bins
-                    .get(start..end.min(self.bins.len()))
+                    .get(bins.start..bins.end.min(self.bins.len()))
                     .unwrap_or_default()
                     .iter()
                     .flatten()
@@ -55,14 +52,31 @@ impl LevelHistory {
 }
 
 /// The column, of `width`, that session time `at` falls in when the band
-/// shows the session up to `now`. Times after `now` land in the last column.
+/// shows the session up to `now`: the first column whose bins hold `at`'s,
+/// so a mark sits over the level heard with it. Times after `now` land in
+/// the last column.
 pub(crate) fn column_of(at: SessionTime, now: SessionTime, width: usize) -> usize {
+    let total = bins_until(now);
     let last = width.saturating_sub(1);
-    if now.as_nanos() == 0 {
-        return if at.as_nanos() == 0 { 0 } else { last };
-    }
-    let column = u128::from(at.as_nanos()) * width as u128 / u128::from(now.as_nanos());
-    usize::try_from(column).map_or(last, |column| column.min(last))
+    let Some(bin) = bin_of(at).filter(|&bin| bin < total) else {
+        return last;
+    };
+    (0..width)
+        .find(|&column| column_bins(column, total, width).contains(&bin))
+        .unwrap_or(last)
+}
+
+/// The bins up to and including the one `now` is in.
+fn bins_until(now: SessionTime) -> usize {
+    bin_of(now).map_or(usize::MAX, |bin| bin.saturating_add(1))
+}
+
+/// The bins column `column` of `width` covers, when the band shows `total`
+/// bins. Each column covers at least one, so a short session still fills
+/// the band rather than leaving gaps between columns.
+fn column_bins(column: usize, total: usize, width: usize) -> Range<usize> {
+    let start = share(column, total, width);
+    start..share(column + 1, total, width).max(start + 1)
 }
 
 /// Bin `index * total / width`, rounded down.
@@ -151,15 +165,43 @@ mod tests {
 
     #[test]
     fn column_of_scales_time_to_width() {
+        // 100 s is 401 bins; 50 columns of eight or nine.
         let now = secs(100);
         assert_eq!(column_of(secs(0), now, 50), 0);
         assert_eq!(column_of(secs(1), now, 50), 0);
+        assert_eq!(column_of(millis(1_999), now, 50), 0);
         assert_eq!(column_of(secs(2), now, 50), 1);
+        assert_eq!(column_of(millis(2_250), now, 50), 1);
         assert_eq!(column_of(secs(99), now, 50), 49);
         assert_eq!(column_of(now, now, 50), 49);
         assert_eq!(column_of(secs(500), now, 50), 49);
         assert_eq!(column_of(secs(0), SessionTime::ZERO, 50), 0);
         assert_eq!(column_of(secs(1), SessionTime::ZERO, 50), 49);
         assert_eq!(column_of(secs(1), now, 0), 0);
+    }
+
+    #[test]
+    fn marks_sit_over_the_level_heard_with_them() {
+        // Short and long sessions, narrow and wide bands: the column a time
+        // lands in is a column that shows the level recorded at that time.
+        for (now_ms, width) in [
+            (300, 62),
+            (2_000, 62),
+            (100_000, 58),
+            (4_368_000, 58),
+            (9_999, 7),
+        ] {
+            let now = millis(now_ms);
+            for at_ms in (0..=now_ms).step_by(usize::try_from(now_ms / 97 + 1).unwrap()) {
+                let mut history = LevelHistory::default();
+                history.record(millis(at_ms), Level::from_peak(77));
+                let column = column_of(millis(at_ms), now, width);
+                assert_eq!(
+                    history.columns(now, width)[column],
+                    Some(Level::from_peak(77)),
+                    "at {at_ms} ms of {now_ms} ms, {width} wide"
+                );
+            }
+        }
     }
 }

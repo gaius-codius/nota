@@ -8,6 +8,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use nota_core::{Clock, SessionTime};
 use ratatui::Terminal;
 use ratatui::backend::Backend;
 use ratatui::crossterm::event::{self, KeyEvent};
@@ -19,6 +20,10 @@ use crate::screen::{Recording, Update};
 /// the REC dot keep moving.
 const REDRAW: Duration = Duration::from_millis(250);
 
+/// The most events applied between two draws, so a flood of updates can't
+/// hold the screen still.
+const MAX_BATCH: usize = 1_000;
+
 /// How long the input thread waits for a key before checking whether it
 /// should stop.
 const INPUT_POLL: Duration = Duration::from_millis(100);
@@ -27,11 +32,20 @@ const INPUT_POLL: Duration = Duration::from_millis(100);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     /// A key from the terminal.
-    Key(KeyEvent),
+    Key {
+        /// The key.
+        key: KeyEvent,
+        /// When it was read, so a mark lands at the moment of the key press
+        /// however long the event waits in the channel.
+        at: SessionTime,
+    },
     /// News from the rest of nota.
     Update(Update),
     /// The terminal changed size.
     Resize,
+    /// Reading the terminal failed and the input thread has stopped: no more
+    /// keys will come.
+    InputLost(io::ErrorKind),
 }
 
 /// Why [`run`] stopped early.
@@ -39,6 +53,9 @@ pub enum Event {
 pub enum RunError<E> {
     /// Drawing to the terminal failed.
     Terminal(E),
+    /// Reading keys from the terminal failed, so marks and notes can't be
+    /// added any more.
+    InputLost(io::ErrorKind),
     /// A mark or note was made but nothing is receiving them any more, so it
     /// couldn't be stored. It's handed back rather than lost.
     AnnotationsClosed(Annotation),
@@ -48,6 +65,7 @@ impl<E: std::fmt::Display> std::fmt::Display for RunError<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Terminal(err) => write!(f, "drawing the screen failed: {err}"),
+            Self::InputLost(kind) => write!(f, "reading keys from the terminal failed: {kind}"),
             Self::AnnotationsClosed(annotation) => write!(
                 f,
                 "a {} at {:?} couldn't be stored: nothing receives marks and notes",
@@ -65,25 +83,37 @@ impl<E: std::error::Error + 'static> std::error::Error for RunError<E> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Terminal(err) => Some(err),
-            Self::AnnotationsClosed(_) => None,
+            Self::InputLost(_) | Self::AnnotationsClosed(_) => None,
         }
     }
 }
 
 /// Runs `screen` on `terminal` until every sender of `events` is gone:
 /// draws it, applies each event, and sends each new mark and note to
-/// `annotations` to be stored. Redraws at least every 250 ms.
+/// `annotations` to be stored. Redraws at least every 250 ms, applying at
+/// most 1 000 events in between. A note still being typed when the loop
+/// ends is saved, unless it's blank.
+///
+/// No key ends the loop: to close the screen, the caller stops its
+/// [`InputThread`] and drops every other sender, from another thread.
 ///
 /// # Errors
 ///
-/// [`RunError::Terminal`] if drawing fails, and
-/// [`RunError::AnnotationsClosed`] if a mark or note can't be sent on.
+/// - [`RunError::Terminal`] if drawing fails.
+/// - [`RunError::InputLost`] if the input thread reports that reading the
+///   terminal failed.
+/// - [`RunError::AnnotationsClosed`] if a mark or note can't be sent on.
 pub fn run<B: Backend>(
     terminal: &mut Terminal<B>,
     screen: &mut Recording,
     events: &Receiver<Event>,
     annotations: &Sender<Annotation>,
 ) -> Result<(), RunError<B::Error>> {
+    let send = |annotation| {
+        annotations
+            .send(annotation)
+            .map_err(|err| RunError::AnnotationsClosed(err.0))
+    };
     loop {
         terminal
             .draw(|frame| screen.draw(frame))
@@ -91,34 +121,47 @@ pub fn run<B: Backend>(
         let first = match events.recv_timeout(REDRAW) {
             Ok(event) => event,
             Err(RecvTimeoutError::Timeout) => continue,
-            Err(RecvTimeoutError::Disconnected) => return Ok(()),
+            Err(RecvTimeoutError::Disconnected) => {
+                // A note half typed is kept: it's already pinned to a moment.
+                if let Some(note) = screen.save_draft() {
+                    send(note)?;
+                }
+                return Ok(());
+            }
         };
-        // Apply everything already waiting before drawing again, so a burst
-        // of levels costs one draw.
-        for event in std::iter::once(first).chain(events.try_iter()) {
+        // Apply what's already waiting before drawing again, so a burst of
+        // levels costs one draw.
+        let waiting = events.try_iter().take(MAX_BATCH - 1);
+        for event in std::iter::once(first).chain(waiting) {
             let added = match event {
-                Event::Key(key) => screen.handle_key(key),
+                Event::Key { key, at } => screen.handle_key_at(key, at),
                 Event::Update(update) => {
                     screen.update(update);
                     None
                 }
                 Event::Resize => None,
+                Event::InputLost(kind) => {
+                    if let Some(note) = screen.save_draft() {
+                        send(note)?;
+                    }
+                    return Err(RunError::InputLost(kind));
+                }
             };
             if let Some(annotation) = added {
-                annotations
-                    .send(annotation)
-                    .map_err(|err| RunError::AnnotationsClosed(err.0))?;
+                send(annotation)?;
             }
         }
     }
 }
 
 /// A thread that reads keys and resizes from the terminal and sends them as
-/// [`Event`]s. It stops when told to, or when nothing receives its events.
+/// [`Event`]s, each key stamped with the session clock as it's read. It
+/// stops when told to or dropped (waiting for the thread either way), or
+/// when nothing receives its events. If reading fails it sends [`Event::InputLost`] and stops.
 #[derive(Debug)]
 pub struct InputThread {
     stop: Arc<AtomicBool>,
-    handle: JoinHandle<io::Result<()>>,
+    handle: Option<JoinHandle<io::Result<()>>>,
 }
 
 impl InputThread {
@@ -128,15 +171,24 @@ impl InputThread {
     /// # Errors
     ///
     /// The thread couldn't be started.
-    pub fn spawn(events: Sender<Event>) -> io::Result<Self> {
+    pub fn spawn(events: Sender<Event>, clock: Arc<dyn Clock>) -> io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let handle = thread::Builder::new()
             .name("nota-tui-input".into())
             .spawn({
                 let stop = Arc::clone(&stop);
-                move || read_input(&events, &stop)
+                move || {
+                    let read = read_input(&events, clock.as_ref(), &stop);
+                    if let Err(err) = &read {
+                        let _ = events.send(Event::InputLost(err.kind()));
+                    }
+                    read
+                }
             })?;
-        Ok(Self { stop, handle })
+        Ok(Self {
+            stop,
+            handle: Some(handle),
+        })
     }
 
     /// Stops reading and waits for the thread, within about 100 ms.
@@ -144,21 +196,38 @@ impl InputThread {
     /// # Errors
     ///
     /// Reading the terminal failed, or the thread panicked.
-    pub fn stop(self) -> io::Result<()> {
+    pub fn stop(mut self) -> io::Result<()> {
         self.stop.store(true, Ordering::Relaxed);
-        self.handle
-            .join()
-            .map_err(|_| io::Error::other("the input thread panicked"))?
+        match self.handle.take() {
+            Some(handle) => handle
+                .join()
+                .map_err(|_| io::Error::other("the input thread panicked"))?,
+            None => Ok(()),
+        }
     }
 }
 
-fn read_input(events: &Sender<Event>, stop: &AtomicBool) -> io::Result<()> {
+impl Drop for InputThread {
+    /// Stops the thread and waits for it (about 100 ms at most), so a
+    /// dropped handle never leaves a second reader on the terminal.
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn read_input(events: &Sender<Event>, clock: &dyn Clock, stop: &AtomicBool) -> io::Result<()> {
     while !stop.load(Ordering::Relaxed) {
         if !event::poll(INPUT_POLL)? {
             continue;
         }
         let event = match event::read()? {
-            event::Event::Key(key) => Event::Key(key),
+            event::Event::Key(key) => Event::Key {
+                key,
+                at: clock.now(),
+            },
             event::Event::Resize(..) => Event::Resize,
             _ => continue,
         };
@@ -173,7 +242,7 @@ fn read_input(events: &Sender<Event>, stop: &AtomicBool) -> io::Result<()> {
 mod tests {
     use std::sync::mpsc;
 
-    use nota_core::{Clock, FakeClock, SessionTime};
+    use nota_core::FakeClock;
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
@@ -182,8 +251,16 @@ mod tests {
     use crate::text::Utterance;
     use crate::theme::Theme;
 
+    /// A key read at the session time `at` nanoseconds.
+    fn key_at(code: KeyCode, at: u64) -> Event {
+        Event::Key {
+            key: KeyEvent::new(code, KeyModifiers::NONE),
+            at: SessionTime::from_nanos(at),
+        }
+    }
+
     fn key(c: char) -> Event {
-        Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+        key_at(KeyCode::Char(c), 7)
     }
 
     fn screen(clock: &Arc<FakeClock>) -> Recording {
@@ -214,7 +291,7 @@ mod tests {
             key('n'),
             key('h'),
             key('i'),
-            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            key_at(KeyCode::Enter, 7),
             Event::Resize,
         ] {
             event_tx.send(event).unwrap();
@@ -227,15 +304,30 @@ mod tests {
             sent,
             [
                 Annotation::Mark(Mark { at }),
-                Annotation::Note(Note {
-                    at,
-                    text: "hi".into()
-                })
+                Annotation::Note(Note::new(at, "hi").unwrap())
             ]
         );
         // The last draw shows the text with its mark.
         let screen_text = format!("{}", terminal.backend());
         assert!(screen_text.contains("│ ◆ loop text"), "{screen_text}");
+    }
+
+    #[test]
+    fn a_half_typed_note_is_saved_when_the_events_end() {
+        let clock = Arc::new(FakeClock::new(SessionTime::from_nanos(11)));
+        let mut screen = screen(&clock);
+        let mut terminal = Terminal::new(TestBackend::new(62, 20)).unwrap();
+        let (event_tx, event_rx) = mpsc::channel();
+        let (note_tx, note_rx) = mpsc::channel();
+        for event in [key('n'), key('o'), key('k')] {
+            event_tx.send(event).unwrap();
+        }
+        drop(event_tx);
+        run(&mut terminal, &mut screen, &event_rx, &note_tx).unwrap();
+        let sent: Vec<_> = note_rx.try_iter().collect();
+        // Pinned to when `n` was read (7 ns), not the clock's 11 ns.
+        let at = SessionTime::from_nanos(7);
+        assert_eq!(sent, [Annotation::Note(Note::new(at, "ok").unwrap())]);
     }
 
     #[test]
@@ -254,9 +346,36 @@ mod tests {
         assert_eq!(
             *annotation,
             Annotation::Mark(Mark {
-                at: SessionTime::from_nanos(3)
+                at: SessionTime::from_nanos(7)
             })
         );
         assert!(err.to_string().contains("mark"));
+    }
+
+    #[test]
+    fn lost_input_ends_the_loop_and_keeps_the_draft() {
+        let clock = Arc::new(FakeClock::new(SessionTime::from_nanos(50)));
+        let mut screen = screen(&clock);
+        let mut terminal = Terminal::new(TestBackend::new(62, 20)).unwrap();
+        let (event_tx, event_rx) = mpsc::channel();
+        let (note_tx, note_rx) = mpsc::channel();
+        for event in [
+            key('n'),
+            key('a'),
+            Event::InputLost(io::ErrorKind::BrokenPipe),
+        ] {
+            event_tx.send(event).unwrap();
+        }
+        // Another sender (the recorder's) is still alive.
+        let err = run(&mut terminal, &mut screen, &event_rx, &note_tx).unwrap_err();
+        assert!(
+            matches!(err, RunError::InputLost(io::ErrorKind::BrokenPipe)),
+            "{err}"
+        );
+        assert!(err.to_string().contains("keys"));
+        let sent: Vec<_> = note_rx.try_iter().collect();
+        let at = SessionTime::from_nanos(7);
+        assert_eq!(sent, [Annotation::Note(Note::new(at, "a").unwrap())]);
+        drop(event_tx);
     }
 }

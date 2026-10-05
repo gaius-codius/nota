@@ -1549,6 +1549,7 @@ dependencies = [
  "insta",
  "nota-core",
  "ratatui",
+ "unicode-segmentation",
  "unicode-width",
 ]
 
