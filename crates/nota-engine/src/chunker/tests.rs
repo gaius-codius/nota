@@ -229,7 +229,7 @@ fn settled_silence_at_the_end_is_not_speech() {
         segments: Vec::new(),
         silent_until: SampleIndex::new(4),
     };
-    assert!(chunker.finish(&unsettled)[0].has_speech);
+    assert!(chunker.finish(&unsettled)[0].has_speech());
 }
 
 #[test]

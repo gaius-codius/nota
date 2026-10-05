@@ -241,14 +241,18 @@ fn parse_row((track, epoch, start, end, hash): RawRow) -> Result<SegmentRow, Sto
 )]
 fn create_private(path: &Path) -> Result<(), StoreError> {
     use std::os::unix::fs::OpenOptionsExt as _;
-    std::fs::OpenOptions::new()
+    // `create_new` (O_EXCL) never opens what's there, file or symlink: a
+    // second descriptor on a live database would drop SQLite's locks.
+    match std::fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(false)
+        .create_new(true)
         .mode(0o600)
         .open(path)
-        .map(drop)
-        .map_err(StoreError::Create)
+    {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(StoreError::Create(e)),
+    }
 }
 
 /// Elsewhere the file's permissions come from its directory.
@@ -273,6 +277,7 @@ impl Store {
     ///
     /// # Errors
     ///
+    /// [`StoreError::Create`] if a new file can't be created,
     /// [`StoreError::Pragma`] if a pragma didn't take,
     /// [`StoreError::UnknownSchema`] if the schema version isn't known, and
     /// [`StoreError::Sqlite`] for any other SQLite failure.
@@ -319,10 +324,11 @@ impl Store {
     /// recorder, which depends on this crate, so this one can't name it, and
     /// Rust has no visibility for "this crate and the recorder only". The
     /// recorder's `SegmentStore::insert` takes the proof and is the one
-    /// caller outside tests and examples. A row that claims a file wrongly
-    /// still can't cost audio: salvage deletes a journal on a row's word
-    /// only if the row's segment file exists and matches its hash and
-    /// length.
+    /// caller outside tests and examples. Salvage limits the damage of a
+    /// wrong row: it deletes a journal on a row's word only if the row's
+    /// segment file exists and matches its hash and length. It can't tell
+    /// whether that file is durable, though, so callers must still make it
+    /// durable first.
     ///
     /// If a row with the same track and start sample is stored, an identical
     /// one is [`Inserted::AlreadyPresent`] and a different one is a

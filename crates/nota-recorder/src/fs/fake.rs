@@ -48,10 +48,12 @@
 //! The fake fails as harshly as Linux may:
 //! - A failed [`FsFile::write_all`] appends the first half of its bytes, as
 //!   a short write before the error would.
-//! - A failed [`FsFile::sync`] leaves the unsynced bytes readable, but they
-//!   never reach the disk: Linux marks their pages clean after a write-back
-//!   error. After any crash they read back as zeros, even if a later sync
-//!   succeeded.
+//! - A failed [`FsFile::sync`] leaves the unsynced bytes readable, but no
+//!   later sync covers them: Linux marks their pages clean after a
+//!   write-back error. After a crash they read back as zeros, even if a
+//!   later sync succeeded, unless they were written back before the error:
+//!   [`CrashOutcome::LoseUnsynced`] zeroes them, [`CrashOutcome::KeepAll`]
+//!   keeps them, and [`CrashOutcome::Partial`] picks for each failed sync.
 //!
 //! Directory errors match Linux's too: reading, removing or renaming onto a
 //! directory is `IsADirectory`, and listing or syncing a file is
@@ -405,9 +407,16 @@ impl State {
                     data
                 }
             };
+            // What a failed fsync dropped from write-back: gone unless the
+            // kernel had written it back before the error.
             for &(from, to) in &inode.lost {
+                let zeroed = match outcome {
+                    CrashOutcome::LoseUnsynced => true,
+                    CrashOutcome::KeepAll => false,
+                    CrashOutcome::Partial { .. } => rng.coin(),
+                };
                 let to = to.min(data.len());
-                if let Some(range) = data.get_mut(from..to) {
+                if let (true, Some(range)) = (zeroed, data.get_mut(from..to)) {
                     range.fill(0);
                 }
             }
@@ -480,8 +489,9 @@ impl FakeFs {
     }
 
     /// Fails the operation after the next `ops` with an error of `kind`,
-    /// without crashing. A failed write writes nothing; a failed fsync also
-    /// loses the file's unsynced data.
+    /// without crashing. A failed write appends half its bytes; a failed
+    /// fsync leaves the unsynced bytes readable but not durable (see the
+    /// module docs).
     pub fn fail_after(&self, ops: usize, kind: io::ErrorKind) {
         self.lock().fail = Some((ops, kind));
     }
@@ -524,7 +534,8 @@ impl FakeFs {
 
     /// A separate copy of this filesystem as the running system sees it,
     /// with everything durable and an empty log. For re-running recovery
-    /// from the same starting point.
+    /// from the same starting point. Bytes a failed fsync dropped read as
+    /// zeros in the copy: they may never have reached the disk.
     #[must_use]
     pub fn copy_disk(&self) -> Self {
         let state = self.lock();
@@ -533,7 +544,12 @@ impl FakeFs {
             .iter()
             .filter(|(id, _)| state.names.files.values().any(|named| named == *id))
             .map(|(&id, inode)| {
-                let data = inode.data.clone();
+                let mut data = inode.data.clone();
+                for &(from, to) in &inode.lost {
+                    if let Some(range) = data.get_mut(from..to.min(inode.data.len())) {
+                        range.fill(0);
+                    }
+                }
                 let synced = data.len();
                 let lost = Vec::new();
                 (id, Inode { data, synced, lost })
@@ -1224,25 +1240,42 @@ mod tests {
             assert_eq!(fs.read(&p("/s/j")).unwrap(), b"safelost");
             (fs, f)
         };
-        // Before another sync, the dropped bytes are zeros or gone.
+        // Before another sync, the dropped bytes are zeros, kept or gone.
         for outcome in CrashOutcome::standard() {
             let (fs, _f) = failed_sync();
             let got = after_crash(&fs, outcome, "/s/j").unwrap();
-            assert!(b"safe\0\0\0\0".starts_with(&got), "{outcome:?}: {got:?}");
+            let zeroed = b"safe\0\0\0\0".starts_with(&got);
+            assert!(
+                zeroed || b"safelost".starts_with(&got),
+                "{outcome:?}: {got:?}"
+            );
             assert!(got.len() >= 4, "{outcome:?}");
         }
-        // A later sync makes what follows durable, but not them.
+        // A later sync makes what follows durable, but not them: they're
+        // zeros unless written back before the error, and both happen.
+        let mut seen = BTreeSet::new();
         for outcome in CrashOutcome::standard() {
             let (fs, mut f) = failed_sync();
             f.write_all(b"next").unwrap();
             f.sync().unwrap();
             assert_eq!(fs.read(&p("/s/j")).unwrap(), b"safelostnext");
-            assert_eq!(
-                after_crash(&fs, outcome, "/s/j").unwrap(),
-                b"safe\0\0\0\0next",
-                "{outcome:?}"
+            let got = after_crash(&fs, outcome, "/s/j").unwrap();
+            let want: &[u8] = match outcome {
+                CrashOutcome::LoseUnsynced => b"safe\0\0\0\0next",
+                CrashOutcome::KeepAll => b"safelostnext",
+                CrashOutcome::Partial { .. } => &got,
+            };
+            assert_eq!(got, want, "{outcome:?}");
+            assert!(
+                [&b"safe\0\0\0\0next"[..], b"safelostnext"].contains(&&got[..]),
+                "{outcome:?}: {got:?}"
             );
+            seen.insert(got);
         }
+        assert_eq!(seen.len(), 2, "partial crashes try both");
+        // A copy of the running disk doesn't promote them to durable.
+        let (fs, _f) = failed_sync();
+        assert_eq!(fs.copy_disk().read(&p("/s/j")).unwrap(), b"safe\0\0\0\0");
     }
 
     #[test]

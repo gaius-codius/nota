@@ -131,10 +131,10 @@ pub struct Chunk {
 }
 
 impl Chunk {
-    /// The audio from `start` on, or `None` if its end overflows.
-    fn new(start: SampleIndex, audio: Vec<f32>, has_speech: bool) -> Option<Self> {
-        let range = SampleRange::starting_at(start, SampleCount::new(audio.len() as u64))?;
-        Some(Self {
+    /// `audio` as the samples of `range`, or `None` unless it holds exactly
+    /// one value per sample.
+    fn new(range: SampleRange, audio: Vec<f32>, has_speech: bool) -> Option<Self> {
+        (range.len().get() == audio.len() as u64).then_some(Self {
             range,
             audio,
             has_speech,
@@ -343,11 +343,10 @@ impl Chunker {
     /// be empty.
     fn cut(&mut self, at: SampleIndex) -> Option<Chunk> {
         let at = at.min(self.end());
-        if at <= self.start {
-            return None;
-        }
-        let len = usize::try_from(at.saturating_count_since(self.start).get())
-            .unwrap_or(self.audio.len());
+        // Built before anything moves, so a cut that can't be made changes
+        // nothing.
+        let range = SampleRange::new(self.start, at).filter(|range| !range.is_empty())?;
+        let len = usize::try_from(range.len().get()).unwrap_or(self.audio.len());
         let rest = self.audio.split_off(len.min(self.audio.len()));
         let audio = std::mem::replace(&mut self.audio, rest);
         // Anything past `known` is unsettled and might be speech.
@@ -356,14 +355,13 @@ impl Chunker {
                 .segments
                 .iter()
                 .any(|&(from, to)| from < at && to > self.start);
-        let first = self.start;
         self.start = at;
         self.known = self.known.max(at);
         for segment in &mut self.segments {
             segment.0 = segment.0.max(at);
         }
         self.segments.retain(|&(from, to)| to > from);
-        Chunk::new(first, audio, has_speech)
+        Chunk::new(range, audio, has_speech)
     }
 }
 

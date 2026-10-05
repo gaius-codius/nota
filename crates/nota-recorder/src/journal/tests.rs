@@ -526,9 +526,9 @@ fn a_failed_fsync_breaks_the_journal_without_moving_durable() {
     journal.append(&samples(MIC, 10, 10)).unwrap();
     journal.sync().unwrap();
     assert_eq!(journal.durable().end(), SampleIndex::new(20));
-    // After a crash, even one that keeps everything, only the durable
+    // After a crash that loses what wasn't written back, only the durable
     // frames of the broken journal are left.
-    let after = fs.crash(CrashOutcome::KeepAll);
+    let after = fs.crash(CrashOutcome::LoseUnsynced);
     let read = read_journal(&after.read(&journal_path(0)).unwrap());
     assert_eq!(read.audio().unwrap().1, samples(MIC, 0, 10));
 }

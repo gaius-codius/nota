@@ -23,8 +23,8 @@
 //! Bytes from the other process are untrusted: a native crash can leave half
 //! a frame, and a library can print to the wrong stream. The decoder checks
 //! every field and builds the typed messages ([`AudioChunk`],
-//! [`Transcript`], [`SampleRange`]) through their checking constructors, so nothing past this
-//! module sees raw bytes. Every frame it accepts has exactly one encoding,
+//! [`Transcript`], [`SampleRange`]) through their checking constructors, so
+//! nothing past this module sees raw bytes. Every frame it accepts has exactly one encoding,
 //! and the property tests check that.
 
 use std::fmt;

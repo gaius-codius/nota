@@ -2,9 +2,11 @@
 //!
 //! Every durable write of audio (the journal, FLAC segments, their renames
 //! and directory syncs) goes through an [`Fs`]. The one exception is the
-//! database, which SQLite writes itself (see `nota-store`). The real one, [`StdFs`], is the
-//! only code in nota allowed to call `std::fs`'s write functions; clippy's
-//! `disallowed-methods` bans them everywhere else. Tests use `FakeFs` (feature
+//! database, which SQLite writes itself (see `nota-store`). The real one,
+//! [`StdFs`], is the only code here allowed to call `std::fs`'s write
+//! functions; clippy's `disallowed-methods` bans them everywhere else, and
+//! the one other user (`nota-store`, creating the database file) says so
+//! with `#[expect]`. Tests use `FakeFs` (feature
 //! `fake-fs`), which records every operation and can simulate a crash that
 //! loses whatever wasn't fsync'd, so a crash after each operation of a write
 //! path is a fast, exhaustive unit test (see `crash`).
