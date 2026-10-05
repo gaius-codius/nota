@@ -41,9 +41,9 @@ pub enum Tie {
 
 /// Ties this process (the engine) to its parent (the recorder): the kernel
 /// kills it when the parent dies. Call it first thing, before anything
-/// slow. Off Linux, or if the kernel refuses, it's [`Tie::Unsupported`],
-/// and the engine still works: stdin closing ends it. The parent is
-/// checked either way.
+/// slow. Off Linux and Android, or if the kernel refuses, it's
+/// [`Tie::Unsupported`], and the engine still works: stdin closing ends it.
+/// The parent is checked either way.
 ///
 /// # Errors
 ///
@@ -58,23 +58,20 @@ pub fn tie_to_recorder() -> io::Result<Tie> {
         // kills the engine, and one that died before has left it with
         // another parent.
         let parent = getppid().map(|pid| pid.as_raw_nonzero().get());
-        let tie = check_parent(std::env::var_os(RECORDER_PID_VAR).as_deref(), parent)?;
-        Ok(if tie == Tie::Tied && !tied {
-            Tie::Unsupported
-        } else {
-            tie
-        })
+        check_parent(tied, std::env::var_os(RECORDER_PID_VAR).as_deref(), parent)
     }
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
     Ok(Tie::Unsupported)
 }
 
 /// Whether the engine's `parent` is the recorder named by `named` (the
-/// variable's value), if one is named.
+/// variable's value), if one is named, given whether the kernel took the
+/// death signal (`tied`).
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn check_parent(named: Option<&OsStr>, parent: Option<i32>) -> io::Result<Tie> {
+fn check_parent(tied: bool, named: Option<&OsStr>, parent: Option<i32>) -> io::Result<Tie> {
+    let untied = if tied { Tie::Tied } else { Tie::Unsupported };
     let Some(named) = named else {
-        return Ok(Tie::Tied);
+        return Ok(untied);
     };
     let recorder = named
         .to_str()
@@ -90,7 +87,7 @@ fn check_parent(named: Option<&OsStr>, parent: Option<i32>) -> io::Result<Tie> {
             )
         })?;
     Ok(if parent == Some(recorder) {
-        Tie::Tied
+        untied
     } else {
         Tie::Orphaned
     })
@@ -102,7 +99,7 @@ mod tests {
 
     #[test]
     fn a_parent_that_is_the_named_recorder_is_tied() {
-        let tie = check_parent(Some(OsStr::new("4242")), Some(4242)).unwrap();
+        let tie = check_parent(true, Some(OsStr::new("4242")), Some(4242)).unwrap();
         assert_eq!(tie, Tie::Tied);
     }
 
@@ -110,21 +107,35 @@ mod tests {
     fn a_parent_that_isnt_the_named_recorder_is_orphaned() {
         // Reparented to init, to a subreaper, or with no parent at all.
         for parent in [Some(1), Some(4243), None] {
-            let tie = check_parent(Some(OsStr::new("4242")), parent).unwrap();
+            let tie = check_parent(true, Some(OsStr::new("4242")), parent).unwrap();
             assert_eq!(tie, Tie::Orphaned, "{parent:?}");
         }
     }
 
     #[test]
     fn with_no_recorder_named_any_parent_is_tied() {
-        assert_eq!(check_parent(None, Some(1)).unwrap(), Tie::Tied);
-        assert_eq!(check_parent(None, None).unwrap(), Tie::Tied);
+        assert_eq!(check_parent(true, None, Some(1)).unwrap(), Tie::Tied);
+        assert_eq!(check_parent(true, None, None).unwrap(), Tie::Tied);
+    }
+
+    #[test]
+    fn a_refused_death_signal_leaves_the_engine_untied_but_checked() {
+        let named = Some(OsStr::new("4242"));
+        assert_eq!(
+            check_parent(false, named, Some(4242)).unwrap(),
+            Tie::Unsupported
+        );
+        assert_eq!(
+            check_parent(false, None, Some(1)).unwrap(),
+            Tie::Unsupported
+        );
+        assert_eq!(check_parent(false, named, Some(1)).unwrap(), Tie::Orphaned);
     }
 
     #[test]
     fn a_named_recorder_that_isnt_a_process_id_is_refused() {
         for named in ["", "abc", "0", "-5", "42 ", "99999999999"] {
-            let err = check_parent(Some(OsStr::new(named)), Some(42)).unwrap_err();
+            let err = check_parent(true, Some(OsStr::new(named)), Some(42)).unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{named:?}");
             assert!(err.to_string().contains(RECORDER_PID_VAR), "{err}");
         }

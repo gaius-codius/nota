@@ -186,7 +186,7 @@ fn host() {
 
 /// [`host`] in `load` mode: an engine that is still loading its models
 /// (saying hello after a minute) when the host is killed.
-fn loading_host() {
+fn loading_host() -> ! {
     let mut config = EngineConfig::new(EngineCommand {
         program: PathBuf::from(env!("CARGO_BIN_EXE_nota-fake-engine")),
         args: ["echo", "--hello-delay-ms", "60000"]
