@@ -3,7 +3,11 @@
 `fuzz/` is a separate Cargo workspace (it is excluded from the root one), so
 `cargo nextest` doesn't run it. It is for occasional long runs with AFL++
 through `cargo-afl`. CI builds the targets with `cargo afl build --locked`,
-so they keep compiling, but doesn't fuzz. When a change to the recorder's
+so they keep compiling, but doesn't fuzz. CI sets
+`RUSTFLAGS="-C target-cpu=x86-64"` to replace cargo-afl's
+`-C target-cpu=native`: its cached `target/` can come from a runner with a
+different CPU, and build scripts and proc macros built for a newer CPU crash
+with SIGILL on an older one. When a change to the recorder's
 dependencies makes that fail on `fuzz/Cargo.lock`, run `cargo metadata` in
 `fuzz/` (it adds the missing packages and keeps the rest) and commit the
 lock file.
