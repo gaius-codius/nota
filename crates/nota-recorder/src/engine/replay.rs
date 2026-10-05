@@ -319,23 +319,14 @@ impl Replay {
         }
     }
 
-    /// Drops the oldest audio until at most `keep` samples are left, while
+    /// Drops the oldest audio until exactly `keep` samples are left (or
+    /// fewer, if there were), splitting the entry the cut falls in, while
     /// no engine is running. Returns the ranges dropped, never transcribed.
     pub(super) fn trim(&mut self, keep: SampleCount) -> Vec<SampleRange> {
-        let mut dropped: Vec<SampleRange> = Vec::new();
-        while self.unconfirmed > keep.get() {
-            let Some(front) = self.entries.pop_front() else {
-                break;
-            };
-            if let Entry::Audio { chunk, .. } = front {
-                self.unconfirmed -= chunk.range().len().get();
-                join(&mut dropped, chunk.range());
-            }
+        match self.unconfirmed.checked_sub(keep.get()) {
+            Some(over) if over > 0 => self.skip(SampleCount::new(over)),
+            _ => Vec::new(),
         }
-        if !dropped.is_empty() {
-            self.held.clear();
-        }
-        dropped
     }
 
     /// How many samples are unconfirmed.
@@ -627,11 +618,17 @@ mod tests {
             dropped,
             [
                 SampleRange::new(at(0), at(20)).unwrap(),
-                SampleRange::new(at(40), at(50)).unwrap()
+                SampleRange::new(at(40), at(45)).unwrap()
             ]
         );
-        assert_eq!(replay.unconfirmed(), 10);
-        assert_eq!(starts(&sent(&mut replay)), [Some(50)]);
+        assert_eq!(replay.unconfirmed(), 15);
+        assert_eq!(starts(&sent(&mut replay)), [Some(45), Some(50)]);
+        assert_eq!(replay.trim(SampleCount::new(15)), []);
+        assert_eq!(
+            replay.trim(SampleCount::new(0)),
+            [SampleRange::new(at(45), at(60)).unwrap()]
+        );
+        assert_eq!(replay.unconfirmed(), 0);
     }
 
     #[test]

@@ -700,6 +700,24 @@ fn an_engine_that_falls_too_far_behind_is_restarted() {
     events.assert_tiles_with_skips(30 * CHUNK);
 }
 
+/// An engine holding exactly the limit isn't behind; one sample more is.
+#[test]
+fn behind_means_more_than_the_limit() {
+    let mut config = fake(&["echo", "--every", "100"]);
+    config.max_unconfirmed = SampleCount::new(4 * CHUNK);
+    let (mut supervisor, mut events) = start(config);
+    events.online();
+    send(&mut supervisor, 0..4);
+    supervisor.flush(TRACK);
+    events.confirmed_to(4 * CHUNK, Duration::from_secs(5));
+    assert!(events.offline_reasons().is_empty(), "{:#?}", events.seen);
+    send(&mut supervisor, 4..9);
+    assert_eq!(
+        events.offline(Duration::from_secs(5)),
+        OfflineReason::Behind
+    );
+}
+
 /// A new engine starts with room to catch up: audio that piled up to the
 /// limit while it loaded doesn't put it behind on the next chunk, which
 /// would restart it before it could confirm anything, every time.
