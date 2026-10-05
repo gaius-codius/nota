@@ -123,9 +123,15 @@ lib=$dest/sherpa-onnx-lib
 unpack=$dest/sherpa-onnx-unpack
 stamp=$dest/sherpa-onnx-lib.sha256
 
-# Drops the libraries an earlier run bundled into sherpa-onnx-sys's rlib.
+# Drops the libraries an earlier run bundled into sherpa-onnx-sys's rlib:
+# its build output in every profile and target of the target directory
+# (`cargo clean -p` only cleans one profile).
+target_dir=${CARGO_TARGET_DIR:-$repo/target}
 clean_sys() {
-  (cd "$repo" && cargo clean --quiet -p sherpa-onnx-sys) || die "cargo clean -p sherpa-onnx-sys failed"
+  if [[ -d $target_dir ]]; then
+    find "$target_dir" \( -path '*/.fingerprint/sherpa-onnx-sys-*' -o -path '*/build/sherpa-onnx-sys-*' \
+      -o -name 'libsherpa_onnx_sys*' \) -prune -exec rm -rf {} +
+  fi
   rm -f "$stamp"
 }
 

@@ -21,12 +21,17 @@ fail() {
 }
 
 name=$("$script" --archive-name)
-mkdir -p "$dir/sherpa-onnx-lib" "$dir/other/lib" \
-  "$CARGO_TARGET_DIR/debug/.fingerprint/sherpa-onnx-sys-0123456789abcdef" \
-  "$CARGO_TARGET_DIR/debug/build/sherpa-onnx-sys-0123456789abcdef" \
-  "$CARGO_TARGET_DIR/debug/deps"
-touch "$dir/sherpa-onnx-lib/libsherpa-onnx-c-api.a" \
-  "$CARGO_TARGET_DIR/debug/deps/libsherpa_onnx_sys-0123456789abcdef.rlib"
+mkdir -p "$dir/sherpa-onnx-lib" "$dir/other/lib"
+touch "$dir/sherpa-onnx-lib/libsherpa-onnx-c-api.a"
+# The sys crate's output in a debug, a release and a cross-target layout,
+# next to another crate's.
+for layout in debug release x86_64-unknown-linux-gnu/debug; do
+  out=$CARGO_TARGET_DIR/$layout
+  mkdir -p "$out/.fingerprint/sherpa-onnx-sys-0123456789abcdef" \
+    "$out/build/sherpa-onnx-sys-0123456789abcdef" "$out/deps"
+  touch "$out/deps/libsherpa_onnx_sys-0123456789abcdef.rlib" "$out/libsherpa_onnx_sys.rlib" \
+    "$out/deps/libsherpa_onnx-0123456789abcdef.rlib"
+done
 echo "not the pinned archive" >"$dir/$name"
 
 if out=$("$script" "$dir" 2>"$dir/err"); then
@@ -35,9 +40,10 @@ fi
 grep -q 'checksum mismatch' "$dir/err" || fail "expected a checksum mismatch, got: $(cat "$dir/err")"
 [[ ! -e $dir/sherpa-onnx-lib ]] || fail "left the earlier libraries for a build to link"
 [[ ! -e $dir/$name ]] || fail "kept the tampered archive"
-if compgen -G "$CARGO_TARGET_DIR/debug/*/*sherpa*onnx*sys*" >/dev/null; then
-  fail "left sherpa-onnx-sys's build output, which bundles the earlier libraries: $(compgen -G "$CARGO_TARGET_DIR/debug/*/*sherpa*onnx*sys*")"
-fi
+left=$(find "$CARGO_TARGET_DIR" -name '*sherpa*onnx*sys*')
+[[ -z $left ]] || fail "left sherpa-onnx-sys's build output, which bundles the earlier libraries: $left"
+[[ -f $CARGO_TARGET_DIR/release/deps/libsherpa_onnx-0123456789abcdef.rlib ]] ||
+  fail "removed another crate's build output"
 [[ -d $dir/other/lib ]] || fail "removed a directory it doesn't own"
 
 if "$script" --bogus "$dir" >/dev/null 2>&1; then
