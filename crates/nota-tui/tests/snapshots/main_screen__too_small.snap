@@ -1,0 +1,24 @@
+---
+source: crates/nota-tui/tests/main_screen.rs
+expression: terminal.backend()
+---
+"                                                           "
+"                                                           "
+"                                                           "
+"                                                           "
+"                                                           "
+"                                                           "
+"                                                           "
+"                                                           "
+"                                                           "
+"                  make the window larger                   "
+"                     nota needs 60×20                      "
+"                                                           "
+"                                                           "
+"                                                           "
+"                                                           "
+"                                                           "
+"                                                           "
+"                                                           "
+"                                                           "
+"                                                           "

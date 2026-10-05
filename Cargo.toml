@@ -20,12 +20,21 @@ claxon = "0.4"
 crc32fast = { version = "1.5", default-features = false, features = ["std"] }
 # FLAC segments: a pure-Rust encoder, without its logging, threading and serde.
 flacenc = { version = "0.5", default-features = false }
+# Golden tests for screens: Ratatui's TestBackend output, compared as text.
+insta = { version = "1.49", default-features = false }
 proptest = { version = "1.11", default-features = false, features = ["std"] }
 rustix = { version = "1.1", default-features = false, features = ["std", "time"] }
+# The terminal UI, on crossterm (re-exported as `ratatui::crossterm`), without
+# its optional extras (the calendar widget, macros, the layout cache).
+ratatui = { version = "0.30", default-features = false, features = ["crossterm", "underline-color"] }
 # The store's database, with SQLite built in (no system library).
 rusqlite = { version = "0.40", features = ["bundled"] }
 # Each segment's checksum in its row.
 sha2 = { version = "0.10", default-features = false, features = ["std"] }
+# Grapheme clusters and their display width, measured the way ratatui draws
+# them, for wrapping and cutting text on the screen.
+unicode-segmentation = "1.12"
+unicode-width = { version = "0.2", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
