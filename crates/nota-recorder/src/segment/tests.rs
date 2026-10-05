@@ -1,6 +1,6 @@
 //! The segment acceptance tests: recording with live publishing crashed
 //! after every operation, salvage crashed after every operation, overlapping
-//! journals, and the rotation bound.
+//! journals (after a failed write or fsync), and the rotation bound.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -20,7 +20,7 @@ use super::*;
 use crate::fs::crash::{CrashCase, CrashTest};
 use crate::fs::fake::{CrashOutcome, FakeFs, Op};
 use crate::fs::{Fs, FsFile, StdFs};
-use crate::journal::format::{FRAME_HEADER_LEN, HEADER_LEN};
+use crate::journal::format::{FRAME_HEADER_LEN, HEADER_LEN, encode_frame};
 use crate::journal::{JournalHeader, JournalId, JournalWriter, read_journal};
 use crate::session::{
     FinishedJournal, MARKS_FILE_NAME, SessionDir, SessionError, SessionLock, SessionStore,
@@ -1004,6 +1004,229 @@ fn overlapping_journals_resolve_to_the_newer_one() {
         ])
         .run()
         .unwrap();
+}
+
+/// The operation to fail (counting every one attempted) for a journal
+/// fsync with frames to cover, chosen so that failing it breaks the journal
+/// mid-window: its replacement takes the replayed frames, then more audio,
+/// and is fsync'd past both.
+fn a_journal_sync_with_frames_to_cover(how: Recording) -> usize {
+    let (clean, _) = clean_run(how);
+    let ops = clean.ops();
+    // Where in the log a journal is fsync'd with frames written since its
+    // last fsync.
+    let mut unsynced: BTreeMap<&Path, bool> = BTreeMap::new();
+    let mut syncs = BTreeSet::new();
+    for (i, op) in ops.iter().enumerate() {
+        match op {
+            Op::Write { path, len } if is_journal(path) && *len != HEADER_LEN => {
+                unsynced.insert(path, true);
+            }
+            Op::Sync(path) if is_journal(path) => {
+                syncs.extend((unsynced.insert(path, false) == Some(true)).then_some(i));
+            }
+            _ => {}
+        }
+    }
+    // Reads that find nothing are attempted but not logged, so the log's
+    // index isn't the count to fail at: try each, and see where the run
+    // leaves the clean one.
+    (0..clean.attempted())
+        .find(|&at| {
+            let fs = FakeFs::with_dirs([session(), db()]);
+            record(
+                &fs,
+                Recording {
+                    fail_at: Some(at),
+                    ..how
+                },
+            );
+            let run = fs.ops();
+            let same = run.iter().zip(&ops).take_while(|(a, b)| a == b).count();
+            syncs.contains(&same) && replacement_synced_past_replay(&run[same..])
+        })
+        .unwrap_or_else(|| panic!("no journal fsync to fail in {ops:?}"))
+}
+
+/// Whether `after`, the operations after a journal's fsync failed, start a
+/// replacement journal that is fsync'd after holding the replayed frames and
+/// new audio.
+fn replacement_synced_past_replay(after: &[Op]) -> bool {
+    let Some(Op::Create(replacement)) = after.first() else {
+        return false;
+    };
+    if !is_journal(replacement) {
+        return false;
+    }
+    let mut frames = 0;
+    after.iter().any(|op| match op {
+        Op::Write { path, len } if path == replacement && *len != HEADER_LEN => {
+            frames += 1;
+            false
+        }
+        Op::Sync(path) => path == replacement && frames >= 2,
+        _ => false,
+    })
+}
+
+/// The audio a test marks the older copy of an overlap with: never what was
+/// recorded at `index`, so a row holding it shows the older copy was
+/// published.
+fn older_copy(track: TrackId, index: u64) -> i16 {
+    !sample(track, index)
+}
+
+/// A durable copy of `disk` in which every journal frame that a newer
+/// journal of its track covers whole holds [`older_copy`] audio instead,
+/// with its CRC remade, so it still reads. Returns it and how many frames
+/// were marked.
+fn mark_older_copies(disk: &FakeFs) -> (FakeFs, usize) {
+    let files: Vec<(PathBuf, Vec<u8>)> = disk
+        .paths()
+        .into_iter()
+        .filter_map(|p| disk.read(&p).ok().map(|bytes| (p, bytes)))
+        .collect();
+    let journals: Vec<(JournalId, TrackId, SampleRange)> = files
+        .iter()
+        .filter(|(path, _)| is_journal(path))
+        .filter_map(|(_, bytes)| {
+            let read = read_journal(bytes);
+            let header = read.header()?;
+            Some((header.id(), header.track(), read.range()?))
+        })
+        .collect();
+    let dirs = files
+        .iter()
+        .filter_map(|(p, _)| p.parent().map(Path::to_path_buf));
+    let copy = FakeFs::with_dirs(dirs.chain([session(), db()]));
+    let mut marked = 0;
+    for (path, bytes) in &files {
+        let read = read_journal(bytes);
+        let header = read.header().filter(|_| is_journal(path));
+        let out = match header {
+            Some(header) => {
+                let covered = |r: SampleRange| {
+                    journals.iter().any(|&(id, track, newer)| {
+                        id > header.id()
+                            && track == header.track()
+                            && newer.start() <= r.start()
+                            && r.end() <= newer.end()
+                    })
+                };
+                let mut out = bytes[..HEADER_LEN].to_vec();
+                for frame in read.frames() {
+                    let r = frame.range();
+                    let audio = if covered(r) {
+                        marked += 1;
+                        (r.start().get()..r.end().get())
+                            .map(|i| older_copy(frame.track(), i))
+                            .collect()
+                    } else {
+                        frame.samples().to_vec()
+                    };
+                    encode_frame(&mut out, frame.seq(), frame.track(), r.start(), &audio);
+                }
+                out.extend_from_slice(&bytes[read.valid_len()..]);
+                assert_eq!(out.len(), bytes.len(), "{}", path.display());
+                out
+            }
+            None => bytes.clone(),
+        };
+        let mut file = copy.create(path).unwrap();
+        file.write_all(&out).unwrap();
+    }
+    (copy.copy_disk(), marked)
+}
+
+#[test]
+fn marking_the_older_copy_shows_which_journal_was_published() {
+    // A journal broken by a failed fsync, kept whole by the crash: its
+    // frames past the last good fsync are the replacement's replayed ones.
+    let how = Recording {
+        steps: 6,
+        publish: false,
+        fail_at: None,
+    };
+    let how = Recording {
+        fail_at: Some(a_journal_sync_with_frames_to_cover(how)),
+        ..how
+    };
+    let (fs, promised) = clean_run(how);
+    let disk = fs.crash(CrashOutcome::KeepAll);
+    let (marked, frames) = mark_older_copies(&disk);
+    assert!(frames > 0, "nothing overlapped");
+    // Only those frames changed: no newer journal covers the rest.
+    let before = observe(&disk);
+    let after = observe(&marked);
+    assert_eq!(
+        before.files.keys().collect::<Vec<_>>(),
+        after.files.keys().collect::<Vec<_>>()
+    );
+    let changed: Vec<&PathBuf> = before
+        .files
+        .iter()
+        .filter(|(p, bytes)| after.files.get(*p) != Some(bytes))
+        .map(|(p, _)| p)
+        .collect();
+    assert_eq!(changed.len(), 1, "{changed:?}");
+    assert!(journal_samples(&after).is_err(), "the mark doesn't show");
+    // Salvage publishes the newer copy, so every row holds what was
+    // recorded, even crashed anywhere.
+    salvage_crashed_everywhere(&marked, &promised);
+}
+
+#[test]
+fn a_failed_journal_fsync_then_a_crash_anywhere_publishes_the_newer_copy_once() {
+    // A journal fsync fails mid-window: the journal breaks, and its
+    // replacement replays the unsynced audio from the durable end and goes
+    // on recording past it. On Linux the broken journal's unsynced frames
+    // may still survive a crash, written back before the error. Crash at
+    // every operation, under every standard outcome, with live publishing
+    // and without: salvage must publish each sample once, keep everything
+    // durable, and take the overlap from the newer journal. The older copy
+    // is marked with different audio before salvage, so a row holding it
+    // shows as the wrong audio.
+    for publish in [false, true] {
+        let base = Recording {
+            steps: 6,
+            publish,
+            fail_at: None,
+        };
+        let how = Recording {
+            fail_at: Some(a_journal_sync_with_frames_to_cover(base)),
+            ..base
+        };
+        let marked_cases = std::cell::Cell::new(0);
+        let summary = CrashTest::new(
+            move |fs: &FakeFs| record(fs, how),
+            |fs: &FakeFs| {
+                let (marked, frames) = mark_older_copies(fs);
+                if frames > 0 {
+                    marked_cases.set(marked_cases.get() + 1);
+                }
+                Recovered {
+                    before: observe(fs),
+                    after: salvage_fake(&marked),
+                    again: salvage_fake(&marked),
+                }
+            },
+            check,
+        )
+        .dirs([session(), db()])
+        .run()
+        .unwrap_or_else(|failure| panic!("publish {publish}: {failure}"));
+        assert!(summary.scenario_ops > 60, "{summary:?}");
+        assert_eq!(
+            summary.cases,
+            (summary.scenario_ops + 1) * CrashOutcome::standard().len()
+        );
+        // Not vacuous: many cases left an older copy for salvage to refuse.
+        assert!(
+            marked_cases.get() > 20,
+            "publish {publish}: {} cases overlapped",
+            marked_cases.get()
+        );
+    }
 }
 
 #[test]
