@@ -214,7 +214,7 @@ fn record_into(fs: &FakeFs, run: Run, promised: &mut Promised) -> Result<(), Str
         };
         let handled = handle(&mut writer, &mut timelines, track, event, &mut report)
             .map_err(|e| e.to_string())?;
-        if let Handled::Recorded(outcome) = handled {
+        if let Handled::Recorded(outcome, _) = handled {
             settle(&mut writer, outcome, &mut report).map_err(|e| e.to_string())?;
         }
         promised.note(&writer);

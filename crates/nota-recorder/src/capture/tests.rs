@@ -508,12 +508,12 @@ fn recording_an_unstarted_track_is_an_error() {
         clock,
     )
     .unwrap();
-    let (tx, rx) = mpsc::channel();
-    tx.send((MIC, CaptureEvent::Audio(samples(0, 10)))).unwrap();
+    let (tx, rx) = test_channel();
+    tx.send(MIC, CaptureEvent::Audio(samples(0, 10)));
     let events = CaptureReceiver {
         events: rx,
         rate: rate(),
-        tracks: vec![MIC],
+        tracks: test_tracks(&[MIC]),
     };
     let mut timeline = epoch_zero();
     let result = record_track(&mut writer, &mut timeline, &events, &mut |_| {});
@@ -525,25 +525,29 @@ fn recording_an_unstarted_track_is_an_error() {
 
 #[test]
 fn a_channel_with_no_senders_reads_as_stopped() {
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = test_channel();
     let rx = CaptureReceiver {
         events: rx,
         rate: rate(),
-        tracks: vec![MIC],
+        tracks: test_tracks(&[MIC]),
     };
-    assert!(matches!(rx.next(Duration::from_millis(1)), Next::Idle));
+    assert!(matches!(rx.next(Duration::from_millis(1)), Received::Idle));
     let sender = CaptureSender {
         events: tx.clone(),
         track: MIC,
+        progress: Progress::new(SampleIndex::ZERO, SampleIndex::ZERO),
         clock: Arc::new(FakeClock::new(SessionTime::ZERO)),
         stopping: Arc::new(AtomicBool::new(false)),
     };
     sender.audio(&[]);
-    assert!(matches!(rx.next(Duration::from_millis(1)), Next::Idle));
+    assert!(matches!(rx.next(Duration::from_millis(1)), Received::Idle));
     drop(tx);
-    assert!(matches!(rx.next(Duration::from_millis(1)), Next::Idle));
+    assert!(matches!(rx.next(Duration::from_millis(1)), Received::Idle));
     drop(sender);
-    assert!(matches!(rx.next(Duration::from_millis(1)), Next::Closed));
+    assert!(matches!(
+        rx.next(Duration::from_millis(1)),
+        Received::Closed
+    ));
 }
 
 #[test]
@@ -618,13 +622,13 @@ fn a_stream_at_another_rate_than_the_journals_records_nothing() {
     writer
         .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
         .unwrap();
-    let (tx, rx) = mpsc::channel();
-    tx.send((MIC, CaptureEvent::Audio(samples(0, 10)))).unwrap();
+    let (tx, rx) = test_channel();
+    tx.send(MIC, CaptureEvent::Audio(samples(0, 10)));
     let other = SampleRate::new(rate().hz() * 2).unwrap();
     let events = CaptureReceiver {
         events: rx,
         rate: other,
-        tracks: vec![MIC],
+        tracks: test_tracks(&[MIC]),
     };
     let mut timeline = epoch_zero();
     let result = record_track(&mut writer, &mut timeline, &events, &mut |_| {});
@@ -867,12 +871,12 @@ fn started_in(epoch: EpochId, at: u64) -> (FakeFs, SessionWriter<FakeFs>, Captur
     writer
         .start_track(MIC, epoch, SampleIndex::new(at))
         .unwrap();
-    let (tx, rx) = mpsc::channel();
-    tx.send((MIC, CaptureEvent::Audio(samples(0, 10)))).unwrap();
+    let (tx, rx) = test_channel();
+    tx.send(MIC, CaptureEvent::Audio(samples(0, 10)));
     let events = CaptureReceiver {
         events: rx,
         rate: rate(),
-        tracks: vec![MIC],
+        tracks: test_tracks(&[MIC]),
     };
     (fs, writer, events)
 }
@@ -931,11 +935,12 @@ fn a_timeline_out_of_step_with_the_writer_records_nothing() {
 
 #[test]
 fn notices_carry_the_time_they_were_reported() {
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = test_channel();
     let clock = Arc::new(FakeClock::new(at(7)));
     let sender = CaptureSender {
         events: tx,
         track: MIC,
+        progress: Progress::new(SampleIndex::ZERO, SampleIndex::ZERO),
         clock: Arc::clone(&clock) as Arc<dyn Clock>,
         stopping: Arc::new(AtomicBool::new(false)),
     };
@@ -945,10 +950,345 @@ fn notices_carry_the_time_they_were_reported() {
     let rx = CaptureReceiver {
         events: rx,
         rate: rate(),
-        tracks: vec![MIC],
+        tracks: test_tracks(&[MIC]),
     };
     assert!(matches!(
         rx.next(Duration::from_millis(1)),
-        Next::Event(MIC, CaptureEvent::Notice { notice: CaptureNotice::Overrun, at: t }) if t == at(7)
+        Received::Event(MIC, CaptureEvent::Notice { notice: CaptureNotice::Overrun, at: t }) if t == at(7)
     ));
+}
+
+/// A [`FakeFs`] whose fsyncs, once it's closed, wait until it's opened
+/// again, reporting each one that starts waiting.
+#[derive(Debug, Clone)]
+struct Stalling {
+    fs: FakeFs,
+    gate: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    stalled: mpsc::Sender<()>,
+}
+
+impl Stalling {
+    fn set_closed(&self, closed: bool) {
+        *self.gate.0.lock().unwrap() = closed;
+        self.gate.1.notify_all();
+    }
+}
+
+#[derive(Debug)]
+struct StallingFile {
+    file: FakeFile,
+    fs: Stalling,
+}
+
+impl FsFile for StallingFile {
+    fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.file.write_all(bytes)
+    }
+
+    fn sync(&mut self) -> io::Result<Synced> {
+        let (closed, opened) = &*self.fs.gate;
+        let mut closed = closed.lock().unwrap();
+        if *closed {
+            let _ = self.fs.stalled.send(());
+        }
+        while *closed {
+            closed = opened.wait(closed).unwrap();
+        }
+        drop(closed);
+        self.file.sync()
+    }
+}
+
+impl Fs for Stalling {
+    type File = StallingFile;
+    type Lock = FakeLock;
+
+    fn create(&self, path: &Path) -> io::Result<StallingFile> {
+        Ok(StallingFile {
+            file: self.fs.create(path)?,
+            fs: self.clone(),
+        })
+    }
+
+    fn create_dir(&self, path: &Path) -> io::Result<()> {
+        self.fs.create_dir(path)
+    }
+
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.fs.rename(from, to)
+    }
+
+    fn sync_dir(&self, dir: &Path) -> io::Result<()> {
+        self.fs.sync_dir(dir)
+    }
+
+    fn remove(&self, path: &Path) -> io::Result<()> {
+        self.fs.remove(path)
+    }
+
+    fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        self.fs.read(path)
+    }
+
+    fn list(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
+        self.fs.list(dir)
+    }
+
+    fn lock_dir(&self, dir: &Path) -> io::Result<FakeLock> {
+        self.fs.lock_dir(dir)
+    }
+}
+
+/// A backend that hands its stream's sender to the test, which then plays
+/// the audio server's callback.
+#[derive(Debug)]
+struct Handed(mpsc::Sender<CaptureSender>);
+
+impl CaptureBackend for Handed {
+    type Stream = ();
+
+    fn start(&self, _: &Source, _: SampleRate, events: CaptureSender) -> Result<(), CaptureError> {
+        self.0.send(events).unwrap();
+        Ok(())
+    }
+}
+
+fn positions_at(delivered: u64, captured: u64, durable: u64) -> Positions {
+    Positions {
+        delivered: SampleIndex::new(delivered),
+        captured: SampleIndex::new(captured),
+        durable: SampleIndex::new(durable),
+    }
+}
+
+#[test]
+fn audio_queued_behind_a_stalled_fsync_counts_as_delivered_and_at_risk() {
+    let (stalled, stalls) = mpsc::channel();
+    let fs = Stalling {
+        fs: FakeFs::with_dirs([dir()]),
+        gate: Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new())),
+        stalled,
+    };
+    let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let session = SessionDir::new(SESSION, fs.clone(), &dir()).lock().unwrap();
+    let length = SegmentLength::new(SampleCount::new(10_000)).unwrap();
+    let mut writer = SessionWriter::open(&session, rate(), length, Arc::clone(&clock)).unwrap();
+    writer
+        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .unwrap();
+    let (handed, sender) = mpsc::channel();
+    let (capture, events) =
+        start(&Handed(handed), MIC, &Source::Microphone, rate(), &clock).unwrap();
+    let stream = sender.recv().unwrap();
+    let progress = events.progress(MIC).unwrap();
+    assert!(events.progress(TrackId::new(9)).is_none());
+    assert_eq!(progress.now(), positions_at(0, 0, 0));
+
+    let (appended, appends) = mpsc::channel();
+    let recorder = thread::spawn(move || {
+        let mut timeline = epoch_zero();
+        let result = record_track(&mut writer, &mut timeline, &events, &mut |e| {
+            if let RecorderEvent::Audio(chunk) = e {
+                appended.send(chunk.samples().len()).unwrap();
+            }
+        });
+        (writer, result)
+    });
+    let next_append = || appends.recv_timeout(Duration::from_secs(10)).unwrap();
+
+    // Ten samples, appended and not yet due an fsync.
+    stream.audio(&samples(0, 10));
+    assert_eq!(next_append(), 10);
+    // Then 900 samples, more than the sync interval at 1 kHz: the fsync
+    // their append makes stalls, so they're off the queue but not yet
+    // captured, and still counted as queued.
+    fs.set_closed(true);
+    stream.audio(&samples(10, 900));
+    stalls.recv_timeout(Duration::from_secs(10)).unwrap();
+    let before = progress.now();
+    assert_eq!(before, positions_at(910, 10, 0));
+    assert_eq!(before.queued(), SampleCount::new(900));
+
+    // While it stalls, the stream delivers three more buffers: the queue
+    // grows, and so does what a crash now would lose.
+    for i in 0..3 {
+        stream.audio(&samples(910 + 100 * i, 100));
+    }
+    let stalled = progress.now();
+    assert_eq!(stalled, positions_at(1_210, 10, 0));
+    assert_eq!(stalled.queued(), SampleCount::new(1_200));
+    assert_eq!(stalled.at_risk(), SampleCount::new(1_210));
+
+    fs.set_closed(false);
+    assert_eq!(next_append(), 900);
+    for _ in 0..3 {
+        assert_eq!(next_append(), 100);
+    }
+    drop(stream);
+    drop(capture);
+    let (writer, result) = recorder.join().unwrap();
+    result.unwrap();
+    let after = progress.now();
+    assert_eq!(after.queued(), SampleCount::ZERO);
+    assert_eq!(after.delivered, SampleIndex::new(1_210));
+    // The stalled fsync went through, at the sync budget (850 samples).
+    assert_eq!(after, positions_at(1_210, 1_210, 850));
+    writer.finish().unwrap();
+}
+
+#[test]
+fn buffers_are_reused_in_the_steady_state() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let session = SessionDir::new(SESSION, fs.clone(), &dir()).lock().unwrap();
+    let length = SegmentLength::new(SampleCount::new(1_000)).unwrap();
+    let mut writer = SessionWriter::open(&session, rate(), length, Arc::clone(&clock)).unwrap();
+    writer
+        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .unwrap();
+    let (handed, sender) = mpsc::channel();
+    let (capture, events) =
+        start(&Handed(handed), MIC, &Source::Microphone, rate(), &clock).unwrap();
+    let stream = sender.recv().unwrap();
+    let queue = Arc::clone(&events.events);
+    let (appended, appends) = mpsc::channel();
+    let recorder = thread::spawn(move || {
+        let mut timeline = epoch_zero();
+        let mut chunks = Vec::new();
+        let mut finished = Vec::new();
+        let result = record_track(&mut writer, &mut timeline, &events, &mut |e| match e {
+            RecorderEvent::Audio(chunk) => {
+                chunks.push(chunk);
+                appended.send(()).unwrap();
+            }
+            other => finished.push(other),
+        });
+        (writer, result, chunks, finished)
+    });
+    // One buffer at a time, each recorded before the next, as a stream
+    // whose recorder keeps up. The recorder hands a buffer back just after
+    // reporting its audio, so when the next one is sent the last may not
+    // be back yet, but the one before it is: two buffers in all, reused
+    // from then on.
+    for i in 0..200 {
+        stream.audio(&samples(i * 32, 32));
+        appends.recv_timeout(Duration::from_secs(10)).unwrap();
+    }
+    drop(stream);
+    drop(capture);
+    let (writer, result, chunks, finished) = recorder.join().unwrap();
+    result.unwrap();
+    let allocated = queue.allocated();
+    assert!(
+        (1..=2).contains(&allocated),
+        "{allocated} buffers allocated"
+    );
+    // What was reported is the audio sent, though its buffers were reused.
+    let reported: Vec<i16> = chunks.iter().flat_map(|c| c.samples().to_vec()).collect();
+    assert_eq!(reported, samples(0, 200 * 32));
+    let journals = all_journals(writer, &finished);
+    assert_eq!(journaled(&fs, &journals), samples(0, 200 * 32));
+}
+
+#[test]
+fn audio_a_broken_journal_couldnt_keep_is_never_counted_durable() {
+    let fs = FakeFs::with_dirs([dir()]);
+    // As in the test above: everything fails from the first frame write on,
+    // so the journal breaks and no replacement can be made.
+    fs.crash_after(10);
+    let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let session = SessionDir::new(SESSION, fs.clone(), &dir()).lock().unwrap();
+    let length = SegmentLength::new(SampleCount::new(1_000)).unwrap();
+    let mut writer = SessionWriter::open(&session, rate(), length, Arc::clone(&clock)).unwrap();
+    writer
+        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .unwrap();
+    let (handed, sender) = mpsc::channel();
+    let (capture, events) =
+        start(&Handed(handed), MIC, &Source::Microphone, rate(), &clock).unwrap();
+    let stream = sender.recv().unwrap();
+    let progress = events.progress(MIC).unwrap();
+    let (appended, appends) = mpsc::channel();
+    let recorder = thread::spawn(move || {
+        let mut timeline = epoch_zero();
+        let mut failed = 0;
+        let result = record_track(&mut writer, &mut timeline, &events, &mut |e| match e {
+            RecorderEvent::Audio(_) => appended.send(()).unwrap(),
+            RecorderEvent::JournalFailed(_) => failed += 1,
+            _ => {}
+        });
+        (writer, result, failed)
+    });
+    for i in 0..5 {
+        stream.audio(&samples(i * 10, 10));
+        appends.recv_timeout(Duration::from_secs(10)).unwrap();
+    }
+    drop(stream);
+    drop(capture);
+    let (writer, result, failed) = recorder.join().unwrap();
+    result.unwrap();
+    assert!(failed > 0);
+    assert_eq!(writer.durable(MIC), None);
+    // All 50 samples moved the track on, and none of them is on disk.
+    let positions = progress.now();
+    assert_eq!(positions, positions_at(50, 50, 0));
+    assert_eq!(positions.at_risk(), SampleCount::new(50));
+}
+
+#[test]
+fn a_stream_that_outlives_its_receiver_queues_nothing() {
+    let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let (handed, sender) = mpsc::channel();
+    let (capture, events) =
+        start(&Handed(handed), MIC, &Source::Microphone, rate(), &clock).unwrap();
+    let stream = sender.recv().unwrap();
+    let queue = Arc::clone(&events.events);
+    stream.audio(&samples(0, 10));
+    drop(events);
+    stream.audio(&samples(10, 10));
+    stream.notice(CaptureNotice::Overrun);
+    drop(capture);
+    assert!(matches!(queue.next(Duration::ZERO), Received::Idle));
+}
+
+#[test]
+fn audio_the_writer_refuses_outright_stays_delivered() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let session = SessionDir::new(SESSION, fs, &dir()).lock().unwrap();
+    let length = SegmentLength::new(SampleCount::new(1_000)).unwrap();
+    let mut writer = SessionWriter::open(&session, rate(), length, Arc::clone(&clock)).unwrap();
+    let last = SampleIndex::new(u64::MAX - 1);
+    writer.start_track(MIC, EpochId::new(0), last).unwrap();
+    let mut timeline = TrackTimeline::new(MIC);
+    timeline
+        .open_epoch(SessionTime::ZERO, last, rate())
+        .unwrap();
+    let (tx, rx) = test_channel();
+    let progress = Progress::new(SampleIndex::ZERO, SampleIndex::ZERO);
+    let events = CaptureReceiver {
+        events: rx,
+        rate: rate(),
+        tracks: vec![(MIC, progress.clone())],
+    };
+    // Two samples where only one sample number is left: nothing is
+    // recorded, so they stay counted as delivered and not captured.
+    progress.sent(2);
+    tx.send(MIC, CaptureEvent::Audio(vec![1, 2]));
+    drop(tx);
+    let result = record_tracks(
+        &mut writer,
+        std::slice::from_mut(&mut timeline),
+        &events,
+        &mut |_, _| {},
+    );
+    assert!(matches!(
+        result,
+        Err(RecordError::Session(SessionError::Overflow))
+    ));
+    assert_eq!(writer.next_sample(MIC), Some(last));
+    let positions = progress.now();
+    assert_eq!(positions.captured, last);
+    assert_eq!(positions.queued(), SampleCount::new(1));
+    assert_eq!(positions.delivered, SampleIndex::new(u64::MAX));
 }
