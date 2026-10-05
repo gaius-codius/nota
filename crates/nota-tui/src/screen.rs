@@ -148,8 +148,9 @@ impl Recording {
     ///   while typing a note. `y` stops it, unless it comes within half a
     ///   second of the question opening: that's typing, not an answer. Any
     ///   other key keeps recording (and does nothing else), back to the note
-    ///   if one was being typed. Only Ctrl+C leaves the question open, so a
-    ///   double press neither answers nor dismisses it.
+    ///   if one was being typed, except the keys that asked: `s` and Ctrl+C
+    ///   leave the question open as it was, so a double press or a held key
+    ///   neither answers nor dismisses it.
     ///
     /// All of them work with Caps Lock on.
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Annotation> {
@@ -162,9 +163,13 @@ impl Recording {
         if key.kind != KeyEventKind::Press {
             return None;
         }
-        let plain = !key
-            .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let plain = !key.modifiers.intersects(
+            KeyModifiers::CONTROL
+                | KeyModifiers::ALT
+                | KeyModifiers::SUPER
+                | KeyModifiers::HYPER
+                | KeyModifiers::META,
+        );
         match self.stop {
             Stop::No => {}
             Stop::Asking { since } => {
@@ -173,9 +178,14 @@ impl Recording {
                     .is_some_and(|after| after >= STOP_GUARD);
                 self.stop = match key.code {
                     KeyCode::Char('y' | 'Y') if plain && answered => Stop::Confirmed,
-                    // Shift for a capital Y, say, isn't an answer.
-                    KeyCode::Modifier(_) => self.stop,
+                    // Asked again, as by a held `s` repeating: still asking,
+                    // and still since the first.
+                    KeyCode::Char('s' | 'S') if plain => self.stop,
                     _ if is_ctrl_c(key) => self.stop,
+                    // Only reported once the terminal's keyboard enhancement
+                    // flags are on, which nota doesn't turn on yet: Shift
+                    // pressed for a capital Y isn't an answer.
+                    KeyCode::Modifier(_) => self.stop,
                     _ => Stop::No,
                 };
                 return None;
@@ -458,12 +468,14 @@ mod tests {
             press(KeyCode::Esc),
             press(KeyCode::Char('m')),
             press(KeyCode::Char('x')),
-            press(KeyCode::Char('s')),
             press(KeyCode::Enter),
             press(KeyCode::Backspace),
             KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
             KeyEvent::new(KeyCode::Char('y'), KeyModifiers::ALT),
             KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT),
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::SUPER),
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::META),
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT),
         ] {
             let (mut screen, clock) = screen_at(secs(1));
             screen.handle_key(press(KeyCode::Char('s')));
@@ -478,6 +490,24 @@ mod tests {
             // And the keys work again.
             assert!(screen.handle_key(press(KeyCode::Char('m'))).is_some());
         }
+    }
+
+    #[test]
+    fn a_held_s_keeps_asking_from_the_first_press() {
+        let (mut screen, clock) = screen_at(secs(1));
+        screen.handle_key(press(KeyCode::Char('s')));
+        // Key repeat: a press every 30 ms after a 300 ms delay.
+        clock.advance(Duration::from_millis(300));
+        for _ in 0..10 {
+            screen.handle_key(press(KeyCode::Char('s')));
+            assert!(screen.is_confirming_stop());
+            clock.advance(Duration::from_millis(30));
+        }
+        screen.handle_key(press(KeyCode::Char('S')));
+        assert!(screen.is_confirming_stop());
+        // 630 ms after the first `s`, though only 30 after the last.
+        screen.handle_key(press(KeyCode::Char('y')));
+        assert!(screen.stop_confirmed());
     }
 
     #[test]

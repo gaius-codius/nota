@@ -13,6 +13,11 @@ ratatui.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
 
+# Flushing keys typed before the screen starts from the terminal's input
+# queue. Already in the tree through crossterm.
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["termios"] }
+
 [dev-dependencies]
 insta.workspace = true
 nota-core = { path = "../nota-core", features = ["fake-clock"] }
