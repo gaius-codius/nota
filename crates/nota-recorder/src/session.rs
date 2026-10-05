@@ -152,7 +152,8 @@ impl fmt::Display for SessionError {
             Self::Journal(e) => write!(f, "recording to the journal failed: {e}"),
             Self::Io(e) => write!(f, "reading the session directory failed: {e}"),
             Self::InUse(Use::Salvaging) => f.write_str("the session is being salvaged"),
-            Self::InUse(_) => f.write_str("the session is already being recorded"),
+            Self::InUse(Use::Publishing) => f.write_str("the session is being published"),
+            Self::InUse(Use::Recording) => f.write_str("the session is already being recorded"),
             Self::Marks(e) => write!(f, "reserving the next journal's ids failed: {e}"),
             Self::UnknownTrack(t) => write!(f, "track {} wasn't started", t.get()),
             Self::TrackExists(t) => write!(f, "track {} was already started", t.get()),
@@ -282,8 +283,9 @@ impl<S: Fs> SessionWriter<S> {
     ///
     /// # Errors
     ///
-    /// [`SessionError::InUse`] if the owner is salvaging the session or
-    /// already recording it; [`SessionError::Io`] if the directory, a
+    /// [`SessionError::InUse`] if the owner is salvaging the session,
+    /// already recording it, or publishing it (it may open once that run
+    /// ends, and then record alongside publishing); [`SessionError::Io`] if the directory, a
     /// journal still to publish or the marks can't be read (damaged marks
     /// are [`std::io::ErrorKind::InvalidData`]);
     /// [`SessionError::Overflow`] if the journal ids have run out.
@@ -297,6 +299,11 @@ impl<S: Fs> SessionWriter<S> {
         S: Clone,
     {
         let recording = session.begin(Use::Recording).map_err(SessionError::InUse)?;
+        // What the directory holds must hold still while it's read: no
+        // publishing run may delete a journal or add a segment meanwhile.
+        let _still = session
+            .begin(Use::Publishing)
+            .map_err(SessionError::InUse)?;
         let id = session.session().id();
         let fs = session.session().fs().clone();
         let dir = session.session().dir().to_path_buf();

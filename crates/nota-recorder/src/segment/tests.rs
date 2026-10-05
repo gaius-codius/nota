@@ -2917,7 +2917,16 @@ fn publishing_runs_one_at_a_time_and_never_during_salvage() {
             Err(PublishError::InUse(Use::Publishing))
         ));
     }
-    // Recording and publishing go together.
+    // A writer reads the directory as it opens, so not while publishing.
+    {
+        let _publishing = held(Use::Publishing);
+        let (_, clock) = fake_clock();
+        assert!(matches!(
+            SessionWriter::open(&lock, rate(), length(), clock),
+            Err(SessionError::InUse(Use::Publishing))
+        ));
+    }
+    // Once open, recording and publishing go together.
     let recording = held(Use::Recording);
     publish(&lock).unwrap();
     // Each use ends with its guard.

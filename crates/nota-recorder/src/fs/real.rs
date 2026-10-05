@@ -87,6 +87,7 @@ impl Fs for StdFs {
     }
 
     fn lock_dir(&self, dir: &Path) -> io::Result<StdLock> {
+        valid_path(dir)?;
         let handle = File::open(dir)?;
         if !handle.metadata()?.is_dir() {
             return Err(io::Error::new(

@@ -632,6 +632,7 @@ impl Fs for FakeFs {
     }
 
     fn lock_dir(&self, dir: &Path) -> io::Result<FakeLock> {
+        valid_path(dir)?;
         let mut state = self.lock();
         if state.names.files.contains_key(dir) {
             return Err(io::Error::new(
@@ -747,6 +748,10 @@ mod tests {
     #[test]
     fn lock_dir_needs_an_existing_directory() {
         let fs = FakeFs::with_dirs(["/s"]);
+        assert_eq!(
+            fs.lock_dir(&p("s")).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
         assert_eq!(
             fs.lock_dir(&p("/nope")).unwrap_err().kind(),
             io::ErrorKind::NotFound
