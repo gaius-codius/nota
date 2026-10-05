@@ -43,6 +43,19 @@
 //! then tells the recorder, which records everything the stream delivered
 //! before it ends.
 //!
+//! # Several tracks
+//!
+//! [`start_tracks`] starts one stream per track (the system audio and the
+//! microphone, say), all feeding one [`CaptureReceiver`], and
+//! [`record_tracks`] records them on one recorder thread into one
+//! [`SessionWriter`](crate::session::SessionWriter): each track in its own
+//! journals, epochs and segments, timed by its own [`TrackTimeline`]. A
+//! track whose stream fails is reported and the others record on; the
+//! recorder returns once every stream has stopped or failed. Every
+//! journal's fsync is checked after every event, whichever track it came
+//! from, and while no audio arrives, so each track keeps its own
+//! durable-loss bound.
+//!
 //! On Linux, [`PipeWireBackend`] captures through cpal's `PipeWire` host. It
 //! links `libpipewire-0.3` and `libasound` (cpal's ALSA host is always built
 //! on Linux) dynamically, and building it needs their development headers,
@@ -56,7 +69,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
-use nota_core::{Clock, Epoch, EpochError, SampleRate, SessionTime, TrackTimeline};
+use std::collections::BTreeSet;
+
+use nota_core::messages::AudioChunk;
+use nota_core::{Clock, Epoch, EpochError, SampleRate, SessionTime, TrackId, TrackTimeline};
 
 use crate::fs::Fs;
 use crate::session::{FinishedJournal, SessionError, SessionWriter};
@@ -64,7 +80,11 @@ use crate::session::{FinishedJournal, SessionError, SessionWriter};
 #[cfg(target_os = "linux")]
 mod pipewire;
 #[cfg(test)]
+mod stop_tests;
+#[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tracks_tests;
 
 #[cfg(target_os = "linux")]
 pub use pipewire::PipeWireBackend;
@@ -155,7 +175,9 @@ pub enum CaptureEvent {
 /// never blocks.
 #[derive(Debug, Clone)]
 pub struct CaptureSender {
-    events: mpsc::Sender<CaptureEvent>,
+    events: mpsc::Sender<(TrackId, CaptureEvent)>,
+    /// The track the stream captures.
+    track: TrackId,
     /// Stamps notices as they're reported.
     clock: Arc<dyn Clock>,
     /// Set once the capture is being stopped.
@@ -168,7 +190,9 @@ impl CaptureSender {
         if !samples.is_empty() {
             // The recorder has gone: nothing is listening, and the stream is
             // about to be stopped.
-            let _ = self.events.send(CaptureEvent::Audio(samples.to_vec()));
+            let _ = self
+                .events
+                .send((self.track, CaptureEvent::Audio(samples.to_vec())));
         }
     }
 
@@ -176,7 +200,9 @@ impl CaptureSender {
     /// session time now.
     pub fn notice(&self, notice: CaptureNotice) {
         let at = self.clock.now();
-        let _ = self.events.send(CaptureEvent::Notice { notice, at });
+        let _ = self
+            .events
+            .send((self.track, CaptureEvent::Notice { notice, at }));
     }
 
     /// Reports that the stream failed, unless the capture is being stopped:
@@ -184,33 +210,51 @@ impl CaptureSender {
     /// 0.18's `PipeWire` host says a named device disconnected).
     pub fn failed(&self, error: CaptureError) {
         if !self.stopping.load(Ordering::SeqCst) {
-            let _ = self.events.send(CaptureEvent::Failed(error));
+            let _ = self.events.send((self.track, CaptureEvent::Failed(error)));
         }
     }
 }
 
-/// The recorder thread's end of the channel, and the rate the stream
-/// captures at.
+/// The recorder thread's end of the channel: the events of every stream
+/// started into it, each with its track, and the rate they capture at.
 #[derive(Debug)]
 pub struct CaptureReceiver {
-    events: mpsc::Receiver<CaptureEvent>,
+    events: mpsc::Receiver<(TrackId, CaptureEvent)>,
     rate: SampleRate,
+    /// The tracks whose streams started, in order.
+    tracks: Vec<TrackId>,
+}
+
+/// What the recorder thread got from the channel.
+#[derive(Debug)]
+enum Next {
+    /// An event from a track's stream.
+    Event(TrackId, CaptureEvent),
+    /// Nothing came in time.
+    Idle,
+    /// Every sender has left: no stream sends anything more.
+    Closed,
 }
 
 impl CaptureReceiver {
-    /// The rate the stream captures at.
+    /// The rate the streams capture at.
     #[must_use]
     pub const fn rate(&self) -> SampleRate {
         self.rate
     }
 
-    /// The next event, waiting at most `timeout`. `None` if none came in
-    /// time. A channel every sender has left reads as [`CaptureEvent::Stopped`].
-    fn next(&self, timeout: Duration) -> Option<CaptureEvent> {
+    /// The tracks whose streams started, in the order they were asked for.
+    #[must_use]
+    pub fn tracks(&self) -> &[TrackId] {
+        &self.tracks
+    }
+
+    /// The next event, waiting at most `timeout`.
+    fn next(&self, timeout: Duration) -> Next {
         match self.events.recv_timeout(timeout) {
-            Ok(event) => Some(event),
-            Err(mpsc::RecvTimeoutError::Timeout) => None,
-            Err(mpsc::RecvTimeoutError::Disconnected) => Some(CaptureEvent::Stopped),
+            Ok((track, event)) => Next::Event(track, event),
+            Err(mpsc::RecvTimeoutError::Timeout) => Next::Idle,
+            Err(mpsc::RecvTimeoutError::Disconnected) => Next::Closed,
         }
     }
 }
@@ -240,8 +284,17 @@ pub trait CaptureBackend {
 #[derive(Debug)]
 pub struct Capture<T> {
     stream: Option<T>,
-    stopped: mpsc::Sender<CaptureEvent>,
+    track: TrackId,
+    stopped: mpsc::Sender<(TrackId, CaptureEvent)>,
     stopping: Arc<AtomicBool>,
+}
+
+impl<T> Capture<T> {
+    /// The track the stream captures.
+    #[must_use]
+    pub const fn track(&self) -> TrackId {
+        self.track
+    }
 }
 
 impl<T> Drop for Capture<T> {
@@ -250,38 +303,86 @@ impl<T> Drop for Capture<T> {
         // What it sends as it goes is still recorded, except a failure.
         self.stopping.store(true, Ordering::SeqCst);
         drop(self.stream.take());
-        let _ = self.stopped.send(CaptureEvent::Stopped);
+        let _ = self.stopped.send((self.track, CaptureEvent::Stopped));
     }
 }
 
-/// Starts capturing `source` at `rate` through `backend`. The stream's
-/// notices are stamped with `clock`, the session's.
+/// Starts capturing `source` as `track` at `rate` through `backend`. The
+/// stream's notices are stamped with `clock`, the session's.
 ///
 /// # Errors
 ///
 /// The backend's [`CaptureError`] if the stream can't be opened.
 pub fn start<B: CaptureBackend>(
     backend: &B,
+    track: TrackId,
     source: &Source,
     rate: SampleRate,
-    clock: Arc<dyn Clock>,
+    clock: &Arc<dyn Clock>,
 ) -> Result<(Capture<B::Stream>, CaptureReceiver), CaptureError> {
+    let (mut started, events) = start_tracks(backend, &[(track, source.clone())], rate, clock);
+    match started.pop() {
+        Some(Ok(capture)) => Ok((capture, events)),
+        Some(Err(error)) => Err(error),
+        // One source asked for, so one result.
+        None => Err(CaptureError::Backend("no stream was started".into())),
+    }
+}
+
+/// One stream [`start_tracks`] was asked for: running, or why it isn't.
+pub type Started<T> = Result<Capture<T>, CaptureError>;
+
+/// Starts capturing each `(track, source)` at `rate` through `backend`, all
+/// into one [`CaptureReceiver`], for [`record_tracks`] on one recorder
+/// thread. The streams' notices are stamped with `clock`, the session's.
+///
+/// Returns each stream's outcome, in the order given: a stream that can't
+/// be opened doesn't stop the others, and the receiver expects only those
+/// that started. A track listed twice isn't started again: that's an error
+/// for its second entry.
+pub fn start_tracks<B: CaptureBackend>(
+    backend: &B,
+    sources: &[(TrackId, Source)],
+    rate: SampleRate,
+    clock: &Arc<dyn Clock>,
+) -> (Vec<Started<B::Stream>>, CaptureReceiver) {
     let (tx, rx) = mpsc::channel();
-    let stopping = Arc::new(AtomicBool::new(false));
-    let sender = CaptureSender {
-        events: tx.clone(),
-        clock,
-        stopping: Arc::clone(&stopping),
-    };
-    let stream = backend.start(source, rate, sender)?;
-    Ok((
-        Capture {
+    let mut tracks = Vec::new();
+    let mut started = Vec::new();
+    for (track, source) in sources {
+        if tracks.contains(track) {
+            started.push(Err(CaptureError::Backend(format!(
+                "track {} was asked for twice",
+                track.get()
+            ))));
+            continue;
+        }
+        let stopping = Arc::new(AtomicBool::new(false));
+        let sender = CaptureSender {
+            events: tx.clone(),
+            track: *track,
+            clock: Arc::clone(clock),
+            stopping: Arc::clone(&stopping),
+        };
+        let capture = backend.start(source, rate, sender).map(|stream| Capture {
             stream: Some(stream),
-            stopped: tx,
+            track: *track,
+            stopped: tx.clone(),
             stopping,
+        });
+        if capture.is_ok() {
+            tracks.push(*track);
+        }
+        started.push(capture);
+    }
+    (
+        started,
+        CaptureReceiver {
+            events: rx,
+            rate,
+            tracks,
         },
-        CaptureReceiver { events: rx, rate },
-    ))
+    )
 }
 
 /// How long the recorder waits for audio before checking whether a journal
@@ -307,6 +408,16 @@ pub enum RecorderEvent {
     /// stays in its current one: the samples after the overrun are timed
     /// early by the audio lost. Recording goes on.
     EpochRefused(EpochError),
+    /// Audio the track recorded, as it was appended: for the engine, and
+    /// for level meters. Its samples are numbered as the journals number
+    /// them, and it never spans an epoch. Reported even if a journal broke
+    /// on it, since the samples are numbered all the same (see
+    /// [`Self::JournalFailed`]).
+    Audio(AudioChunk),
+    /// From [`record_tracks`] only: the track's stream failed and delivers
+    /// nothing more. What it sent before is recorded, and the other tracks
+    /// record on.
+    CaptureFailed(CaptureError),
 }
 
 /// Why [`record_track`] stopped early.
@@ -361,9 +472,10 @@ impl std::error::Error for RecordError {
 
 /// Records `timeline`'s track from `events` into `writer` until the
 /// capture stops, reporting finished journals, journal failures, the
-/// stream's notices and new epochs to `report` as they happen. Run it on
-/// the recorder thread. Start the track on `writer` first, and open the
-/// same epoch on `timeline`, at the session time the stream was started.
+/// stream's notices, new epochs and the audio recorded to `report` as they
+/// happen. Run it on the recorder thread. Start the track on `writer`
+/// first, and open the same epoch on `timeline`, at the session time the
+/// stream was started.
 ///
 /// At each overrun the track moves to a new epoch, in `timeline` and
 /// `writer` alike, starting at the time the overrun was reported (see the
@@ -383,68 +495,179 @@ impl std::error::Error for RecordError {
 ///
 /// # Errors
 ///
-/// [`RecordError::RateMismatch`], before anything is recorded, if the
-/// stream and `writer` run at different rates;
-/// [`RecordError::TimelineMismatch`], before anything is recorded, unless
-/// `timeline`'s current epoch is the one `writer` records the track in,
-/// from the same first sample, at `writer`'s rate;
-/// [`RecordError::Capture`] if the stream failed;
-/// [`RecordError::Session`] if `track` can't be recorded. A journal that
-/// breaks isn't an error here: it's reported, and recording goes on.
+/// As [`record_tracks`], and [`RecordError::Capture`] if the stream failed.
 pub fn record_track<S: Fs>(
     writer: &mut SessionWriter<S>,
     timeline: &mut TrackTimeline,
     events: &CaptureReceiver,
     report: &mut dyn FnMut(RecorderEvent),
 ) -> Result<(), RecordError> {
-    let track = timeline.track();
+    let mut failed = None;
+    record_tracks(
+        writer,
+        std::slice::from_mut(timeline),
+        events,
+        &mut |_track, event| match event {
+            RecorderEvent::CaptureFailed(error) => {
+                failed.get_or_insert(error);
+            }
+            event => report(event),
+        },
+    )?;
+    failed.map_or(Ok(()), |error| Err(RecordError::Capture(error)))
+}
+
+/// Records every track `events` captures, each into its own journals on
+/// `writer` and timed by its own timeline in `timelines`, until every
+/// stream has stopped or failed. Reports what [`record_track`] reports, with
+/// the track it's about (`None` for what concerns the session's journals as
+/// a whole: journals that ended, which may be any track's, and a journal
+/// that broke at an fsync), and a stream's failure as
+/// [`RecorderEvent::CaptureFailed`]: the other tracks record on. Run it on
+/// the recorder thread. Start each track on `writer` first, and open the
+/// same epoch on its timeline, at the session time its stream was started.
+///
+/// After every event, from whichever track, every journal due an fsync is
+/// fsync'd, and so are they all when nothing arrives for 100 ms: each
+/// track's durable position stays within about
+/// [`SYNC_INTERVAL`](crate::journal::SYNC_INTERVAL) of what it captured,
+/// however busy or quiet the other tracks are.
+///
+/// # Errors
+///
+/// Before anything is recorded: [`RecordError::RateMismatch`] if the
+/// streams and `writer` run at different rates;
+/// [`RecordError::Session`] with [`SessionError::UnknownTrack`] for a
+/// timeline whose track `writer` didn't start, or a stream with no
+/// timeline; [`RecordError::TimelineMismatch`] unless each timeline's
+/// current epoch is the one `writer` records its track in, from the same
+/// first sample, at `writer`'s rate. While recording,
+/// [`RecordError::Session`] if a track can't be recorded. A journal that
+/// breaks isn't an error here: it's reported, and recording goes on.
+pub fn record_tracks<S: Fs>(
+    writer: &mut SessionWriter<S>,
+    timelines: &mut [TrackTimeline],
+    events: &CaptureReceiver,
+    report: &mut dyn FnMut(Option<TrackId>, RecorderEvent),
+) -> Result<(), RecordError> {
     if events.rate() != writer.rate() {
         return Err(RecordError::RateMismatch {
             capture: events.rate(),
             journal: writer.rate(),
         });
     }
-    let Some((epoch, first_sample)) = writer.epoch(track) else {
+    for timeline in timelines.iter() {
+        let track = timeline.track();
+        let Some((epoch, first_sample)) = writer.epoch(track) else {
+            return Err(RecordError::Session(SessionError::UnknownTrack(track)));
+        };
+        let current = timeline
+            .current()
+            .map(|e| (e.id(), e.first_sample(), e.rate()));
+        if current != Some((epoch, first_sample, writer.rate())) {
+            return Err(RecordError::TimelineMismatch);
+        }
+    }
+    if let Some(&track) = events
+        .tracks()
+        .iter()
+        .find(|&&t| !timelines.iter().any(|timeline| timeline.track() == t))
+    {
+        return Err(RecordError::Session(SessionError::UnknownTrack(track)));
+    }
+    let mut live: BTreeSet<TrackId> = events.tracks().iter().copied().collect();
+    while !live.is_empty() {
+        let outcome = match events.next(IDLE_SYNC_CHECK) {
+            Next::Event(track, event) => match handle(writer, timelines, track, event, report)? {
+                Handled::Recorded(outcome) => outcome,
+                Handled::Ended => {
+                    live.remove(&track);
+                    continue;
+                }
+            },
+            Next::Idle => Ok(()),
+            Next::Closed => return Ok(()),
+        };
+        settle(writer, outcome, report)?;
+    }
+    Ok(())
+}
+
+/// What became of one event.
+enum Handled {
+    /// It was recorded, with this outcome from the writer.
+    Recorded(Result<(), (TrackId, SessionError)>),
+    /// The track's stream stopped or failed: nothing more comes from it.
+    Ended,
+}
+
+/// Records one `event` from `track`'s stream: audio appended to its
+/// journal and reported, an overrun turned into a new epoch, a failure
+/// reported. The writer's error, if any, comes back for [`settle`].
+fn handle<S: Fs>(
+    writer: &mut SessionWriter<S>,
+    timelines: &mut [TrackTimeline],
+    track: TrackId,
+    event: CaptureEvent,
+    report: &mut dyn FnMut(Option<TrackId>, RecorderEvent),
+) -> Result<Handled, RecordError> {
+    let Some(timeline) = timelines.iter_mut().find(|t| t.track() == track) else {
         return Err(RecordError::Session(SessionError::UnknownTrack(track)));
     };
-    let current = timeline
-        .current()
-        .map(|e| (e.id(), e.first_sample(), e.rate()));
-    if current != Some((epoch, first_sample, writer.rate())) {
-        return Err(RecordError::TimelineMismatch);
-    }
-    loop {
-        let event = events.next(IDLE_SYNC_CHECK);
-        let outcome = match event {
-            Some(CaptureEvent::Audio(samples)) => writer.append(track, &samples),
-            Some(CaptureEvent::Notice { notice, at }) => {
-                let lost = notice == CaptureNotice::Overrun;
-                report(RecorderEvent::Capture(notice));
-                if lost {
-                    open_epoch_after_loss(writer, timeline, at, report)
-                } else {
-                    Ok(())
-                }
+    let outcome = match event {
+        CaptureEvent::Audio(samples) => {
+            let first = writer
+                .next_sample(track)
+                .ok_or(SessionError::UnknownTrack(track))
+                .map_err(RecordError::Session)?;
+            let appended = writer.append(track, &samples);
+            if let Some(chunk) = AudioChunk::new(track, first, writer.rate(), samples) {
+                report(Some(track), RecorderEvent::Audio(chunk));
             }
-            Some(CaptureEvent::Failed(error)) => return Err(RecordError::Capture(error)),
-            Some(CaptureEvent::Stopped) => return Ok(()),
-            None => Ok(()),
-        };
-        let synced = writer.sync_if_due();
-        for result in [outcome, synced] {
-            match result {
-                Ok(()) => {}
-                Err(error @ (SessionError::Journal(_) | SessionError::Marks(_))) => {
-                    report(RecorderEvent::JournalFailed(error));
-                }
-                Err(error) => return Err(RecordError::Session(error)),
+            appended
+        }
+        CaptureEvent::Notice { notice, at } => {
+            let lost = notice == CaptureNotice::Overrun;
+            report(Some(track), RecorderEvent::Capture(notice));
+            if lost {
+                open_epoch_after_loss(writer, timeline, at, &mut |e| report(Some(track), e))
+            } else {
+                Ok(())
             }
         }
-        let finished = writer.take_finished();
-        if !finished.is_empty() {
-            report(RecorderEvent::Finished(finished));
+        CaptureEvent::Failed(error) => {
+            report(Some(track), RecorderEvent::CaptureFailed(error));
+            return Ok(Handled::Ended);
+        }
+        CaptureEvent::Stopped => return Ok(Handled::Ended),
+    };
+    Ok(Handled::Recorded(outcome.map_err(|e| (track, e))))
+}
+
+/// After an event: fsyncs every journal due one, reports a broken journal
+/// (from the event's `outcome`, with its track, or from the fsync) and the
+/// journals that ended. Any other writer error stops recording.
+fn settle<S: Fs>(
+    writer: &mut SessionWriter<S>,
+    outcome: Result<(), (TrackId, SessionError)>,
+    report: &mut dyn FnMut(Option<TrackId>, RecorderEvent),
+) -> Result<(), RecordError> {
+    let synced = writer.sync_if_due().map_err(|e| (None, e));
+    let outcome = outcome.map_err(|(track, e)| (Some(track), e));
+    for result in [outcome, synced] {
+        match result {
+            Ok(()) => {}
+            Err((track, error @ (SessionError::Journal(_) | SessionError::Marks(_)))) => {
+                report(track, RecorderEvent::JournalFailed(error));
+            }
+            Err((_, error)) => return Err(RecordError::Session(error)),
         }
     }
+    let finished = writer.take_finished();
+    if !finished.is_empty() {
+        report(None, RecorderEvent::Finished(finished));
+    }
+    Ok(())
 }
 
 /// Moves `timeline`'s track to a new epoch starting at `at`, in `timeline`

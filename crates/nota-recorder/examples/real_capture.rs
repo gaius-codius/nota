@@ -689,7 +689,7 @@ mod linux {
             })
         };
 
-        let (capture, events) = start(&PipeWireBackend, &source, RATE, Arc::clone(&clock))?;
+        let (capture, events) = start(&PipeWireBackend, TRACK, &source, RATE, &clock)?;
         let mut timeline = TrackTimeline::new(TRACK);
         timeline.open_epoch(clock.now(), SampleIndex::ZERO, RATE)?;
         let recorder = {
@@ -764,7 +764,12 @@ mod linux {
                     fs.0.note("journal-failed")
                 }
                 // Rows carry their epoch; the checks compare them as is.
-                RecorderEvent::Epoch(_) | RecorderEvent::EpochRefused(_) => Ok(()),
+                // The audio is checked from the journals; one track's
+                // stream failing ends `record_track` with that error.
+                RecorderEvent::Epoch(_)
+                | RecorderEvent::EpochRefused(_)
+                | RecorderEvent::Audio(_)
+                | RecorderEvent::CaptureFailed(_) => Ok(()),
                 RecorderEvent::Capture(n) => {
                     let logged = if n == CaptureNotice::Overrun {
                         fs.0.note("overrun")
@@ -1392,7 +1397,7 @@ mod linux {
             let sent = Arc::clone(&sent);
             thread::spawn(move || feeder(supervisor, &feed_rx, &sent))
         };
-        let (capture, capture_events) = start(&PipeWireBackend, &source, RATE, Arc::clone(&clock))?;
+        let (capture, capture_events) = start(&PipeWireBackend, TRACK, &source, RATE, &clock)?;
         let mut timeline = TrackTimeline::new(TRACK);
         timeline.open_epoch(clock.now(), SampleIndex::ZERO, RATE)?;
         let recorder = thread::spawn(move || {
