@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use crate::ids::{EpochId, TrackId};
-use crate::time::{SampleIndex, SampleRate, SessionTime};
+use crate::time::{SampleIndex, SampleRange, SampleRate, SessionTime};
 
 /// One epoch of a track: from `first_sample` on, sample `s` plays at
 /// `start + (s - first_sample) / rate`. It runs until the next epoch's first
@@ -165,6 +165,14 @@ pub enum EpochError {
     TimeOverflow,
     /// The track already has as many epochs as an [`EpochId`] can number.
     TooManyEpochs,
+    /// An epoch to follow ([`TrackTimeline::follow`]) isn't the next one
+    /// the timeline would open: one was missed, or came twice.
+    NotNext {
+        /// The id the next epoch would have.
+        expected: EpochId,
+        /// The id it had.
+        got: EpochId,
+    },
 }
 
 impl std::fmt::Display for EpochError {
@@ -191,6 +199,12 @@ impl std::fmt::Display for EpochError {
             ),
             Self::TimeOverflow => f.write_str("the previous epoch ends beyond the session clock"),
             Self::TooManyEpochs => f.write_str("the track has run out of epoch numbers"),
+            Self::NotNext { expected, got } => write!(
+                f,
+                "epoch {} came where epoch {} was due",
+                got.get(),
+                expected.get()
+            ),
         }
     }
 }
@@ -302,6 +316,66 @@ impl TrackTimeline {
             overrun: opened.overrun,
         });
         Ok(opened)
+    }
+
+    /// Adds `epoch`, which another timeline of this track opened, so this
+    /// one maps samples to session time the same way: for a thread that
+    /// follows a track the recorder is timing. Each epoch must come once,
+    /// in order.
+    ///
+    /// # Errors
+    ///
+    /// [`EpochError::NotNext`] unless `epoch` is the next this timeline
+    /// would open; otherwise as [`Self::open_epoch`] would refuse it, except
+    /// that an epoch starting before the previous one's audio ended is
+    /// always [`EpochError::ImplausibleOverrun`]: the timeline that opened
+    /// it would have moved it. The timeline is unchanged when it refuses.
+    pub fn follow(&mut self, epoch: &Epoch) -> Result<(), EpochError> {
+        let expected =
+            EpochId::new(u32::try_from(self.epochs.len()).map_err(|_| EpochError::TooManyEpochs)?);
+        if epoch.id != expected {
+            return Err(EpochError::NotNext {
+                expected,
+                got: epoch.id,
+            });
+        }
+        if let Some(previous) = self.epochs.last() {
+            if epoch.first_sample < previous.first_sample {
+                return Err(EpochError::SampleWentBack {
+                    previous: previous.first_sample,
+                    first_sample: epoch.first_sample,
+                });
+            }
+            let previous_end = previous
+                .time_of(epoch.first_sample)
+                .ok_or(EpochError::TimeOverflow)?;
+            if epoch.start < previous_end {
+                return Err(EpochError::ImplausibleOverrun {
+                    previous_end,
+                    start: epoch.start,
+                });
+            }
+        }
+        self.epochs.push(*epoch);
+        Ok(())
+    }
+
+    /// When the samples in `range` were heard: from the session time of its
+    /// first sample to the end of its last, timed by the epoch that last
+    /// sample is in. `None` if the range is empty, starts before the first
+    /// epoch, or the time overflows.
+    ///
+    /// A range that runs across epochs (audio either side of a reopened
+    /// stream) spans the gap between them as well.
+    #[must_use]
+    pub fn span_of(&self, range: SampleRange) -> Option<(SessionTime, SessionTime)> {
+        if range.is_empty() {
+            return None;
+        }
+        let last = SampleIndex::new(range.end().get() - 1);
+        let start = self.time_of(range.start())?;
+        let end = self.epoch_of(last)?.time_of(range.end())?;
+        Some((start, end))
     }
 
     /// The epoch `sample` belongs to, or `None` if it's before the first.
