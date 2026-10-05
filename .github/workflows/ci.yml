@@ -204,11 +204,7 @@ jobs:
       - name: Diff against the base branch
         env:
           PR_BASE: ${{ github.event.pull_request.base.sha }}
-        # TEMPORARY: the 88 mutants of the 33-minute run, on their own tree, with a deliberate gap in a test
-        run: |
-          git checkout -q c3b540455206681f3c8f54181010f8455829245f
-          sed -i '1057,1069d;1045,1048d' crates/nota-recorder/src/engine.rs
-          git diff --src-prefix=a/ --dst-prefix=b/ c3b540455206681f3c8f54181010f8455829245f^ > "$RUNNER_TEMP/pr.diff"
+        run: git diff --src-prefix=a/ --dst-prefix=b/ "$PR_BASE...HEAD" > "$RUNNER_TEMP/pr.diff"
       # A shard dealt no mutants (a small diff, or none in these crates) passes.
       - env:
           SHARD: ${{ strategy.job-index }}
