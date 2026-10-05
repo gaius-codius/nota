@@ -178,7 +178,8 @@ clear_cache() {
 
 # How many operations a full run does, on the plain disk.
 mkdir "$WORK/count" "$WORK/count/rec"
-TOTAL=$("$BIN" write "$WORK/count/rec" "$WORK/count/promises" | sed -n 's/^ops //p')
+TOTAL=$("$BIN" write "$WORK/count/rec" "$WORK/count/promises" | sed -n 's/^ops //p') ||
+  die "the write workload failed on the plain disk"
 [[ $TOTAL =~ ^[0-9]+$ ]] || die "the write workload didn't report its operation count"
 "$BIN" check "$WORK/count/rec" "$WORK/count/promises" > /dev/null ||
   die "an uncrashed run fails its own check"
