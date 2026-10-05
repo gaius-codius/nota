@@ -22,7 +22,8 @@
 //! through `nota-store`.
 //!
 //! The `nota-fake-engine` binary is a test double for the engine, for the
-//! supervisor's tests; it isn't part of nota.
+//! supervisor's tests, built only with the `fake-engine` feature, which the
+//! crate's own tests turn on; it isn't part of nota.
 
 pub mod capture;
 pub mod engine;

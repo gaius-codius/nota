@@ -24,11 +24,11 @@ use nota_core::{SampleCount, SampleIndex, SampleRange, SampleRate};
 /// [`ChunkerConfig::live`]; the fields can't be set out of range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChunkerConfig {
-    min_pause: u64,
-    target: u64,
-    cap: u64,
-    fallback_window: u64,
-    frame: u64,
+    min_pause: SampleCount,
+    target: SampleCount,
+    cap: SampleCount,
+    fallback_window: SampleCount,
+    frame: SampleCount,
 }
 
 impl ChunkerConfig {
@@ -41,11 +41,11 @@ impl ChunkerConfig {
         // the pause (at least 3), which is below the target, the window and
         // the cap.
         Self {
-            min_pause: (hz * 15 / 100).max(3),
-            target: (hz * 3).max(4),
-            cap: (hz * 10).max(5),
-            fallback_window: (hz * 8).max(5),
-            frame: (hz * 3 / 100).max(1),
+            min_pause: SampleCount::new((hz * 15 / 100).max(3)),
+            target: SampleCount::new((hz * 3).max(4)),
+            cap: SampleCount::new((hz * 10).max(5)),
+            fallback_window: SampleCount::new((hz * 8).max(5)),
+            frame: SampleCount::new((hz * 3 / 100).max(1)),
         }
     }
 
@@ -61,51 +61,51 @@ impl ChunkerConfig {
         frame: SampleCount,
     ) -> Option<Self> {
         let config = Self {
-            min_pause: min_pause.get(),
-            target: target.get(),
-            cap: cap.get(),
-            fallback_window: fallback_window.get(),
-            frame: frame.get(),
+            min_pause,
+            target,
+            cap,
+            fallback_window,
+            frame,
         };
-        let ok = config.frame > 0
-            && config.min_pause >= 2
+        let ok = config.frame > SampleCount::ZERO
+            && config.min_pause >= SampleCount::new(2)
             && config.min_pause <= config.target
             && config.target <= config.cap
             && config.frame <= config.fallback_window
             && config.fallback_window <= config.cap
             // Bounds the buffer to something addressable.
-            && usize::try_from(config.cap).is_ok();
+            && usize::try_from(config.cap.get()).is_ok();
         ok.then_some(config)
     }
 
     /// The shortest silence that counts as a pause.
     #[must_use]
     pub const fn min_pause(&self) -> SampleCount {
-        SampleCount::new(self.min_pause)
+        self.min_pause
     }
 
     /// How far into a chunk a pause must be to end it early.
     #[must_use]
     pub const fn target(&self) -> SampleCount {
-        SampleCount::new(self.target)
+        self.target
     }
 
     /// The longest chunk.
     #[must_use]
     pub const fn cap(&self) -> SampleCount {
-        SampleCount::new(self.cap)
+        self.cap
     }
 
     /// How far back from the cap the fallback cut may go.
     #[must_use]
     pub const fn fallback_window(&self) -> SampleCount {
-        SampleCount::new(self.fallback_window)
+        self.fallback_window
     }
 
     /// The frame the fallback cut compares loudness over.
     #[must_use]
     pub const fn frame(&self) -> SampleCount {
-        SampleCount::new(self.frame)
+        self.frame
     }
 }
 
@@ -121,16 +121,44 @@ pub struct Labels {
     pub silent_until: SampleIndex,
 }
 
-/// A run of audio cut from the stream.
+/// A run of audio cut from the stream. Only the chunker makes one, so the
+/// audio always holds exactly one value per sample in the range.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Chunk {
+    range: SampleRange,
+    audio: Vec<f32>,
+    has_speech: bool,
+}
+
+impl Chunk {
+    /// The audio from `start` on, or `None` if its end overflows.
+    fn new(start: SampleIndex, audio: Vec<f32>, has_speech: bool) -> Option<Self> {
+        let range = SampleRange::starting_at(start, SampleCount::new(audio.len() as u64))?;
+        Some(Self {
+            range,
+            audio,
+            has_speech,
+        })
+    }
+
     /// The samples it covers.
-    pub range: SampleRange,
-    /// The audio, one value per sample in `range`.
-    pub audio: Vec<f32>,
+    #[must_use]
+    pub const fn range(&self) -> SampleRange {
+        self.range
+    }
+
+    /// The audio, one value per sample in [`Self::range`].
+    #[must_use]
+    pub fn audio(&self) -> &[f32] {
+        &self.audio
+    }
+
     /// Whether any of it might be speech. `false` only when all of it is
     /// settled silence.
-    pub has_speech: bool,
+    #[must_use]
+    pub const fn has_speech(&self) -> bool {
+        self.has_speech
+    }
 }
 
 /// Cuts one track's audio into chunks. Feed it with [`Chunker::push`] and
@@ -139,15 +167,15 @@ pub struct Chunk {
 pub struct Chunker {
     config: ChunkerConfig,
     /// The first sample of the chunk being built.
-    start: u64,
+    start: SampleIndex,
     /// The audio from `start` on.
     audio: Vec<f32>,
     /// Finished speech segments that end after `start`, in order, clipped to
-    /// start at or after it.
-    segments: Vec<(u64, u64)>,
+    /// start at or after it, as `(from, to)`.
+    segments: Vec<(SampleIndex, SampleIndex)>,
     /// Everything before this is settled: speech if in `segments`, silence
     /// otherwise.
-    known: u64,
+    known: SampleIndex,
 }
 
 impl Chunker {
@@ -156,23 +184,23 @@ impl Chunker {
     pub const fn new(config: ChunkerConfig, first: SampleIndex) -> Self {
         Self {
             config,
-            start: first.get(),
+            start: first,
             audio: Vec::new(),
             segments: Vec::new(),
-            known: first.get(),
+            known: first,
         }
     }
 
     /// The sample the next pushed audio starts at.
     #[must_use]
     pub fn next_sample(&self) -> SampleIndex {
-        SampleIndex::new(self.end())
+        self.end()
     }
 
     /// The first sample not yet in a returned chunk.
     #[must_use]
     pub const fn chunk_start(&self) -> SampleIndex {
-        SampleIndex::new(self.start)
+        self.start
     }
 
     /// Adds `samples`, which follow on from [`Self::next_sample`], and what
@@ -199,13 +227,14 @@ impl Chunker {
         chunks
     }
 
-    fn end(&self) -> u64 {
-        self.start.saturating_add(self.audio.len() as u64)
+    fn end(&self) -> SampleIndex {
+        self.start
+            .saturating_add(SampleCount::new(self.audio.len() as u64))
     }
 
     fn learn(&mut self, labels: &Labels) {
         for segment in &labels.segments {
-            let (from, to) = (segment.start().get().max(self.start), segment.end().get());
+            let (from, to) = (segment.start().max(self.start), segment.end());
             if to > from {
                 self.known = self.known.max(to);
                 self.segments.push((from, to));
@@ -215,18 +244,18 @@ impl Chunker {
         // it; settle only what's here.
         self.known = self
             .known
-            .max(labels.silent_until.get())
+            .max(labels.silent_until)
             .clamp(self.start, self.end());
         self.segments.retain(|&(_, to)| to > self.start);
     }
 
     /// The pauses (maximal settled silences of at least `min_pause`) in the
     /// chunk, as `(from, to)`.
-    fn pauses(&self) -> Vec<(u64, u64)> {
+    fn pauses(&self) -> Vec<(SampleIndex, SampleIndex)> {
         let mut pauses = Vec::new();
         let mut silent_from = self.start;
-        let mut push = |from: u64, to: u64| {
-            if to.saturating_sub(from) >= self.config.min_pause {
+        let mut push = |from: SampleIndex, to: SampleIndex| {
+            if to.saturating_count_since(from) >= self.config.min_pause {
                 pauses.push((from, to));
             }
         };
@@ -240,10 +269,12 @@ impl Chunker {
     }
 
     /// Where to cut next, if anywhere yet.
-    fn next_cut(&self) -> Option<u64> {
+    fn next_cut(&self) -> Option<SampleIndex> {
         let pauses = self.pauses();
-        let middle = |&(from, to): &(u64, u64)| from + (to - from) / 2;
-        let into = |at: u64| at - self.start;
+        let middle = |&(from, to): &(SampleIndex, SampleIndex)| {
+            from.saturating_add(SampleCount::new(to.saturating_count_since(from).get() / 2))
+        };
+        let into = |at: SampleIndex| at.saturating_count_since(self.start);
 
         // 1. The first pause whose middle is past the target.
         if let Some(at) = pauses
@@ -258,11 +289,11 @@ impl Chunker {
         }
         // 2. At the cap: the widest pause with its middle inside the cap;
         //    the later one on a tie.
-        let cap_at = self.start + self.config.cap;
+        let cap_at = self.start.saturating_add(self.config.cap);
         if let Some(&pause) = pauses
             .iter()
             .filter(|pause| middle(pause) <= cap_at)
-            .max_by_key(|&&(from, to)| (to - from, from))
+            .max_by_key(|&&(from, to)| (to.saturating_count_since(from), from))
         {
             return Some(middle(&pause));
         }
@@ -270,34 +301,38 @@ impl Chunker {
         Some(self.quietest_frame_middle(cap_at))
     }
 
-    fn quietest_frame_middle(&self, cap_at: u64) -> u64 {
-        let window_start = cap_at - self.config.fallback_window;
+    fn quietest_frame_middle(&self, cap_at: SampleIndex) -> SampleIndex {
+        let window_start = cap_at.saturating_sub(self.config.fallback_window);
         let frame = self.config.frame;
+        let half_frame = SampleCount::new(frame.get() / 2);
         let mut best = (f64::INFINITY, cap_at);
         let mut from = window_start;
-        while from + frame <= cap_at {
-            let energy = self.energy(from, from + frame);
+        while let Some(to) = from.checked_add(frame) {
+            if to > cap_at {
+                break;
+            }
+            let energy = self.energy(from, to);
             // Strictly lower, so the earliest of equally quiet frames wins.
             if energy < best.0 {
-                best = (energy, from + frame / 2);
+                best = (energy, from.saturating_add(half_frame));
             }
-            from += frame;
+            from = to;
         }
         // A frame's middle is past the window start, which is at or after
         // the chunk start, and a frame is at least one sample, so the cut
         // is never at the chunk start unless the frame is one sample long.
-        best.1.max(self.start + 1)
+        best.1.max(self.start.saturating_add(SampleCount::new(1)))
     }
 
-    fn energy(&self, from: u64, to: u64) -> f64 {
+    fn energy(&self, from: SampleIndex, to: SampleIndex) -> f64 {
         let slice = self.slice(from, to);
         slice.iter().map(|&s| f64::from(s) * f64::from(s)).sum()
     }
 
     /// The buffered audio for `[from, to)`, clipped to what's buffered.
-    fn slice(&self, from: u64, to: u64) -> &[f32] {
-        let at = |pos: u64| {
-            usize::try_from(pos.saturating_sub(self.start))
+    fn slice(&self, from: SampleIndex, to: SampleIndex) -> &[f32] {
+        let at = |pos: SampleIndex| {
+            usize::try_from(pos.saturating_count_since(self.start).get())
                 .unwrap_or(usize::MAX)
                 .min(self.audio.len())
         };
@@ -306,11 +341,13 @@ impl Chunker {
 
     /// Cuts the chunk `[start, at)` off the front, or nothing if that would
     /// be empty.
-    fn cut(&mut self, at: u64) -> Option<Chunk> {
+    fn cut(&mut self, at: SampleIndex) -> Option<Chunk> {
         let at = at.min(self.end());
-        let range = SampleRange::new(SampleIndex::new(self.start), SampleIndex::new(at))
-            .filter(|range| !range.is_empty())?;
-        let len = usize::try_from(at - self.start).unwrap_or(self.audio.len());
+        if at <= self.start {
+            return None;
+        }
+        let len = usize::try_from(at.saturating_count_since(self.start).get())
+            .unwrap_or(self.audio.len());
         let rest = self.audio.split_off(len.min(self.audio.len()));
         let audio = std::mem::replace(&mut self.audio, rest);
         // Anything past `known` is unsettled and might be speech.
@@ -319,17 +356,14 @@ impl Chunker {
                 .segments
                 .iter()
                 .any(|&(from, to)| from < at && to > self.start);
+        let first = self.start;
         self.start = at;
         self.known = self.known.max(at);
         for segment in &mut self.segments {
             segment.0 = segment.0.max(at);
         }
         self.segments.retain(|&(from, to)| to > from);
-        Some(Chunk {
-            range,
-            audio,
-            has_speech,
-        })
+        Chunk::new(first, audio, has_speech)
     }
 }
 

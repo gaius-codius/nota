@@ -11,6 +11,17 @@ publish.workspace = true
 # `FakeFs` and the crash test helper, for other crates' tests. Enable it from
 # `[dev-dependencies]` only.
 fake-fs = []
+# Builds the `nota-fake-engine` test double. The recorder's own tests turn
+# it on (see `[dev-dependencies]`); nothing else should.
+fake-engine = []
+
+[[bin]]
+name = "nota-fake-engine"
+required-features = ["fake-engine"]
+
+[[test]]
+name = "supervisor"
+required-features = ["fake-engine"]
 
 [dependencies]
 crc32fast.workspace = true
@@ -26,6 +37,9 @@ cpal = { workspace = true, features = ["pipewire"] }
 
 [dev-dependencies]
 claxon.workspace = true
+# Turns on `fake-engine` for test builds only, so the supervisor's tests
+# always have the test double and release builds never do.
+nota-recorder = { path = ".", features = ["fake-engine"] }
 nota-core = { path = "../nota-core", features = ["fake-clock"] }
 proptest.workspace = true
 

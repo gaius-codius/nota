@@ -11,6 +11,10 @@
 //! through the recorder's filesystem layer; the recorder's crash tests use a
 //! stand-in store, and the `LazyFS` runs check this one on a real filesystem.
 //!
+//! The database file is created readable by its owner only (`0600`, as
+//! the recorder keeps its audio), and SQLite gives its `-wal` and `-shm`
+//! files the database file's permissions.
+//!
 //! **One store per session.** Rows carry no session, so a store must hold
 //! one session's rows only. (Salvage also ignores a row unless its segment
 //! file is in the session's directory and matches it: its SHA-256, and the
@@ -125,6 +129,8 @@ pub enum Inserted {
 pub enum StoreError {
     /// SQLite reported an error.
     Sqlite(rusqlite::Error),
+    /// The database file couldn't be created.
+    Create(std::io::Error),
     /// A pragma didn't take: its name and what it read back.
     Pragma {
         /// The pragma's name.
@@ -152,6 +158,7 @@ impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Sqlite(e) => write!(f, "sqlite error: {e}"),
+            Self::Create(e) => write!(f, "could not create the database file: {e}"),
             Self::Pragma { name, found } => {
                 write!(f, "pragma {name} did not take (read back {found:?})")
             }
@@ -172,6 +179,7 @@ impl std::error::Error for StoreError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Sqlite(e) => Some(e),
+            Self::Create(e) => Some(e),
             _ => None,
         }
     }
@@ -223,6 +231,32 @@ fn parse_row((track, epoch, start, end, hash): RawRow) -> Result<SegmentRow, Sto
         .ok_or_else(|| StoreError::Corrupt("range is empty".to_owned()))
 }
 
+/// Creates the file at `path`, readable and writable by its owner only, if
+/// nothing is there. SQLite would create it with the process umask, which
+/// usually lets anyone read it.
+#[cfg(unix)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the database's own file; SQLite does the rest of its I/O itself"
+)]
+fn create_private(path: &Path) -> Result<(), StoreError> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)
+        .map(drop)
+        .map_err(StoreError::Create)
+}
+
+/// Elsewhere the file's permissions come from its directory.
+#[cfg(not(unix))]
+fn create_private(_path: &Path) -> Result<(), StoreError> {
+    Ok(())
+}
+
 /// The nota database.
 #[derive(Debug)]
 pub struct Store {
@@ -230,7 +264,8 @@ pub struct Store {
 }
 
 impl Store {
-    /// Opens or creates the database at `path`.
+    /// Opens or creates the database at `path`. A new file is readable by
+    /// its owner only; an existing one keeps its permissions.
     ///
     /// Sets `journal_mode=WAL` and `synchronous=FULL` and checks both took.
     /// A new database gets its schema; one at the current version is used
@@ -242,6 +277,7 @@ impl Store {
     /// [`StoreError::UnknownSchema`] if the schema version isn't known, and
     /// [`StoreError::Sqlite`] for any other SQLite failure.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
+        create_private(path)?;
         let mut conn = Connection::open(path)?;
         let mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
         if !mode.eq_ignore_ascii_case("wal") {
@@ -277,6 +313,16 @@ impl Store {
     /// A row says its segment file is durable, and salvage deletes journals
     /// on its word, so only the recorder's publish step calls this, once the
     /// file is fsync'd under its final name.
+    ///
+    /// The type system can't hold callers to that here: the proof that a
+    /// file is durable (the recorder's `DurableSegment`) is built in the
+    /// recorder, which depends on this crate, so this one can't name it, and
+    /// Rust has no visibility for "this crate and the recorder only". The
+    /// recorder's `SegmentStore::insert` takes the proof and is the one
+    /// caller outside tests and examples. A row that claims a file wrongly
+    /// still can't cost audio: salvage deletes a journal on a row's word
+    /// only if the row's segment file exists and matches its hash and
+    /// length.
     ///
     /// If a row with the same track and start sample is stored, an identical
     /// one is [`Inserted::AlreadyPresent`] and a different one is a
@@ -555,6 +601,30 @@ mod tests {
         assert_eq!(store.segments().unwrap(), vec![]);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn database_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = TestDir::new("mode");
+        let mut store = open(&dir);
+        store.insert_segment(&row(1, 0, 0, 480, 7)).unwrap();
+        for name in ["nota.db", "nota.db-wal", "nota.db-shm"] {
+            let mode = std::fs::metadata(dir.0.join(name))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "{name}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unwritable_path_is_a_create_error() {
+        let dir = TestDir::new("create");
+        let path = dir.0.join("missing").join("nota.db");
+        assert!(matches!(Store::open(&path), Err(StoreError::Create(_))));
+    }
+
     #[test]
     fn unknown_schema_version_is_refused() {
         let dir = TestDir::new("schema");
@@ -611,8 +681,12 @@ mod tests {
     fn error_display_is_specific() {
         use std::error::Error as _;
         let existing = row(3, 0, 42, 50, 1);
-        let cases: [(StoreError, &str); 6] = [
+        let cases: [(StoreError, &str); 7] = [
             (StoreError::Sqlite(rusqlite::Error::InvalidQuery), "sqlite"),
+            (
+                StoreError::Create(std::io::Error::other("disk on fire")),
+                "create the database file: disk on fire",
+            ),
             (
                 StoreError::Pragma {
                     name: "journal_mode",
@@ -631,6 +705,11 @@ mod tests {
         }
         assert!(
             StoreError::Sqlite(rusqlite::Error::InvalidQuery)
+                .source()
+                .is_some()
+        );
+        assert!(
+            StoreError::Create(std::io::Error::other("x"))
                 .source()
                 .is_some()
         );

@@ -151,7 +151,7 @@ fn cuts_in_the_first_pause_after_the_target() {
     let mut detector = FakeDetector::new(0, vec![(0, 30), (40, 70), (80, 100)], 5, 0);
     let samples = audio(0, 100, &detector);
     let chunks = run(config, 0, &samples, &mut detector, &[1]);
-    let cuts: Vec<_> = chunks.iter().map(|c| c.range.end().get()).collect();
+    let cuts: Vec<_> = chunks.iter().map(|c| c.range().end().get()).collect();
     // Each pause is cut as soon as it's settled and `min_pause` long: in the
     // middle of what's known of it (30..35, 70..75), not of its final extent.
     assert_eq!(cuts, [32, 72, 100]);
@@ -165,8 +165,8 @@ fn at_the_cap_cuts_in_the_widest_pause() {
     let mut detector = FakeDetector::new(0, vec![(0, 10), (14, 20), (27, 200)], 3, 0);
     let samples = audio(0, 60, &detector);
     let chunks = run(config, 0, &samples, &mut detector, &[1]);
-    assert_eq!(chunks[0].range, range(0, 23));
-    assert!(chunks[0].has_speech);
+    assert_eq!(chunks[0].range(), range(0, 23));
+    assert!(chunks[0].has_speech());
 }
 
 #[test]
@@ -176,7 +176,7 @@ fn at_the_cap_the_widest_pause_wins_even_if_earlier() {
     let mut detector = FakeDetector::new(0, vec![(0, 8), (16, 22), (26, 200)], 3, 0);
     let samples = audio(0, 60, &detector);
     let chunks = run(config, 0, &samples, &mut detector, &[1]);
-    assert_eq!(chunks[0].range, range(0, 12));
+    assert_eq!(chunks[0].range(), range(0, 12));
 }
 
 #[test]
@@ -190,7 +190,7 @@ fn a_chunk_is_cut_as_soon_as_it_reaches_the_cap() {
     assert!(chunker.push(&[0.5; 39], &labels).is_empty());
     let chunks = chunker.push(&[0.5], &labels);
     assert_eq!(chunks.len(), 1);
-    assert!(chunks[0].range.end().get() <= 40);
+    assert!(chunks[0].range().end().get() <= 40);
 }
 
 #[test]
@@ -207,7 +207,7 @@ fn the_quietest_frame_is_by_energy_not_by_sum() {
         *s = 0.1;
     }
     let chunks = chunker.push(&samples, &Labels::default());
-    assert_eq!(chunks[0].range, range(0, 30));
+    assert_eq!(chunks[0].range(), range(0, 30));
 }
 
 #[test]
@@ -221,7 +221,7 @@ fn settled_silence_at_the_end_is_not_speech() {
     };
     let chunks = chunker.finish(&settled);
     assert_eq!(chunks.len(), 1);
-    assert!(!chunks[0].has_speech);
+    assert!(!chunks[0].has_speech());
     // Unsettled, the same audio might be speech.
     let mut chunker = Chunker::new(config, SampleIndex::ZERO);
     chunker.push(&[0.0; 5], &Labels::default());
@@ -248,7 +248,7 @@ fn in_continuous_speech_cuts_at_the_quietest_frame_before_the_cap() {
     let chunks = run(config, 0, &samples, &mut detector, &[100]);
     // Frames from 20: 20..24, 24..28, 28..32; the quietest is 24..28 (two
     // dipped samples) or 28..32 (two); the earlier wins, cut at its middle.
-    assert_eq!(chunks[0].range, range(0, 26));
+    assert_eq!(chunks[0].range(), range(0, 26));
 }
 
 #[test]
@@ -257,9 +257,9 @@ fn silence_is_cut_off_and_marked() {
     let mut detector = FakeDetector::new(1_000, vec![(1_050, 1_060)], 3, 2);
     let samples = audio(1_000, 100, &detector);
     let chunks = run(config, 1_000, &samples, &mut detector, &[7]);
-    assert!(!chunks[0].has_speech, "{chunks:?}");
-    assert!(chunks[0].range.end().get() <= 1_050);
-    assert!(chunks.iter().any(|c| c.has_speech));
+    assert!(!chunks[0].has_speech(), "{chunks:?}");
+    assert!(chunks[0].range().end().get() <= 1_050);
+    assert!(chunks.iter().any(Chunk::has_speech));
 }
 
 #[test]
@@ -270,7 +270,7 @@ fn unsettled_audio_counts_as_speech() {
     let mut chunker = Chunker::new(config, SampleIndex::ZERO);
     let chunks = chunker.push(&[0.0; 45], &Labels::default());
     assert_eq!(chunks.len(), 1);
-    assert!(chunks[0].has_speech);
+    assert!(chunks[0].has_speech());
 }
 
 #[test]
@@ -278,13 +278,14 @@ fn live_config_is_valid_at_any_rate() {
     for hz in [1, 2, 7, 8_000, 16_000, 48_000, 1_000_000] {
         let rate = nota_core::SampleRate::new(hz).unwrap();
         let live = ChunkerConfig::live(rate);
-        let again = config(
-            live.min_pause,
-            live.target,
-            live.cap,
-            live.fallback_window,
-            live.frame,
-        );
+        let again = ChunkerConfig::new(
+            live.min_pause(),
+            live.target(),
+            live.cap(),
+            live.fallback_window(),
+            live.frame(),
+        )
+        .unwrap();
         assert_eq!(live, again, "{hz} Hz");
     }
     let live = ChunkerConfig::live(nota_core::SampleRate::SPEECH);
@@ -351,19 +352,19 @@ proptest! {
     fn chunks_tile_the_stream(
         (config, first, len, truth, pushes, lag) in scenario()
     ) {
-        let mut detector = FakeDetector::new(first, truth, config.min_pause, lag);
+        let mut detector = FakeDetector::new(first, truth, config.min_pause().get(), lag);
         let samples = audio(first, len, &detector);
         let chunks = run(config, first, &samples, &mut detector, &pushes);
 
         let mut next = first;
         let mut joined = Vec::new();
         for chunk in &chunks {
-            prop_assert_eq!(chunk.range.start().get(), next);
-            prop_assert!(!chunk.range.is_empty());
-            prop_assert!(chunk.range.len().get() <= config.cap);
-            prop_assert_eq!(chunk.audio.len() as u64, chunk.range.len().get());
-            joined.extend_from_slice(&chunk.audio);
-            next = chunk.range.end().get();
+            prop_assert_eq!(chunk.range().start().get(), next);
+            prop_assert!(!chunk.range().is_empty());
+            prop_assert!(chunk.range().len() <= config.cap());
+            prop_assert_eq!(chunk.audio().len() as u64, chunk.range().len().get());
+            joined.extend_from_slice(chunk.audio());
+            next = chunk.range().end().get();
         }
         prop_assert_eq!(next, first + len);
         prop_assert_eq!(joined, samples);
@@ -373,13 +374,13 @@ proptest! {
     fn speech_is_never_marked_silent(
         (config, first, len, truth, pushes, lag) in scenario()
     ) {
-        let mut detector = FakeDetector::new(first, truth, config.min_pause, lag);
+        let mut detector = FakeDetector::new(first, truth, config.min_pause().get(), lag);
         let samples = audio(first, len, &detector);
         let chunks = run(config, first, &samples, &mut detector, &pushes);
         for chunk in chunks {
-            let (from, to) = (chunk.range.start().get(), chunk.range.end().get());
+            let (from, to) = (chunk.range().start().get(), chunk.range().end().get());
             if (from..to).any(|i| detector.in_speech(i)) {
-                prop_assert!(chunk.has_speech, "{:?}", chunk.range);
+                prop_assert!(chunk.has_speech(), "{:?}", chunk.range());
             }
         }
     }
@@ -388,19 +389,19 @@ proptest! {
     fn cuts_inside_speech_are_only_fallbacks(
         (config, first, len, truth, pushes, lag) in scenario()
     ) {
-        let mut detector = FakeDetector::new(first, truth, config.min_pause, lag);
+        let mut detector = FakeDetector::new(first, truth, config.min_pause().get(), lag);
         let samples = audio(first, len, &detector);
         let chunks = run(config, first, &samples, &mut detector, &pushes);
         let last = chunks.len().saturating_sub(1);
         for (k, chunk) in chunks.iter().enumerate() {
-            let cut = chunk.range.end().get();
+            let cut = chunk.range().end().get();
             // The last chunk ends where the stream does, which isn't a cut.
             if k == last || !detector.in_speech(cut) || !detector.in_speech(cut - 1) {
                 continue;
             }
             prop_assert!(
-                chunk.range.len().get() >= config.cap - config.fallback_window,
-                "{:?} cut inside speech before the fallback window", chunk.range
+                chunk.range().len().get() >= config.cap().get() - config.fallback_window().get(),
+                "{:?} cut inside speech before the fallback window", chunk.range()
             );
         }
     }
@@ -411,12 +412,12 @@ proptest! {
     fn short_speech_is_never_cut(
         (config, first, len, truth, pushes, lag) in short_speech()
     ) {
-        let mut detector = FakeDetector::new(first, truth, config.min_pause, lag);
+        let mut detector = FakeDetector::new(first, truth, config.min_pause().get(), lag);
         let samples = audio(first, len, &detector);
         let chunks = run(config, first, &samples, &mut detector, &pushes);
         let last = chunks.len().saturating_sub(1);
         for (k, chunk) in chunks.iter().enumerate() {
-            let cut = chunk.range.end().get();
+            let cut = chunk.range().end().get();
             if k < last {
                 prop_assert!(
                     !(detector.in_speech(cut) && detector.in_speech(cut - 1)),
