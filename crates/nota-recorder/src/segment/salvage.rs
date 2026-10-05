@@ -24,10 +24,10 @@ use super::{SegmentLength, is_temp_segment, segment_file_name};
 use crate::fs::Fs;
 use crate::journal::format::{FRAME_HEADER_LEN, HEADER_LEN, MAX_FRAME_SAMPLES, frames_after};
 use crate::journal::{JournalHeader, JournalId, JournalRead, read_journal, sync_budget};
-use crate::session::{FinishedJournal, SessionDir, SessionStore};
+use crate::session::{FinishedJournal, SessionDir, SessionStore, Use};
 
 /// What a publish run did.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct Published {
     segments: Vec<SegmentRow>,
     deleted: Vec<JournalId>,
@@ -116,6 +116,10 @@ pub enum PublishError {
     /// A journal finished in another session than the one being published.
     /// Nothing was done.
     OtherSession(FinishedJournal),
+    /// Salvage was refused, with nothing done: the session's owner is
+    /// recording it (or already salvaging it), so its journals aren't all
+    /// finished.
+    InUse(Use),
 }
 
 impl fmt::Display for PublishError {
@@ -135,6 +139,8 @@ impl fmt::Display for PublishError {
                 j.id().file_name(),
                 j.session().get()
             ),
+            Self::InUse(Use::Salvaging) => f.write_str("the session is already being salvaged"),
+            Self::InUse(_) => f.write_str("the session is being recorded; it can't be salvaged"),
         }
     }
 }
@@ -145,7 +151,7 @@ impl Error for PublishError {
             Self::Io(e) => Some(e),
             Self::Store(e) => Some(e.as_ref()),
             Self::Flac(e) => Some(e),
-            Self::Changed(_) | Self::OtherSession(_) => None,
+            Self::Changed(_) | Self::OtherSession(_) | Self::InUse(_) => None,
         }
     }
 }
@@ -170,17 +176,30 @@ fn store_error<E: Error + Send + Sync + 'static>(e: E) -> PublishError {
 /// nothing. `length` should be what the session recorded with; another
 /// value still loses nothing, but splits segments differently.
 ///
+/// Every journal it finds is taken as finished, so it runs only on a
+/// session nothing is recording: the store's [`SessionLock`] keeps out
+/// other owners, and within the owner it refuses while a
+/// [`SessionWriter`](crate::session::SessionWriter) is open.
+///
 /// # Errors
 ///
-/// As [`publish_journals`].
+/// [`PublishError::InUse`], before anything is done, if the owner is
+/// recording the session or already salvaging it. Otherwise as
+/// [`publish_journals`].
+///
+/// [`SessionLock`]: crate::session::SessionLock
 pub fn salvage<S: Fs, T: SegmentStore>(
     session: &mut SessionStore<S, T>,
     length: SegmentLength,
 ) -> Result<Published, PublishError> {
+    let _salvaging = session
+        .lock()
+        .begin(Use::Salvaging)
+        .map_err(PublishError::InUse)?;
     let (fs, dir) = (session.session().fs(), session.session().dir());
     let mut journals = Vec::new();
     for path in fs.list(dir)? {
-        if findings::is_temp(&path) {
+        if findings::is_temp(&path) || crate::session::is_marks_temp(&path) {
             // Best effort: the next findings write removes it anyway, and
             // the findings must never hold up publishing.
             let _gone = fs.remove(&path);
@@ -259,11 +278,14 @@ pub fn publish_journals<S: Fs, T: SegmentStore>(
     journals: &[FinishedJournal],
 ) -> Result<Published, PublishError> {
     let (session, store) = session.parts();
-    if let Some(&foreign) = journals.iter().find(|j| j.session() != session.id()) {
-        return Err(PublishError::OtherSession(foreign));
+    if let Some(foreign) = journals.iter().find(|j| j.session() != session.id()) {
+        return Err(PublishError::OtherSession(FinishedJournal::new(
+            foreign.session(),
+            foreign.id(),
+        )));
     }
     let (fs, dir) = (session.fs(), session.dir());
-    let ids: BTreeSet<JournalId> = journals.iter().map(|j| j.id()).collect();
+    let ids: BTreeSet<JournalId> = journals.iter().map(FinishedJournal::id).collect();
 
     // Pass 1: what each journal holds, without keeping its samples.
     let mut summaries = Vec::new();

@@ -13,7 +13,7 @@ use nota_core::{Clock, EpochId, FakeClock, SampleIndex, SampleRate, SessionId, S
 use std::error::Error as _;
 
 use super::*;
-use crate::fs::fake::{FakeFile, FakeFs};
+use crate::fs::fake::{FakeFile, FakeFs, FakeLock};
 use crate::fs::{Fs, FsFile, Synced};
 use crate::journal::{JournalId, read_journal};
 use crate::segment::SegmentLength;
@@ -133,7 +133,7 @@ fn run<S: Fs + Clone + 'static>(
 ) -> Run<S> {
     let clock = Arc::new(FakeClock::new(SessionTime::ZERO));
     let dyn_clock: Arc<dyn Clock> = Arc::clone(&clock) as Arc<dyn Clock>;
-    let session = SessionDir::new(SESSION, fs.clone(), &dir());
+    let session = SessionDir::new(SESSION, fs.clone(), &dir()).lock().unwrap();
     let length = SegmentLength::new(1_000).unwrap();
     let mut writer = SessionWriter::open(&session, rate(), length, dyn_clock).unwrap();
     writer
@@ -177,7 +177,11 @@ fn finished_reported(reported: &[RecorderEvent]) -> Vec<FinishedJournal> {
     reported
         .iter()
         .filter_map(|e| match e {
-            RecorderEvent::Finished(j) => Some(j.clone()),
+            RecorderEvent::Finished(j) => Some(
+                j.iter()
+                    .map(|j| FinishedJournal::new(j.session(), j.id()))
+                    .collect::<Vec<_>>(),
+            ),
             _ => None,
         })
         .flatten()
@@ -221,6 +225,7 @@ impl FsFile for WatchedFile {
 
 impl Fs for Watched {
     type File = WatchedFile;
+    type Lock = FakeLock;
 
     fn create(&self, path: &Path) -> io::Result<WatchedFile> {
         Ok(WatchedFile {
@@ -251,6 +256,10 @@ impl Fs for Watched {
 
     fn list(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
         self.fs.list(dir)
+    }
+
+    fn lock_dir(&self, dir: &Path) -> io::Result<FakeLock> {
+        self.fs.lock_dir(dir)
     }
 }
 
@@ -397,9 +406,10 @@ fn journals_are_synced_while_no_audio_arrives() {
 #[test]
 fn a_journal_that_cant_be_replaced_is_reported_and_the_track_moves_on() {
     let fs = FakeFs::with_dirs([dir()]);
-    // Lets the listing at open, the first journal's creation and a few
-    // writes through, then fails everything.
-    fs.crash_after(4);
+    // Lets the reads at open (the marks, the listing), the marks' write
+    // (five operations), the first journal's creation and a few writes
+    // through, then fails everything.
+    fs.crash_after(10);
     let script = (0..5).map(|i| Step::Audio(samples(i * 10, 10))).collect();
     let run = run(&fs, script, Vec::new(), |_| {});
     run.result.unwrap();
@@ -417,7 +427,7 @@ fn a_journal_that_cant_be_replaced_is_reported_and_the_track_moves_on() {
 fn recording_an_unstarted_track_is_an_error() {
     let fs = FakeFs::with_dirs([dir()]);
     let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
-    let session = SessionDir::new(SESSION, fs.clone(), &dir());
+    let session = SessionDir::new(SESSION, fs.clone(), &dir()).lock().unwrap();
     let mut writer =
         SessionWriter::open(&session, rate(), SegmentLength::new(1_000).unwrap(), clock).unwrap();
     let (tx, rx) = mpsc::channel();
@@ -509,7 +519,7 @@ fn capture_errors_and_sources_read_plainly() {
 fn a_stream_at_another_rate_than_the_journals_records_nothing() {
     let fs = FakeFs::with_dirs([dir()]);
     let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
-    let session = SessionDir::new(SESSION, fs.clone(), &dir());
+    let session = SessionDir::new(SESSION, fs.clone(), &dir()).lock().unwrap();
     let mut writer =
         SessionWriter::open(&session, rate(), SegmentLength::new(1_000).unwrap(), clock).unwrap();
     writer

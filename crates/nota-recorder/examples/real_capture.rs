@@ -90,7 +90,7 @@ mod linux {
     use nota_recorder::engine::{
         EngineCommand, EngineConfig, EngineEvent, EngineStatus, EngineStderr, EngineSupervisor,
     };
-    use nota_recorder::fs::{Fs, FsFile, StdFile, StdFs, Synced};
+    use nota_recorder::fs::{Fs, FsFile, StdFile, StdFs, StdLock, Synced};
     use nota_recorder::journal::{JournalId, SYNC_INTERVAL, read_journal};
     use nota_recorder::segment::{
         DurableSegment, Published, SegmentLength, SegmentStore, publish_journals, salvage,
@@ -495,6 +495,7 @@ mod linux {
 
     impl Fs for TapFs {
         type File = TapFile;
+        type Lock = StdLock;
 
         fn create(&self, path: &Path) -> io::Result<TapFile> {
             let file = self.counted("create", path, || {
@@ -550,6 +551,10 @@ mod linux {
 
         fn list(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
             StdFs.list(dir)
+        }
+
+        fn lock_dir(&self, dir: &Path) -> io::Result<StdLock> {
+            StdFs.lock_dir(dir)
         }
     }
 
@@ -654,7 +659,7 @@ mod linux {
         tap.reference = Some((ref_dir, Mutex::new(BTreeMap::new())));
         let fs = TapFs(Arc::new(tap));
 
-        let session = SessionDir::new(SESSION, fs.clone(), &session_path);
+        let session = SessionDir::new(SESSION, fs.clone(), &session_path).lock()?;
         let mut writer = SessionWriter::open(&session, RATE, length, Arc::clone(&clock))?;
         writer.start_track(TRACK, EpochId::new(0), SampleIndex::ZERO)?;
         fs.0.log("start 0")?;
@@ -799,7 +804,7 @@ mod linux {
         }
         let fs = TapFs(Arc::new(tap));
         let mut store = Store::open(&dir.join("nota.db"))?;
-        let session = SessionDir::new(SESSION, fs.clone(), &dir.join("session"));
+        let session = SessionDir::new(SESSION, fs.clone(), &dir.join("session")).lock()?;
         let counted = CountedStore {
             store: &mut store,
             fs: fs.clone(),
@@ -1063,7 +1068,7 @@ mod linux {
             .into());
         }
 
-        let ours = SessionDir::new(SESSION, StdFs, session);
+        let ours = SessionDir::new(SESSION, StdFs, session).lock()?;
         let first = salvage(&mut SessionStore::new(ours.clone(), &mut *store), length)?;
         let after = Observed::read(session, store)?;
         if recovered && after != before {
@@ -1366,7 +1371,7 @@ mod linux {
         let mut tap = Tap::new(Arc::clone(&clock));
         tap.frames = Some(Mutex::new(feed_tx.clone()));
         let fs = TapFs(Arc::new(tap));
-        let session = SessionDir::new(SESSION, fs, &dir);
+        let session = SessionDir::new(SESSION, fs, &dir).lock()?;
         // Short windows keep each journal small, as the feeder rereads it.
         let length = SegmentLength::new(10 * u64::from(RATE.hz())).ok_or("bad length")?;
         let mut writer = SessionWriter::open(&session, RATE, length, Arc::clone(&clock))?;
