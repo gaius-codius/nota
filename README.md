@@ -27,8 +27,9 @@ cargo build
 ```
 
 The script downloads the archive for your platform, checks it against the
-SHA-256 it pins and unpacks it into `target/sherpa-onnx/lib`, which
-`.cargo/config.toml` points the build at. Until it has run, the build stops
+SHA-256 it pins and unpacks it into `target/sherpa-onnx/sherpa-onnx-lib`,
+which `.cargo/config.toml` points the build at. Run cargo from inside the
+repo, where that file applies. Until it has run, the build stops
 with "SHERPA_ONNX_LIB_DIR does not exist".
 
 ## Licence

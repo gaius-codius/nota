@@ -33,7 +33,7 @@
 # Failing points keep their backing directory, promises and logs under the
 # work directory.
 
-set -euo pipefail
+set -Eeuo pipefail
 
 LAZYFS=${LAZYFS:-$HOME/.local/share/nota/lazyfs/lazyfs/build/lazyfs}
 STEP=1
@@ -60,9 +60,11 @@ die() { echo "lazyfs-crash: $*" >&2; exit 2; }
 
 [[ -x $LAZYFS ]] || die "no LazyFS binary at $LAZYFS (set LAZYFS)"
 command -v fusermount3 > /dev/null || die "fusermount3 not found"
-[[ $STEP =~ ^[1-9][0-9]*$ ]] || die "--step needs a positive number"
-[[ $FROM =~ ^[1-9][0-9]*$ ]] || die "--from needs a positive number"
-[[ -z $TO || $TO =~ ^[1-9][0-9]*$ ]] || die "--to needs a positive number"
+# At most 9 digits, so bash arithmetic can't overflow.
+[[ $STEP =~ ^[1-9][0-9]{0,8}$ ]] || die "--step needs a positive number"
+[[ $FROM =~ ^[1-9][0-9]{0,8}$ ]] || die "--from needs a positive number"
+[[ -z $TO || $TO =~ ^[1-9][0-9]{0,8}$ ]] || die "--to needs a positive number"
+[[ -z $TO || $FROM -le $TO ]] || die "--from $FROM is after --to $TO"
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 cargo build --manifest-path "$REPO/Cargo.toml" --example lazyfs_crash --locked --quiet
@@ -90,7 +92,11 @@ unmount() {
     # LazyFS exits once unmounted (with status 134: it aborts on every exit).
     # One that never mounted, or hangs, is killed by its PID.
     lazyfs_gone() { ! kill -0 "$LZ_PID" 2> /dev/null; }
-    wait_for 10 lazyfs_gone || kill -9 "$LZ_PID" 2> /dev/null || true
+    if ! wait_for 10 lazyfs_gone; then
+      kill -9 "$LZ_PID" 2> /dev/null || true
+      # A killed LazyFS that had mounted leaves it "not connected".
+      [[ -z $MNT ]] || fusermount3 -uz "$MNT" 2> /dev/null || true
+    fi
     wait "$LZ_PID" 2> /dev/null || true
     LZ_PID=
   fi
@@ -109,6 +115,8 @@ cleanup() {
   unmount
 }
 trap cleanup EXIT
+# Exit status 1 means failed points; anything unexpected is 2, with a line.
+trap 'echo "lazyfs-crash: unexpected failure at line $LINENO" >&2; exit 2' ERR
 trap 'exit 130' INT TERM
 
 # Waits up to $1 seconds for the command after it to succeed.

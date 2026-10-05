@@ -26,6 +26,10 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # sherpa-onnx-sys's cached build bundles the pinned libraries, and
+          # cargo doesn't notice a new pin; a new pin needs a new cache.
+          key: sherpa-onnx-${{ hashFiles('scripts/sherpa-onnx.sh') }}
       - run: scripts/install-linux-build-deps.sh
       - run: scripts/sherpa-onnx.test.sh
       # The sherpa-onnx libraries, from the archive pinned by SHA-256; every
@@ -46,6 +50,9 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # See the lint job.
+          key: sherpa-onnx-${{ hashFiles('scripts/sherpa-onnx.sh') }}
       # The sherpa-onnx libraries, from the archive pinned by SHA-256; every
       # build links these (.cargo/config.toml), never an unchecked download.
       - name: Fetch the pinned sherpa-onnx libraries
@@ -123,6 +130,9 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # See the lint job.
+          key: sherpa-onnx-${{ hashFiles('scripts/sherpa-onnx.sh') }}
       - run: scripts/check-no-gpl.test.sh
       - run: |
           lib=$(scripts/sherpa-onnx.sh --no-tts "$RUNNER_TEMP/sherpa-onnx")
@@ -143,9 +153,9 @@ jobs:
         with:
           workspaces: fuzz
       - run: scripts/install-linux-build-deps.sh
-      # Must match the afl crate in fuzz/Cargo.lock.
+      # Must match the afl crate in fuzz/Cargo.lock. Installing it also builds
+      # the AFL++ runtime.
       - run: cargo install cargo-afl --version 0.18.2 --locked
-      - run: cargo afl config --build
       - run: cargo afl build --locked
         working-directory: fuzz
 
@@ -206,6 +216,9 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # See the lint job.
+          key: sherpa-onnx-${{ hashFiles('scripts/sherpa-onnx.sh') }}
       # The sherpa-onnx libraries, from the archive pinned by SHA-256; every
       # build links these (.cargo/config.toml), never an unchecked download.
       - name: Fetch the pinned sherpa-onnx libraries
@@ -223,6 +236,9 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install && rustup component add llvm-tools-preview
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # See the lint job.
+          key: sherpa-onnx-${{ hashFiles('scripts/sherpa-onnx.sh') }}
       # The sherpa-onnx libraries, from the archive pinned by SHA-256; every
       # build links these (.cargo/config.toml), never an unchecked download.
       - name: Fetch the pinned sherpa-onnx libraries
