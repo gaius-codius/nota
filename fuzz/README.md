@@ -5,10 +5,10 @@
 through `cargo-afl`. CI builds the targets with `cargo afl build --locked`,
 so they keep compiling, but doesn't fuzz. CI sets
 `RUSTFLAGS="-C target-cpu=x86-64"`, which cargo-afl appends after its own
-`-C target-cpu=native`, and rustc uses the last one: the job's cached `target/` can come from a runner with a
-different CPU, and build scripts and proc macros built for a newer CPU crash
-with SIGILL on an older one. When a change to the recorder's
-dependencies makes that fail on `fuzz/Cargo.lock`, run `cargo metadata` in
+`-C target-cpu=native`, and rustc uses the last one: the job's cached
+`target/` can come from a runner with a different CPU, and build scripts and
+proc macros built for a newer CPU crash with SIGILL on an older one. When a
+change to the recorder's dependencies makes that fail on `fuzz/Cargo.lock`, run `cargo metadata` in
 `fuzz/` (it adds the missing packages and keeps the rest) and commit the
 lock file.
 
