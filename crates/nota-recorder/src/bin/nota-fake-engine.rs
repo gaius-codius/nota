@@ -29,7 +29,8 @@
 //! when stdin ends. Bad arguments exit 2. Like the real engine, every mode
 //! first ties itself to the recorder ([`nota_core::lifeline`]), so on Linux
 //! it dies with the recorder even while it sleeps, and exits 0 at once if
-//! the recorder has already gone.
+//! the recorder has already gone (exit 2 if the recorder's process id it's
+//! given isn't one).
 
 use std::collections::BTreeMap;
 use std::io::{self, BufReader, Read, Write};

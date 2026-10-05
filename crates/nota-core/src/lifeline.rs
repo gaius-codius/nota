@@ -34,29 +34,36 @@ pub enum Tie {
     /// The recorder that started the engine had already gone: the engine
     /// should exit now.
     Orphaned,
-    /// Not on this platform; the engine ends when its stdin closes.
+    /// Not on this platform, or the kernel refused (a sandbox's policy, say):
+    /// the engine ends when its stdin closes.
     Unsupported,
 }
 
 /// Ties this process (the engine) to its parent (the recorder): the kernel
 /// kills it when the parent dies. Call it first thing, before anything
-/// slow. Off Linux it's [`Tie::Unsupported`].
+/// slow. Off Linux, or if the kernel refuses, it's [`Tie::Unsupported`],
+/// and the engine still works: stdin closing ends it. The parent is
+/// checked either way.
 ///
 /// # Errors
 ///
-/// If the kernel refuses, or [`RECORDER_PID_VAR`] is set but isn't a
-/// process id.
+/// If [`RECORDER_PID_VAR`] is set but isn't a process id.
 pub fn tie_to_recorder() -> io::Result<Tie> {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         use rustix::process::{Signal, getppid, set_parent_process_death_signal};
 
-        set_parent_process_death_signal(Some(Signal::KILL))?;
+        let tied = set_parent_process_death_signal(Some(Signal::KILL)).is_ok();
         // Read after the signal is set: a recorder that dies from here on
         // kills the engine, and one that died before has left it with
         // another parent.
         let parent = getppid().map(|pid| pid.as_raw_nonzero().get());
-        check_parent(std::env::var_os(RECORDER_PID_VAR).as_deref(), parent)
+        let tie = check_parent(std::env::var_os(RECORDER_PID_VAR).as_deref(), parent)?;
+        Ok(if tie == Tie::Tied && !tied {
+            Tie::Unsupported
+        } else {
+            tie
+        })
     }
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
     Ok(Tie::Unsupported)

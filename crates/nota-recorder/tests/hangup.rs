@@ -328,12 +328,13 @@ fn a_hangup_to_the_recorders_group_leaves_the_engine_to_the_recorder() {
 }
 
 /// Acceptance (GAI-202): a recorder killed outright still takes the engine
-/// with it, within the shutdown grace: the engine's stdin closes.
+/// with it, within the shutdown grace: the kernel kills it (GAI-203), and
+/// its stdin closes.
 #[test]
 fn a_killed_recorder_still_ends_the_engine() {
     let (mut host, engine) = Host::start("kill");
     kill_process(host.pid(), Signal::KILL).unwrap();
-    // Counted from the kill: the engine's stdin closes as the host dies.
+    // Counted from the kill: the engine goes as the host dies.
     assert!(
         wait_until(SHUTDOWN_GRACE, || !alive(engine)),
         "the engine outlived its recorder"

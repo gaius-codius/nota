@@ -53,7 +53,8 @@ pub enum EngineError {
     Protocol(&'static str),
     /// A model couldn't be loaded.
     Model(String),
-    /// The engine couldn't be tied to the recorder's life.
+    /// The engine couldn't be tied to the recorder's life: the recorder's
+    /// process id it was given isn't one.
     Tie(io::Error),
 }
 
@@ -104,7 +105,8 @@ impl std::error::Error for EngineError {
 ///
 /// # Errors
 ///
-/// As [`child::run`], or if the tie or setting stdout aside fails.
+/// As [`child::run`], or if the recorder's process id it was given isn't
+/// one, or stdout can't be set aside.
 pub fn run_asr(paths: &sherpa::ModelPaths) -> Result<(), EngineError> {
     if lifeline::tie_to_recorder().map_err(EngineError::Tie)? == Tie::Orphaned {
         return Ok(());

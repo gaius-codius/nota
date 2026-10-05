@@ -935,7 +935,8 @@ fn an_engine_whose_recorder_has_already_gone_exits_at_once() {
 
     let mut engine = Command::new(env!("CARGO_BIN_EXE_nota-fake-engine"))
         .arg("echo")
-        .env(nota_core::lifeline::RECORDER_PID_VAR, "1")
+        // The largest pid there can be: never this test's.
+        .env(nota_core::lifeline::RECORDER_PID_VAR, i32::MAX.to_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .spawn()
