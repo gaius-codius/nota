@@ -12,6 +12,9 @@ set -euo pipefail
 script=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/sherpa-onnx.sh
 dir=$(mktemp -d)
 trap 'rm -rf "$dir"' EXIT
+# A symlink, as a target directory may be.
+mkdir "$dir/real-target"
+ln -s real-target "$dir/target"
 export CARGO_TARGET_DIR=$dir/target
 
 status=0
@@ -40,7 +43,7 @@ fi
 grep -q 'checksum mismatch' "$dir/err" || fail "expected a checksum mismatch, got: $(cat "$dir/err")"
 [[ ! -e $dir/sherpa-onnx-lib ]] || fail "left the earlier libraries for a build to link"
 [[ ! -e $dir/$name ]] || fail "kept the tampered archive"
-left=$(find "$CARGO_TARGET_DIR" -name '*sherpa*onnx*sys*')
+left=$(find -H "$CARGO_TARGET_DIR" -name '*sherpa*onnx*sys*')
 [[ -z $left ]] || fail "left sherpa-onnx-sys's build output, which bundles the earlier libraries: $left"
 [[ -f $CARGO_TARGET_DIR/release/deps/libsherpa_onnx-0123456789abcdef.rlib ]] ||
   fail "removed another crate's build output"

@@ -126,10 +126,19 @@ stamp=$dest/sherpa-onnx-lib.sha256
 # Drops the libraries an earlier run bundled into sherpa-onnx-sys's rlib:
 # its build output in every profile and target of the target directory
 # (`cargo clean -p` only cleans one profile).
-target_dir=${CARGO_TARGET_DIR:-$repo/target}
 clean_sys() {
+  local target_dir
+  # Cargo's own answer, so build.target-dir and CARGO_TARGET_DIR count.
+  target_dir=$(cd "$repo" && cargo metadata --format-version 1 --no-deps --offline |
+    sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p' | sed 's/\\\\/\\/g') ||
+    die "cargo metadata failed"
+  [[ -n $target_dir ]] || die "cargo metadata gave no target directory"
+  if command -v cygpath >/dev/null; then
+    target_dir=$(cygpath -u "$target_dir")
+  fi
   if [[ -d $target_dir ]]; then
-    find "$target_dir" \( -path '*/.fingerprint/sherpa-onnx-sys-*' -o -path '*/build/sherpa-onnx-sys-*' \
+    # -H: the target directory itself may be a symlink.
+    find -H "$target_dir" \( -path '*/.fingerprint/sherpa-onnx-sys-*' -o -path '*/build/sherpa-onnx-sys-*' \
       -o -name 'libsherpa_onnx_sys*' \) -prune -exec rm -rf {} +
   fi
   rm -f "$stamp"

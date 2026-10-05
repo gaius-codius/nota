@@ -153,9 +153,11 @@ jobs:
         with:
           workspaces: fuzz
       - run: scripts/install-linux-build-deps.sh
-      # Must match the afl crate in fuzz/Cargo.lock. Installing it also builds
-      # the AFL++ runtime.
+      # Must match the afl crate in fuzz/Cargo.lock.
       - run: cargo install cargo-afl --version 0.18.2 --locked
+      # Installing builds the AFL++ runtime, but a cached cargo-afl skips the
+      # install; --force builds it either way.
+      - run: cargo afl config --build --force
       - run: cargo afl build --locked
         working-directory: fuzz
 
