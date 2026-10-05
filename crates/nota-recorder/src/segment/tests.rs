@@ -3250,3 +3250,17 @@ fn a_newest_segment_that_cant_be_read_floors_the_track_at_its_window_end() {
     // Windows are 1,500 samples: 3,000 starts one, which ends at 4,500.
     assert_eq!(writer.first_free_sample(MIC), SampleIndex::new(4_500));
 }
+
+#[test]
+fn a_journal_still_to_publish_that_cant_be_read_stops_a_writer_opening() {
+    // A directory under a live journal's name reads as EISDIR: what it holds
+    // isn't known, so no floor can be set for it.
+    let live = session().join(JournalId::new(4).file_name());
+    let fs = FakeFs::with_dirs([session(), db(), live]);
+    let (_, clock) = fake_clock();
+    let err = SessionWriter::open(&owned(&fs), rate(), length(), clock).unwrap_err();
+    assert!(
+        matches!(&err, SessionError::Io(e) if e.kind() == io::ErrorKind::IsADirectory),
+        "{err}"
+    );
+}
