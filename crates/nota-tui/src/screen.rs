@@ -21,6 +21,11 @@ const LEVEL_LEAD: Duration = Duration::from_secs(5);
 /// stuck key from growing it without bound.
 const MAX_NOTE_CHARS: usize = 500;
 
+/// How soon after the stop question opens a `y` counts as typing rather
+/// than an answer. A word typed without `n` first, like "system", opens the
+/// question with its `s` and would confirm it with the `y` straight after.
+pub(crate) const STOP_GUARD: Duration = Duration::from_millis(500);
+
 /// News from the rest of nota for the screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Update {
@@ -68,8 +73,12 @@ pub struct Recording {
 pub(crate) enum Stop {
     /// Not asked.
     No,
-    /// `s` or Ctrl+C was pressed: the footer asks whether to stop.
-    Asking,
+    /// `s` or Ctrl+C was pressed at `since`: the footer asks whether to
+    /// stop.
+    Asking {
+        /// When the question opened, for [`STOP_GUARD`].
+        since: SessionTime,
+    },
     /// `y` answered the question: the recording is to stop.
     Confirmed,
 }
@@ -136,9 +145,11 @@ impl Recording {
     /// - `n` starts a note pinned to this moment. Typing fills it, `⏎` saves
     ///   it, `esc` drops it, and a blank note is dropped too.
     /// - `s` asks whether to stop the recording, and so does Ctrl+C, even
-    ///   while typing a note. `y` stops it; `n` or `esc` keeps recording,
-    ///   back to the note if one was being typed. Every other key is ignored
-    ///   while asking, Ctrl+C too, so only `y` can end a lecture.
+    ///   while typing a note. `y` stops it, unless it comes within half a
+    ///   second of the question opening: that's typing, not an answer. Any
+    ///   other key keeps recording (and does nothing else), back to the note
+    ///   if one was being typed. Only Ctrl+C leaves the question open, so a
+    ///   double press neither answers nor dismisses it.
     ///
     /// All of them work with Caps Lock on.
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Annotation> {
@@ -156,22 +167,24 @@ impl Recording {
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
         match self.stop {
             Stop::No => {}
-            Stop::Asking => {
-                match key.code {
-                    KeyCode::Char('y' | 'Y') if plain => self.stop = Stop::Confirmed,
-                    KeyCode::Char('n' | 'N') if plain => self.stop = Stop::No,
-                    KeyCode::Esc => self.stop = Stop::No,
-                    _ => {}
-                }
+            Stop::Asking { since } => {
+                let answered = at
+                    .checked_duration_since(since)
+                    .is_some_and(|after| after >= STOP_GUARD);
+                self.stop = match key.code {
+                    KeyCode::Char('y' | 'Y') if plain && answered => Stop::Confirmed,
+                    // Shift for a capital Y, say, isn't an answer.
+                    KeyCode::Modifier(_) => self.stop,
+                    _ if is_ctrl_c(key) => self.stop,
+                    _ => Stop::No,
+                };
                 return None;
             }
             // The screen is closing: nothing more to add.
             Stop::Confirmed => return None,
         }
-        if matches!(key.code, KeyCode::Char('c' | 'C'))
-            && key.modifiers.contains(KeyModifiers::CONTROL)
-        {
-            self.stop = Stop::Asking;
+        if is_ctrl_c(key) {
+            self.stop = Stop::Asking { since: at };
             return None;
         }
         if let Some(draft) = &mut self.draft {
@@ -207,7 +220,7 @@ impl Recording {
                 None
             }
             KeyCode::Char('s' | 'S') => {
-                self.stop = Stop::Asking;
+                self.stop = Stop::Asking { since: at };
                 None
             }
             _ => None,
@@ -229,7 +242,7 @@ impl Recording {
     /// Whether the footer is asking whether to stop the recording.
     #[must_use]
     pub fn is_confirming_stop(&self) -> bool {
-        self.stop == Stop::Asking
+        matches!(self.stop, Stop::Asking { .. })
     }
 
     /// Whether `y` has confirmed the stop. Once true it stays true, and the
@@ -249,10 +262,14 @@ impl Recording {
     }
 }
 
+fn is_ctrl_c(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('c' | 'C')) && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
 #[cfg(test)]
 mod tests {
     use nota_core::FakeClock;
-    use ratatui::crossterm::event::KeyEventState;
+    use ratatui::crossterm::event::{KeyEventState, ModifierKeyCode};
 
     use super::*;
 
@@ -406,11 +423,12 @@ mod tests {
 
     #[test]
     fn s_asks_before_stopping_and_y_stops() {
-        let (mut screen, _clock) = screen_at(secs(1));
+        let (mut screen, clock) = screen_at(secs(1));
         assert_eq!(screen.handle_key(press(KeyCode::Char('s'))), None);
         assert!(screen.is_confirming_stop());
         assert!(!screen.stop_confirmed());
         assert!(screen.annotations().is_empty());
+        clock.advance(STOP_GUARD);
         assert_eq!(screen.handle_key(press(KeyCode::Char('y'))), None);
         assert!(screen.stop_confirmed());
         assert!(!screen.is_confirming_stop());
@@ -424,57 +442,104 @@ mod tests {
 
     #[test]
     fn caps_lock_stops_too() {
-        let (mut screen, _clock) = screen_at(secs(1));
+        let (mut screen, clock) = screen_at(secs(1));
         screen.handle_key(press(KeyCode::Char('S')));
         assert!(screen.is_confirming_stop());
+        clock.advance(STOP_GUARD);
         screen.handle_key(press(KeyCode::Char('Y')));
         assert!(screen.stop_confirmed());
     }
 
     #[test]
-    fn n_and_esc_keep_recording() {
-        for cancel in [KeyCode::Char('n'), KeyCode::Char('N'), KeyCode::Esc] {
-            let (mut screen, _clock) = screen_at(secs(1));
+    fn any_other_key_keeps_recording_and_does_nothing_else() {
+        for key in [
+            press(KeyCode::Char('n')),
+            press(KeyCode::Char('N')),
+            press(KeyCode::Esc),
+            press(KeyCode::Char('m')),
+            press(KeyCode::Char('x')),
+            press(KeyCode::Char('s')),
+            press(KeyCode::Enter),
+            press(KeyCode::Backspace),
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::ALT),
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT),
+        ] {
+            let (mut screen, clock) = screen_at(secs(1));
             screen.handle_key(press(KeyCode::Char('s')));
-            assert_eq!(screen.handle_key(press(cancel)), None);
-            assert!(!screen.is_confirming_stop(), "{cancel:?}");
-            assert!(!screen.stop_confirmed(), "{cancel:?}");
-            // `n` answered the question; it didn't start a note.
-            assert!(!screen.is_typing_note(), "{cancel:?}");
+            clock.advance(STOP_GUARD);
+            assert_eq!(screen.handle_key(key), None, "{key:?}");
+            assert!(!screen.is_confirming_stop(), "{key:?}");
+            assert!(!screen.stop_confirmed(), "{key:?}");
+            // The key only answered the question: `n` didn't start a note,
+            // `m` didn't mark.
+            assert!(!screen.is_typing_note(), "{key:?}");
+            assert!(screen.annotations().is_empty(), "{key:?}");
             // And the keys work again.
             assert!(screen.handle_key(press(KeyCode::Char('m'))).is_some());
         }
     }
 
     #[test]
-    fn other_keys_do_nothing_while_asking() {
-        let (mut screen, _clock) = screen_at(secs(1));
+    fn a_modifier_alone_leaves_the_question_open() {
+        let (mut screen, clock) = screen_at(secs(1));
         screen.handle_key(press(KeyCode::Char('s')));
-        for key in [
-            press(KeyCode::Char('m')),
-            press(KeyCode::Char('x')),
-            press(KeyCode::Char('s')),
-            press(KeyCode::Enter),
-            ctrl_c(),
-            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
-            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT),
+        clock.advance(STOP_GUARD);
+        screen.handle_key(KeyEvent::new(
+            KeyCode::Modifier(ModifierKeyCode::LeftShift),
+            KeyModifiers::SHIFT,
+        ));
+        assert!(screen.is_confirming_stop());
+        screen.handle_key(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT));
+        assert!(screen.stop_confirmed());
+    }
+
+    #[test]
+    fn y_straight_after_the_question_is_typing_and_keeps_recording() {
+        let after = |ms| secs(10).checked_add(Duration::from_millis(ms)).unwrap();
+        let just_under = STOP_GUARD.checked_sub(Duration::from_nanos(1)).unwrap();
+        for (y_at, stops) in [
+            (secs(10), false),
+            (after(50), false),
+            (secs(10).checked_add(just_under).unwrap(), false),
+            (secs(10).checked_add(STOP_GUARD).unwrap(), true),
+            (after(4_000), true),
+            // Stamped before the question: never an answer.
+            (secs(9), false),
         ] {
-            assert_eq!(screen.handle_key(key), None, "{key:?}");
-            assert!(screen.is_confirming_stop(), "{key:?}");
-            assert!(!screen.stop_confirmed(), "{key:?}");
+            let (mut screen, _clock) = screen_at(secs(10));
+            screen.handle_key_at(press(KeyCode::Char('s')), secs(10));
+            screen.handle_key_at(press(KeyCode::Char('y')), y_at);
+            assert_eq!(screen.stop_confirmed(), stops, "{y_at:?}");
+            assert!(!screen.is_confirming_stop(), "{y_at:?}");
         }
-        assert!(screen.annotations().is_empty());
-        assert!(!screen.is_typing_note());
+    }
+
+    #[test]
+    fn typing_a_word_without_n_first_never_stops() {
+        for word in ["system", "symbol", "syringe", "easy", "stay", "SYSTEM"] {
+            let (mut screen, clock) = screen_at(secs(1));
+            for c in word.chars() {
+                screen.handle_key(press(KeyCode::Char(c)));
+                clock.advance(Duration::from_millis(80));
+            }
+            assert!(!screen.stop_confirmed(), "{word}");
+            assert!(!screen.is_confirming_stop(), "{word}");
+        }
     }
 
     #[test]
     fn ctrl_c_asks_and_a_second_does_not_stop() {
-        let (mut screen, _clock) = screen_at(secs(1));
+        let (mut screen, clock) = screen_at(secs(1));
         screen.handle_key(ctrl_c());
         assert!(screen.is_confirming_stop());
+        clock.advance(STOP_GUARD);
         screen.handle_key(ctrl_c());
         assert!(screen.is_confirming_stop());
         assert!(!screen.stop_confirmed());
+        // It didn't open the question again either: `y` still answers.
+        screen.handle_key(press(KeyCode::Char('y')));
+        assert!(screen.stop_confirmed());
         // Caps Lock on.
         let (mut screen, _clock) = screen_at(secs(1));
         screen.handle_key(KeyEvent::new(
@@ -491,9 +556,8 @@ mod tests {
         type_text(&mut screen, "half");
         screen.handle_key(ctrl_c());
         assert!(screen.is_confirming_stop());
-        // Not typed into the note while asking.
+        // `x` answers the question; it isn't typed into the note.
         screen.handle_key(press(KeyCode::Char('x')));
-        screen.handle_key(press(KeyCode::Esc));
         assert!(!screen.is_confirming_stop());
         assert!(screen.is_typing_note());
         type_text(&mut screen, " done");

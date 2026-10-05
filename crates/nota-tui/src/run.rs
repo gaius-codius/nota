@@ -184,8 +184,11 @@ pub fn run<B: Backend>(
 }
 
 /// A thread that reads keys and resizes from the terminal and sends them as
-/// [`Event`]s, each key stamped with the session clock as it's read. It
-/// stops when told to or dropped (waiting up to a second for the thread
+/// [`Event`]s, each key stamped with the session clock as it's read. Keys
+/// already waiting when it starts are discarded: they were typed before the
+/// screen was there to take them (during a slow start-up, say), and a
+/// Ctrl+C then `y` typed because nota looked stuck mustn't stop the new
+/// recording. It stops when told to or dropped (waiting up to a second for the thread
 /// either way), or when nothing receives its events. If reading fails it
 /// sends [`Event::InputLost`] and stops.
 #[derive(Debug)]
@@ -212,7 +215,7 @@ impl InputThread {
                 let stop = Arc::clone(&stop);
                 move || {
                     let _finishing = finishing;
-                    let read = read_input(&events, clock.as_ref(), &stop);
+                    let read = read_input(&mut Crossterm, &events, clock.as_ref(), &stop);
                     if let Err(err) = &read {
                         let _ = events.send(Event::InputLost(err.kind()));
                     }
@@ -262,12 +265,43 @@ impl Drop for InputThread {
     }
 }
 
-fn read_input(events: &Sender<Event>, clock: &dyn Clock, stop: &AtomicBool) -> io::Result<()> {
+/// Where the input thread reads terminal events: the terminal itself, or a
+/// test's script.
+trait Input {
+    /// Whether an event can be read within `timeout`.
+    fn poll(&mut self, timeout: Duration) -> io::Result<bool>;
+    /// The next event, waiting for it if need be.
+    fn read(&mut self) -> io::Result<event::Event>;
+}
+
+/// The terminal, through crossterm.
+struct Crossterm;
+
+impl Input for Crossterm {
+    fn poll(&mut self, timeout: Duration) -> io::Result<bool> {
+        event::poll(timeout)
+    }
+
+    fn read(&mut self) -> io::Result<event::Event> {
+        event::read()
+    }
+}
+
+fn read_input(
+    input: &mut impl Input,
+    events: &Sender<Event>,
+    clock: &dyn Clock,
+    stop: &AtomicBool,
+) -> io::Result<()> {
+    // Typed before the screen started: see [`InputThread`].
+    while input.poll(Duration::ZERO)? {
+        input.read()?;
+    }
     while !stop.load(Ordering::Relaxed) {
-        if !event::poll(INPUT_POLL)? {
+        if !input.poll(INPUT_POLL)? {
             continue;
         }
-        let event = match event::read()? {
+        let event = match input.read()? {
             event::Event::Key(key) => Event::Key {
                 key,
                 at: clock.now(),
@@ -284,6 +318,7 @@ fn read_input(events: &Sender<Event>, clock: &dyn Clock, stop: &AtomicBool) -> i
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::sync::mpsc;
 
     use nota_core::FakeClock;
@@ -436,8 +471,10 @@ mod tests {
             key: KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
             at: SessionTime::from_nanos(9),
         };
+        // Half a second after the question opened, so it's an answer.
+        let y = key_at(KeyCode::Char('y'), 9 + 500_000_000);
         // Nothing after the `y` is applied: no mark, no second note.
-        for event in [key('n'), key('o'), ctrl_c, key('y'), key('m'), key('n')] {
+        for event in [key('n'), key('o'), ctrl_c, y, key('m'), key('n')] {
             event_tx.send(event).unwrap();
         }
         // The recorder's sender is still alive: the key alone ends it.
@@ -457,7 +494,8 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(62, 20)).unwrap();
         let (event_tx, event_rx) = mpsc::channel();
         let (note_tx, note_rx) = mpsc::channel();
-        for event in [key('s'), key('y'), key('m')] {
+        let y = key_at(KeyCode::Char('y'), 7 + 500_000_000);
+        for event in [key('s'), y, key('m')] {
             event_tx.send(event).unwrap();
         }
         let ended = run(&mut terminal, &mut screen, &event_rx, &note_tx).unwrap();
@@ -482,5 +520,74 @@ mod tests {
         let at = SessionTime::from_nanos(7);
         assert_eq!(sent, [Annotation::Note(Note::new(at, "k").unwrap())]);
         drop(event_tx);
+    }
+
+    /// Terminal events in two lots: those already waiting when the input
+    /// thread starts, then those that come one by one after. Once both are
+    /// read it tells the thread to stop.
+    struct Script {
+        waiting: VecDeque<event::Event>,
+        later: VecDeque<event::Event>,
+        stop: Arc<AtomicBool>,
+    }
+
+    impl Input for Script {
+        fn poll(&mut self, timeout: Duration) -> io::Result<bool> {
+            if !self.waiting.is_empty() {
+                return Ok(true);
+            }
+            if timeout.is_zero() {
+                return Ok(false);
+            }
+            let Some(event) = self.later.pop_front() else {
+                self.stop.store(true, Ordering::Relaxed);
+                return Ok(false);
+            };
+            self.waiting.push_back(event);
+            Ok(true)
+        }
+
+        fn read(&mut self) -> io::Result<event::Event> {
+            self.waiting
+                .pop_front()
+                .ok_or_else(|| io::Error::other("nothing to read"))
+        }
+    }
+
+    fn terminal_key(code: KeyCode, modifiers: KeyModifiers) -> event::Event {
+        event::Event::Key(KeyEvent::new(code, modifiers))
+    }
+
+    #[test]
+    fn keys_waiting_before_the_screen_starts_are_discarded() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut script = Script {
+            // Ctrl+C then `y`, typed during a slow start-up.
+            waiting: VecDeque::from([
+                terminal_key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                terminal_key(KeyCode::Char('y'), KeyModifiers::NONE),
+                event::Event::Resize(80, 24),
+            ]),
+            later: VecDeque::from([
+                terminal_key(KeyCode::Char('m'), KeyModifiers::NONE),
+                event::Event::FocusGained,
+                event::Event::Resize(70, 24),
+            ]),
+            stop: Arc::clone(&stop),
+        };
+        let clock = FakeClock::new(SessionTime::from_nanos(42));
+        let (event_tx, event_rx) = mpsc::channel();
+        read_input(&mut script, &event_tx, &clock, &stop).unwrap();
+        let sent: Vec<_> = event_rx.try_iter().collect();
+        assert_eq!(
+            sent,
+            [
+                Event::Key {
+                    key: KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
+                    at: SessionTime::from_nanos(42),
+                },
+                Event::Resize,
+            ]
+        );
     }
 }

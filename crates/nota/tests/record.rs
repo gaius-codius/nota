@@ -361,10 +361,12 @@ fn s_asks_first_and_y_stops_with_everything_saved() {
     nota.press("n");
     assert!(nota.shows_after(at, "s stop"));
     assert_eq!(nota.child.try_wait().unwrap(), None);
-    // Ctrl+C asks too; `y` stops.
+    // Ctrl+C asks too; `y` stops, once the question has been open long
+    // enough for it to be an answer rather than typing.
     let at = nota.len();
     nota.press("\u{3}");
     assert!(nota.shows_after(at, "stop recording?"));
+    pause(Duration::from_millis(600));
     nota.press("y");
     let status = nota.exits().expect("nota didn't stop");
     assert!(status.success(), "{status:?}: {}", nota.output());

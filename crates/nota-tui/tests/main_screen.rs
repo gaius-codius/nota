@@ -156,3 +156,11 @@ fn too_small() {
     let terminal = draw(&main_screen(), 59, 20);
     insta::assert_snapshot!(terminal.backend());
 }
+
+#[test]
+fn too_small_confirming_stop() {
+    let mut screen = main_screen();
+    press(&mut screen, KeyCode::Char('s'));
+    let terminal = draw(&screen, 30, 8);
+    insta::assert_snapshot!(terminal.backend());
+}
