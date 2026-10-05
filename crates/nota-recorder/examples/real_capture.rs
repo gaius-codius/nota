@@ -1489,9 +1489,9 @@ mod linux {
                     // anything before that it sent before it died.
                     if offline_at.is_some() && resumed.is_none() {
                         resumed = Some(at);
-                        resumed_from = Some(t.range.start().get());
+                        resumed_from = Some(t.range().start().get());
                     }
-                    text.push(t.text);
+                    text.push(t.into_text());
                 }
                 EngineEvent::Confirmed { up_to, .. } => {
                     confirmed = up_to.get();

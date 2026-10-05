@@ -249,9 +249,9 @@ fn assert_text_reads_as_the_fixture(seen: &[(nota_core::SessionTime, EngineEvent
     let mut text = Vec::new();
     for (_, event) in seen {
         if let EngineEvent::Transcript(t) = event {
-            assert!(t.range.start().get() >= last_end, "overlapping text");
-            last_end = t.range.end().get();
-            text.push(t.text.clone());
+            assert!(t.range().start().get() >= last_end, "overlapping text");
+            last_end = t.range().end().get();
+            text.push(t.text().to_owned());
         }
     }
     let heard = words(&text.join(" "));

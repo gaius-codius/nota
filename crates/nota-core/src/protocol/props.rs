@@ -46,15 +46,15 @@ fn to_engine() -> impl Strategy<Value = Frame<ToEngine>> {
 fn from_engine() -> impl Strategy<Value = Frame<FromEngine>> {
     prop_oneof![
         any::<u16>().prop_map(|v| Frame::Hello(ProtocolVersion::new(v))),
-        (any::<u32>(), any::<u64>(), any::<u64>(), ".{0,40}").prop_map(|(track, a, b, text)| {
-            let range =
-                SampleRange::new(SampleIndex::new(a.min(b)), SampleIndex::new(a.max(b))).unwrap();
-            Frame::Message(FromEngine::Transcript(Transcript {
-                track: TrackId::new(track),
-                range,
-                text,
-            }))
-        }),
+        (any::<u32>(), any::<u64>(), any::<u64>(), ".{0,40}")
+            .prop_filter("a transcript covers some audio", |(_, a, b, _)| a != b)
+            .prop_map(|(track, a, b, text)| {
+                let range =
+                    SampleRange::new(SampleIndex::new(a.min(b)), SampleIndex::new(a.max(b)))
+                        .unwrap();
+                let transcript = Transcript::new(TrackId::new(track), range, text).unwrap();
+                Frame::Message(FromEngine::Transcript(transcript))
+            }),
         (any::<u32>(), any::<u64>()).prop_map(|(track, up_to)| Frame::Message(
             FromEngine::Confirmed {
                 track: TrackId::new(track),

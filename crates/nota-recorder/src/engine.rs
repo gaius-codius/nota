@@ -679,7 +679,7 @@ impl Supervisor {
             FromEngine::Transcript(transcript) => {
                 let replay = self
                     .tracks
-                    .get_mut(&transcript.track)
+                    .get_mut(&transcript.track())
                     .ok_or("text for an unknown track")?;
                 replay.on_transcript(transcript).map_err(|v| v.0)
             }

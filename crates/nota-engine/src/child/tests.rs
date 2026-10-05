@@ -146,13 +146,13 @@ fn transcribes_speech_and_confirms_everything_on_flush() {
                 confirmed = up_to.get();
             }
             Frame::Message(FromEngine::Transcript(t)) => {
-                assert_eq!(t.track, TRACK);
+                assert_eq!(t.track(), TRACK);
                 assert_eq!(
-                    t.range.start().get(),
+                    t.range().start().get(),
                     confirmed,
                     "text starts where the last confirmed did"
                 );
-                text.push((t.range, t.text.clone()));
+                text.push((t.range(), t.text().to_owned()));
             }
             Frame::Hello(_) => panic!("second hello"),
         }

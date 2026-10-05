@@ -154,12 +154,9 @@ fn answer(
     for chunk in chunks {
         if chunk.has_speech() {
             let text = transcriber.transcribe(chunk.audio());
-            if !text.is_empty() {
-                let transcript = Transcript {
-                    track,
-                    range: chunk.range(),
-                    text,
-                };
+            // A chunk is never empty, so the transcript always builds.
+            let transcript = Transcript::new(track, chunk.range(), text);
+            if let Some(transcript) = transcript.filter(|t| !t.text().is_empty()) {
                 send(output, &Frame::Message(FromEngine::Transcript(transcript)))?;
             }
         }

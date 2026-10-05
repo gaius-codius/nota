@@ -271,7 +271,10 @@ impl<W: Write> Engine<W> {
             slow_down(self.args.delay_ms);
         }
         let text = format!("{}-{}", start.get(), end.get());
-        self.send(FromEngine::Transcript(Transcript { track, range, text }))?;
+        let Some(transcript) = Transcript::new(track, range, text) else {
+            return Ok(());
+        };
+        self.send(FromEngine::Transcript(transcript))?;
         if self.args.mode == Mode::TextOnly {
             return Ok(());
         }

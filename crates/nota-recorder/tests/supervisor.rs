@@ -138,10 +138,10 @@ impl Events {
             .filter_map(|(_, e)| match e {
                 EngineEvent::Transcript(t) => {
                     assert_eq!(
-                        t.text,
-                        format!("{}-{}", t.range.start().get(), t.range.end().get())
+                        t.text(),
+                        format!("{}-{}", t.range().start().get(), t.range().end().get())
                     );
-                    Some((t.range.start().get(), t.range.end().get()))
+                    Some((t.range().start().get(), t.range().end().get()))
                 }
                 _ => None,
             })
@@ -279,7 +279,7 @@ fn sigkill_mid_chunk_loses_nothing_and_resumes() {
     // The two held chunks are resent and answered with the next three.
     events.until(
         Duration::from_secs(10),
-        |e| matches!(e, EngineEvent::Transcript(t) if t.range.start().get() == 5 * CHUNK),
+        |e| matches!(e, EngineEvent::Transcript(t) if t.range().start().get() == 5 * CHUNK),
     );
     let resumed_at = events.clock.now();
     let took = resumed_at.checked_duration_since(killed_at).unwrap();

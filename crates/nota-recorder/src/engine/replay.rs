@@ -254,18 +254,18 @@ impl Replay {
         let expected = self
             .held
             .last()
-            .map(|t| t.range.end())
+            .map(|t| t.range().end())
             .or_else(|| self.first_unconfirmed())
             .ok_or(Violation("text for audio not sent"))?;
-        if transcript.range.start() != expected {
+        if transcript.range().start() != expected {
             return Err(Violation(
                 "text doesn't start at the first unconfirmed sample",
             ));
         }
         let past = self
             .sent_run_end()
-            .is_none_or(|end| transcript.range.end() > end);
-        if transcript.range.is_empty() || past {
+            .is_none_or(|end| transcript.range().end() > end);
+        if past {
             return Err(Violation("text past the audio sent"));
         }
         self.held.push(transcript);
@@ -287,7 +287,7 @@ impl Replay {
         if self.sent_run_end().is_none_or(|end| up_to > end) {
             return Err(Violation("confirmed past the audio sent"));
         }
-        if self.held.iter().any(|t| t.range.end() > up_to) {
+        if self.held.iter().any(|t| t.range().end() > up_to) {
             return Err(Violation("text runs past its confirmation"));
         }
         self.confirm(up_to);
@@ -379,11 +379,12 @@ mod tests {
     }
 
     fn t(from: u64, to: u64) -> Transcript {
-        Transcript {
-            track: TRACK,
-            range: SampleRange::new(at(from), at(to)).unwrap(),
-            text: format!("{from}-{to}"),
-        }
+        Transcript::new(
+            TRACK,
+            SampleRange::new(at(from), at(to)).unwrap(),
+            format!("{from}-{to}"),
+        )
+        .unwrap()
     }
 
     fn sent(replay: &mut Replay) -> Vec<ToEngine> {
@@ -613,7 +614,8 @@ mod tests {
         assert!(replay.on_confirmed(at(111)).is_err(), "past the audio");
         assert!(replay.on_transcript(t(101, 105)).is_err(), "wrong start");
         assert!(replay.on_transcript(t(100, 111)).is_err(), "past the audio");
-        assert!(replay.on_transcript(t(100, 100)).is_err(), "empty");
+        let empty = SampleRange::new(at(100), at(100)).unwrap();
+        assert_eq!(Transcript::new(TRACK, empty, "x".into()), None, "empty");
         replay.on_transcript(t(100, 104)).unwrap();
         replay.on_transcript(t(104, 108)).unwrap();
         assert!(

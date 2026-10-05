@@ -115,15 +115,49 @@ impl AudioChunk {
     }
 }
 
-/// Text the engine heard in a run of one track's samples.
+/// Text the engine heard in a run of one track's samples. The run is never
+/// empty.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Transcript {
+    track: TrackId,
+    range: SampleRange,
+    text: String,
+}
+
+impl Transcript {
+    /// `text`, heard in `range` of `track`. `None` if the range is empty:
+    /// text is always heard in some audio.
+    #[must_use]
+    pub fn new(track: TrackId, range: SampleRange, text: String) -> Option<Self> {
+        if range.is_empty() {
+            return None;
+        }
+        Some(Self { track, range, text })
+    }
+
     /// The track the speech is from.
-    pub track: TrackId,
+    #[must_use]
+    pub const fn track(&self) -> TrackId {
+        self.track
+    }
+
     /// The samples the text covers.
-    pub range: SampleRange,
+    #[must_use]
+    pub const fn range(&self) -> SampleRange {
+        self.range
+    }
+
     /// What the engine heard, before any correction.
-    pub text: String,
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// The text, without the rest.
+    #[must_use]
+    pub fn into_text(self) -> String {
+        self.text
+    }
 }
 
 #[cfg(test)]
@@ -156,6 +190,21 @@ mod tests {
         );
         let empty = AudioChunk::new(TrackId::new(0), last, SampleRate::SPEECH, Vec::new()).unwrap();
         assert!(empty.range().is_empty());
+    }
+
+    #[test]
+    fn transcript_covers_some_audio() {
+        let range = |a, b| SampleRange::new(SampleIndex::new(a), SampleIndex::new(b)).unwrap();
+        let t = Transcript::new(TrackId::new(2), range(4, 9), "hello".to_owned()).unwrap();
+        assert_eq!(t.track(), TrackId::new(2));
+        assert_eq!(t.range(), range(4, 9));
+        assert_eq!(t.text(), "hello");
+        assert_eq!(t.into_text(), "hello");
+        assert_eq!(
+            Transcript::new(TrackId::new(2), range(4, 4), "x".to_owned()),
+            None
+        );
+        assert!(Transcript::new(TrackId::new(2), range(4, 5), String::new()).is_some());
     }
 
     #[test]

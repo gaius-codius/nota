@@ -23,7 +23,7 @@
 //! Bytes from the other process are untrusted: a native crash can leave half
 //! a frame, and a library can print to the wrong stream. The decoder checks
 //! every field and builds the typed messages ([`AudioChunk`],
-//! [`SampleRange`]) through their checking constructors, so nothing past this
+//! [`Transcript`], [`SampleRange`]) through their checking constructors, so nothing past this
 //! module sees raw bytes. Every frame it accepts has exactly one encoding,
 //! and the property tests check that.
 
@@ -139,14 +139,14 @@ impl WireMessage for FromEngine {
     fn encode_body(&self, out: &mut Vec<u8>) -> Result<(), EncodeError> {
         match self {
             Self::Transcript(transcript) => {
-                if transcript.text.len() > MAX_TEXT_LEN {
+                if transcript.text().len() > MAX_TEXT_LEN {
                     return Err(EncodeError::TooLarge);
                 }
                 out.push(TAG_TRANSCRIPT);
-                out.extend_from_slice(&transcript.track.get().to_le_bytes());
-                out.extend_from_slice(&transcript.range.start().get().to_le_bytes());
-                out.extend_from_slice(&transcript.range.end().get().to_le_bytes());
-                out.extend_from_slice(transcript.text.as_bytes());
+                out.extend_from_slice(&transcript.track().get().to_le_bytes());
+                out.extend_from_slice(&transcript.range().start().get().to_le_bytes());
+                out.extend_from_slice(&transcript.range().end().get().to_le_bytes());
+                out.extend_from_slice(transcript.text().as_bytes());
             }
             Self::Confirmed { track, up_to } => {
                 out.push(TAG_CONFIRMED);
@@ -167,7 +167,9 @@ impl WireMessage for FromEngine {
                 let text = std::str::from_utf8(fields.rest())
                     .map_err(|_| DecodeError::NotUtf8)?
                     .to_owned();
-                Ok(Self::Transcript(Transcript { track, range, text }))
+                let transcript =
+                    Transcript::new(track, range, text).ok_or(DecodeError::EmptyRange)?;
+                Ok(Self::Transcript(transcript))
             }
             TAG_CONFIRMED => {
                 let track = TrackId::new(fields.u32()?);
@@ -393,6 +395,8 @@ pub enum DecodeError {
     RangeOverflow,
     /// A transcript range that ends before it starts.
     InvertedRange,
+    /// A transcript range with no samples in it.
+    EmptyRange,
     /// Transcript text that isn't UTF-8.
     NotUtf8,
 }
@@ -409,6 +413,7 @@ impl fmt::Display for DecodeError {
             Self::BadRate(hz) => write!(f, "sampling rate {hz} Hz out of range"),
             Self::RangeOverflow => write!(f, "audio sample index overflows"),
             Self::InvertedRange => write!(f, "transcript range ends before it starts"),
+            Self::EmptyRange => write!(f, "transcript range holds no samples"),
             Self::NotUtf8 => write!(f, "transcript text isn't UTF-8"),
         }
     }
@@ -568,6 +573,19 @@ mod tests {
             decode_body::<FromEngine>(&transcript),
             Err(DecodeError::InvertedRange)
         );
+        // One that covers no samples, even with text.
+        let mut empty = vec![0x81, 0, 0, 0, 0];
+        empty.extend_from_slice(&4_u64.to_le_bytes());
+        empty.extend_from_slice(&4_u64.to_le_bytes());
+        empty.extend_from_slice(b"hi");
+        assert_eq!(
+            decode_body::<FromEngine>(&empty),
+            Err(DecodeError::EmptyRange)
+        );
+        assert_eq!(
+            DecodeError::EmptyRange.to_string(),
+            "transcript range holds no samples"
+        );
         let mut not_text = vec![0x81, 0, 0, 0, 0];
         not_text.extend_from_slice(&4_u64.to_le_bytes());
         not_text.extend_from_slice(&5_u64.to_le_bytes());
@@ -588,11 +606,12 @@ mod tests {
         let fits = chunk(0, vec![0; MAX_AUDIO_SAMPLES]);
         let bytes = encode(&Frame::Message(ToEngine::Audio(fits))).unwrap();
         assert!(bytes.len() - 4 <= MAX_BODY_LEN);
-        let text = Transcript {
-            track: TrackId::new(0),
-            range: SampleRange::new(SampleIndex::ZERO, SampleIndex::ZERO).unwrap(),
-            text: "x".repeat(MAX_TEXT_LEN + 1),
-        };
+        let text = Transcript::new(
+            TrackId::new(0),
+            SampleRange::new(SampleIndex::ZERO, SampleIndex::new(1)).unwrap(),
+            "x".repeat(MAX_TEXT_LEN + 1),
+        )
+        .unwrap();
         assert_eq!(
             encode(&Frame::Message(FromEngine::Transcript(text))),
             Err(EncodeError::TooLarge)
@@ -605,11 +624,12 @@ mod tests {
         assert_eq!(MAX_TEXT_LEN, MAX_BODY_LEN - 21);
         // The longest text fills the body to the byte; audio to within one
         // (an odd byte can't hold a sample).
-        let text = Transcript {
-            track: TrackId::new(0),
-            range: SampleRange::new(SampleIndex::ZERO, SampleIndex::ZERO).unwrap(),
-            text: "x".repeat(MAX_TEXT_LEN),
-        };
+        let text = Transcript::new(
+            TrackId::new(0),
+            SampleRange::new(SampleIndex::ZERO, SampleIndex::new(1)).unwrap(),
+            "x".repeat(MAX_TEXT_LEN),
+        )
+        .unwrap();
         let bytes = encode(&Frame::Message(FromEngine::Transcript(text.clone()))).unwrap();
         assert_eq!(bytes.len() - 4, MAX_BODY_LEN);
         assert_eq!(
@@ -667,6 +687,7 @@ mod tests {
             DecodeError::OddAudioLength,
             DecodeError::RangeOverflow,
             DecodeError::InvertedRange,
+            DecodeError::EmptyRange,
             DecodeError::NotUtf8,
         ] {
             assert!(!err.to_string().is_empty());
