@@ -21,4 +21,4 @@ expression: terminal.backend()
 "│   ░░░                                                      │"
 "│                                                            │"
 "│                                                            │"
-"╰─ m mark  n note  s stop ─────────────────── Brave · 14 MB ─╯"
+"╰─ stop recording?  y stop  n keep recording ─ Brave · 14 … ─╯"
