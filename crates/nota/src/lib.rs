@@ -172,7 +172,10 @@ fn parse_record(args: &[OsString]) -> Result<RecordArgs, String> {
         _ => return Err("--parakeet and --vad go together".into()),
     };
     record.data = match data {
-        Some(dir) => dir,
+        // Absolute, so every directory in it has a parent to make it in.
+        Some(dir) => {
+            std::path::absolute(&dir).map_err(|e| format!("--data {}: {e}", dir.display()))?
+        }
         None => directories::ProjectDirs::from("", "", "nota")
             .ok_or("no home directory to keep sessions in; pass --data")?
             .data_dir()

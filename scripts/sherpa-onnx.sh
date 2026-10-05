@@ -152,7 +152,7 @@ if [[ -f $stamp && $(cat "$stamp") != "$sha256" ]]; then
 fi
 
 if [[ ! -f $archive ]]; then
-  curl -fsSL --retry 3 -o "$archive.part" "$url"
+  curl -fsSL --proto =https --retry 3 --retry-all-errors --connect-timeout 30 -o "$archive.part" "$url"
   mv "$archive.part" "$archive"
 fi
 got=$(sha256_of "$archive")

@@ -4,7 +4,7 @@
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -27,6 +27,13 @@ const MAX_BATCH: usize = 1_000;
 /// How long the input thread waits for a key before checking whether it
 /// should stop.
 const INPUT_POLL: Duration = Duration::from_millis(100);
+
+/// How long stopping the input thread waits for it. It checks every
+/// [`INPUT_POLL`], but once the terminal has hung up crossterm's read never
+/// returns (it retries the read that keeps failing). The thread is then left
+/// behind rather than holding up the stop: the terminal it reads is gone, so
+/// it can't take keys meant for anything else.
+const STOP_WAIT: Duration = Duration::from_secs(1);
 
 /// Something for the screen to act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,12 +185,15 @@ pub fn run<B: Backend>(
 
 /// A thread that reads keys and resizes from the terminal and sends them as
 /// [`Event`]s, each key stamped with the session clock as it's read. It
-/// stops when told to or dropped (waiting for the thread either way), or
-/// when nothing receives its events. If reading fails it sends [`Event::InputLost`] and stops.
+/// stops when told to or dropped (waiting up to a second for the thread
+/// either way), or when nothing receives its events. If reading fails it
+/// sends [`Event::InputLost`] and stops.
 #[derive(Debug)]
 pub struct InputThread {
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<io::Result<()>>>,
+    /// Disconnected once the thread has finished.
+    finished: Receiver<()>,
 }
 
 impl InputThread {
@@ -195,11 +205,13 @@ impl InputThread {
     /// The thread couldn't be started.
     pub fn spawn(events: Sender<Event>, clock: Arc<dyn Clock>) -> io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
+        let (finishing, finished) = mpsc::channel::<()>();
         let handle = thread::Builder::new()
             .name("nota-tui-input".into())
             .spawn({
                 let stop = Arc::clone(&stop);
                 move || {
+                    let _finishing = finishing;
                     let read = read_input(&events, clock.as_ref(), &stop);
                     if let Err(err) = &read {
                         let _ = events.send(Event::InputLost(err.kind()));
@@ -210,33 +222,43 @@ impl InputThread {
         Ok(Self {
             stop,
             handle: Some(handle),
+            finished,
         })
     }
 
-    /// Stops reading and waits for the thread, within about 100 ms.
+    /// Stops reading and waits for the thread: about 100 ms while the
+    /// terminal is there, at most a second once it has hung up.
     ///
     /// # Errors
     ///
-    /// Reading the terminal failed, or the thread panicked.
+    /// Reading the terminal failed, the thread panicked, or it didn't stop
+    /// within a second ([`io::ErrorKind::TimedOut`]) and was left behind.
     pub fn stop(mut self) -> io::Result<()> {
+        self.finish()
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
         self.stop.store(true, Ordering::Relaxed);
-        match self.handle.take() {
-            Some(handle) => handle
+        let Some(handle) = self.handle.take() else {
+            return Ok(());
+        };
+        match self.finished.recv_timeout(STOP_WAIT) {
+            Err(RecvTimeoutError::Disconnected) => handle
                 .join()
                 .map_err(|_| io::Error::other("the input thread panicked"))?,
-            None => Ok(()),
+            Ok(()) | Err(RecvTimeoutError::Timeout) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the input thread didn't stop; the terminal has probably hung up",
+            )),
         }
     }
 }
 
 impl Drop for InputThread {
-    /// Stops the thread and waits for it (about 100 ms at most), so a
-    /// dropped handle never leaves a second reader on the terminal.
+    /// Stops the thread and waits for it as [`InputThread::stop`] does, so a
+    /// dropped handle never leaves a second reader on a working terminal.
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
+        let _ = self.finish();
     }
 }
 

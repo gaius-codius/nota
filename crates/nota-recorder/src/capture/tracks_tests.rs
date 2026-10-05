@@ -480,3 +480,53 @@ fn a_track_that_fails_first_leaves_the_other_recording_until_it_stops() {
     let journals = writer.finish().unwrap();
     assert_eq!(by_track(&fs, &journals)[&SYSTEM], samples(SYSTEM, 0, 50));
 }
+
+#[test]
+fn events_from_a_stream_that_never_started_are_dropped() {
+    // A stream can report something before its start fails (cpal reports a
+    // refused real-time promotion while the stream is still being built).
+    // Its track was never started, and the others record on.
+    let fs = FakeFs::with_dirs([dir()]);
+    let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let session = SessionDir::new(SESSION, fs.clone(), &dir()).lock().unwrap();
+    let length = SegmentLength::new(SampleCount::new(1_000)).unwrap();
+    let mut writer = SessionWriter::open(&session, rate(), length, clock).unwrap();
+    writer
+        .start_track(SYSTEM, EpochId::new(0), SampleIndex::ZERO)
+        .unwrap();
+    let mut timeline = TrackTimeline::new(SYSTEM);
+    timeline
+        .open_epoch(SessionTime::ZERO, SampleIndex::ZERO, rate())
+        .unwrap();
+    let mut timelines = vec![timeline];
+    let (tx, rx) = test_channel();
+    tx.send(
+        MIC,
+        CaptureEvent::Notice {
+            notice: CaptureNotice::Warning("no rtkit".into()),
+            at: SessionTime::ZERO,
+        },
+    );
+    tx.send(SYSTEM, CaptureEvent::Audio(samples(SYSTEM, 0, 30)));
+    tx.send(MIC, CaptureEvent::Audio(samples(MIC, 0, 10)));
+    tx.send(
+        MIC,
+        CaptureEvent::Failed(CaptureError::Backend("late".into())),
+    );
+    tx.send(SYSTEM, CaptureEvent::Audio(samples(SYSTEM, 30, 20)));
+    tx.send(SYSTEM, CaptureEvent::Stopped);
+    let events = CaptureReceiver {
+        events: rx,
+        rate: rate(),
+        tracks: test_tracks(&[SYSTEM]),
+    };
+    let mut reported = Vec::new();
+    record_tracks(&mut writer, &mut timelines, &events, &mut |t, _| {
+        reported.push(t);
+    })
+    .unwrap();
+    assert!(!reported.contains(&Some(MIC)), "{reported:?}");
+    assert_eq!(writer.next_sample(SYSTEM), Some(SampleIndex::new(50)));
+    let journals = writer.finish().unwrap();
+    assert_eq!(by_track(&fs, &journals)[&SYSTEM], samples(SYSTEM, 0, 50));
+}

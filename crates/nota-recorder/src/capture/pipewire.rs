@@ -249,7 +249,10 @@ mod tests {
     fn promoting_says_whether_the_thread_is_now_real_time() {
         // On a thread of its own, so the test runner's stays as it was.
         // Whether the kernel allows it depends on the machine's rtprio
-        // limit; either way the answer must match the thread's policy.
+        // limit; either way the answer must match the thread's policy, and
+        // where the limit allows it the promotion must happen.
+        let limit = rustix::process::getrlimit(rustix::process::Resource::Rtprio).current;
+        let allowed = limit.is_none_or(|limit| limit >= u64::from(RT_PRIORITY));
         let (promoted, policy) = std::thread::spawn(|| {
             let promoted = promote_current_thread();
             (promoted, thread_priority::thread_schedule_policy().unwrap())
@@ -258,6 +261,9 @@ mod tests {
         .unwrap();
         let fifo = ThreadSchedulePolicy::Realtime(RealtimeThreadSchedulePolicy::Fifo);
         assert_eq!(promoted, policy == fifo, "{policy:?}");
+        if allowed {
+            assert!(promoted, "rtprio limit {limit:?} allows {RT_PRIORITY}");
+        }
         if promoted {
             let priority = std::thread::spawn(|| {
                 promote_current_thread();

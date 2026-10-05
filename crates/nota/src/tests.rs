@@ -111,3 +111,18 @@ fn record_defaults_to_the_default_devices_and_no_engine() {
     assert_eq!(r.mic, Source::Microphone);
     assert_eq!(r.system, Source::SystemAudio);
 }
+
+#[test]
+fn a_relative_data_directory_is_made_absolute() {
+    // The library makes missing directories by walking up to their parents,
+    // which a one-part relative path (`notes`, `.`) has none of.
+    for given in ["notes", ".", "a/b"] {
+        let r = record(&["record", "--data", given]).unwrap();
+        assert!(r.data.is_absolute(), "{given}: {}", r.data.display());
+        assert!(
+            r.data.ends_with(given.trim_start_matches('.')),
+            "{}",
+            r.data.display()
+        );
+    }
+}

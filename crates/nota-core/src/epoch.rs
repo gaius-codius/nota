@@ -1,8 +1,9 @@
 //! Track epochs: how a track's sample count maps to session time.
 //!
 //! A track's stream can stop and reopen during a session (a device change,
-//! sleep, a stall). Each opening starts an epoch, which pins the next sample
-//! to a session time. The sample count carries on across epochs, so the time
+//! sleep, a stall), or the audio server can drop some of its audio (an
+//! overrun). Each opening, and each overrun, starts an epoch, which pins the
+//! next sample to a session time. The sample count carries on across epochs, so the time
 //! between them is a gap with no audio, and a mark made during it maps to no
 //! sample.
 

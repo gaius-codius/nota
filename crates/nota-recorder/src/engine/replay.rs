@@ -134,10 +134,11 @@ impl Replay {
         poisoned
     }
 
-    /// Forgets the failures counted against this track.
-    pub(super) fn clear_strikes(&mut self) {
-        self.strikes = 0;
-        self.stuck_at = None;
+    /// Counts this track as one failure short of `limit`, still stuck where
+    /// it is: the next failure with its first unconfirmed sample unmoved
+    /// reaches the limit.
+    pub(super) const fn hold_as_suspect(&mut self, limit: u32) {
+        self.strikes = limit.saturating_sub(1);
     }
 
     /// Drops `count` samples of the oldest audio, or all of it if there's
@@ -523,6 +524,25 @@ mod tests {
             panic!()
         };
         assert_eq!(rest.samples(), &chunk(10, 10).samples()[3..]);
+    }
+
+    #[test]
+    fn a_suspect_held_back_reaches_the_limit_on_its_next_failure_unless_it_moved() {
+        let mut replay = Replay::new(TRACK);
+        replay.push_audio(&chunk(0, 10), SessionTime::ZERO);
+        sent(&mut replay);
+        assert!(replay.note_failure(1));
+        replay.hold_as_suspect(3);
+        replay.reset_sent();
+        sent(&mut replay);
+        assert!(replay.note_failure(3));
+        // Held again, but it confirms some audio before the next failure:
+        // a fresh count.
+        replay.hold_as_suspect(3);
+        replay.reset_sent();
+        sent(&mut replay);
+        replay.on_confirmed(at(5)).unwrap();
+        assert!(!replay.note_failure(3));
     }
 
     #[test]

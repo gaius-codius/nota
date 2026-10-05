@@ -774,11 +774,13 @@ impl Supervisor {
         }
         self.emit(EngineEvent::Status(EngineStatus::Offline(reason)));
         // Tracks are sent in order, so the first one standing still is the
-        // likeliest culprit; the others get a fresh count, and if the
-        // poison was theirs they're caught next.
+        // likeliest culprit. The others stay one failure short of the
+        // limit: if the poison was theirs, the next failure skips it. (A
+        // fresh count would keep them level with the first track, which is
+        // then skipped again every time if its audio keeps standing still.)
         for &track in poisoned.iter().skip(1) {
             if let Some(replay) = self.tracks.get_mut(&track) {
-                replay.clear_strikes();
+                replay.hold_as_suspect(POISON_STRIKES);
             }
         }
         for track in poisoned.into_iter().take(1) {

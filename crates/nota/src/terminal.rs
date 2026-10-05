@@ -8,6 +8,7 @@
 //! hangup the terminal is gone and restoring it fails; that's ignored.
 
 use std::io::{self, Stdout, Write};
+use std::mem::ManuallyDrop;
 use std::sync::Once;
 
 use ratatui::Terminal;
@@ -22,7 +23,11 @@ use ratatui::crossterm::terminal::{
 /// The terminal set up for the screen. Restored when dropped.
 #[derive(Debug)]
 pub(crate) struct Screen {
-    terminal: Terminal<CrosstermBackend<Stdout>>,
+    /// Never dropped. Its drop shows the cursor and, if that fails, prints
+    /// the error with `eprintln!`, which panics when stderr is the terminal
+    /// that has just hung up. [`restore`] shows the cursor instead, and the
+    /// buffers are freed at exit (there's one screen per process).
+    terminal: ManuallyDrop<Terminal<CrosstermBackend<Stdout>>>,
 }
 
 impl Screen {
@@ -42,7 +47,9 @@ impl Screen {
         )
         .and_then(|()| Terminal::new(CrosstermBackend::new(io::stdout())));
         match set_up {
-            Ok(terminal) => Ok(Self { terminal }),
+            Ok(terminal) => Ok(Self {
+                terminal: ManuallyDrop::new(terminal),
+            }),
             Err(e) => {
                 restore();
                 Err(e)
@@ -51,7 +58,7 @@ impl Screen {
     }
 
     /// The terminal to draw on.
-    pub(crate) const fn terminal(&mut self) -> &mut Terminal<CrosstermBackend<Stdout>> {
+    pub(crate) fn terminal(&mut self) -> &mut Terminal<CrosstermBackend<Stdout>> {
         &mut self.terminal
     }
 }

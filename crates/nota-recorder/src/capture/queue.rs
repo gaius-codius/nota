@@ -5,10 +5,11 @@
 //! the steady state sending must not allocate. [`Queue`] keeps its events
 //! in a `VecDeque` with room reserved up front, and lends the callbacks the
 //! sample buffers the recorder has finished with, so the callback only
-//! copies samples into a buffer it already has. Only when the disk stalls
-//! for longer than [`RESERVED_EVENTS`] buffers, or more buffers are out
-//! than [`SPARE_BUFFERS`], does sending allocate. The queue then grows
-//! rather than dropping audio, and keeps the room it grew.
+//! copies samples into a buffer it already has. Sending allocates when more
+//! buffers are out than ever before (the first few callbacks, and each
+//! stall longer than any before it, up to [`SPARE_BUFFERS`] buffers kept),
+//! or when the disk stalls for longer than [`RESERVED_EVENTS`] buffers. The
+//! queue then grows rather than dropping audio, and keeps the room it grew.
 //!
 //! Each sender takes the lock for a copy and a push. The recorder holds it
 //! only to pop an event or hand a buffer back, never across a write or an
@@ -224,8 +225,8 @@ pub struct Positions {
     pub delivered: SampleIndex,
     /// The end of what the recorder has appended to the track's journals.
     pub captured: SampleIndex,
-    /// The end of what an fsync has made durable on the track's current
-    /// journal. Audio a broken journal lost is behind it too: a gap, no
+    /// The furthest an fsync has made durable on any of the track's
+    /// journals. Audio a broken journal lost is behind it too: a gap, no
     /// longer at risk.
     pub durable: SampleIndex,
 }
