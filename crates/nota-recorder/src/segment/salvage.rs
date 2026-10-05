@@ -476,7 +476,11 @@ fn claims<S: Fs>(
 /// read (see [`claims`]).
 fn in_a_bad_window(findings: &[Finding], segment: &PlannedSegment, length: SegmentLength) -> bool {
     let start = segment.range.start();
-    let from = SampleIndex::new(length.window_of(start).saturating_mul(length.samples()));
+    let from = SampleIndex::new(
+        length
+            .window_of(start)
+            .saturating_mul(length.samples().get()),
+    );
     let to = length
         .window_end(start)
         .unwrap_or(SampleIndex::new(u64::MAX));

@@ -238,6 +238,7 @@ impl Claimed {
 
 #[cfg(test)]
 mod tests {
+    use nota_core::SampleCount;
     use nota_store::Sha256Digest;
     use proptest::prelude::*;
 
@@ -268,7 +269,7 @@ mod tests {
     }
 
     fn len(n: u64) -> SegmentLength {
-        SegmentLength::new(n).unwrap()
+        SegmentLength::new(SampleCount::new(n)).unwrap()
     }
 
     /// A segment as (track, epoch, start, end, parts as (journal, start, end)).

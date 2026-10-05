@@ -193,7 +193,7 @@ mod linux {
         fn length(&self) -> Res<SegmentLength> {
             self.number("segment-seconds")?
                 .checked_mul(u64::from(RATE.hz()))
-                .and_then(SegmentLength::new)
+                .and_then(|n| SegmentLength::new(SampleCount::new(n)))
                 .ok_or_else(|| "--segment-seconds must be positive and not huge".into())
         }
     }
@@ -1382,7 +1382,8 @@ mod linux {
         let fs = TapFs(Arc::new(tap));
         let session = SessionDir::new(SESSION, fs, &dir).lock()?;
         // Short windows keep each journal small, as the feeder rereads it.
-        let length = SegmentLength::new(10 * u64::from(RATE.hz())).ok_or("bad length")?;
+        let length =
+            SegmentLength::new(SampleCount::new(10 * u64::from(RATE.hz()))).ok_or("bad length")?;
         let mut writer = SessionWriter::open(&session, RATE, length, Arc::clone(&clock))?;
         writer.start_track(TRACK, EpochId::new(0), SampleIndex::ZERO)?;
 

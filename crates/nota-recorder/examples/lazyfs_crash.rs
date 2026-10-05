@@ -63,7 +63,7 @@ fn rate() -> Res<SampleRate> {
 
 /// One and a half seconds per window, so journals sync partway through.
 fn length() -> Res<SegmentLength> {
-    SegmentLength::new(1_500).ok_or_else(|| "bad length".into())
+    SegmentLength::new(SampleCount::new(1_500)).ok_or_else(|| "bad length".into())
 }
 
 /// The sample a track holds at `index`: distinct per track and position.
