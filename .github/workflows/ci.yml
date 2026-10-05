@@ -147,10 +147,22 @@ jobs:
     # keeps its targets compiling. It builds them and doesn't fuzz.
     name: Fuzz targets build
     runs-on: ubuntu-latest
+    env:
+      # cargo-afl builds with -C target-cpu=native, and without --target that
+      # covers build scripts and proc macros too, which run during the build.
+      # A cached target/ built on a runner with a newer CPU then dies with
+      # SIGILL on an older one. cargo-afl appends RUSTFLAGS after its own
+      # flags and rustc takes the last target-cpu, so this pins everything
+      # rustc builds to the baseline x86-64 CPU that every runner has. (The
+      # AFL++ runtime is C, built without -march=native, and rebuilt each
+      # run.) It's job-level so rust-cache hashes it into the cache key.
+      RUSTFLAGS: -C target-cpu=x86-64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Which CPU this runner has, for when a build fails on one CPU only.
+      - run: grep -m1 'model name' /proc/cpuinfo
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
