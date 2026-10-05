@@ -96,9 +96,10 @@ mod linux {
 
         let (capture, events) = start(
             &PipeWireBackend,
+            TRACK,
             &source,
             rate,
-            Arc::clone(&clock) as Arc<dyn Clock>,
+            &(Arc::clone(&clock) as Arc<dyn Clock>),
         )?;
         let started = clock.now();
         let mut timeline = TrackTimeline::new(TRACK);
@@ -115,7 +116,9 @@ mod linux {
                 RecorderEvent::JournalFailed(_) => failures += 1,
                 RecorderEvent::EpochRefused(_) => refused += 1,
                 RecorderEvent::Capture(n) => notices.push(n),
-                RecorderEvent::Epoch(_) => {}
+                RecorderEvent::Epoch(_)
+                | RecorderEvent::Audio(_)
+                | RecorderEvent::CaptureFailed(_) => {}
             });
             (writer, journals, notices, failures, refused, result)
         });

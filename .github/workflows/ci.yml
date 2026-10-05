@@ -134,6 +134,9 @@ jobs:
           # See the lint job.
           key: sherpa-onnx-${{ hashFiles('scripts/sherpa-onnx.sh') }}
       - run: scripts/check-no-gpl.test.sh
+      # nota links the recorder, whose capture needs PipeWire's and ALSA's
+      # headers to build.
+      - run: scripts/install-linux-build-deps.sh
       - run: |
           lib=$(scripts/sherpa-onnx.sh --no-tts "$RUNNER_TEMP/sherpa-onnx")
           SHERPA_ONNX_LIB_DIR=$lib cargo build --release -p nota --locked

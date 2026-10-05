@@ -167,7 +167,7 @@ fn run_in<S: Fs + Clone + 'static>(
         sent,
         clock: Arc::clone(&clock),
     };
-    let (capture, events) = start(&backend, &Source::Microphone, rate(), dyn_clock).unwrap();
+    let (capture, events) = start(&backend, MIC, &Source::Microphone, rate(), &dyn_clock).unwrap();
     let (finished, done) = mpsc::channel();
     thread::spawn(move || {
         let mut reported = Vec::new();
@@ -509,10 +509,11 @@ fn recording_an_unstarted_track_is_an_error() {
     )
     .unwrap();
     let (tx, rx) = mpsc::channel();
-    tx.send(CaptureEvent::Audio(samples(0, 10))).unwrap();
+    tx.send((MIC, CaptureEvent::Audio(samples(0, 10)))).unwrap();
     let events = CaptureReceiver {
         events: rx,
         rate: rate(),
+        tracks: vec![MIC],
     };
     let mut timeline = epoch_zero();
     let result = record_track(&mut writer, &mut timeline, &events, &mut |_| {});
@@ -528,22 +529,21 @@ fn a_channel_with_no_senders_reads_as_stopped() {
     let rx = CaptureReceiver {
         events: rx,
         rate: rate(),
+        tracks: vec![MIC],
     };
-    assert!(rx.next(Duration::from_millis(1)).is_none());
+    assert!(matches!(rx.next(Duration::from_millis(1)), Next::Idle));
     let sender = CaptureSender {
         events: tx.clone(),
+        track: MIC,
         clock: Arc::new(FakeClock::new(SessionTime::ZERO)),
         stopping: Arc::new(AtomicBool::new(false)),
     };
     sender.audio(&[]);
-    assert!(rx.next(Duration::from_millis(1)).is_none());
+    assert!(matches!(rx.next(Duration::from_millis(1)), Next::Idle));
     drop(tx);
-    assert!(rx.next(Duration::from_millis(1)).is_none());
+    assert!(matches!(rx.next(Duration::from_millis(1)), Next::Idle));
     drop(sender);
-    assert!(matches!(
-        rx.next(Duration::from_millis(1)),
-        Some(CaptureEvent::Stopped)
-    ));
+    assert!(matches!(rx.next(Duration::from_millis(1)), Next::Closed));
 }
 
 #[test]
@@ -551,9 +551,10 @@ fn a_stream_that_cant_open_is_an_error() {
     let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
     let err = start(
         &Unavailable,
+        MIC,
         &Source::Device("nowhere".into()),
         rate(),
-        clock,
+        &clock,
     )
     .unwrap_err();
     assert_eq!(
@@ -618,11 +619,12 @@ fn a_stream_at_another_rate_than_the_journals_records_nothing() {
         .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
         .unwrap();
     let (tx, rx) = mpsc::channel();
-    tx.send(CaptureEvent::Audio(samples(0, 10))).unwrap();
+    tx.send((MIC, CaptureEvent::Audio(samples(0, 10)))).unwrap();
     let other = SampleRate::new(rate().hz() * 2).unwrap();
     let events = CaptureReceiver {
         events: rx,
         rate: other,
+        tracks: vec![MIC],
     };
     let mut timeline = epoch_zero();
     let result = record_track(&mut writer, &mut timeline, &events, &mut |_| {});
@@ -866,10 +868,11 @@ fn started_in(epoch: EpochId, at: u64) -> (FakeFs, SessionWriter<FakeFs>, Captur
         .start_track(MIC, epoch, SampleIndex::new(at))
         .unwrap();
     let (tx, rx) = mpsc::channel();
-    tx.send(CaptureEvent::Audio(samples(0, 10))).unwrap();
+    tx.send((MIC, CaptureEvent::Audio(samples(0, 10)))).unwrap();
     let events = CaptureReceiver {
         events: rx,
         rate: rate(),
+        tracks: vec![MIC],
     };
     (fs, writer, events)
 }
@@ -932,6 +935,7 @@ fn notices_carry_the_time_they_were_reported() {
     let clock = Arc::new(FakeClock::new(at(7)));
     let sender = CaptureSender {
         events: tx,
+        track: MIC,
         clock: Arc::clone(&clock) as Arc<dyn Clock>,
         stopping: Arc::new(AtomicBool::new(false)),
     };
@@ -941,9 +945,10 @@ fn notices_carry_the_time_they_were_reported() {
     let rx = CaptureReceiver {
         events: rx,
         rate: rate(),
+        tracks: vec![MIC],
     };
     assert!(matches!(
         rx.next(Duration::from_millis(1)),
-        Some(CaptureEvent::Notice { notice: CaptureNotice::Overrun, at: t }) if t == at(7)
+        Next::Event(MIC, CaptureEvent::Notice { notice: CaptureNotice::Overrun, at: t }) if t == at(7)
     ));
 }

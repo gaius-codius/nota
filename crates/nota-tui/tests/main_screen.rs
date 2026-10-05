@@ -143,6 +143,15 @@ fn main_while_typing_a_note() {
 }
 
 #[test]
+fn main_confirming_stop() {
+    let mut screen = main_screen();
+    press(&mut screen, KeyCode::Char('s'));
+    assert!(screen.is_confirming_stop());
+    let terminal = draw(&screen, 62, 20);
+    insta::assert_snapshot!(terminal.backend());
+}
+
+#[test]
 fn too_small() {
     let terminal = draw(&main_screen(), 59, 20);
     insta::assert_snapshot!(terminal.backend());

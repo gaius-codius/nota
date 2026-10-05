@@ -7,12 +7,40 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# `nota record --tone yes`: a synthetic tone in place of the audio server,
+# for the end-to-end tests. Turned on by the self dev-dependency below, so
+# any build that also builds nota's tests has it; `cargo build -p nota`
+# (the release build) doesn't.
+fake-capture = []
+
+[[test]]
+name = "record"
+required-features = ["fake-capture"]
+
 [dependencies]
+# The platform's data directory, where sessions are kept.
+directories = "6"
+nota-core = { path = "../nota-core" }
 nota-engine = { path = "../nota-engine" }
+nota-recorder = { path = "../nota-recorder" }
+nota-store = { path = "../nota-store" }
+nota-tui = { path = "../nota-tui" }
+ratatui.workspace = true
+
+# SIGHUP, SIGTERM and SIGINT, read on a thread so the recording can stop
+# in order. Already in the tree through crossterm.
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.3"
 
 [dev-dependencies]
-nota-core = { path = "../nota-core" }
+nota = { path = ".", features = ["fake-capture"] }
+nota-core = { path = "../nota-core", features = ["fake-clock"] }
 nota-recorder = { path = "../nota-recorder" }
+
+# A pseudo-terminal for the end-to-end test, and signals to send.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+rustix = { workspace = true, features = ["pty", "termios", "process", "fs", "event"] }
 
 [lints]
 workspace = true

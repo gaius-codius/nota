@@ -1,6 +1,6 @@
 //! Shared types for nota: the session clock, track epochs, typed time units,
-//! and the messages between the recorder and the speech engine, with their
-//! wire encoding (the engine protocol).
+//! the messages between the recorder and the speech engine, with their wire
+//! encoding (the engine protocol), and heard speech placed in session time.
 //!
 //! Time has one source, the [`Clock`]. Each track maps its sample count to
 //! session time through a [`TrackTimeline`] of epochs; a new epoch starts
@@ -31,6 +31,7 @@ pub mod ids;
 pub mod messages;
 pub mod protocol;
 pub mod time;
+pub mod utterance;
 
 #[cfg(any(test, feature = "fake-clock"))]
 pub use clock::FakeClock;
@@ -38,3 +39,4 @@ pub use clock::{Clock, ClockUnavailable, SystemClock};
 pub use epoch::{Epoch, EpochError, Gap, OpenedEpoch, TrackTimeline};
 pub use ids::{EpochId, SessionId, TrackId};
 pub use time::{SampleCount, SampleIndex, SampleRange, SampleRate, SessionTime};
+pub use utterance::Utterance;

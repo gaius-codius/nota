@@ -10,7 +10,7 @@
 //! │ ◆ transcript, ◆/◇ in the margin of their line, newest      │
 //! │   brightest                                                │
 //! │   ░░░                                                      │  still transcribing
-//! ╰─ m mark  n note ─────────────────────────── <source · size> ─╯  keys, status
+//! ╰─ m mark  n note  s stop ─────────────────── <source · size> ─╯  keys, status
 //! ```
 
 use ratatui::Frame;
@@ -121,19 +121,39 @@ impl Recording {
             format!("{} · {}", self.source, megabytes(self.recorded_bytes)),
             self.theme.text_secondary,
         )];
-        let y = area.bottom() - 1;
+        let row = Rect::new(area.x, area.bottom() - 1, area.width, 1);
+        let key = |key: &'static str, what: &'static str| {
+            [
+                Span::styled(key, self.theme.text),
+                Span::styled(what, self.theme.text_hint),
+            ]
+        };
+        if self.is_confirming_stop() {
+            // The question takes the keys' place, and the note's if one is
+            // being typed: it comes back if the answer is no.
+            let left = [
+                vec![Span::styled("stop recording?  ", self.theme.text_bright)],
+                key("y", " stop  ").to_vec(),
+                key("n", " keep recording").to_vec(),
+            ]
+            .concat();
+            frame_row(
+                row,
+                ('╰', '╯'),
+                left,
+                right,
+                Keep::Left,
+                self.theme.border,
+                buf,
+            );
+            return None;
+        }
         let Some(draft) = &self.draft else {
-            let key = |key: &'static str, what: &'static str| {
-                [
-                    Span::styled(key, self.theme.text),
-                    Span::styled(what, self.theme.text_hint),
-                ]
-            };
             // Only keys that work: `?` joins once the keys overlay exists
             // (UI spec, "Not yet designed").
-            let left = [key("m", " mark  "), key("n", " note")].concat();
+            let left = [key("m", " mark  "), key("n", " note  "), key("s", " stop")].concat();
             frame_row(
-                Rect::new(area.x, y, area.width, 1),
+                row,
                 ('╰', '╯'),
                 left,
                 right,
@@ -157,7 +177,7 @@ impl Recording {
             Span::styled(hint, self.theme.text_hint),
         ];
         frame_row(
-            Rect::new(area.x, y, area.width, 1),
+            row,
             ('╰', '╯'),
             left,
             right,
@@ -166,7 +186,7 @@ impl Recording {
             buf,
         );
         let cursor_x = area.x + 5 + u16::try_from(display_width(shown)).unwrap_or(u16::MAX);
-        Some(Position::new(cursor_x.min(area.right() - 1), y))
+        Some(Position::new(cursor_x.min(area.right() - 1), row.y))
     }
 
     /// The marks row and the level row, each `area.width` columns.
@@ -513,7 +533,7 @@ mod tests {
         let bottom = row(&draw(&screen, 60), 19);
         assert_eq!(
             bottom,
-            "╰─ m mark  n note ─ alsa_input.usb-Focusrite_Scarlett_2i… ─╯"
+            "╰─ m mark  n note  s stop ─ alsa_input.usb-Focusrite_Sca… ─╯"
         );
         screen.draft = Some(crate::screen::Draft {
             at: secs(1),
@@ -532,6 +552,44 @@ mod tests {
             top.starts_with("╭─ ≈ nota · a very long title a very lo… ─ ●"),
             "{top}"
         );
+    }
+
+    #[test]
+    fn the_stop_question_takes_the_footer() {
+        let theme = Theme::default();
+        let mut screen = screen("Mic", 0);
+        screen.update(Update::Recorded(14_200_000));
+        screen.stop = crate::screen::Stop::Asking;
+        let buf = draw(&screen, 62);
+        assert_eq!(
+            row(&buf, 19),
+            "╰─ stop recording?  y stop  n keep recording ── Mic · 14 MB ─╯"
+        );
+        // The key letters in the keys' style, what they do as a hint.
+        let y = 3 + "stop recording?  ".len();
+        let y = u16::try_from(y).unwrap();
+        assert_eq!(buf[(y, 19)].symbol(), "y");
+        assert_eq!(buf[(y, 19)].fg, theme.text.fg.unwrap());
+        assert_eq!(buf[(y + 2, 19)].fg, theme.text_hint.fg.unwrap());
+
+        // It takes the note's place too, with no cursor, and the source gives
+        // way.
+        screen.source = "Brave".into();
+        screen.draft = Some(crate::screen::Draft {
+            at: secs(1),
+            text: "typed".into(),
+        });
+        let mut terminal = Terminal::new(TestBackend::new(62, 20)).unwrap();
+        terminal.draw(|frame| screen.draw(frame)).unwrap();
+        assert_eq!(
+            row(terminal.backend().buffer(), 19),
+            "╰─ stop recording?  y stop  n keep recording ─ Brave · 14 … ─╯"
+        );
+        assert!(!terminal.backend().cursor_visible());
+        // Answering no brings the note and its cursor back.
+        screen.stop = crate::screen::Stop::No;
+        terminal.draw(|frame| screen.draw(frame)).unwrap();
+        assert!(terminal.backend().cursor_visible());
     }
 
     #[test]
