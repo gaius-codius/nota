@@ -708,7 +708,10 @@ fn an_overrun_starts_a_new_epoch_at_its_time_and_the_loss_is_a_gap() {
 
     // The journals follow: the new epoch starts a new journal, and the
     // sample count runs on.
-    assert_eq!(run.writer.epoch(MIC), Some(EpochId::new(1)));
+    assert_eq!(
+        run.writer.epoch(MIC),
+        Some((EpochId::new(1), SampleIndex::new(500)))
+    );
     assert_eq!(run.writer.next_sample(MIC), Some(SampleIndex::new(800)));
     let journals = all_journals(run.writer, &run.reported);
     assert_eq!(journal_epochs(&fs, &journals), [(0, 0, 500), (1, 500, 800)]);
@@ -738,7 +741,10 @@ fn overruns_with_no_audio_between_leave_an_empty_epoch() {
         starts,
         [(0, SessionTime::ZERO, 0), (1, at(1), 100), (2, at(2), 100)]
     );
-    assert_eq!(run.writer.epoch(MIC), Some(EpochId::new(2)));
+    assert_eq!(
+        run.writer.epoch(MIC),
+        Some((EpochId::new(2), SampleIndex::new(100)))
+    );
     let journals = all_journals(run.writer, &run.reported);
     assert_eq!(journal_epochs(&fs, &journals), [(0, 0, 100), (2, 100, 200)]);
 }
@@ -756,7 +762,10 @@ fn other_notices_leave_the_epoch_alone() {
     let run = run(&fs, script, Vec::new(), |_| {});
     run.result.unwrap();
     assert_eq!(run.timeline.epochs().len(), 1);
-    assert_eq!(run.writer.epoch(MIC), Some(EpochId::new(0)));
+    assert_eq!(
+        run.writer.epoch(MIC),
+        Some((EpochId::new(0), SampleIndex::ZERO))
+    );
     assert!(epochs_reported(&run.reported).is_empty());
 }
 
@@ -784,7 +793,10 @@ fn an_epoch_the_timeline_refuses_is_reported_and_recording_goes_on() {
         ]
     ));
     assert_eq!(run.timeline.epochs().len(), 1);
-    assert_eq!(run.writer.epoch(MIC), Some(EpochId::new(0)));
+    assert_eq!(
+        run.writer.epoch(MIC),
+        Some((EpochId::new(0), SampleIndex::ZERO))
+    );
     assert_eq!(run.writer.next_sample(MIC), Some(SampleIndex::new(1_010)));
 }
 
@@ -802,29 +814,42 @@ fn a_journal_that_breaks_at_the_overrun_is_reported_and_the_epoch_still_moves() 
     ];
     let run = run(&fs, script, Vec::new(), |_| {});
     run.result.unwrap();
+    // Nothing failed before the overrun; ending the old epoch's journal
+    // did, after the track moved.
+    let failed = run
+        .reported
+        .iter()
+        .position(|e| matches!(e, RecorderEvent::JournalFailed(_)));
+    let moved = run
+        .reported
+        .iter()
+        .position(|e| matches!(e, RecorderEvent::Epoch(_)));
     assert!(
-        run.reported
-            .iter()
-            .any(|e| matches!(e, RecorderEvent::JournalFailed(_))),
+        matches!((moved, failed), (Some(m), Some(f)) if m < f),
         "{:?}",
         run.reported
     );
-    assert_eq!(run.writer.epoch(MIC), Some(EpochId::new(1)));
+    assert_eq!(
+        run.writer.epoch(MIC),
+        Some((EpochId::new(1), SampleIndex::new(10)))
+    );
     assert_eq!(
         run.timeline.current().map(nota_core::Epoch::id),
         Some(EpochId::new(1))
     );
 }
 
-/// A writer with `MIC` started in `epoch`, and a channel holding some
-/// audio for it.
-fn started_in(epoch: EpochId) -> (FakeFs, SessionWriter<FakeFs>, CaptureReceiver) {
+/// A writer with `MIC` started in `epoch` at sample `at`, and a channel
+/// holding some audio for it.
+fn started_in(epoch: EpochId, at: u64) -> (FakeFs, SessionWriter<FakeFs>, CaptureReceiver) {
     let fs = FakeFs::with_dirs([dir()]);
     let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
     let session = SessionDir::new(SESSION, fs.clone(), &dir()).lock().unwrap();
     let mut writer =
         SessionWriter::open(&session, rate(), SegmentLength::new(1_000).unwrap(), clock).unwrap();
-    writer.start_track(MIC, epoch, SampleIndex::ZERO).unwrap();
+    writer
+        .start_track(MIC, epoch, SampleIndex::new(at))
+        .unwrap();
     let (tx, rx) = mpsc::channel();
     tx.send(CaptureEvent::Audio(samples(0, 10))).unwrap();
     let events = CaptureReceiver {
@@ -845,15 +870,22 @@ fn a_timeline_out_of_step_with_the_writer_records_nothing() {
     other_track
         .open_epoch(SessionTime::ZERO, SampleIndex::ZERO, rate())
         .unwrap();
+    let mut from_100 = TrackTimeline::new(MIC);
+    from_100
+        .open_epoch(SessionTime::ZERO, SampleIndex::new(100), rate())
+        .unwrap();
     let cases = [
         // No epoch open.
-        (EpochId::new(0), TrackTimeline::new(MIC), "empty"),
+        (EpochId::new(0), 0, TrackTimeline::new(MIC), "empty"),
         // Epoch 0, but the writer records epoch 1.
-        (EpochId::new(1), epoch_zero(), "epoch"),
-        (EpochId::new(0), at_other_rate, "rate"),
+        (EpochId::new(1), 0, epoch_zero(), "epoch"),
+        (EpochId::new(0), 0, at_other_rate, "rate"),
+        // The same epoch, from another first sample, either way round.
+        (EpochId::new(0), 100, epoch_zero(), "writer ahead"),
+        (EpochId::new(0), 0, from_100, "timeline ahead"),
     ];
-    for (epoch, mut timeline, case) in cases {
-        let (_fs, mut writer, events) = started_in(epoch);
+    for (epoch, at, mut timeline, case) in cases {
+        let (_fs, mut writer, events) = started_in(epoch, at);
         let before = timeline.clone();
         let result = record_track(&mut writer, &mut timeline, &events, &mut |_| {});
         let Err(error) = result else {
@@ -862,11 +894,15 @@ fn a_timeline_out_of_step_with_the_writer_records_nothing() {
         assert!(matches!(error, RecordError::TimelineMismatch), "{case}");
         assert!(error.to_string().contains("timeline"), "{case}");
         assert!(std::error::Error::source(&error).is_none(), "{case}");
-        assert_eq!(writer.next_sample(MIC), Some(SampleIndex::ZERO), "{case}");
+        assert_eq!(
+            writer.next_sample(MIC),
+            Some(SampleIndex::new(at)),
+            "{case}"
+        );
         assert_eq!(timeline, before, "{case}");
     }
     // A timeline for a track the writer didn't start.
-    let (_fs, mut writer, events) = started_in(EpochId::new(0));
+    let (_fs, mut writer, events) = started_in(EpochId::new(0), 0);
     let result = record_track(&mut writer, &mut other_track, &events, &mut |_| {});
     assert!(matches!(
         result,

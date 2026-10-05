@@ -689,9 +689,9 @@ mod linux {
             })
         };
 
+        let (capture, events) = start(&PipeWireBackend, &source, RATE, Arc::clone(&clock))?;
         let mut timeline = TrackTimeline::new(TRACK);
         timeline.open_epoch(clock.now(), SampleIndex::ZERO, RATE)?;
-        let (capture, events) = start(&PipeWireBackend, &source, RATE, Arc::clone(&clock))?;
         let recorder = {
             let to_publish = to_publish.clone();
             let fs = fs.clone();
@@ -1391,9 +1391,9 @@ mod linux {
             let sent = Arc::clone(&sent);
             thread::spawn(move || feeder(supervisor, &feed_rx, &sent))
         };
+        let (capture, capture_events) = start(&PipeWireBackend, &source, RATE, Arc::clone(&clock))?;
         let mut timeline = TrackTimeline::new(TRACK);
         timeline.open_epoch(clock.now(), SampleIndex::ZERO, RATE)?;
-        let (capture, capture_events) = start(&PipeWireBackend, &source, RATE, Arc::clone(&clock))?;
         let recorder = thread::spawn(move || {
             // Audio lost before the journal: the engine never sees it either.
             let mut lost = 0_usize;

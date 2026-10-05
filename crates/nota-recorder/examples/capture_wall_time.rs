@@ -94,8 +94,6 @@ mod linux {
         )?;
         writer.start_track(TRACK, EpochId::new(0), SampleIndex::ZERO)?;
 
-        let mut timeline = TrackTimeline::new(TRACK);
-        timeline.open_epoch(clock.now(), SampleIndex::ZERO, rate)?;
         let (capture, events) = start(
             &PipeWireBackend,
             &source,
@@ -103,24 +101,28 @@ mod linux {
             Arc::clone(&clock) as Arc<dyn Clock>,
         )?;
         let started = clock.now();
+        let mut timeline = TrackTimeline::new(TRACK);
+        timeline.open_epoch(started, SampleIndex::ZERO, rate)?;
         let recorder = thread::spawn(move || {
             let mut journals = Vec::new();
             let mut notices = Vec::new();
             let mut failures = 0_usize;
+            // Refused epochs leave samples mistimed, not lost: noted, but
+            // not a failure of this measurement.
+            let mut refused = 0_usize;
             let result = record_track(&mut writer, &mut timeline, &events, &mut |e| match e {
                 RecorderEvent::Finished(j) => journals.extend(j),
-                RecorderEvent::JournalFailed(_) | RecorderEvent::EpochRefused(_) => {
-                    failures += 1;
-                }
+                RecorderEvent::JournalFailed(_) => failures += 1,
+                RecorderEvent::EpochRefused(_) => refused += 1,
                 RecorderEvent::Capture(n) => notices.push(n),
                 RecorderEvent::Epoch(_) => {}
             });
-            (writer, journals, notices, failures, result)
+            (writer, journals, notices, failures, refused, result)
         });
         wait(Duration::from_secs(seconds));
         let stopped = clock.now();
         drop(capture);
-        let (writer, mut journals, notices, failures, result) = recorder
+        let (writer, mut journals, notices, failures, refused, result) = recorder
             .join()
             .map_err(|_| "the recorder thread panicked")?;
         result?;
@@ -142,6 +144,7 @@ mod linux {
             peak,
             notices: &notices,
             failures,
+            refused,
         })
     }
 
@@ -191,6 +194,7 @@ mod linux {
         peak: i16,
         notices: &'a [CaptureNotice],
         failures: usize,
+        refused: usize,
     }
 
     fn report(r: &Report<'_>) -> Res<bool> {
@@ -237,6 +241,7 @@ mod linux {
             r.notices.len() - overruns
         )?;
         writeln!(out, "journal fails {}", r.failures)?;
+        writeln!(out, "epochs refused {}", r.refused)?;
         writeln!(out, "{}", if ok { "PASS" } else { "FAIL" })?;
         Ok(ok)
     }

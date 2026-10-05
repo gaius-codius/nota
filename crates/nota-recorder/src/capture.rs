@@ -19,10 +19,23 @@
 //! never arrives, so the track's sample count falls behind session time.
 //! [`record_track`] then starts a new epoch, in the track's
 //! [`TrackTimeline`] and in its journals alike, at the session time the
-//! overrun was reported: the samples after it keep their own time, and the
-//! loss shows as a gap between the two epochs. The time is read on the
-//! stream's thread as the overrun is reported, not when the recorder gets
-//! to it, which may be seconds later while the disk stalls.
+//! overrun was reported: the samples after it are timed from there, not
+//! early by the audio lost, and the loss shows as a gap between the two
+//! epochs. The time is read on the stream's thread as the overrun is
+//! reported, not when the recorder gets to it, which may be seconds later
+//! while the disk stalls.
+//!
+//! That time is approximate until holes are measured from the stream's
+//! own timestamps:
+//! - The audio that follows was captured up to a buffer before the
+//!   overrun is reported, so it's timed late by up to that much.
+//! - The audio server reports overruns of its whole graph, so a stream
+//!   that lost nothing may still get a new epoch, with a gap of about a
+//!   buffer.
+//! - If the device's clock has run fast by more than the audio lost, the
+//!   timeline takes the overrun as drift
+//!   ([`TrackTimeline::open_epoch`]): the new epoch starts where the old
+//!   one's audio ends, with no gap.
 //!
 //! [`start`] returns a [`Capture`], which keeps the stream running until it's
 //! dropped, on the thread that started it, and a
@@ -109,7 +122,8 @@ impl std::error::Error for CaptureError {}
 pub enum CaptureNotice {
     /// The audio server overran the stream's buffer: audio was lost, and
     /// the track's sample count fell behind session time by that much.
-    /// [`record_track`] starts a new epoch, so the loss is a gap.
+    /// [`record_track`] moves the track to a new epoch, so the loss is a
+    /// gap, unless the timeline refuses one.
     Overrun,
     /// The default device changed and the stream followed it.
     RouteChanged,
@@ -312,8 +326,8 @@ pub enum RecordError {
         journal: SampleRate,
     },
     /// The track's timeline isn't in the epoch the writer records it in,
-    /// or not at the writer's rate, so its samples would be timed wrongly.
-    /// Nothing is recorded.
+    /// starting at the same sample and at the writer's rate, so its samples
+    /// would be timed wrongly. Nothing is recorded.
     TimelineMismatch,
 }
 
@@ -329,7 +343,7 @@ impl fmt::Display for RecordError {
                 journal.hz()
             ),
             Self::TimelineMismatch => f.write_str(
-                "the track's timeline isn't in the epoch or at the rate its journals are written in",
+                "the track's timeline doesn't match the epoch or rate its journals are written in",
             ),
         }
     }
@@ -372,8 +386,8 @@ impl std::error::Error for RecordError {
 /// [`RecordError::RateMismatch`], before anything is recorded, if the
 /// stream and `writer` run at different rates;
 /// [`RecordError::TimelineMismatch`], before anything is recorded, unless
-/// `timeline`'s current epoch is the one `writer` records the track in, at
-/// `writer`'s rate;
+/// `timeline`'s current epoch is the one `writer` records the track in,
+/// from the same first sample, at `writer`'s rate;
 /// [`RecordError::Capture`] if the stream failed;
 /// [`RecordError::Session`] if `track` can't be recorded. A journal that
 /// breaks isn't an error here: it's reported, and recording goes on.
@@ -390,11 +404,13 @@ pub fn record_track<S: Fs>(
             journal: writer.rate(),
         });
     }
-    let Some(recording) = writer.epoch(track) else {
+    let Some((epoch, first_sample)) = writer.epoch(track) else {
         return Err(RecordError::Session(SessionError::UnknownTrack(track)));
     };
-    let current = timeline.current().map(|e| (e.id(), e.rate()));
-    if current != Some((recording, writer.rate())) {
+    let current = timeline
+        .current()
+        .map(|e| (e.id(), e.first_sample(), e.rate()));
+    if current != Some((epoch, first_sample, writer.rate())) {
         return Err(RecordError::TimelineMismatch);
     }
     loop {
