@@ -1,6 +1,7 @@
 //! Shared types for nota: the session clock, track epochs, typed time units,
 //! the messages between the recorder and the speech engine, with their wire
-//! encoding (the engine protocol), and heard speech placed in session time.
+//! encoding (the engine protocol), the engine's tie to its recorder, and
+//! heard speech placed in session time.
 //!
 //! Time has one source, the [`Clock`]. Each track maps its sample count to
 //! session time through a [`TrackTimeline`] of epochs; a new epoch starts
@@ -28,6 +29,7 @@
 pub mod clock;
 pub mod epoch;
 pub mod ids;
+pub mod lifeline;
 pub mod messages;
 pub mod protocol;
 pub mod time;

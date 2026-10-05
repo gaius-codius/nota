@@ -3,7 +3,9 @@
 //! Runs as a child process (`nota engine asr`), so a crash in native model
 //! code can't take the recording down. The recorder sends audio over stdin
 //! and reads text back over stdout, framed by [`nota_core::protocol`]; see
-//! [`child::run`]. The child exits when its stdin closes.
+//! [`child::run`]. The child exits when its stdin closes, and on Linux the
+//! kernel also kills it when the recorder dies, even mid-load or mid-decode
+//! (see [`nota_core::lifeline`]).
 //!
 //! This is the only crate with native model code (cargo-deny's `wrappers`
 //! rule keeps it so). The `sherpa-onnx` crate's build script links a static
@@ -34,6 +36,7 @@ pub mod sherpa;
 use std::fmt;
 use std::io;
 
+use nota_core::lifeline::{self, Tie};
 use nota_core::messages::ProtocolVersion;
 use nota_core::protocol::ReadError;
 
@@ -50,6 +53,8 @@ pub enum EngineError {
     Protocol(&'static str),
     /// A model couldn't be loaded.
     Model(String),
+    /// The engine couldn't be tied to the recorder's life.
+    Tie(io::Error),
 }
 
 impl From<ReadError> for EngineError {
@@ -71,6 +76,7 @@ impl fmt::Display for EngineError {
             ),
             Self::Protocol(what) => write!(f, "protocol error: {what}"),
             Self::Model(what) => write!(f, "{what}"),
+            Self::Tie(err) => write!(f, "tying the engine to the recorder: {err}"),
         }
     }
 }
@@ -79,14 +85,18 @@ impl std::error::Error for EngineError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Read(err) => Some(err),
-            Self::Write(err) => Some(err),
+            Self::Write(err) | Self::Tie(err) => Some(err),
             Self::Version(_) | Self::Protocol(_) | Self::Model(_) => None,
         }
     }
 }
 
 /// Runs `nota engine asr`: the protocol on stdin and stdout with the real
-/// models, until stdin closes.
+/// models, until stdin closes or the recorder dies.
+///
+/// It first ties itself to the recorder ([`lifeline::tie_to_recorder`]),
+/// before loading anything; if the recorder has already gone, it stops
+/// there, as if stdin had closed.
 ///
 /// Native code may print to stdout, which would corrupt the protocol, so on
 /// Unix the protocol gets its own copy of stdout and stdout itself is
@@ -94,8 +104,11 @@ impl std::error::Error for EngineError {
 ///
 /// # Errors
 ///
-/// As [`child::run`], or if stdout can't be set aside.
+/// As [`child::run`], or if the tie or setting stdout aside fails.
 pub fn run_asr(paths: &sherpa::ModelPaths) -> Result<(), EngineError> {
+    if lifeline::tie_to_recorder().map_err(EngineError::Tie)? == Tie::Orphaned {
+        return Ok(());
+    }
     let output = protocol_output().map_err(EngineError::Write)?;
     let input = io::BufReader::new(io::stdin().lock());
     child::run(input, output, || sherpa::SherpaModels::load(paths))
@@ -140,6 +153,12 @@ mod tests {
         let write = EngineError::Write(io::Error::from(io::ErrorKind::BrokenPipe));
         assert!(write.to_string().starts_with("writing to the recorder"));
         assert!(write.source().is_some());
+        let tie = EngineError::Tie(io::Error::from(io::ErrorKind::InvalidInput));
+        assert!(
+            tie.to_string()
+                .starts_with("tying the engine to the recorder")
+        );
+        assert!(tie.source().is_some());
         assert!(version.source().is_none());
     }
 }

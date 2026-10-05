@@ -22,6 +22,13 @@
 //! The engine's stderr is always captured, never passed through: the TUI
 //! owns the terminal.
 //!
+//! The engine ends with the recorder however the recorder dies: its stdin
+//! closes, and on Linux the kernel kills it (see [`nota_core::lifeline`];
+//! the supervisor names the recorder in
+//! [`RECORDER_PID_VAR`](nota_core::lifeline::RECORDER_PID_VAR)). The kernel
+//! acts when the thread that started the engine ends, so only the
+//! supervisor thread, which outlives every engine it starts, starts them.
+//!
 //! Audio goes to the journal separately and never through here, so the
 //! recording carries on whatever the engine does.
 
@@ -38,6 +45,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use nota_core::lifeline::RECORDER_PID_VAR;
 use nota_core::messages::{AudioChunk, FromEngine, ProtocolVersion, ToEngine, Transcript};
 use nota_core::protocol::{Frame, FrameReader, ReadError, write_frame};
 use nota_core::{Clock, SampleCount, SampleIndex, SampleRange, SampleRate, SessionTime, TrackId};
@@ -900,6 +908,7 @@ fn start_child(
 ) -> io::Result<Running> {
     let mut process = Command::new(&command.program)
         .args(&command.args)
+        .env(RECORDER_PID_VAR, std::process::id().to_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
