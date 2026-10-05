@@ -160,14 +160,27 @@ jobs:
       - run: cargo afl build --locked
         working-directory: fuzz
 
-  mutants:
+  mutants-shard:
     # Every mutant of the lines this PR changes in the core and recorder
     # crates must be caught by a test. A missed or timed-out mutant fails.
+    # The mutants are dealt out round-robin to five shards that run side by
+    # side; the job below gathers the results. Round-robin, not cargo-mutants'
+    # default consecutive slices: a file's mutants tend to share slow tests,
+    # and slices put them on one shard. On one 88-mutant diff the slowest
+    # shard took 16 minutes as slices and 9 dealt round-robin.
     # The weekly full run is in mutants.yml.
-    name: Mutation testing (changed code)
+    name: Mutation testing (shard ${{ strategy.job-index }} of ${{ strategy.job-total }})
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 60
+    strategy:
+      # One shard failing doesn't stop the others, so a run reports every
+      # missed mutant at once.
+      fail-fast: false
+      # One leg per shard. The shard number is the leg's index, so it can't
+      # disagree with the count if the matrix grows another axis.
+      matrix:
+        shard: [0, 1, 2, 3, 4]
     env:
       # Warnings stay warnings here: a mutant that leaves a parameter unused
       # would otherwise fail to build and count as unviable, not tested.
@@ -192,15 +205,41 @@ jobs:
         env:
           PR_BASE: ${{ github.event.pull_request.base.sha }}
         run: git diff --src-prefix=a/ --dst-prefix=b/ "$PR_BASE...HEAD" > "$RUNNER_TEMP/pr.diff"
-      - run: >-
+      # A shard dealt no mutants (a small diff, or none in these crates) passes.
+      - env:
+          SHARD: ${{ strategy.job-index }}
+          SHARDS: ${{ strategy.job-total }}
+        run: >-
           cargo mutants --in-diff "$RUNNER_TEMP/pr.diff"
           -p nota-core -p nota-recorder
+          --shard "$SHARD/$SHARDS" --sharding round-robin
           --test-tool nextest --jobs 2 --output "$RUNNER_TEMP"
       - if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: mutants
+          name: mutants-shard-${{ strategy.job-index }}
           path: ${{ runner.temp }}/mutants.out
+
+  mutants:
+    # The required check. It passes only if every shard passed: a failed,
+    # cancelled or skipped shard fails it, and it runs even then (always()),
+    # so it can't be skipped, which a ruleset would count as passing. A run
+    # cancelled by a newer push therefore fails here too; that commit is
+    # superseded.
+    name: Mutation testing (changed code)
+    if: always() && github.event_name == 'pull_request'
+    needs: mutants-shard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - env:
+          SHARDS_RESULT: ${{ needs.mutants-shard.result }}
+        run: |
+          if [ "$SHARDS_RESULT" != success ]; then
+            echo "::error::Mutation testing shards: $SHARDS_RESULT (every shard must pass)"
+            exit 1
+          fi
+          echo "Every mutation testing shard passed."
 
   build:
     name: Build (${{ matrix.os }})
