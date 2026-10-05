@@ -732,12 +732,14 @@ impl Supervisor {
             _ => Some(POISON_STRIKES),
         };
         let poisoned: Vec<TrackId> = match strikes {
-            Some(limit) if matches!(phase, Phase::Online(_)) => self
+            // Only audio sent to an engine counts against a track, and none
+            // is sent until it's online.
+            Some(limit) => self
                 .tracks
                 .iter_mut()
                 .filter_map(|(&track, replay)| replay.note_failure(limit).then_some(track))
                 .collect(),
-            _ => Vec::new(),
+            None => Vec::new(),
         };
         let reason = match (phase, reason) {
             (

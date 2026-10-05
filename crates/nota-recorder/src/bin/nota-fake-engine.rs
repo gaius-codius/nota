@@ -171,9 +171,7 @@ impl<W: Write> Engine<W> {
     }
 
     fn hello(&mut self) -> io::Result<()> {
-        if self.args.hello_delay_ms > 0 {
-            slow_down(self.args.hello_delay_ms);
-        }
+        slow_down(self.args.hello_delay_ms);
         let version = match self.args.mode {
             Mode::NoHello => return Ok(()),
             Mode::WrongVersion => ProtocolVersion::new(ProtocolVersion::CURRENT.get() + 1),

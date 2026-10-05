@@ -114,18 +114,19 @@ impl Replay {
 
     /// Notes that the engine failed. Returns whether it has now failed
     /// `limit` times in a row on this track's audio: sent to it each time,
-    /// with the first unconfirmed sample never moving.
+    /// with the first unconfirmed sample never moving. A failure with none
+    /// of the track's audio sent (an engine that died before hello, say)
+    /// says nothing about it, and leaves the count as it was.
     pub(super) fn note_failure(&mut self, limit: u32) -> bool {
-        let first = self
-            .first_unconfirmed()
-            .filter(|_| self.oldest_sent().is_some());
-        if first.is_none() || first != self.stuck_at {
+        if self.oldest_sent().is_none() {
+            return false;
+        }
+        let first = self.first_unconfirmed();
+        if first != self.stuck_at {
             self.strikes = 0;
+            self.stuck_at = first;
         }
-        self.stuck_at = first;
-        if first.is_some() {
-            self.strikes += 1;
-        }
+        self.strikes += 1;
         let poisoned = self.strikes >= limit;
         if poisoned {
             self.strikes = 0;
@@ -323,10 +324,8 @@ impl Replay {
     /// fewer, if there were), splitting the entry the cut falls in, while
     /// no engine is running. Returns the ranges dropped, never transcribed.
     pub(super) fn trim(&mut self, keep: SampleCount) -> Vec<SampleRange> {
-        match self.unconfirmed.checked_sub(keep.get()) {
-            Some(over) if over > 0 => self.skip(SampleCount::new(over)),
-            _ => Vec::new(),
-        }
+        let over = self.unconfirmed.saturating_sub(keep.get());
+        self.skip(SampleCount::new(over))
     }
 
     /// How many samples are unconfirmed.
@@ -544,6 +543,30 @@ mod tests {
         );
         assert_eq!(replay.unconfirmed(), 0);
         assert!(replay.entries.is_empty());
+    }
+
+    #[test]
+    fn a_failure_with_nothing_sent_leaves_the_count() {
+        let mut replay = Replay::new(TRACK);
+        replay.push_audio(&chunk(0, 10), SessionTime::ZERO);
+        sent(&mut replay);
+        assert!(!replay.note_failure(2));
+        replay.reset_sent();
+        // An engine that failed before anything was sent to it.
+        assert!(!replay.note_failure(2));
+        sent(&mut replay);
+        assert!(replay.note_failure(2));
+    }
+
+    #[test]
+    fn a_chunk_splits_only_inside_it() {
+        let whole = chunk(10, 10);
+        assert!(split_at(&whole, at(10)).is_none());
+        assert!(split_at(&whole, at(20)).is_none());
+        assert!(split_at(&whole, at(5)).is_none());
+        let rest = split_at(&whole, at(13)).unwrap();
+        assert_eq!(rest.range(), SampleRange::new(at(13), at(20)).unwrap());
+        assert_eq!(rest.samples(), &whole.samples()[3..]);
     }
 
     #[test]
