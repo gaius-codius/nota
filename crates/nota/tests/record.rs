@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use nota_core::SessionId;
+use nota_core::{Clock, SessionId, SystemClock};
 use nota_recorder::fs::{Fs, StdFs};
 use nota_recorder::segment::needs_salvage;
 use nota_recorder::session::SessionDir;
@@ -44,14 +44,14 @@ fn pause(d: Duration) {
 
 /// Waits up to `limit` for `done`, checking every 20 ms.
 fn wait_until(limit: Duration, mut done: impl FnMut() -> bool) -> bool {
-    let step = Duration::from_millis(20);
-    let mut waited = Duration::ZERO;
-    while waited < limit {
+    // Measured on the session clock, not summed from the pauses: a pause
+    // can run long on a loaded machine.
+    let clock = SystemClock::start().unwrap();
+    while clock.now().elapsed() < limit {
         if done() {
             return true;
         }
-        pause(step);
-        waited += step;
+        pause(Duration::from_millis(20));
     }
     done()
 }
@@ -597,10 +597,10 @@ fn a_hangup_to_the_group_leaves_the_engine_to_nota() {
     assert_saved(&tmp.0, 1, &[0, 1], 1_450);
 }
 
-/// Acceptance (GAI-202), end to end: nota killed outright still takes the
-/// engine with it, since its stdin closes. (The supervisor's own test holds
-/// it to the shutdown grace; the real engine may still be loading its
-/// models here, so this allows for that.)
+/// Acceptance (GAI-202, GAI-203), end to end: nota killed outright takes
+/// the engine with it within the supervisor's 3 s shutdown grace, even if
+/// the engine is still loading its models, as it may be here: the kernel
+/// kills it when nota dies.
 #[test]
 fn a_killed_nota_takes_its_engine_with_it() {
     let Some(models) = test_models() else {
@@ -609,9 +609,10 @@ fn a_killed_nota_takes_its_engine_with_it() {
     let tmp = TestDir::new("engine-killed");
     let (mut nota, engine) = recording_with_the_engine(&tmp.0, &models);
     nota.signal(Signal::KILL);
-    assert!(nota.exits().is_some());
+    // Counted from the kill: nota is gone at once.
     assert!(
-        wait_until(Duration::from_secs(20), || !alive(engine)),
+        wait_until(Duration::from_secs(3), || !alive(engine)),
         "the engine outlived nota"
     );
+    assert!(nota.exits().is_some());
 }

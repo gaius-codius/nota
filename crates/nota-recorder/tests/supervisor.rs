@@ -904,3 +904,58 @@ fn an_exit_reports_the_end_of_stderr() {
         "exited (exit status: 1): Error: no model at /m"
     );
 }
+
+/// Each engine is told which recorder started it, so it can tell whether
+/// that recorder died before it tied itself to it (GAI-203).
+#[cfg(target_os = "linux")]
+#[test]
+fn an_engine_is_told_which_recorder_started_it() {
+    let (_supervisor, mut events) = start(fake(&["echo"]));
+    let pid = events.online();
+    let environ = std::fs::read(format!("/proc/{pid}/environ")).unwrap();
+    let expected = format!(
+        "{}={}",
+        nota_core::lifeline::RECORDER_PID_VAR,
+        std::process::id()
+    );
+    assert!(
+        environ.split(|&b| b == 0).any(|v| v == expected.as_bytes()),
+        "{}",
+        String::from_utf8_lossy(&environ)
+    );
+}
+
+/// An engine whose recorder died before it could tie itself to it exits at
+/// once, without waiting for stdin (GAI-203): here its parent is this test,
+/// not the recorder named.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_engine_whose_recorder_has_already_gone_exits_at_once() {
+    use std::process::Stdio;
+
+    let mut engine = Command::new(env!("CARGO_BIN_EXE_nota-fake-engine"))
+        .arg("echo")
+        // The largest pid there can be: never this test's.
+        .env(nota_core::lifeline::RECORDER_PID_VAR, i32::MAX.to_string())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    // Stdin stays open: only the check can end it.
+    let _stdin = engine.stdin.take();
+    let (_keep, never) = std::sync::mpsc::channel::<()>();
+    let mut status = None;
+    for _ in 0..300 {
+        status = engine.try_wait().unwrap();
+        if status.is_some() {
+            break;
+        }
+        let _ = never.recv_timeout(Duration::from_millis(10));
+    }
+    let Some(status) = status else {
+        engine.kill().unwrap();
+        engine.wait().unwrap();
+        panic!("the engine waited on a recorder that had gone");
+    };
+    assert!(status.success(), "{status:?}");
+}

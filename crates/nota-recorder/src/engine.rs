@@ -22,8 +22,14 @@
 //! The engine's stderr is always captured, never passed through: the TUI
 //! owns the terminal. On Unix the engine runs in a process group of its
 //! own, so signals sent to the recorder's group (the terminal's SIGHUP when
-//! it closes) don't reach it; it exits when its stdin
-//! closes, so it still ends when the recorder does.
+//! it closes) don't reach it.
+//!
+//! The engine still ends with the recorder however the recorder dies: its
+//! stdin closes, and on Linux the kernel kills it, even while it loads or
+//! decodes (see [`nota_core::lifeline`]; the supervisor names the recorder
+//! in [`RECORDER_PID_VAR`](nota_core::lifeline::RECORDER_PID_VAR)). The
+//! kernel acts when the thread that started the engine ends, so only the
+//! supervisor thread, which outlives every engine it starts, starts them.
 //!
 //! Audio goes to the journal separately and never through here, so the
 //! recording carries on whatever the engine does.
@@ -41,6 +47,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use nota_core::lifeline::RECORDER_PID_VAR;
 use nota_core::messages::{AudioChunk, FromEngine, ProtocolVersion, ToEngine, Transcript};
 use nota_core::protocol::{Frame, FrameReader, ReadError, write_frame};
 use nota_core::{Clock, SampleCount, SampleIndex, SampleRange, SampleRate, SessionTime, TrackId};
@@ -902,11 +909,13 @@ fn start_child(
     inputs: &Sender<Input>,
 ) -> io::Result<Running> {
     let mut child = Command::new(&command.program);
-    child.args(&command.args);
+    child
+        .args(&command.args)
+        .env(RECORDER_PID_VAR, std::process::id().to_string());
     // A process group of its own, so a signal to the recorder's group (the
     // terminal's SIGHUP when it closes) doesn't reach the engine: only the
-    // supervisor decides when it stops. It still ends with
-    // the recorder, however that dies: its stdin closes.
+    // supervisor decides when it stops. It still ends with the recorder,
+    // however that dies: its stdin closes, and on Linux the kernel kills it.
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut child, 0);
     let mut process = child

@@ -26,12 +26,17 @@
 //! | `wrong-version` | Sends a `Hello` with the wrong protocol version. |
 //!
 //! Every mode first requires the recorder's `Hello` (else exit 2) and exits 0
-//! when stdin ends. Bad arguments exit 2.
+//! when stdin ends. Bad arguments exit 2. Like the real engine, every mode
+//! first ties itself to the recorder ([`nota_core::lifeline`]), so on Linux
+//! it dies with the recorder even while it sleeps, and exits 0 at once if
+//! the recorder has already gone (exit 2 if the recorder's process id it's
+//! given isn't one).
 
 use std::collections::BTreeMap;
 use std::io::{self, BufReader, Read, Write};
 use std::process::ExitCode;
 
+use nota_core::lifeline::{Tie, tie_to_recorder};
 use nota_core::messages::{FromEngine, ProtocolVersion, ToEngine, Transcript};
 use nota_core::protocol::{Frame, FrameReader, write_frame};
 use nota_core::{SampleCount, SampleIndex, SampleRange, TrackId};
@@ -330,6 +335,11 @@ fn main() -> ExitCode {
     let Some(args) = Args::parse(std::env::args().skip(1)) else {
         return ExitCode::from(EXIT_USAGE);
     };
+    match tie_to_recorder() {
+        Ok(Tie::Tied | Tie::Unsupported) => {}
+        Ok(Tie::Orphaned) => return ExitCode::SUCCESS,
+        Err(_) => return ExitCode::from(EXIT_USAGE),
+    }
     ExitCode::from(run(args, io::stdin().lock(), io::stdout().lock()))
 }
 
