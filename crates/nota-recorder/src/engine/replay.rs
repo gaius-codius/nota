@@ -547,6 +547,20 @@ mod tests {
     }
 
     #[test]
+    fn a_skip_keeps_the_flush_after_it() {
+        let mut replay = Replay::new(TRACK);
+        replay.push_audio(&chunk(0, 10), SessionTime::ZERO);
+        replay.push_audio(&chunk(50, 10), SessionTime::ZERO);
+        // The stream after the gap still starts with its flush, or the
+        // next engine would get audio that doesn't follow on.
+        assert_eq!(
+            replay.skip(SampleCount::new(10)),
+            [SampleRange::new(at(0), at(10)).unwrap()]
+        );
+        assert_eq!(starts(&sent(&mut replay)), [None, Some(50)]);
+    }
+
+    #[test]
     fn a_track_is_idle_from_its_latest_audio_until_flushed() {
         let mut replay = Replay::new(TRACK);
         assert_eq!(replay.idle_since(), None);

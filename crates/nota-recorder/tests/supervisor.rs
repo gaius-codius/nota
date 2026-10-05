@@ -718,6 +718,35 @@ fn behind_means_more_than_the_limit() {
     );
 }
 
+/// Falling behind says nothing about the audio: a quiet track whose
+/// first unconfirmed sample stands still while another track falls behind
+/// again and again isn't taken for poison.
+#[test]
+fn falling_behind_is_not_poison() {
+    let other = TrackId::new(1);
+    let mut config = fake(&["echo", "--every", "100"]);
+    config.max_unconfirmed = SampleCount::new(4 * CHUNK);
+    let (mut supervisor, mut events) = start(config);
+    events.online();
+    supervisor.send_audio(on_track(other, 0)).unwrap();
+    let mut next = 0;
+    for _ in 0..4 {
+        send(&mut supervisor, next..next + 5);
+        next += 5;
+        assert_eq!(
+            events.offline(Duration::from_secs(5)),
+            OfflineReason::Behind
+        );
+        events.online();
+    }
+    events.pause(Duration::from_millis(200));
+    let skipped_other = events
+        .seen
+        .iter()
+        .any(|(_, e)| matches!(e, EngineEvent::Skipped { track, .. } if *track == other));
+    assert!(!skipped_other, "{:#?}", events.seen);
+}
+
 /// A new engine starts with room to catch up: audio that piled up to the
 /// limit while it loaded doesn't put it behind on the next chunk, which
 /// would restart it before it could confirm anything, every time.

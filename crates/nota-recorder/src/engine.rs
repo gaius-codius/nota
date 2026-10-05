@@ -1105,6 +1105,36 @@ mod tests {
         assert_eq!(tail, "line 998\nline 999");
     }
 
+    /// A reader that gives each of `parts` in turn, then ends.
+    struct Scripted(std::collections::VecDeque<io::Result<&'static [u8]>>);
+
+    impl Read for Scripted {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            match self.0.pop_front() {
+                None => Ok(0),
+                Some(Err(err)) => Err(err),
+                Some(Ok(bytes)) => {
+                    buf[..bytes.len()].copy_from_slice(bytes);
+                    Ok(bytes.len())
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reading_stderr_retries_interruptions_and_stops_at_errors() {
+        let parts = vec![
+            Ok(&b"one\n"[..]),
+            Err(io::Error::from(io::ErrorKind::Interrupted)),
+            Ok(&b"two\n"[..]),
+            Err(io::Error::from(io::ErrorKind::BrokenPipe)),
+            Ok(&b"three\n"[..]),
+        ];
+        assert_eq!(read_tail(Scripted(parts.into()), 100), "one\ntwo");
+        // Exactly `keep` bytes: nothing was cut, so the first line stays.
+        assert_eq!(read_tail(&b"ab\ncd"[..], 5), "ab\ncd");
+    }
+
     #[test]
     fn audio_for_a_stopped_supervisor_is_refused() {
         let (inputs, rx) = mpsc::channel();
