@@ -95,8 +95,8 @@ impl SegmentLength {
 
     /// A window of `samples` samples; `None` for zero.
     #[must_use]
-    pub const fn new(samples: u64) -> Option<Self> {
-        match NonZeroU64::new(samples) {
+    pub const fn new(samples: SampleCount) -> Option<Self> {
+        match NonZeroU64::new(samples.get()) {
             Some(n) => Some(Self(n)),
             None => None,
         }
@@ -112,8 +112,8 @@ impl SegmentLength {
 
     /// Samples per window.
     #[must_use]
-    pub const fn samples(self) -> u64 {
-        self.0.get()
+    pub const fn samples(self) -> SampleCount {
+        SampleCount::new(self.0.get())
     }
 
     /// The window `sample` falls in.

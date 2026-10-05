@@ -5,7 +5,7 @@ use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use super::{Fs, FsFile, Synced, same_directory, valid_path};
+use super::{Fs, FsFile, Synced, is_a_directory, same_directory, valid_dir, valid_path};
 
 /// The real filesystem.
 #[derive(Debug, Default, Clone, Copy)]
@@ -59,10 +59,15 @@ impl Fs for StdFs {
     )]
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         same_directory(from, to)?;
+        // Linux would move a directory too; the fake doesn't model that.
+        if std::fs::symlink_metadata(from)?.is_dir() {
+            return Err(is_a_directory());
+        }
         std::fs::rename(from, to)
     }
 
     fn sync_dir(&self, dir: &Path) -> io::Result<()> {
+        valid_dir(dir)?;
         sync_dir(dir)
     }
 
@@ -71,14 +76,17 @@ impl Fs for StdFs {
         reason = "the durable-write layer is the one place that removes files"
     )]
     fn remove(&self, path: &Path) -> io::Result<()> {
+        valid_path(path)?;
         std::fs::remove_file(path)
     }
 
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        valid_path(path)?;
         std::fs::read(path)
     }
 
     fn list(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
+        valid_dir(dir)?;
         let mut entries = std::fs::read_dir(dir)?
             .map(|entry| entry.map(|e| e.path()))
             .collect::<io::Result<Vec<_>>>()?;
@@ -257,6 +265,26 @@ mod tests {
             fs.rename(Path::new("a"), Path::new("b"))
                 .unwrap_err()
                 .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        let bare = Path::new("journal");
+        let kinds = [
+            fs.remove(bare).unwrap_err().kind(),
+            fs.read(bare).unwrap_err().kind(),
+            fs.list(bare).unwrap_err().kind(),
+            fs.sync_dir(bare).unwrap_err().kind(),
+            fs.lock_dir(bare).unwrap_err().kind(),
+        ];
+        assert_eq!(kinds, [io::ErrorKind::InvalidInput; 5]);
+        assert_eq!(
+            fs.list(Path::new("/tmp/..")).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        // The root is a directory to sync or list, though not a name.
+        fs.sync_dir(Path::new("/")).unwrap();
+        assert!(fs.list(Path::new("/")).is_ok());
+        assert_eq!(
+            fs.remove(Path::new("/")).unwrap_err().kind(),
             io::ErrorKind::InvalidInput
         );
     }

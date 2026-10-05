@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use nota_core::{SampleIndex, SampleRange};
+use nota_core::{SampleCount, SampleIndex, SampleRange};
 use sherpa_onnx::{
     OfflineRecognizer, OfflineRecognizerConfig, SileroVadModelConfig, VadModelConfig,
     VoiceActivityDetector,
@@ -28,16 +28,19 @@ const WINDOW: usize = 512;
 /// samples. Speech is confirmed only after 0.25 s of it, and a segment's
 /// start is then backdated by that plus two windows (about 0.31 s), so
 /// anything older than 0.5 s that isn't in a segment is silence.
-const SETTLE_LAG: u64 = 8_000;
+const SETTLE_LAG: SampleCount = SampleCount::new(8_000);
+
+/// How long a pause must last before the detector may be reset.
+const RESET_PAUSE: SampleCount = SampleCount::new(2 * SETTLE_LAG.get());
 
 /// How far sherpa-onnx backdates a segment's start from where speech is
 /// confirmed: two windows plus the minimum speech (0.25 s).
-const BACKDATE: u64 = 2 * WINDOW as u64 + 4_000;
+const BACKDATE: SampleCount = SampleCount::new(2 * WINDOW as u64 + 4_000);
 
 /// Reset the detector, during a pause, once it has counted this many
 /// samples, about an hour. sherpa-onnx counts samples in an `i32`, which
 /// would overflow after 37 hours.
-const RESET_AFTER: u64 = 16_000 * 3_600;
+const RESET_AFTER: SampleCount = SampleCount::new(16_000 * 3_600);
 
 /// Where the model files are.
 #[derive(Debug, Clone)]
@@ -112,15 +115,15 @@ impl Models for SherpaModels {
     fn detector(&self, first: SampleIndex) -> Result<SileroDetector, EngineError> {
         Ok(SileroDetector {
             vad: create_vad(&self.vad)?,
-            base: first.get(),
-            processed: 0,
+            base: first,
+            processed: SampleCount::ZERO,
             pending: Vec::with_capacity(WINDOW),
             onset: None,
-            silent_until: first.get(),
-            speech_until: first.get(),
+            silent_until: first,
+            speech_until: first,
             reset_after: RESET_AFTER,
             reset: false,
-            segment_end: first.get(),
+            segment_end: first,
         })
     }
 
@@ -174,23 +177,23 @@ impl Transcriber for Parakeet {
 pub struct SileroDetector {
     vad: VoiceActivityDetector,
     /// The track sample the detector's own count starts at.
-    base: u64,
+    base: SampleIndex,
     /// Samples fed to the detector since `base`.
-    processed: u64,
+    processed: SampleCount,
     /// Samples waiting to fill a window.
     pending: Vec<f32>,
     /// Where (in the detector's count) speech was first detected, while it
     /// still is.
-    onset: Option<u64>,
-    silent_until: u64,
+    onset: Option<SampleCount>,
+    silent_until: SampleIndex,
     /// The end of the latest speech seen, in track samples.
-    speech_until: u64,
+    speech_until: SampleIndex,
     /// [`RESET_AFTER`], or less in tests.
-    reset_after: u64,
+    reset_after: SampleCount,
     /// Whether the detector has been reset since it started.
     reset: bool,
     /// The end of the latest segment reported, in track samples.
-    segment_end: u64,
+    segment_end: SampleIndex,
 }
 
 impl std::fmt::Debug for SileroDetector {
@@ -207,24 +210,29 @@ impl std::fmt::Debug for SileroDetector {
 impl SileroDetector {
     fn feed_window(&mut self, window: &[f32], labels: &mut Labels) {
         self.vad.accept_waveform(window);
-        self.processed += window.len() as u64;
+        self.processed = self
+            .processed
+            .saturating_add(SampleCount::new(window.len() as u64));
         if self.vad.detected() {
             self.onset.get_or_insert(self.processed);
         } else {
             self.onset = None;
         }
         self.drain(labels);
-        let now = self.base + self.processed;
+        let now = self.base.saturating_add(self.processed);
         if self.onset.is_some() {
             self.speech_until = now;
         }
         // In track samples, so a reset (which zeroes `processed`) can't
         // move it.
-        let settled = (self.base + self.onset.unwrap_or(self.processed)).saturating_sub(SETTLE_LAG);
+        let settled = self
+            .base
+            .saturating_add(self.onset.unwrap_or(self.processed))
+            .saturating_sub(SETTLE_LAG);
         self.silent_until = self.silent_until.max(settled);
         // Reset only well into a pause: a speech candidate the model hasn't
         // confirmed yet would otherwise be forgotten.
-        let in_pause = now.saturating_sub(self.speech_until) >= 2 * SETTLE_LAG;
+        let in_pause = now.saturating_count_since(self.speech_until) >= RESET_PAUSE;
         if self.onset.is_none()
             && self.vad.is_empty()
             && in_pause
@@ -232,25 +240,26 @@ impl SileroDetector {
         {
             self.vad.reset();
             self.reset = true;
-            self.base += self.processed;
-            self.processed = 0;
+            self.base = self.base.saturating_add(self.processed);
+            self.processed = SampleCount::ZERO;
         }
     }
 
     fn drain(&mut self, labels: &mut Labels) {
         while let Some(segment) = self.vad.front() {
-            let start = u64::try_from(segment.start()).unwrap_or(0);
-            let len = u64::try_from(segment.n()).unwrap_or(0);
-            let (mut from, to) = (self.base + start, self.base + start + len);
+            let start = SampleCount::new(u64::try_from(segment.start()).unwrap_or(0));
+            let len = SampleCount::new(u64::try_from(segment.n()).unwrap_or(0));
+            let mut from = self.base.saturating_add(start);
+            let to = from.saturating_add(len);
             // After a reset, sherpa-onnx clamps a backdated start to where
             // it was reset; the speech may have begun up to `BACKDATE`
             // earlier, though not before the speech before it.
-            if start == 0 && self.reset {
+            if start == SampleCount::ZERO && self.reset {
                 from = from.saturating_sub(BACKDATE).max(self.segment_end);
             }
             self.segment_end = self.segment_end.max(to);
             self.speech_until = self.speech_until.max(to);
-            if let Some(range) = SampleRange::new(SampleIndex::new(from), SampleIndex::new(to)) {
+            if let Some(range) = SampleRange::new(from, to) {
                 labels.segments.push(range);
             }
             self.vad.pop();
@@ -258,7 +267,7 @@ impl SileroDetector {
     }
 
     fn labels(&self, mut labels: Labels) -> Labels {
-        labels.silent_until = SampleIndex::new(self.silent_until);
+        labels.silent_until = self.silent_until;
         labels
     }
 }
@@ -393,7 +402,7 @@ mod tests {
         assert!(segments[0].0 >= first + 4_000, "{segments:?}");
         // Every loud 30 ms frame is in a segment or past settled silence.
         let end = first + audio.len() as u64;
-        assert!(silent + 2 * SETTLE_LAG >= end, "{silent}");
+        assert!(silent + 2 * SETTLE_LAG.get() >= end, "{silent}");
         for (k, frame) in audio.chunks(480).enumerate() {
             // Mean power over 0.01 (an RMS of 0.1), in a whole frame.
             let energy: f32 = frame.iter().map(|s| s * s).sum();
@@ -415,14 +424,14 @@ mod tests {
         };
         let (plain, plain_silent) = detect(models.detector(SampleIndex::ZERO).unwrap(), 0, &audio);
         let mut resetting = models.detector(SampleIndex::ZERO).unwrap();
-        resetting.reset_after = 8_000;
+        resetting.reset_after = SampleCount::new(8_000);
         let (reset, reset_silent) = detect(resetting, 0, &audio);
         assert_eq!(plain.len(), reset.len(), "{plain:?} vs {reset:?}");
         // The same speech, starts possibly widened to cover what a reset
         // hid.
         for (a, b) in plain.iter().zip(&reset) {
             assert!(b.0 <= a.0 + 2 * WINDOW as u64, "{plain:?} vs {reset:?}");
-            assert!(a.0 <= b.0 + BACKDATE, "{plain:?} vs {reset:?}");
+            assert!(a.0 <= b.0 + BACKDATE.get(), "{plain:?} vs {reset:?}");
             assert!(
                 a.1.abs_diff(b.1) <= 2 * WINDOW as u64,
                 "{plain:?} vs {reset:?}"
@@ -433,9 +442,10 @@ mod tests {
 
     #[test]
     fn reset_after_is_an_hour_and_backdate_matches_sherpa() {
-        assert_eq!(RESET_AFTER, 57_600_000);
+        assert_eq!(RESET_AFTER.get(), 57_600_000);
         // sherpa-onnx: start = tail - 2 * window - min_speech_samples.
-        assert_eq!(BACKDATE, 5_024);
-        assert!(SETTLE_LAG > BACKDATE + 2 * WINDOW as u64);
+        assert_eq!(BACKDATE.get(), 5_024);
+        assert_eq!(RESET_PAUSE.get(), 16_000);
+        assert!(SETTLE_LAG.get() > BACKDATE.get() + 2 * WINDOW as u64);
     }
 }

@@ -1529,6 +1529,7 @@ dependencies = [
  "crc32fast",
  "flacenc",
  "nota-core",
+ "nota-recorder",
  "nota-store",
  "proptest",
  "sha2",

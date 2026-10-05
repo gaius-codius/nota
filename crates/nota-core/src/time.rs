@@ -126,11 +126,32 @@ impl SampleIndex {
         self.0.checked_add(count.0).map(Self)
     }
 
+    /// The sample `count` samples later, stopping at the largest position
+    /// on overflow.
+    #[must_use]
+    pub const fn saturating_add(self, count: SampleCount) -> Self {
+        Self(self.0.saturating_add(count.0))
+    }
+
+    /// The sample `count` samples earlier, stopping at the track's first
+    /// sample.
+    #[must_use]
+    pub const fn saturating_sub(self, count: SampleCount) -> Self {
+        Self(self.0.saturating_sub(count.0))
+    }
+
     /// The number of samples from `earlier` up to (not including) `self`, or
     /// `None` if `earlier` is later.
     #[must_use]
     pub fn checked_count_since(self, earlier: Self) -> Option<SampleCount> {
         self.0.checked_sub(earlier.0).map(SampleCount)
+    }
+
+    /// Like [`Self::checked_count_since`], but no samples if `earlier` is
+    /// later.
+    #[must_use]
+    pub const fn saturating_count_since(self, earlier: Self) -> SampleCount {
+        SampleCount(self.0.saturating_sub(earlier.0))
     }
 }
 
@@ -152,6 +173,19 @@ impl SampleCount {
     #[must_use]
     pub const fn get(self) -> u64 {
         self.0
+    }
+
+    /// This many samples plus `other`, stopping at the largest count on
+    /// overflow.
+    #[must_use]
+    pub const fn saturating_add(self, other: Self) -> Self {
+        Self(self.0.saturating_add(other.0))
+    }
+
+    /// This many samples less `other`, stopping at none.
+    #[must_use]
+    pub const fn saturating_sub(self, other: Self) -> Self {
+        Self(self.0.saturating_sub(other.0))
     }
 
     /// How long this many samples last at `rate`, rounded up to a whole
@@ -357,6 +391,44 @@ mod tests {
         );
         assert_eq!(s.checked_count_since(s), Some(SampleCount::ZERO));
         assert_eq!(SampleIndex::new(4).checked_count_since(s), None);
+    }
+
+    #[test]
+    fn saturating_sample_arithmetic_stops_at_the_ends() {
+        let s = SampleIndex::new(10);
+        assert_eq!(s.saturating_add(SampleCount::new(5)), SampleIndex::new(15));
+        assert_eq!(
+            SampleIndex::new(u64::MAX - 1).saturating_add(SampleCount::new(5)),
+            SampleIndex::new(u64::MAX)
+        );
+        assert_eq!(s.saturating_sub(SampleCount::new(4)), SampleIndex::new(6));
+        assert_eq!(s.saturating_sub(SampleCount::new(10)), SampleIndex::ZERO);
+        assert_eq!(s.saturating_sub(SampleCount::new(11)), SampleIndex::ZERO);
+        assert_eq!(
+            s.saturating_count_since(SampleIndex::new(4)),
+            SampleCount::new(6)
+        );
+        assert_eq!(s.saturating_count_since(s), SampleCount::ZERO);
+        assert_eq!(
+            SampleIndex::new(4).saturating_count_since(s),
+            SampleCount::ZERO
+        );
+        assert_eq!(
+            SampleCount::new(3).saturating_add(SampleCount::new(4)),
+            SampleCount::new(7)
+        );
+        assert_eq!(
+            SampleCount::new(u64::MAX - 1).saturating_add(SampleCount::new(5)),
+            SampleCount::new(u64::MAX)
+        );
+        assert_eq!(
+            SampleCount::new(7).saturating_sub(SampleCount::new(3)),
+            SampleCount::new(4)
+        );
+        assert_eq!(
+            SampleCount::new(3).saturating_sub(SampleCount::new(7)),
+            SampleCount::ZERO
+        );
     }
 
     #[test]

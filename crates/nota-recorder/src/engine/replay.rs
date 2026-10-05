@@ -44,7 +44,7 @@ pub(super) struct Replay {
     /// The sample after the last audio pushed.
     next: Option<SampleIndex>,
     /// Samples in `entries`.
-    unconfirmed: u64,
+    unconfirmed: SampleCount,
     /// Audio has been pushed since the last flush, so the engine may hold
     /// an open stream even when everything is confirmed.
     open: bool,
@@ -63,7 +63,7 @@ impl Replay {
             entries: VecDeque::new(),
             held: Vec::new(),
             next: None,
-            unconfirmed: 0,
+            unconfirmed: SampleCount::ZERO,
             open: false,
             last_audio: None,
             stuck_at: None,
@@ -89,7 +89,7 @@ impl Replay {
                 break;
             };
             at = piece.range().end();
-            self.unconfirmed += piece.range().len().get();
+            self.unconfirmed = self.unconfirmed.saturating_add(piece.range().len());
             self.entries.push_back(Entry::Audio {
                 chunk: piece,
                 sent_at: None,
@@ -160,13 +160,13 @@ impl Replay {
                         break;
                     };
                     *chunk = rest;
-                    self.unconfirmed -= left;
+                    self.unconfirmed = self.unconfirmed.saturating_sub(SampleCount::new(left));
                     if let Some(gone) = SampleRange::new(range.start(), at) {
                         join(&mut dropped, gone);
                     }
                     break;
                 }
-                self.unconfirmed -= range.len().get();
+                self.unconfirmed = self.unconfirmed.saturating_sub(range.len());
                 left -= range.len().get();
                 join(&mut dropped, range);
             }
@@ -254,18 +254,18 @@ impl Replay {
         let expected = self
             .held
             .last()
-            .map(|t| t.range.end())
+            .map(|t| t.range().end())
             .or_else(|| self.first_unconfirmed())
             .ok_or(Violation("text for audio not sent"))?;
-        if transcript.range.start() != expected {
+        if transcript.range().start() != expected {
             return Err(Violation(
                 "text doesn't start at the first unconfirmed sample",
             ));
         }
         let past = self
             .sent_run_end()
-            .is_none_or(|end| transcript.range.end() > end);
-        if transcript.range.is_empty() || past {
+            .is_none_or(|end| transcript.range().end() > end);
+        if past {
             return Err(Violation("text past the audio sent"));
         }
         self.held.push(transcript);
@@ -287,7 +287,7 @@ impl Replay {
         if self.sent_run_end().is_none_or(|end| up_to > end) {
             return Err(Violation("confirmed past the audio sent"));
         }
-        if self.held.iter().any(|t| t.range.end() > up_to) {
+        if self.held.iter().any(|t| t.range().end() > up_to) {
             return Err(Violation("text runs past its confirmation"));
         }
         self.confirm(up_to);
@@ -308,12 +308,14 @@ impl Replay {
                     }
                     if range.end() > up_to {
                         if let Some(rest) = split_at(chunk, up_to) {
-                            self.unconfirmed -= range.len().get() - rest.range().len().get();
+                            let done = range.len().get() - rest.range().len().get();
+                            self.unconfirmed =
+                                self.unconfirmed.saturating_sub(SampleCount::new(done));
                             *chunk = rest;
                         }
                         break;
                     }
-                    self.unconfirmed -= range.len().get();
+                    self.unconfirmed = self.unconfirmed.saturating_sub(range.len());
                 }
             }
             self.entries.pop_front();
@@ -324,12 +326,12 @@ impl Replay {
     /// fewer, if there were), splitting the entry the cut falls in, while
     /// no engine is running. Returns the ranges dropped, never transcribed.
     pub(super) fn trim(&mut self, keep: SampleCount) -> Vec<SampleRange> {
-        let over = self.unconfirmed.saturating_sub(keep.get());
-        self.skip(SampleCount::new(over))
+        let over = self.unconfirmed.saturating_sub(keep);
+        self.skip(over)
     }
 
     /// How many samples are unconfirmed.
-    pub(super) const fn unconfirmed(&self) -> u64 {
+    pub(super) const fn unconfirmed(&self) -> SampleCount {
         self.unconfirmed
     }
 }
@@ -379,11 +381,12 @@ mod tests {
     }
 
     fn t(from: u64, to: u64) -> Transcript {
-        Transcript {
-            track: TRACK,
-            range: SampleRange::new(at(from), at(to)).unwrap(),
-            text: format!("{from}-{to}"),
-        }
+        Transcript::new(
+            TRACK,
+            SampleRange::new(at(from), at(to)).unwrap(),
+            format!("{from}-{to}"),
+        )
+        .unwrap()
     }
 
     fn sent(replay: &mut Replay) -> Vec<ToEngine> {
@@ -408,11 +411,11 @@ mod tests {
         sent(&mut replay);
         replay.on_transcript(t(0, 15)).unwrap();
         assert_eq!(replay.on_confirmed(at(15)).unwrap(), [t(0, 15)]);
-        assert_eq!(replay.unconfirmed(), 5);
+        assert_eq!(replay.unconfirmed().get(), 5);
         assert_eq!(replay.first_unconfirmed(), Some(at(15)));
         // Confirmed silence releases nothing.
         assert_eq!(replay.on_confirmed(at(20)).unwrap(), []);
-        assert_eq!(replay.unconfirmed(), 0);
+        assert_eq!(replay.unconfirmed().get(), 0);
         assert_eq!(replay.oldest_sent(), None);
     }
 
@@ -513,7 +516,7 @@ mod tests {
             [SampleRange::new(at(5), at(13)).unwrap()]
         );
         assert_eq!(replay.first_unconfirmed(), Some(at(13)));
-        assert_eq!(replay.unconfirmed(), 17);
+        assert_eq!(replay.unconfirmed().get(), 17);
         let resent = sent(&mut replay);
         assert_eq!(starts(&resent), [Some(13), Some(20)]);
         let ToEngine::Audio(rest) = &resent[0] else {
@@ -534,14 +537,14 @@ mod tests {
             replay.skip(SampleCount::new(20)),
             [SampleRange::new(at(0), at(20)).unwrap()]
         );
-        assert_eq!(replay.unconfirmed(), 10);
+        assert_eq!(replay.unconfirmed().get(), 10);
         assert_eq!(starts(&sent(&mut replay)), [Some(20)]);
         // More than is left takes everything.
         assert_eq!(
             replay.skip(SampleCount::new(1_000)),
             [SampleRange::new(at(20), at(30)).unwrap()]
         );
-        assert_eq!(replay.unconfirmed(), 0);
+        assert_eq!(replay.unconfirmed().get(), 0);
         assert!(replay.entries.is_empty());
     }
 
@@ -613,7 +616,8 @@ mod tests {
         assert!(replay.on_confirmed(at(111)).is_err(), "past the audio");
         assert!(replay.on_transcript(t(101, 105)).is_err(), "wrong start");
         assert!(replay.on_transcript(t(100, 111)).is_err(), "past the audio");
-        assert!(replay.on_transcript(t(100, 100)).is_err(), "empty");
+        let empty = SampleRange::new(at(100), at(100)).unwrap();
+        assert_eq!(Transcript::new(TRACK, empty, "x".into()), None, "empty");
         replay.on_transcript(t(100, 104)).unwrap();
         replay.on_transcript(t(104, 108)).unwrap();
         assert!(
@@ -639,7 +643,7 @@ mod tests {
             })
             .collect();
         assert_eq!(lens, [MAX_AUDIO_SAMPLES, MAX_AUDIO_SAMPLES, 1]);
-        assert_eq!(replay.unconfirmed(), MAX_AUDIO_SAMPLES as u64 * 2 + 1);
+        assert_eq!(replay.unconfirmed().get(), MAX_AUDIO_SAMPLES as u64 * 2 + 1);
     }
 
     #[test]
@@ -658,14 +662,14 @@ mod tests {
                 SampleRange::new(at(40), at(45)).unwrap()
             ]
         );
-        assert_eq!(replay.unconfirmed(), 15);
+        assert_eq!(replay.unconfirmed().get(), 15);
         assert_eq!(starts(&sent(&mut replay)), [Some(45), Some(50)]);
         assert_eq!(replay.trim(SampleCount::new(15)), []);
         assert_eq!(
             replay.trim(SampleCount::new(0)),
             [SampleRange::new(at(45), at(60)).unwrap()]
         );
-        assert_eq!(replay.unconfirmed(), 0);
+        assert_eq!(replay.unconfirmed().get(), 0);
     }
 
     #[test]

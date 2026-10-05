@@ -1,9 +1,12 @@
-//! The filesystem layer: the only way the recorder touches the disk.
+//! The filesystem layer: how the recorder touches the disk.
 //!
-//! Every durable write (the journal, FLAC segments, their renames and
-//! directory syncs) goes through an [`Fs`]. The real one, [`StdFs`], is the
-//! only code in nota allowed to call `std::fs`'s write functions; clippy's
-//! `disallowed-methods` bans them everywhere else. Tests use `FakeFs` (feature
+//! Every durable write of audio (the journal, FLAC segments, their renames
+//! and directory syncs) goes through an [`Fs`]. The one exception is the
+//! database, which SQLite writes itself (see `nota-store`). The real one,
+//! [`StdFs`], is the only code here allowed to call `std::fs`'s write
+//! functions; clippy's `disallowed-methods` bans them everywhere else, and
+//! the one other user (`nota-store`, creating the database file) says so
+//! with `#[expect]`. Tests use `FakeFs` (feature
 //! `fake-fs`), which records every operation and can simulate a crash that
 //! loses whatever wasn't fsync'd, so a crash after each operation of a write
 //! path is a fast, exhaustive unit test (see `crash`).
@@ -18,9 +21,11 @@
 //!   encoded in memory and published as one append, fsync, rename and
 //!   directory sync. The bytes aren't durable until
 //!   [`FsFile::sync`]; a crash may keep none, some or all of them, and kept
-//!   bytes past the last sync may read back as zeros.
-//! - [`Fs::rename`] moves a name within one directory, replacing any file
-//!   at the new name. It isn't durable until that directory is synced.
+//!   bytes past the last sync may read back as zeros. A failed write may
+//!   have appended some of its bytes, and after a failed sync the unsynced
+//!   bytes still read back but may never reach the disk.
+//! - [`Fs::rename`] moves a file's name within one directory, replacing any
+//!   file at the new name. It isn't durable until that directory is synced.
 //! - [`Fs::remove`] unlinks a name; durable after a directory sync.
 //! - [`Fs::read`] reads a whole file, and [`Fs::list`] a directory's
 //!   entries, as the running system sees them.
@@ -71,15 +76,17 @@ pub trait Fs: Send + Sync + fmt::Debug {
     /// Any I/O error, including a missing parent.
     fn create_dir(&self, path: &Path) -> io::Result<()>;
 
-    /// Renames `from` to `to`, replacing any file at `to`. Both must be in the
-    /// same directory, which keeps the crash model simple and is all the
-    /// write path needs (`seg.flac.tmp` to `seg.flac`). Durable only after
-    /// [`Fs::sync_dir`] on that directory.
+    /// Renames the file `from` to `to`, replacing any file at `to`. Both must
+    /// be in the same directory, and `from` can't be a directory, which keeps
+    /// the crash model simple and is all the write path needs
+    /// (`seg.flac.tmp` to `seg.flac`). Durable only after [`Fs::sync_dir`] on
+    /// that directory.
     ///
     /// # Errors
     ///
-    /// [`io::ErrorKind::InvalidInput`] if the directories differ; any I/O
-    /// error, including a missing `from`.
+    /// [`io::ErrorKind::InvalidInput`] if the directories differ;
+    /// [`io::ErrorKind::IsADirectory`] if `from` or `to` is a directory; any
+    /// I/O error, including a missing `from`.
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;
 
     /// Makes every create, rename and remove in `dir` so far durable.
@@ -142,7 +149,9 @@ pub trait FsFile: Send + fmt::Debug {
     /// # Errors
     ///
     /// Any I/O error. After a failed fsync, nothing written since the last
-    /// successful one can be assumed durable.
+    /// successful one can be assumed durable, even after a later fsync
+    /// succeeds: the kernel may have dropped those bytes from its write-back
+    /// while they still read back. Treat the file as broken.
     fn sync(&mut self) -> io::Result<Synced>;
 }
 
@@ -167,6 +176,21 @@ fn valid_path(path: &Path) -> io::Result<()> {
             "a path needs a directory and a name",
         )),
     }
+}
+
+/// Checks a directory to sync or list: the root, or a [`valid_path`].
+fn valid_dir(dir: &Path) -> io::Result<()> {
+    if dir.has_root() && dir.parent().is_none() {
+        Ok(())
+    } else {
+        valid_path(dir)
+    }
+}
+
+/// As Linux's read(2), unlink(2) and rename(2) onto a directory: `EISDIR`.
+/// [`Fs::rename`] refuses a directory to move with it too.
+fn is_a_directory() -> io::Error {
+    io::Error::new(io::ErrorKind::IsADirectory, "is a directory")
 }
 
 /// Checks that `from` and `to` are valid paths in the same directory, as

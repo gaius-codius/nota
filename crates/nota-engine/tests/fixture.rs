@@ -119,9 +119,12 @@ fn the_fixture_transcribes() {
     while let Some(frame) = reader.read_frame::<FromEngine>().unwrap() {
         match frame {
             Frame::Message(FromEngine::Transcript(t)) => {
-                assert_eq!(t.range.start().get(), confirmed);
-                assert!(t.range.len().get() <= 160_000, "a chunk over the 10 s cap");
-                texts.push(t.text);
+                assert_eq!(t.range().start().get(), confirmed);
+                assert!(
+                    t.range().len().get() <= 160_000,
+                    "a chunk over the 10 s cap"
+                );
+                texts.push(t.into_text());
             }
             Frame::Message(FromEngine::Confirmed { up_to, .. }) => confirmed = up_to.get(),
             Frame::Hello(_) => panic!("second hello"),

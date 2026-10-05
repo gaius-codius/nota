@@ -152,20 +152,17 @@ fn answer(
     chunks: Vec<Chunk>,
 ) -> Result<(), EngineError> {
     for chunk in chunks {
-        if chunk.has_speech {
-            let text = transcriber.transcribe(&chunk.audio);
-            if !text.is_empty() {
-                let transcript = Transcript {
-                    track,
-                    range: chunk.range,
-                    text,
-                };
+        if chunk.has_speech() {
+            let text = transcriber.transcribe(chunk.audio());
+            // A chunk is never empty, so the transcript always builds.
+            let transcript = Transcript::new(track, chunk.range(), text);
+            if let Some(transcript) = transcript.filter(|t| !t.text().is_empty()) {
                 send(output, &Frame::Message(FromEngine::Transcript(transcript)))?;
             }
         }
         let confirmed = FromEngine::Confirmed {
             track,
-            up_to: chunk.range.end(),
+            up_to: chunk.range().end(),
         };
         send(output, &Frame::Message(confirmed))?;
     }

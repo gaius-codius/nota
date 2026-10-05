@@ -39,7 +39,7 @@ fn rate() -> SampleRate {
 
 /// One and a half seconds per window, so journals sync partway through.
 fn length() -> SegmentLength {
-    SegmentLength::new(1_500).unwrap()
+    SegmentLength::new(SampleCount::new(1_500)).unwrap()
 }
 
 fn session() -> PathBuf {
@@ -1052,7 +1052,7 @@ fn journals_rotate_at_every_window_even_when_publishing_fails() {
         );
         // ...so never more than one window's worth of bytes.
         let frames = u64::try_from(read.frames().len()).unwrap();
-        assert!(range.len().get() <= length().samples());
+        assert!(range.len().get() <= length().samples().get());
         assert_eq!(
             bytes.len() as u64,
             HEADER_LEN as u64 + frames * FRAME_HEADER_LEN as u64 + 2 * range.len().get()
@@ -1266,10 +1266,10 @@ fn salvage_on_the_real_filesystem_with_sqlite() {
 
 #[test]
 fn segment_lengths_and_names() {
-    assert_eq!(SegmentLength::new(0), None);
+    assert_eq!(SegmentLength::new(SampleCount::new(0)), None);
     let five = SegmentLength::default_at(SampleRate::SPEECH);
-    assert_eq!(five.samples(), 4_800_000);
-    let l = SegmentLength::new(10).unwrap();
+    assert_eq!(five.samples(), SampleCount::new(4_800_000));
+    let l = SegmentLength::new(SampleCount::new(10)).unwrap();
     assert_eq!(l.window_of(SampleIndex::new(9)), 0);
     assert_eq!(l.window_of(SampleIndex::new(10)), 1);
     assert_eq!(
@@ -1277,13 +1277,13 @@ fn segment_lengths_and_names() {
         Some(SampleIndex::new(20))
     );
     assert_eq!(
-        SegmentLength::new(u64::MAX)
+        SegmentLength::new(SampleCount::new(u64::MAX))
             .unwrap()
             .window_end(SampleIndex::new(5)),
         Some(SampleIndex::new(u64::MAX))
     );
     assert_eq!(
-        SegmentLength::new(1)
+        SegmentLength::new(SampleCount::new(1))
             .unwrap()
             .window_end(SampleIndex::new(u64::MAX)),
         None
@@ -1397,7 +1397,7 @@ fn a_row_without_its_file_here_claims_nothing() {
 fn a_journal_corrupt_before_its_end_is_published_then_set_aside() {
     let fs = FakeFs::with_dirs([session(), db()]);
     let (clock, dyn_clock) = fake_clock();
-    let long = SegmentLength::new(1_000_000).unwrap();
+    let long = SegmentLength::new(SampleCount::new(1_000_000)).unwrap();
     let lock = owned(&fs);
     let mut writer = SessionWriter::open(&lock, rate(), long, dyn_clock).unwrap();
     writer
@@ -1483,7 +1483,7 @@ fn journal_at_16_khz(seconds: u64) -> (Vec<u8>, Vec<(usize, u64)>) {
     let fs = FakeFs::with_dirs([session(), db()]);
     let (clock, dyn_clock) = fake_clock();
     let hz = SampleRate::new(16_000).unwrap();
-    let long = SegmentLength::new(1_000_000_000).unwrap();
+    let long = SegmentLength::new(SampleCount::new(1_000_000_000)).unwrap();
     let lock = owned(&fs);
     let mut writer = SessionWriter::open(&lock, hz, long, dyn_clock).unwrap();
     writer
@@ -1518,7 +1518,7 @@ fn salvage_bytes(bytes: &[u8]) -> Published {
     file.write_all(bytes).unwrap();
     salvage(
         &mut session_store(&disk),
-        SegmentLength::new(1_000_000_000).unwrap(),
+        SegmentLength::new(SampleCount::new(1_000_000_000)).unwrap(),
     )
     .unwrap()
 }
@@ -1960,8 +1960,8 @@ fn check_mismatch_kept(
     let in_bad = |track: TrackId, s: u64| {
         let window = length().window_of(SampleIndex::new(s));
         let (from, to) = (
-            window * length().samples(),
-            (window + 1) * length().samples(),
+            window * length().samples().get(),
+            (window + 1) * length().samples().get(),
         );
         bad.iter().any(|r| {
             r.track() == track && r.range().start().get() < to && from < r.range().end().get()

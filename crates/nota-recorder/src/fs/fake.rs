@@ -44,16 +44,28 @@
 //! # Failing without crashing
 //!
 //! [`FakeFs::fail_after`] fails one operation with an I/O error and lets the
-//! process carry on, for testing what code does after `ENOSPC` or `EIO`. A
-//! failed fsync drops the file's unsynced data from the running view too, as
-//! Linux does: the dirty pages are marked clean and the data is gone.
+//! process carry on, for testing what code does after `ENOSPC` or `EIO`.
+//! The fake fails as harshly as Linux may:
+//! - A failed [`FsFile::write_all`] appends the first half of its bytes, as
+//!   a short write before the error would.
+//! - A failed [`FsFile::sync`] leaves the unsynced bytes readable, but no
+//!   later sync covers them: Linux marks their pages clean after a
+//!   write-back error. After a crash they read back as zeros, even if a
+//!   later sync succeeded, unless they were written back before the error:
+//!   [`CrashOutcome::LoseUnsynced`] zeroes them, [`CrashOutcome::KeepAll`]
+//!   keeps them, and [`CrashOutcome::Partial`] picks for each failed sync.
+//!
+//! Directory errors match Linux's too: reading, removing or renaming onto a
+//! directory is `IsADirectory`, and listing or syncing a file is
+//! `NotADirectory`. Renaming a directory is refused (`IsADirectory`), as
+//! [`Fs::rename`] says; Linux would move it, but nothing needs that.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use super::{Fs, FsFile, Synced, same_directory, valid_path};
+use super::{Fs, FsFile, Synced, is_a_directory, same_directory, valid_dir, valid_path};
 
 /// One operation on a [`FakeFs`], as recorded in its log.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,6 +173,9 @@ struct Inode {
     data: Vec<u8>,
     /// How much of `data` the last fsync covered.
     synced: usize,
+    /// Ranges of `data` a failed fsync dropped from write-back: readable,
+    /// but zeros after a crash.
+    lost: Vec<(usize, usize)>,
 }
 
 /// The names in a directory tree: files (to their inodes) and directories.
@@ -319,6 +334,18 @@ impl State {
             .ok_or_else(|| io::Error::other("the fake lost an open file's inode"))
     }
 
+    /// Fails unless `dir` is a directory: `NotADirectory` for a file,
+    /// `NotFound` for nothing.
+    fn dir_exists(&self, dir: &Path) -> io::Result<()> {
+        if self.names.dirs.contains(dir) {
+            Ok(())
+        } else if self.names.files.contains_key(dir) {
+            Err(not_a_directory())
+        } else {
+            Err(not_found())
+        }
+    }
+
     /// Fails unless `path`'s directory exists.
     fn parent_exists(&self, path: &Path) -> io::Result<()> {
         match path.parent() {
@@ -380,9 +407,29 @@ impl State {
                     data
                 }
             };
+            // What a failed fsync dropped from write-back: gone unless the
+            // kernel had written it back before the error.
+            for &(from, to) in &inode.lost {
+                let zeroed = match outcome {
+                    CrashOutcome::LoseUnsynced => true,
+                    CrashOutcome::KeepAll => false,
+                    CrashOutcome::Partial { .. } => rng.coin(),
+                };
+                let to = to.min(data.len());
+                if let (true, Some(range)) = (zeroed, data.get_mut(from..to)) {
+                    range.fill(0);
+                }
+            }
             data.shrink_to_fit();
             let synced = data.len();
-            inodes.insert(id, Inode { data, synced });
+            inodes.insert(
+                id,
+                Inode {
+                    data,
+                    synced,
+                    lost: Vec::new(),
+                },
+            );
         }
         inodes.retain(|id, _| names.files.values().any(|named| named == id));
         State::new(inodes, self.next_inode, names)
@@ -401,9 +448,10 @@ fn exists() -> io::Error {
     io::Error::new(io::ErrorKind::AlreadyExists, "the name exists")
 }
 
-/// As Linux's read(2), unlink(2) and rename(2) onto a directory: `EISDIR`.
-fn is_a_directory() -> io::Error {
-    io::Error::new(io::ErrorKind::IsADirectory, "is a directory")
+/// As Linux's opendir(3) and fsync of a directory handle on a file:
+/// `ENOTDIR`.
+fn not_a_directory() -> io::Error {
+    io::Error::new(io::ErrorKind::NotADirectory, "not a directory")
 }
 
 impl FakeFs {
@@ -441,8 +489,9 @@ impl FakeFs {
     }
 
     /// Fails the operation after the next `ops` with an error of `kind`,
-    /// without crashing. A failed write writes nothing; a failed fsync also
-    /// loses the file's unsynced data.
+    /// without crashing. A failed write appends half its bytes; a failed
+    /// fsync leaves the unsynced bytes readable but not durable (see the
+    /// module docs).
     pub fn fail_after(&self, ops: usize, kind: io::ErrorKind) {
         self.lock().fail = Some((ops, kind));
     }
@@ -485,7 +534,8 @@ impl FakeFs {
 
     /// A separate copy of this filesystem as the running system sees it,
     /// with everything durable and an empty log. For re-running recovery
-    /// from the same starting point.
+    /// from the same starting point. Bytes a failed fsync dropped read as
+    /// zeros in the copy: they may never have reached the disk.
     #[must_use]
     pub fn copy_disk(&self) -> Self {
         let state = self.lock();
@@ -494,9 +544,15 @@ impl FakeFs {
             .iter()
             .filter(|(id, _)| state.names.files.values().any(|named| named == *id))
             .map(|(&id, inode)| {
-                let data = inode.data.clone();
+                let mut data = inode.data.clone();
+                for &(from, to) in &inode.lost {
+                    if let Some(range) = data.get_mut(from..to.min(inode.data.len())) {
+                        range.fill(0);
+                    }
+                }
                 let synced = data.len();
-                (id, Inode { data, synced })
+                let lost = Vec::new();
+                (id, Inode { data, synced, lost })
             })
             .collect();
         Self::from_state(State::new(inodes, state.next_inode, state.names.clone()))
@@ -556,6 +612,9 @@ impl Fs for FakeFs {
         same_directory(from, to)?;
         let mut state = self.lock();
         state.admit()?;
+        if state.names.dirs.contains(from) {
+            return Err(is_a_directory());
+        }
         let id = *state.names.files.get(from).ok_or_else(not_found)?;
         if state.names.dirs.contains(to) {
             return Err(is_a_directory());
@@ -573,11 +632,10 @@ impl Fs for FakeFs {
     }
 
     fn sync_dir(&self, dir: &Path) -> io::Result<()> {
+        valid_dir(dir)?;
         let mut state = self.lock();
         state.admit()?;
-        if !state.names.dirs.contains(dir) {
-            return Err(not_found());
-        }
+        state.dir_exists(dir)?;
         let State {
             pending, durable, ..
         } = &mut *state;
@@ -594,6 +652,7 @@ impl Fs for FakeFs {
     }
 
     fn remove(&self, path: &Path) -> io::Result<()> {
+        valid_path(path)?;
         let mut state = self.lock();
         state.admit()?;
         if state.names.dirs.contains(path) {
@@ -606,6 +665,7 @@ impl Fs for FakeFs {
     }
 
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        valid_path(path)?;
         let mut state = self.lock();
         state.admit()?;
         if state.names.dirs.contains(path) {
@@ -618,11 +678,10 @@ impl Fs for FakeFs {
     }
 
     fn list(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
+        valid_dir(dir)?;
         let mut state = self.lock();
         state.admit()?;
-        if !state.names.dirs.contains(dir) {
-            return Err(not_found());
-        }
+        state.dir_exists(dir)?;
         let in_dir = |p: &&PathBuf| p.parent() == Some(dir);
         let mut entries: Vec<PathBuf> = state.names.files.keys().filter(in_dir).cloned().collect();
         entries.extend(state.names.dirs.iter().filter(in_dir).cloned());
@@ -634,15 +693,7 @@ impl Fs for FakeFs {
     fn lock_dir(&self, dir: &Path) -> io::Result<FakeLock> {
         valid_path(dir)?;
         let mut state = self.lock();
-        if state.names.files.contains_key(dir) {
-            return Err(io::Error::new(
-                io::ErrorKind::NotADirectory,
-                "lock_dir needs a directory",
-            ));
-        }
-        if !state.names.dirs.contains(dir) {
-            return Err(not_found());
-        }
+        state.dir_exists(dir)?;
         if !state.locked.insert(dir.to_path_buf()) {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
@@ -659,7 +710,14 @@ impl Fs for FakeFs {
 impl FsFile for FakeFile {
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
         let mut state = lock(&self.state);
-        state.admit()?;
+        if let Err(e) = state.admit() {
+            if !state.crashed {
+                // A short write, then the error.
+                let half = &bytes[..bytes.len() / 2];
+                state.inode(self.inode)?.data.extend_from_slice(half);
+            }
+            return Err(e);
+        }
         state.inode(self.inode)?.data.extend_from_slice(bytes);
         state.log.push(Op::Write {
             path: self.path.clone(),
@@ -672,9 +730,11 @@ impl FsFile for FakeFile {
         let mut state = lock(&self.state);
         if let Err(e) = state.admit() {
             if !state.crashed {
-                // Linux after a failed fsync: the unsynced pages are dropped.
+                // Linux after a failed fsync: the unsynced pages are marked
+                // clean, so they read back but never reach the disk.
                 let inode = state.inode(self.inode)?;
-                inode.data.truncate(inode.synced);
+                let range = (inode.synced, inode.data.len());
+                inode.lost.push(range);
             }
             return Err(e);
         }
@@ -1020,7 +1080,30 @@ mod tests {
             fs.create(&p("/s/..")).unwrap_err().kind(),
             io::ErrorKind::InvalidInput
         );
+        let bare = p("j");
+        let kinds = [
+            fs.remove(&bare).unwrap_err().kind(),
+            fs.read(&bare).unwrap_err().kind(),
+            fs.list(&bare).unwrap_err().kind(),
+            fs.sync_dir(&bare).unwrap_err().kind(),
+        ];
+        assert_eq!(kinds, [io::ErrorKind::InvalidInput; 4]);
+        // An absolute path still needs a name, unless it's the root.
+        assert_eq!(
+            fs.list(&p("/s/..")).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            fs.sync_dir(&p("/s/..")).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            fs.remove(&p("/")).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
         assert!(fs.ops().is_empty());
+        // Refused before counting as an operation.
+        assert_eq!(fs.attempted(), 0);
     }
 
     #[test]
@@ -1135,24 +1218,129 @@ mod tests {
         );
         assert!(!fs.has_crashed());
         f.write_all(b"!").unwrap();
-        assert_eq!(fs.read(&p("/s/j")).unwrap(), b"ok!");
+        // The failed write left half its bytes, as a short write can.
+        assert_eq!(fs.read(&p("/s/j")).unwrap(), b"okfu!");
         // Only the successes are in the log.
         assert_eq!(fs.ops().len(), 4);
         assert_eq!(fs.attempted(), 5);
     }
 
     #[test]
-    fn a_failed_fsync_drops_the_unsynced_data() {
+    fn a_failed_fsync_keeps_the_data_readable_but_never_durable() {
+        let failed_sync = || {
+            let fs = FakeFs::with_dirs(["/s"]);
+            let mut f = fs.create(&p("/s/j")).unwrap();
+            fs.sync_dir(&p("/s")).unwrap();
+            f.write_all(b"safe").unwrap();
+            f.sync().unwrap();
+            f.write_all(b"lost").unwrap();
+            fs.fail_after(0, io::ErrorKind::Other);
+            assert!(f.sync().is_err());
+            assert!(!fs.has_crashed());
+            assert_eq!(fs.read(&p("/s/j")).unwrap(), b"safelost");
+            (fs, f)
+        };
+        // Before another sync, the dropped bytes are zeros, kept or gone.
+        for outcome in CrashOutcome::standard() {
+            let (fs, _f) = failed_sync();
+            let got = after_crash(&fs, outcome, "/s/j").unwrap();
+            let zeroed = b"safe\0\0\0\0".starts_with(&got);
+            assert!(
+                zeroed || b"safelost".starts_with(&got),
+                "{outcome:?}: {got:?}"
+            );
+            assert!(got.len() >= 4, "{outcome:?}");
+        }
+        // A later sync makes what follows durable, but not them: they're
+        // zeros unless written back before the error, and both happen.
+        let mut seen = BTreeSet::new();
+        for outcome in CrashOutcome::standard() {
+            let (fs, mut f) = failed_sync();
+            f.write_all(b"next").unwrap();
+            f.sync().unwrap();
+            assert_eq!(fs.read(&p("/s/j")).unwrap(), b"safelostnext");
+            let got = after_crash(&fs, outcome, "/s/j").unwrap();
+            let want: &[u8] = match outcome {
+                CrashOutcome::LoseUnsynced => b"safe\0\0\0\0next",
+                CrashOutcome::KeepAll => b"safelostnext",
+                CrashOutcome::Partial { .. } => &got,
+            };
+            assert_eq!(got, want, "{outcome:?}");
+            assert!(
+                [&b"safe\0\0\0\0next"[..], b"safelostnext"].contains(&&got[..]),
+                "{outcome:?}: {got:?}"
+            );
+            seen.insert(got);
+        }
+        assert_eq!(seen.len(), 2, "partial crashes try both");
+        // A copy of the running disk doesn't promote them to durable.
+        let (fs, _f) = failed_sync();
+        assert_eq!(fs.copy_disk().read(&p("/s/j")).unwrap(), b"safe\0\0\0\0");
+    }
+
+    #[test]
+    fn a_failed_write_leaves_a_prefix() {
         let fs = FakeFs::with_dirs(["/s"]);
         let mut f = fs.create(&p("/s/j")).unwrap();
-        f.write_all(b"safe").unwrap();
-        f.sync().unwrap();
-        f.write_all(b"lost").unwrap();
-        fs.fail_after(0, io::ErrorKind::Other);
-        assert!(f.sync().is_err());
-        assert!(!fs.has_crashed());
-        assert_eq!(fs.read(&p("/s/j")).unwrap(), b"safe");
-        f.sync().unwrap();
+        fs.fail_after(0, io::ErrorKind::StorageFull);
+        assert_eq!(
+            f.write_all(b"abcdefg").unwrap_err().kind(),
+            io::ErrorKind::StorageFull
+        );
+        assert_eq!(fs.read(&p("/s/j")).unwrap(), b"abc");
+        // Not in the log, which holds successes only.
+        assert_eq!(fs.ops(), [Op::Create(p("/s/j")), Op::Read(p("/s/j"))]);
+        // A crash, unlike a failure, writes nothing.
+        fs.crash_after(0);
+        assert!(f.write_all(b"xy").is_err());
+        assert_eq!(
+            fs.crash(CrashOutcome::KeepAll).read(&p("/s/j")).unwrap(),
+            b"abc"
+        );
+    }
+
+    #[test]
+    fn directory_errors_match_linux() {
+        let fs = FakeFs::with_dirs(["/s", "/s/d"]);
+        let _file = fs.create(&p("/s/f")).unwrap();
+        assert_eq!(
+            fs.sync_dir(&p("/s/f")).unwrap_err().kind(),
+            io::ErrorKind::NotADirectory
+        );
+        assert_eq!(
+            fs.list(&p("/s/f")).unwrap_err().kind(),
+            io::ErrorKind::NotADirectory
+        );
+        assert_eq!(
+            fs.lock_dir(&p("/s/f")).unwrap_err().kind(),
+            io::ErrorKind::NotADirectory
+        );
+        assert_eq!(
+            fs.rename(&p("/s/d"), &p("/s/e")).unwrap_err().kind(),
+            io::ErrorKind::IsADirectory
+        );
+        assert_eq!(fs.list(&p("/s")).unwrap(), [p("/s/d"), p("/s/f")]);
+        // StdFs agrees.
+        let dir = crate::test_dir::TestDir::new("fake-dir-errors");
+        let (sub, file) = (dir.0.join("d"), dir.0.join("f"));
+        crate::fs::StdFs.create_dir(&sub).unwrap();
+        let _file = crate::fs::StdFs.create(&file).unwrap();
+        assert_eq!(
+            crate::fs::StdFs.sync_dir(&file).unwrap_err().kind(),
+            io::ErrorKind::NotADirectory
+        );
+        assert_eq!(
+            crate::fs::StdFs.list(&file).unwrap_err().kind(),
+            io::ErrorKind::NotADirectory
+        );
+        assert_eq!(
+            crate::fs::StdFs
+                .rename(&sub, &dir.0.join("e"))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::IsADirectory
+        );
+        assert!(sub.is_dir());
     }
 
     #[test]

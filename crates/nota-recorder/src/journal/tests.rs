@@ -517,13 +517,20 @@ fn a_failed_fsync_breaks_the_journal_without_moving_durable() {
     // "succeeding" would claim audio that's gone.
     assert!(matches!(journal.sync(), Err(JournalError::Broken)));
     assert!(matches!(journal.append(&[1]), Err(JournalError::Broken)));
-    // What was durable is still there, and a new journal can start.
+    // What was durable is still there, and a new journal can start. The
+    // unsynced frame still reads back too, as on Linux, though it may
+    // never reach the disk.
     let read = read_journal(&fs.read(&journal_path(0)).unwrap());
-    assert_eq!(read.audio().unwrap().1, samples(MIC, 0, 10));
+    assert_eq!(read.audio().unwrap().1, samples(MIC, 0, 20));
     let mut journal = create(&fs, 1, MIC, 10, dyn_clock).unwrap();
     journal.append(&samples(MIC, 10, 10)).unwrap();
     journal.sync().unwrap();
     assert_eq!(journal.durable().end(), SampleIndex::new(20));
+    // After a crash that loses what wasn't written back, only the durable
+    // frames of the broken journal are left.
+    let after = fs.crash(CrashOutcome::LoseUnsynced);
+    let read = read_journal(&after.read(&journal_path(0)).unwrap());
+    assert_eq!(read.audio().unwrap().1, samples(MIC, 0, 10));
 }
 
 #[test]

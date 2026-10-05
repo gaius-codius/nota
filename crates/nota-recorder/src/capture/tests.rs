@@ -9,8 +9,8 @@ use std::thread;
 use std::time::Duration;
 
 use nota_core::{
-    Clock, EpochId, FakeClock, SampleIndex, SampleRate, SessionId, SessionTime, TrackId,
-    TrackTimeline,
+    Clock, EpochId, FakeClock, SampleCount, SampleIndex, SampleRate, SessionId, SessionTime,
+    TrackId, TrackTimeline,
 };
 
 use std::error::Error as _;
@@ -155,7 +155,7 @@ fn run_in<S: Fs + Clone + 'static>(
     let clock = Arc::new(FakeClock::new(SessionTime::ZERO));
     let dyn_clock: Arc<dyn Clock> = Arc::clone(&clock) as Arc<dyn Clock>;
     let session = SessionDir::new(SESSION, fs.clone(), &dir()).lock().unwrap();
-    let length = SegmentLength::new(1_000).unwrap();
+    let length = SegmentLength::new(SampleCount::new(1_000)).unwrap();
     let mut writer = SessionWriter::open(&session, rate(), length, Arc::clone(&dyn_clock)).unwrap();
     writer
         .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
@@ -501,8 +501,13 @@ fn recording_an_unstarted_track_is_an_error() {
     let fs = FakeFs::with_dirs([dir()]);
     let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
     let session = SessionDir::new(SESSION, fs.clone(), &dir()).lock().unwrap();
-    let mut writer =
-        SessionWriter::open(&session, rate(), SegmentLength::new(1_000).unwrap(), clock).unwrap();
+    let mut writer = SessionWriter::open(
+        &session,
+        rate(),
+        SegmentLength::new(SampleCount::new(1_000)).unwrap(),
+        clock,
+    )
+    .unwrap();
     let (tx, rx) = mpsc::channel();
     tx.send(CaptureEvent::Audio(samples(0, 10))).unwrap();
     let events = CaptureReceiver {
@@ -602,8 +607,13 @@ fn a_stream_at_another_rate_than_the_journals_records_nothing() {
     let fs = FakeFs::with_dirs([dir()]);
     let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
     let session = SessionDir::new(SESSION, fs.clone(), &dir()).lock().unwrap();
-    let mut writer =
-        SessionWriter::open(&session, rate(), SegmentLength::new(1_000).unwrap(), clock).unwrap();
+    let mut writer = SessionWriter::open(
+        &session,
+        rate(),
+        SegmentLength::new(SampleCount::new(1_000)).unwrap(),
+        clock,
+    )
+    .unwrap();
     writer
         .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
         .unwrap();
@@ -845,8 +855,13 @@ fn started_in(epoch: EpochId, at: u64) -> (FakeFs, SessionWriter<FakeFs>, Captur
     let fs = FakeFs::with_dirs([dir()]);
     let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
     let session = SessionDir::new(SESSION, fs.clone(), &dir()).lock().unwrap();
-    let mut writer =
-        SessionWriter::open(&session, rate(), SegmentLength::new(1_000).unwrap(), clock).unwrap();
+    let mut writer = SessionWriter::open(
+        &session,
+        rate(),
+        SegmentLength::new(SampleCount::new(1_000)).unwrap(),
+        clock,
+    )
+    .unwrap();
     writer
         .start_track(MIC, epoch, SampleIndex::new(at))
         .unwrap();

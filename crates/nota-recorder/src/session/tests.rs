@@ -26,7 +26,7 @@ fn rate() -> SampleRate {
 }
 
 fn length() -> SegmentLength {
-    SegmentLength::new(1_000).unwrap()
+    SegmentLength::new(SampleCount::new(1_000)).unwrap()
 }
 
 fn dir() -> PathBuf {

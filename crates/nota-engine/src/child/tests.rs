@@ -146,13 +146,13 @@ fn transcribes_speech_and_confirms_everything_on_flush() {
                 confirmed = up_to.get();
             }
             Frame::Message(FromEngine::Transcript(t)) => {
-                assert_eq!(t.track, TRACK);
+                assert_eq!(t.track(), TRACK);
                 assert_eq!(
-                    t.range.start().get(),
+                    t.range().start().get(),
                     confirmed,
                     "text starts where the last confirmed did"
                 );
-                text.push((t.range, t.text.clone()));
+                text.push((t.range(), t.text().to_owned()));
             }
             Frame::Hello(_) => panic!("second hello"),
         }
@@ -213,11 +213,9 @@ fn stdin_closing_transcribes_what_each_track_still_holds() {
     assert_eq!(
         frames[1..],
         [
-            Frame::Message(FromEngine::Transcript(Transcript {
-                track: TRACK,
-                range: range(0, 1_600),
-                text: "1600 loud".into(),
-            })),
+            Frame::Message(FromEngine::Transcript(
+                Transcript::new(TRACK, range(0, 1_600), "1600 loud".into()).unwrap()
+            )),
             Frame::Message(FromEngine::Confirmed {
                 track: TRACK,
                 up_to: SampleIndex::new(1_600),
