@@ -718,9 +718,7 @@ impl FsFile for FakeFile {
                 // clean, so they read back but never reach the disk.
                 let inode = state.inode(self.inode)?;
                 let range = (inode.synced, inode.data.len());
-                if range.0 < range.1 {
-                    inode.lost.push(range);
-                }
+                inode.lost.push(range);
             }
             return Err(e);
         }
@@ -1074,6 +1072,15 @@ mod tests {
             fs.sync_dir(&bare).unwrap_err().kind(),
         ];
         assert_eq!(kinds, [io::ErrorKind::InvalidInput; 4]);
+        // An absolute path still needs a name, unless it's the root.
+        assert_eq!(
+            fs.list(&p("/s/..")).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            fs.sync_dir(&p("/s/..")).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
         assert_eq!(
             fs.remove(&p("/")).unwrap_err().kind(),
             io::ErrorKind::InvalidInput

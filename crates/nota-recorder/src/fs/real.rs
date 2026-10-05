@@ -276,6 +276,10 @@ mod tests {
             fs.lock_dir(bare).unwrap_err().kind(),
         ];
         assert_eq!(kinds, [io::ErrorKind::InvalidInput; 5]);
+        assert_eq!(
+            fs.list(Path::new("/tmp/..")).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
         // The root is a directory to sync or list, though not a name.
         fs.sync_dir(Path::new("/")).unwrap();
         assert!(fs.list(Path::new("/")).is_ok());
