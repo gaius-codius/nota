@@ -19,7 +19,6 @@
 //! delivered, not only from what the recorder wrote.
 
 use std::collections::VecDeque;
-use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -37,6 +36,7 @@ pub(super) const RESERVED_EVENTS: usize = 1_024;
 pub(super) const SPARE_BUFFERS: usize = 64;
 
 /// What the senders and the recorder share.
+#[derive(Debug)]
 struct State {
     events: VecDeque<(TrackId, CaptureEvent)>,
     /// Buffers the recorder is done with.
@@ -48,16 +48,11 @@ struct State {
 }
 
 /// The channel itself: events in order, from every stream started into it.
+#[derive(Debug)]
 pub(super) struct Queue {
     state: Mutex<State>,
     /// Signalled whenever an event arrives or a sender leaves.
     changed: Condvar,
-}
-
-impl fmt::Debug for Queue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Queue")
-    }
 }
 
 /// What [`Queue::next`] found.
@@ -129,13 +124,8 @@ impl Queue {
 
 /// A sender on a [`Queue`]. The queue closes once every one has been
 /// dropped and its events taken.
+#[derive(Debug)]
 pub(super) struct QueueSender(Arc<Queue>);
-
-impl fmt::Debug for QueueSender {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("QueueSender")
-    }
-}
 
 impl Clone for QueueSender {
     fn clone(&self) -> Self {

@@ -239,6 +239,33 @@ mod tests {
     }
 
     #[test]
+    fn promoting_says_whether_the_thread_is_now_real_time() {
+        // On a thread of its own, so the test runner's stays as it was.
+        // Whether the kernel allows it depends on the machine's rtprio
+        // limit; either way the answer must match the thread's policy.
+        let (promoted, policy) = std::thread::spawn(|| {
+            let promoted = promote_current_thread();
+            (promoted, thread_priority::thread_schedule_policy().unwrap())
+        })
+        .join()
+        .unwrap();
+        let fifo = ThreadSchedulePolicy::Realtime(RealtimeThreadSchedulePolicy::Fifo);
+        assert_eq!(promoted, policy == fifo, "{policy:?}");
+        if promoted {
+            let priority = std::thread::spawn(|| {
+                promote_current_thread();
+                thread_priority::get_current_thread_priority().unwrap()
+            })
+            .join()
+            .unwrap();
+            assert_eq!(
+                priority,
+                ThreadPriority::Crossplatform(ThreadPriorityValue::try_from(RT_PRIORITY).unwrap())
+            );
+        }
+    }
+
+    #[test]
     fn the_thread_is_promoted_on_the_first_buffer_only() {
         for outcome in [true, false] {
             let mut promotion = Promotion::new();
