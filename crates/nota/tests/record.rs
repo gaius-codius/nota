@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use nota_core::SessionId;
+use nota_core::{Clock, SessionId, SystemClock};
 use nota_recorder::fs::{Fs, StdFs};
 use nota_recorder::segment::needs_salvage;
 use nota_recorder::session::SessionDir;
@@ -44,14 +44,14 @@ fn pause(d: Duration) {
 
 /// Waits up to `limit` for `done`, checking every 20 ms.
 fn wait_until(limit: Duration, mut done: impl FnMut() -> bool) -> bool {
-    let step = Duration::from_millis(20);
-    let mut waited = Duration::ZERO;
-    while waited < limit {
+    // Measured on the session clock, not summed from the pauses: a pause
+    // can run long on a loaded machine.
+    let clock = SystemClock::start().unwrap();
+    while clock.now().elapsed() < limit {
         if done() {
             return true;
         }
-        pause(step);
-        waited += step;
+        pause(Duration::from_millis(20));
     }
     done()
 }

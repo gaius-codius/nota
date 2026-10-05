@@ -26,7 +26,7 @@ use std::thread;
 use std::time::Duration;
 
 use nota_core::messages::AudioChunk;
-use nota_core::{SampleIndex, SampleRate, SystemClock, TrackId};
+use nota_core::{Clock, SampleIndex, SampleRate, SystemClock, TrackId};
 use nota_recorder::engine::{
     EngineCommand, EngineConfig, EngineEvent, EngineStatus, EngineSupervisor,
 };
@@ -50,14 +50,14 @@ fn pause(d: Duration) {
 
 /// Waits up to `limit` for `done`, checking every 10 ms.
 fn wait_until(limit: Duration, mut done: impl FnMut() -> bool) -> bool {
-    let step = Duration::from_millis(10);
-    let mut waited = Duration::ZERO;
-    while waited < limit {
+    // Measured on the session clock, not summed from the pauses: a pause
+    // can run long on a loaded machine.
+    let clock = SystemClock::start().unwrap();
+    while clock.now().elapsed() < limit {
         if done() {
             return true;
         }
-        pause(step);
-        waited += step;
+        pause(Duration::from_millis(10));
     }
     done()
 }
@@ -202,9 +202,14 @@ fn loading_host() {
         engine = engine_of(std::process::id());
         engine.is_some()
     }));
-    // Time to read the recorder's hello and start loading.
-    pause(Duration::from_millis(300));
-    say(&format!("engine {}", engine.unwrap()));
+    let engine = engine.unwrap();
+    // Asleep in its load: past the tie and the recorder's hello, and no
+    // longer reading stdin.
+    assert!(wait_until(Duration::from_secs(10), || {
+        std::fs::read_to_string(format!("/proc/{engine}/wchan"))
+            .is_ok_and(|w| w.contains("nanosleep"))
+    }));
+    say(&format!("engine {engine}"));
     say("ready");
     pause(Duration::from_secs(60));
     panic!("not killed");
