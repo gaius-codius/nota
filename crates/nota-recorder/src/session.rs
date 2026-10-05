@@ -221,6 +221,8 @@ impl std::error::Error for FinishError {
 #[derive(Debug)]
 struct Track<F> {
     epoch: EpochId,
+    /// The first sample of `epoch`.
+    epoch_start: SampleIndex,
     /// The next sample to record.
     next: SampleIndex,
     journal: Option<JournalWriter<F>>,
@@ -414,6 +416,7 @@ impl<S: Fs> SessionWriter<S> {
             track,
             Track {
                 epoch,
+                epoch_start: at,
                 next: at,
                 journal: None,
                 unsynced: Vec::new(),
@@ -447,7 +450,15 @@ impl<S: Fs> SessionWriter<S> {
             .get_mut(&track)
             .ok_or(SessionError::UnknownTrack(track))?;
         state.epoch = epoch;
+        state.epoch_start = state.next;
         ended
+    }
+
+    /// The epoch `track` is recording in and the sample it started at, or
+    /// `None` if the track wasn't started.
+    #[must_use]
+    pub fn epoch(&self, track: TrackId) -> Option<(EpochId, SampleIndex)> {
+        self.tracks.get(&track).map(|t| (t.epoch, t.epoch_start))
     }
 
     /// The rate stamped on every journal this writer starts.

@@ -8,7 +8,10 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 
-use nota_core::{Clock, EpochId, FakeClock, SampleIndex, SampleRate, SessionId, SessionTime};
+use nota_core::{
+    Clock, EpochId, FakeClock, SampleIndex, SampleRate, SessionId, SessionTime, TrackId,
+    TrackTimeline,
+};
 
 use std::error::Error as _;
 
@@ -41,6 +44,8 @@ enum Step {
     Audio(Vec<i16>),
     Notice(CaptureNotice),
     Fail(CaptureError),
+    /// Moves the session clock on.
+    Advance(Duration),
 }
 
 /// Sends its script from a thread of its own, then signals `sent`. When
@@ -52,6 +57,7 @@ struct Synthetic {
     script: Vec<Step>,
     last: Vec<i16>,
     sent: mpsc::Sender<()>,
+    clock: Arc<FakeClock>,
 }
 
 #[derive(Debug)]
@@ -85,6 +91,7 @@ impl CaptureBackend for Synthetic {
         assert_eq!(start_rate, rate());
         let script = self.script.clone();
         let sent = self.sent.clone();
+        let clock = Arc::clone(&self.clock);
         let feeder_events = events.clone();
         let feeder = thread::spawn(move || {
             for step in script {
@@ -92,6 +99,7 @@ impl CaptureBackend for Synthetic {
                     Step::Audio(s) => feeder_events.audio(&s),
                     Step::Notice(n) => feeder_events.notice(n),
                     Step::Fail(e) => feeder_events.failed(e),
+                    Step::Advance(by) => clock.advance(by),
                 }
             }
             sent.send(()).unwrap();
@@ -118,15 +126,28 @@ impl CaptureBackend for Unavailable {
 
 struct Run<S: Fs> {
     writer: SessionWriter<S>,
+    timeline: TrackTimeline,
     result: Result<(), RecordError>,
     reported: Vec<RecorderEvent>,
 }
 
 /// Records `script` and `last` from a [`Synthetic`] backend on a recorder
-/// thread, with windows of 1,000 samples at 1 kHz. `while_running` runs once
-/// the script is sent, before the capture stops.
+/// thread, with windows of 1,000 samples at 1 kHz, in epoch 0 from session
+/// time zero. `while_running` runs once the script is sent, before the
+/// capture stops.
 fn run<S: Fs + Clone + 'static>(
     fs: &S,
+    script: Vec<Step>,
+    last: Vec<i16>,
+    while_running: impl FnOnce(&FakeClock),
+) -> Run<S> {
+    run_in(fs, epoch_zero(), script, last, while_running)
+}
+
+/// [`run`], with `timeline` as the track's.
+fn run_in<S: Fs + Clone + 'static>(
+    fs: &S,
+    mut timeline: TrackTimeline,
     script: Vec<Step>,
     last: Vec<i16>,
     while_running: impl FnOnce(&FakeClock),
@@ -135,19 +156,27 @@ fn run<S: Fs + Clone + 'static>(
     let dyn_clock: Arc<dyn Clock> = Arc::clone(&clock) as Arc<dyn Clock>;
     let session = SessionDir::new(SESSION, fs.clone(), &dir()).lock().unwrap();
     let length = SegmentLength::new(1_000).unwrap();
-    let mut writer = SessionWriter::open(&session, rate(), length, dyn_clock).unwrap();
+    let mut writer = SessionWriter::open(&session, rate(), length, Arc::clone(&dyn_clock)).unwrap();
     writer
         .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
         .unwrap();
     let (sent, script_sent) = mpsc::channel();
-    let backend = Synthetic { script, last, sent };
-    let (capture, events) = start(&backend, &Source::Microphone, rate()).unwrap();
+    let backend = Synthetic {
+        script,
+        last,
+        sent,
+        clock: Arc::clone(&clock),
+    };
+    let (capture, events) = start(&backend, &Source::Microphone, rate(), dyn_clock).unwrap();
     let (finished, done) = mpsc::channel();
     thread::spawn(move || {
         let mut reported = Vec::new();
-        let result = record_track(&mut writer, MIC, &events, &mut |e| reported.push(e));
+        let result = record_track(&mut writer, &mut timeline, &events, &mut |e| {
+            reported.push(e);
+        });
         let _ = finished.send(Run {
             writer,
+            timeline,
             result,
             reported,
         });
@@ -173,6 +202,15 @@ fn journaled(fs: &FakeFs, journals: &[FinishedJournal]) -> Vec<i16> {
     out
 }
 
+/// `MIC`'s timeline with epoch 0 open at session time zero, at [`rate`].
+fn epoch_zero() -> TrackTimeline {
+    let mut timeline = TrackTimeline::new(MIC);
+    timeline
+        .open_epoch(SessionTime::ZERO, SampleIndex::ZERO, rate())
+        .unwrap();
+    timeline
+}
+
 fn finished_reported(reported: &[RecorderEvent]) -> Vec<FinishedJournal> {
     reported
         .iter()
@@ -186,6 +224,17 @@ fn finished_reported(reported: &[RecorderEvent]) -> Vec<FinishedJournal> {
         })
         .flatten()
         .collect()
+}
+
+/// Every journal a run finished: those reported while it recorded, then
+/// the rest as `writer` finishes.
+fn all_journals<S: Fs>(
+    writer: SessionWriter<S>,
+    reported: &[RecorderEvent],
+) -> Vec<FinishedJournal> {
+    let mut all = finished_reported(reported);
+    all.extend(writer.finish().unwrap());
+    all
 }
 
 /// A file operation [`Watched`] reports.
@@ -342,7 +391,7 @@ fn notices_are_reported_and_recording_goes_on() {
             &CaptureNotice::Warning("watch lost".into())
         ]
     );
-    let journals = run.writer.finish().unwrap();
+    let journals = all_journals(run.writer, &run.reported);
     assert_eq!(journaled(&fs, &journals), samples(0, 20));
 }
 
@@ -460,7 +509,8 @@ fn recording_an_unstarted_track_is_an_error() {
         events: rx,
         rate: rate(),
     };
-    let result = record_track(&mut writer, MIC, &events, &mut |_| {});
+    let mut timeline = epoch_zero();
+    let result = record_track(&mut writer, &mut timeline, &events, &mut |_| {});
     assert!(matches!(
         result,
         Err(RecordError::Session(SessionError::UnknownTrack(MIC)))
@@ -477,6 +527,7 @@ fn a_channel_with_no_senders_reads_as_stopped() {
     assert!(rx.next(Duration::from_millis(1)).is_none());
     let sender = CaptureSender {
         events: tx.clone(),
+        clock: Arc::new(FakeClock::new(SessionTime::ZERO)),
         stopping: Arc::new(AtomicBool::new(false)),
     };
     sender.audio(&[]);
@@ -492,7 +543,14 @@ fn a_channel_with_no_senders_reads_as_stopped() {
 
 #[test]
 fn a_stream_that_cant_open_is_an_error() {
-    let err = start(&Unavailable, &Source::Device("nowhere".into()), rate()).unwrap_err();
+    let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let err = start(
+        &Unavailable,
+        &Source::Device("nowhere".into()),
+        rate(),
+        clock,
+    )
+    .unwrap_err();
     assert_eq!(
         err,
         CaptureError::DeviceNotAvailable(Source::Device("nowhere".into()))
@@ -556,7 +614,8 @@ fn a_stream_at_another_rate_than_the_journals_records_nothing() {
         events: rx,
         rate: other,
     };
-    let result = record_track(&mut writer, MIC, &events, &mut |_| {});
+    let mut timeline = epoch_zero();
+    let result = record_track(&mut writer, &mut timeline, &events, &mut |_| {});
     let Err(error) = result else {
         panic!("recorded at the wrong rate");
     };
@@ -566,4 +625,310 @@ fn a_stream_at_another_rate_than_the_journals_records_nothing() {
     ));
     assert!(error.to_string().contains("Hz"));
     assert_eq!(writer.next_sample(MIC), Some(SampleIndex::ZERO));
+}
+
+fn secs(s: u64) -> Duration {
+    Duration::from_secs(s)
+}
+
+fn at(s: u64) -> SessionTime {
+    SessionTime::ZERO.checked_add(secs(s)).unwrap()
+}
+
+/// What `reported` says about epochs, in order.
+fn epochs_reported(reported: &[RecorderEvent]) -> Vec<&RecorderEvent> {
+    reported
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                RecorderEvent::Epoch(_)
+                    | RecorderEvent::EpochRefused(_)
+                    | RecorderEvent::Capture(CaptureNotice::Overrun)
+            )
+        })
+        .collect()
+}
+
+/// Each finished journal's epoch and range, in id order.
+fn journal_epochs(fs: &FakeFs, journals: &[FinishedJournal]) -> Vec<(u32, u64, u64)> {
+    journals
+        .iter()
+        .map(|j| {
+            let bytes = fs.read(&dir().join(j.id().file_name())).unwrap();
+            let read = read_journal(&bytes);
+            let range = read.range().unwrap();
+            (
+                read.header().unwrap().epoch().get(),
+                range.start().get(),
+                range.end().get(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn an_overrun_starts_a_new_epoch_at_its_time_and_the_loss_is_a_gap() {
+    let fs = FakeFs::with_dirs([dir()]);
+    // Half a second of audio, then an overrun reported at 2 s: 1.5 s lost.
+    let script = vec![
+        Step::Audio(samples(0, 500)),
+        Step::Advance(secs(2)),
+        Step::Notice(CaptureNotice::Overrun),
+        Step::Advance(secs(1)),
+        Step::Audio(samples(500, 300)),
+    ];
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+
+    let epoch = run.timeline.current().copied().unwrap();
+    assert_eq!(epoch.id(), EpochId::new(1));
+    assert_eq!(epoch.start(), at(2));
+    assert_eq!(epoch.first_sample(), SampleIndex::new(500));
+    assert_eq!(epoch.rate(), rate());
+    assert_eq!(run.timeline.epochs().len(), 2);
+    assert!(matches!(
+        epochs_reported(&run.reported)[..],
+        [
+            RecorderEvent::Capture(CaptureNotice::Overrun),
+            RecorderEvent::Epoch(e)
+        ] if *e == epoch
+    ));
+
+    // The samples after the overrun keep their own time; the loss is a gap.
+    let half = SessionTime::from_nanos(500_000_000);
+    assert_eq!(
+        run.timeline.time_of(SampleIndex::new(499)),
+        Some(SessionTime::from_nanos(499_000_000))
+    );
+    assert_eq!(run.timeline.time_of(SampleIndex::new(500)), Some(at(2)));
+    let gaps: Vec<_> = run.timeline.gaps().collect();
+    assert_eq!(gaps.len(), 1);
+    assert_eq!((gaps[0].from(), gaps[0].to()), (half, at(2)));
+
+    // The journals follow: the new epoch starts a new journal, and the
+    // sample count runs on.
+    assert_eq!(
+        run.writer.epoch(MIC),
+        Some((EpochId::new(1), SampleIndex::new(500)))
+    );
+    assert_eq!(run.writer.next_sample(MIC), Some(SampleIndex::new(800)));
+    let journals = all_journals(run.writer, &run.reported);
+    assert_eq!(journal_epochs(&fs, &journals), [(0, 0, 500), (1, 500, 800)]);
+    assert_eq!(journaled(&fs, &journals), samples(0, 800));
+}
+
+#[test]
+fn overruns_with_no_audio_between_leave_an_empty_epoch() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let script = vec![
+        Step::Audio(samples(0, 100)),
+        Step::Advance(secs(1)),
+        Step::Notice(CaptureNotice::Overrun),
+        Step::Advance(secs(1)),
+        Step::Notice(CaptureNotice::Overrun),
+        Step::Audio(samples(100, 100)),
+    ];
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    let starts: Vec<(u32, SessionTime, u64)> = run
+        .timeline
+        .epochs()
+        .iter()
+        .map(|e| (e.id().get(), e.start(), e.first_sample().get()))
+        .collect();
+    assert_eq!(
+        starts,
+        [(0, SessionTime::ZERO, 0), (1, at(1), 100), (2, at(2), 100)]
+    );
+    assert_eq!(
+        run.writer.epoch(MIC),
+        Some((EpochId::new(2), SampleIndex::new(100)))
+    );
+    let journals = all_journals(run.writer, &run.reported);
+    assert_eq!(journal_epochs(&fs, &journals), [(0, 0, 100), (2, 100, 200)]);
+}
+
+#[test]
+fn other_notices_leave_the_epoch_alone() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let script = vec![
+        Step::Audio(samples(0, 100)),
+        Step::Advance(secs(1)),
+        Step::Notice(CaptureNotice::RouteChanged),
+        Step::Notice(CaptureNotice::Warning("x".into())),
+        Step::Audio(samples(100, 100)),
+    ];
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    assert_eq!(run.timeline.epochs().len(), 1);
+    assert_eq!(
+        run.writer.epoch(MIC),
+        Some((EpochId::new(0), SampleIndex::ZERO))
+    );
+    assert!(epochs_reported(&run.reported).is_empty());
+}
+
+#[test]
+fn an_epoch_the_timeline_refuses_is_reported_and_recording_goes_on() {
+    let fs = FakeFs::with_dirs([dir()]);
+    // Epoch 0 starts at 10 s, so its second of audio runs to 11 s: an
+    // overrun reported at 0 s is far too early to be drift.
+    let mut timeline = TrackTimeline::new(MIC);
+    timeline
+        .open_epoch(at(10), SampleIndex::ZERO, rate())
+        .unwrap();
+    let script = vec![
+        Step::Audio(samples(0, 1_000)),
+        Step::Notice(CaptureNotice::Overrun),
+        Step::Audio(samples(1_000, 10)),
+    ];
+    let run = run_in(&fs, timeline, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    assert!(matches!(
+        epochs_reported(&run.reported)[..],
+        [
+            RecorderEvent::Capture(CaptureNotice::Overrun),
+            RecorderEvent::EpochRefused(EpochError::ImplausibleOverrun { .. })
+        ]
+    ));
+    assert_eq!(run.timeline.epochs().len(), 1);
+    assert_eq!(
+        run.writer.epoch(MIC),
+        Some((EpochId::new(0), SampleIndex::ZERO))
+    );
+    assert_eq!(run.writer.next_sample(MIC), Some(SampleIndex::new(1_010)));
+}
+
+#[test]
+fn a_journal_that_breaks_at_the_overrun_is_reported_and_the_epoch_still_moves() {
+    let fs = FakeFs::with_dirs([dir()]);
+    // Lets the listing at open, the marks' write (five operations), the
+    // first journal's creation (four) and its frame through, then fails
+    // everything from the fsync that ends it at the overrun.
+    fs.crash_after(11);
+    let script = vec![
+        Step::Audio(samples(0, 10)),
+        Step::Advance(secs(1)),
+        Step::Notice(CaptureNotice::Overrun),
+    ];
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    // Nothing failed before the overrun; ending the old epoch's journal
+    // did, after the track moved.
+    let failed = run
+        .reported
+        .iter()
+        .position(|e| matches!(e, RecorderEvent::JournalFailed(_)));
+    let moved = run
+        .reported
+        .iter()
+        .position(|e| matches!(e, RecorderEvent::Epoch(_)));
+    assert!(
+        matches!((moved, failed), (Some(m), Some(f)) if m < f),
+        "{:?}",
+        run.reported
+    );
+    assert_eq!(
+        run.writer.epoch(MIC),
+        Some((EpochId::new(1), SampleIndex::new(10)))
+    );
+    assert_eq!(
+        run.timeline.current().map(nota_core::Epoch::id),
+        Some(EpochId::new(1))
+    );
+}
+
+/// A writer with `MIC` started in `epoch` at sample `at`, and a channel
+/// holding some audio for it.
+fn started_in(epoch: EpochId, at: u64) -> (FakeFs, SessionWriter<FakeFs>, CaptureReceiver) {
+    let fs = FakeFs::with_dirs([dir()]);
+    let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let session = SessionDir::new(SESSION, fs.clone(), &dir()).lock().unwrap();
+    let mut writer =
+        SessionWriter::open(&session, rate(), SegmentLength::new(1_000).unwrap(), clock).unwrap();
+    writer
+        .start_track(MIC, epoch, SampleIndex::new(at))
+        .unwrap();
+    let (tx, rx) = mpsc::channel();
+    tx.send(CaptureEvent::Audio(samples(0, 10))).unwrap();
+    let events = CaptureReceiver {
+        events: rx,
+        rate: rate(),
+    };
+    (fs, writer, events)
+}
+
+#[test]
+fn a_timeline_out_of_step_with_the_writer_records_nothing() {
+    let other_rate = SampleRate::new(rate().hz() * 2).unwrap();
+    let mut at_other_rate = TrackTimeline::new(MIC);
+    at_other_rate
+        .open_epoch(SessionTime::ZERO, SampleIndex::ZERO, other_rate)
+        .unwrap();
+    let mut other_track = TrackTimeline::new(TrackId::new(1));
+    other_track
+        .open_epoch(SessionTime::ZERO, SampleIndex::ZERO, rate())
+        .unwrap();
+    let mut from_100 = TrackTimeline::new(MIC);
+    from_100
+        .open_epoch(SessionTime::ZERO, SampleIndex::new(100), rate())
+        .unwrap();
+    let cases = [
+        // No epoch open.
+        (EpochId::new(0), 0, TrackTimeline::new(MIC), "empty"),
+        // Epoch 0, but the writer records epoch 1.
+        (EpochId::new(1), 0, epoch_zero(), "epoch"),
+        (EpochId::new(0), 0, at_other_rate, "rate"),
+        // The same epoch, from another first sample, either way round.
+        (EpochId::new(0), 100, epoch_zero(), "writer ahead"),
+        (EpochId::new(0), 0, from_100, "timeline ahead"),
+    ];
+    for (epoch, at, mut timeline, case) in cases {
+        let (_fs, mut writer, events) = started_in(epoch, at);
+        let before = timeline.clone();
+        let result = record_track(&mut writer, &mut timeline, &events, &mut |_| {});
+        let Err(error) = result else {
+            panic!("{case}: recorded out of step");
+        };
+        assert!(matches!(error, RecordError::TimelineMismatch), "{case}");
+        assert!(error.to_string().contains("timeline"), "{case}");
+        assert!(std::error::Error::source(&error).is_none(), "{case}");
+        assert_eq!(
+            writer.next_sample(MIC),
+            Some(SampleIndex::new(at)),
+            "{case}"
+        );
+        assert_eq!(timeline, before, "{case}");
+    }
+    // A timeline for a track the writer didn't start.
+    let (_fs, mut writer, events) = started_in(EpochId::new(0), 0);
+    let result = record_track(&mut writer, &mut other_track, &events, &mut |_| {});
+    assert!(matches!(
+        result,
+        Err(RecordError::Session(SessionError::UnknownTrack(t))) if t == TrackId::new(1)
+    ));
+    assert_eq!(writer.next_sample(MIC), Some(SampleIndex::ZERO));
+}
+
+#[test]
+fn notices_carry_the_time_they_were_reported() {
+    let (tx, rx) = mpsc::channel();
+    let clock = Arc::new(FakeClock::new(at(7)));
+    let sender = CaptureSender {
+        events: tx,
+        clock: Arc::clone(&clock) as Arc<dyn Clock>,
+        stopping: Arc::new(AtomicBool::new(false)),
+    };
+    sender.notice(CaptureNotice::Overrun);
+    // The recorder gets to it later.
+    clock.advance(secs(5));
+    let rx = CaptureReceiver {
+        events: rx,
+        rate: rate(),
+    };
+    assert!(matches!(
+        rx.next(Duration::from_millis(1)),
+        Some(CaptureEvent::Notice { notice: CaptureNotice::Overrun, at: t }) if t == at(7)
+    ));
 }
