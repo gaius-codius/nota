@@ -83,7 +83,7 @@ mod linux {
         let (dir, seconds, source) = parse()?;
         let rate = SampleRate::SPEECH;
         let clock = Arc::new(SystemClock::start().map_err(|_| "no monotonic clock")?);
-        let session = SessionDir::new(SessionId::new(1), StdFs, &dir);
+        let session = SessionDir::new(SessionId::new(1), StdFs, &dir).lock()?;
         let mut writer = SessionWriter::open(
             &session,
             rate,
@@ -120,7 +120,7 @@ mod linux {
         let wall = stopped
             .checked_duration_since(started)
             .ok_or("the clock went back")?;
-        let (journaled, peak) = read_back(&session, &journals)?;
+        let (journaled, peak) = read_back(session.session(), &journals)?;
         report(&Report {
             source: &source,
             captured,

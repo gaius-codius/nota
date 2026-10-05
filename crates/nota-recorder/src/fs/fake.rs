@@ -32,6 +32,15 @@
 //! A crash also kills the "process": every later operation on the old fake,
 //! or on files it opened, fails.
 //!
+//! # Locks
+//!
+//! [`Fs::lock_dir`] works as `flock` does: each guard is its own holder, so
+//! a second lock on a directory is refused even through the same fake. A
+//! lock isn't an operation on the disk: it isn't logged, doesn't count
+//! towards [`FakeFs::crash_after`], still works after the crash (every disk
+//! operation fails anyway), and is gone from the filesystem the crash
+//! returns, as a dead process's locks are.
+//!
 //! # Failing without crashing
 //!
 //! [`FakeFs::fail_after`] fails one operation with an I/O error and lets the
@@ -119,6 +128,19 @@ pub struct FakeFs {
 impl Default for FakeFs {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// A directory locked on a [`FakeFs`]; dropping it unlocks.
+#[derive(Debug)]
+pub struct FakeLock {
+    state: Arc<Mutex<State>>,
+    dir: PathBuf,
+}
+
+impl Drop for FakeLock {
+    fn drop(&mut self) {
+        lock(&self.state).locked.remove(&self.dir);
     }
 }
 
@@ -244,6 +266,8 @@ struct State {
     /// one with this error.
     fail: Option<(usize, io::ErrorKind)>,
     crashed: bool,
+    /// The directories locked by a live [`FakeLock`].
+    locked: BTreeSet<PathBuf>,
 }
 
 impl State {
@@ -259,6 +283,7 @@ impl State {
             budget: None,
             fail: None,
             crashed: false,
+            locked: BTreeSet::new(),
         }
     }
 
@@ -490,6 +515,7 @@ fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
 
 impl Fs for FakeFs {
     type File = FakeFile;
+    type Lock = FakeLock;
 
     fn create(&self, path: &Path) -> io::Result<FakeFile> {
         valid_path(path)?;
@@ -604,6 +630,30 @@ impl Fs for FakeFs {
         state.log.push(Op::List(dir.to_path_buf()));
         Ok(entries)
     }
+
+    fn lock_dir(&self, dir: &Path) -> io::Result<FakeLock> {
+        valid_path(dir)?;
+        let mut state = self.lock();
+        if state.names.files.contains_key(dir) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                "lock_dir needs a directory",
+            ));
+        }
+        if !state.names.dirs.contains(dir) {
+            return Err(not_found());
+        }
+        if !state.locked.insert(dir.to_path_buf()) {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "the directory is locked",
+            ));
+        }
+        Ok(FakeLock {
+            state: Arc::clone(&self.state),
+            dir: dir.to_path_buf(),
+        })
+    }
 }
 
 impl FsFile for FakeFile {
@@ -671,6 +721,46 @@ mod tests {
     /// Whether `path` reads back as `want` after crashing with `outcome`.
     fn after_crash(fs: &FakeFs, outcome: CrashOutcome, path: &str) -> Option<Vec<u8>> {
         fs.crash(outcome).read(&p(path)).ok()
+    }
+
+    #[test]
+    fn a_lock_is_exclusive_until_dropped_and_gone_after_a_crash() {
+        let fs = FakeFs::with_dirs(["/s"]);
+        let held = fs.lock_dir(&p("/s")).unwrap();
+        assert_eq!(
+            fs.clone().lock_dir(&p("/s")).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(held);
+        let held = fs.lock_dir(&p("/s")).unwrap();
+        // Not a disk operation: nothing logged or counted.
+        assert!(fs.ops().is_empty());
+        assert_eq!(fs.attempted(), 0);
+        let after = fs.crash(CrashOutcome::KeepAll);
+        let _new = after.lock_dir(&p("/s")).unwrap();
+        assert_eq!(
+            fs.lock_dir(&p("/s")).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(held);
+    }
+
+    #[test]
+    fn lock_dir_needs_an_existing_directory() {
+        let fs = FakeFs::with_dirs(["/s"]);
+        assert_eq!(
+            fs.lock_dir(&p("s")).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            fs.lock_dir(&p("/nope")).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        let _f = fs.create(&p("/s/journal")).unwrap();
+        assert_eq!(
+            fs.lock_dir(&p("/s/journal")).unwrap_err().kind(),
+            io::ErrorKind::NotADirectory
+        );
     }
 
     #[test]

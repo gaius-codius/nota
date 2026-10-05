@@ -35,12 +35,12 @@ use nota_core::{
     Clock, EpochId, FakeClock, SampleCount, SampleIndex, SampleRate, SessionId, SessionTime,
     TrackId,
 };
-use nota_recorder::fs::{Fs, FsFile, StdFile, StdFs, Synced};
+use nota_recorder::fs::{Fs, FsFile, StdFile, StdFs, StdLock, Synced};
 use nota_recorder::journal::{JournalId, read_journal};
 use nota_recorder::segment::{
     Published, SegmentLength, publish_journals, salvage, segment_file_name,
 };
-use nota_recorder::session::{SessionDir, SessionStore, SessionWriter};
+use nota_recorder::session::{MARKS_FILE_NAME, SessionDir, SessionStore, SessionWriter};
 use nota_store::{SegmentRow, Store};
 use sha2::{Digest, Sha256};
 
@@ -151,6 +151,7 @@ fn stop_here(marker: &Path) -> io::Result<()> {
 
 impl Fs for CountingFs {
     type File = CountingFile;
+    type Lock = StdLock;
 
     fn create(&self, path: &Path) -> io::Result<CountingFile> {
         let file = self.counted(StdFs.create(path))?;
@@ -182,6 +183,10 @@ impl Fs for CountingFs {
 
     fn list(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
         StdFs.list(dir)
+    }
+
+    fn lock_dir(&self, dir: &Path) -> io::Result<StdLock> {
+        StdFs.lock_dir(dir)
     }
 }
 
@@ -369,7 +374,7 @@ fn record(fs: &CountingFs, store: &mut Store, session: &Path, log: &mut PromiseL
     let (rate, length) = (rate()?, length()?);
     let clock = Arc::new(FakeClock::new(SessionTime::ZERO));
     let dyn_clock: Arc<dyn Clock> = Arc::clone(&clock) as Arc<dyn Clock>;
-    let session = SessionDir::new(SESSION, fs.clone(), session);
+    let session = SessionDir::new(SESSION, fs.clone(), session).lock()?;
     let mut writer = SessionWriter::open(&session, rate, length, dyn_clock)?;
     let mut store = SessionStore::new(session, store);
     for (track, at) in TRACKS {
@@ -551,7 +556,13 @@ fn check_after(session: &Path, promised: &Promised, after: &Observed) -> Res<()>
         .iter()
         .map(|r| session.join(segment_file_name(r.track(), r.range())))
         .collect();
-    if let Some(orphan) = after.files.keys().find(|p| !named.contains(*p)) {
+    // The session's marks are the one other file a recording leaves.
+    let marks = session.join(MARKS_FILE_NAME);
+    if let Some(orphan) = after
+        .files
+        .keys()
+        .find(|p| !named.contains(*p) && **p != marks)
+    {
         return Err(format!("a file without a row: {}", orphan.display()).into());
     }
     Ok(())
@@ -590,7 +601,7 @@ fn check_command(args: &[String]) -> Res<()> {
         .into());
     }
 
-    let ours = SessionDir::new(SESSION, StdFs, &session);
+    let ours = SessionDir::new(SESSION, StdFs, &session).lock()?;
     let first = salvage(&mut SessionStore::new(ours.clone(), &mut store), length)?;
     let after = observe(&session, &store)?;
     check_after(&session, &promised, &after).map_err(|e| format!("after salvage: {e}"))?;
