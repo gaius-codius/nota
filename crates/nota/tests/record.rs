@@ -11,6 +11,7 @@ use std::io::{Read, Write};
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -21,6 +22,7 @@ use nota_recorder::fs::{Fs, StdFs};
 use nota_recorder::segment::needs_salvage;
 use nota_recorder::session::SessionDir;
 use nota_store::Store;
+use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::fs::{Mode, OFlags};
 use rustix::process::{Pid, Signal, kill_process};
 use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
@@ -101,7 +103,11 @@ impl Drop for TestDir {
 /// `nota record` running on a pseudo-terminal, 80×24.
 struct Running {
     child: Child,
-    master: std::fs::File,
+    /// The terminal's end the test drives; `None` once hung up.
+    master: Option<std::fs::File>,
+    /// Stops the thread reading the terminal, which holds a copy of it.
+    reading: Arc<AtomicBool>,
+    reader: Option<thread::JoinHandle<()>>,
     /// The terminal's other end, kept to read its modes after the child
     /// exits.
     slave: OwnedFd,
@@ -109,11 +115,15 @@ struct Running {
 }
 
 impl Running {
+    fn start(data: &Path) -> Self {
+        Self::start_with(data, &[])
+    }
+
     #[expect(
         clippy::disallowed_methods,
         reason = "opening the pseudo-terminal's other end"
     )]
-    fn start(data: &Path) -> Self {
+    fn start_with(data: &Path, extra: &[&str]) -> Self {
         let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).unwrap();
         grantpt(&master).unwrap();
         unlockpt(&master).unwrap();
@@ -137,6 +147,7 @@ impl Running {
         let child = Command::new(env!("CARGO_BIN_EXE_nota"))
             .args(["record", "--tone", "yes", "--title", "Workshop", "--data"])
             .arg(data)
+            .args(extra)
             .stdin(Stdio::from(slave.try_clone().unwrap()))
             .stdout(Stdio::from(slave.try_clone().unwrap()))
             .stderr(Stdio::from(slave.try_clone().unwrap()))
@@ -145,20 +156,32 @@ impl Running {
             .unwrap();
         let master = std::fs::File::from(master);
         let output = Arc::new(Mutex::new(Vec::new()));
-        let mut reader = master.try_clone().unwrap();
+        let mut copy = master.try_clone().unwrap();
         let sink = Arc::clone(&output);
-        thread::spawn(move || {
+        let reading = Arc::new(AtomicBool::new(true));
+        let still = Arc::clone(&reading);
+        let reader = thread::spawn(move || {
             let mut buf = [0_u8; 4096];
-            while let Ok(n) = reader.read(&mut buf) {
-                if n == 0 {
-                    break;
+            while still.load(Ordering::SeqCst) {
+                let mut fds = [PollFd::new(&copy, PollFlags::IN)];
+                let timeout = Timespec {
+                    tv_sec: 0,
+                    tv_nsec: 50_000_000,
+                };
+                if poll(&mut fds, Some(&timeout)).unwrap_or(0) == 0 {
+                    continue;
                 }
-                sink.lock().unwrap().extend_from_slice(&buf[..n]);
+                match copy.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => sink.lock().unwrap().extend_from_slice(&buf[..n]),
+                }
             }
         });
         Self {
             child,
-            master,
+            master: Some(master),
+            reading,
+            reader: Some(reader),
             slave,
             output,
         }
@@ -181,7 +204,21 @@ impl Running {
     }
 
     fn press(&mut self, keys: &str) {
-        self.master.write_all(keys.as_bytes()).unwrap();
+        self.master
+            .as_mut()
+            .unwrap()
+            .write_all(keys.as_bytes())
+            .unwrap();
+    }
+
+    /// Closes the terminal's other end, as closing the window does: the
+    /// program's reads and writes on it fail from now on.
+    fn hang_up(&mut self) {
+        self.reading.store(false, Ordering::SeqCst);
+        if let Some(reader) = self.reader.take() {
+            reader.join().unwrap();
+        }
+        self.master = None;
     }
 
     fn signal(&self, signal: Signal) {
@@ -224,7 +261,7 @@ fn recording(data: &Path) -> Running {
 
 /// The session's published segments per track, and whether it has
 /// journals left.
-fn published(data: &Path, session: u64) -> (Vec<(u32, u64)>, bool) {
+fn published(data: &Path, session: u64) -> (Vec<(u32, u64, u64)>, bool) {
     let dir = data.join("sessions").join(session.to_string());
     let audio = dir.join("audio");
     let left = needs_salvage(&SessionDir::new(SessionId::new(session), StdFs, &audio)).unwrap();
@@ -240,28 +277,42 @@ fn published(data: &Path, session: u64) -> (Vec<(u32, u64)>, bool) {
         );
         assert!(StdFs.list(&audio).unwrap().contains(&audio.join(name)));
     }
-    let mut tracks: Vec<(u32, u64)> = rows
+    let mut tracks: Vec<(u32, u64, u64)> = rows
         .iter()
-        .map(|r| (r.track().get(), r.range().len().get()))
+        .map(|r| {
+            (
+                r.track().get(),
+                r.range().start().get(),
+                r.range().len().get(),
+            )
+        })
         .collect();
     tracks.sort_unstable();
     (tracks, left)
 }
 
-/// Both tracks published at least `secs` of audio, nothing left over.
-fn assert_saved(data: &Path, session: u64, secs: u64) {
+/// Each of `tracks` published at least `ms` of audio, from its first
+/// sample without a gap, and nothing is left over; the others nothing.
+fn assert_saved(data: &Path, session: u64, tracks: &[u32], ms: u64) {
     let (rows, left) = published(data, session);
     assert!(!left, "journals left after the stop");
     for track in [0, 1] {
-        let samples: u64 = rows
+        let mut ranges: Vec<(u64, u64)> = rows
             .iter()
-            .filter(|(t, _)| *t == track)
-            .map(|(_, n)| n)
-            .sum();
-        assert!(
-            samples >= secs * 16_000,
-            "track {track}: {samples} samples, {rows:?}"
-        );
+            .filter(|(t, ..)| *t == track)
+            .map(|&(_, start, len)| (start, start + len))
+            .collect();
+        ranges.sort_unstable();
+        if !tracks.contains(&track) {
+            assert!(ranges.is_empty(), "track {track} recorded: {ranges:?}");
+            continue;
+        }
+        let mut end = 0;
+        for (start, next) in ranges {
+            assert_eq!(start, end, "track {track} has a gap at {end}");
+            end = next;
+        }
+        assert!(end >= ms * 16, "track {track}: only {end} samples");
     }
 }
 
@@ -292,7 +343,7 @@ fn s_asks_first_and_y_stops_with_everything_saved() {
         "never left the alternate screen"
     );
     assert!(nota.output().contains("recorded to"), "{}", nota.output());
-    assert_saved(&tmp.0, 1, 1);
+    assert_saved(&tmp.0, 1, &[0, 1], 1_450);
 }
 
 fn stops_on(signal: Signal, name: &str) {
@@ -302,7 +353,7 @@ fn stops_on(signal: Signal, name: &str) {
     let status = nota.exits().expect("nota didn't stop");
     assert!(status.success(), "{status:?}: {}", nota.output());
     assert!(nota.terminal_restored());
-    assert_saved(&tmp.0, 1, 1);
+    assert_saved(&tmp.0, 1, &[0, 1], 1_450);
 }
 
 #[test]
@@ -326,7 +377,7 @@ fn a_signal_while_the_stop_question_is_open_still_stops_safely() {
     let status = nota.exits().expect("nota didn't stop");
     assert!(status.success(), "{status:?}");
     assert!(nota.terminal_restored());
-    assert_saved(&tmp.0, 1, 1);
+    assert_saved(&tmp.0, 1, &[0, 1], 1_450);
 }
 
 #[test]
@@ -349,7 +400,55 @@ fn a_recording_killed_outright_is_salvaged_at_the_next_start() {
     let (rows, left) = published(&tmp.0, 1);
     assert!(!left);
     for track in [0, 1] {
-        assert!(rows.iter().any(|(t, _)| *t == track), "{rows:?}");
+        assert!(rows.iter().any(|(t, ..)| *t == track), "{rows:?}");
     }
-    assert_saved(&tmp.0, 2, 1);
+    assert_saved(&tmp.0, 2, &[0, 1], 1_450);
+}
+
+#[test]
+fn sigint_stops_with_everything_saved_and_the_terminal_restored() {
+    stops_on(Signal::INT, "int");
+}
+
+#[test]
+fn a_closed_terminal_and_its_hangup_still_save_everything() {
+    let tmp = TestDir::new("closed");
+    let mut nota = recording(&tmp.0);
+    nota.hang_up();
+    nota.signal(Signal::HUP);
+    let status = nota.exits().expect("nota didn't stop");
+    assert!(status.success(), "{status:?}: {}", nota.output());
+    assert_saved(&tmp.0, 1, &[0, 1], 1_450);
+}
+
+#[test]
+fn when_every_stream_fails_the_recording_stops_by_itself() {
+    let tmp = TestDir::new("all-fail");
+    let mut nota = Running::start_with(&tmp.0, &["--mic", "fails", "--system", "fails"]);
+    let status = nota
+        .exits()
+        .expect("nota kept going with nothing to record");
+    assert!(status.success(), "{status:?}: {}", nota.output());
+    assert!(nota.terminal_restored());
+    let said = visible(&nota.output.lock().unwrap());
+    assert!(said.contains("stopped recording the mic"), "{said}");
+    assert!(
+        said.contains("stopped recording the system audio"),
+        "{said}"
+    );
+    assert_saved(&tmp.0, 1, &[0, 1], 450);
+}
+
+#[test]
+fn a_stream_that_cant_start_leaves_the_other_recording() {
+    let tmp = TestDir::new("one-missing");
+    let mut nota = Running::start_with(&tmp.0, &["--mic", "missing"]);
+    assert!(nota.shows_after(0, "s stop"), "{}", nota.output());
+    pause(Duration::from_millis(1_500));
+    nota.signal(Signal::TERM);
+    let status = nota.exits().expect("nota didn't stop");
+    assert!(status.success(), "{status:?}");
+    let said = visible(&nota.output.lock().unwrap());
+    assert!(said.contains("not recording device missing"), "{said}");
+    assert_saved(&tmp.0, 1, &[1], 1_450);
 }

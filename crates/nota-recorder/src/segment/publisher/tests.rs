@@ -172,3 +172,47 @@ fn a_queue_outliving_the_thread_reports_it_gone() {
         "the segment publisher stopped unexpectedly"
     );
 }
+
+/// A store whose `fail_at`th commit (counting from 0) fails, once.
+#[derive(Debug)]
+struct FailsOnce {
+    store: FakeStore,
+    commits: usize,
+    fail_at: usize,
+}
+
+impl SegmentStore for FailsOnce {
+    type Error = BrokenError;
+
+    fn rows(&mut self) -> Result<Vec<SegmentRow>, BrokenError> {
+        self.store.rows().map_err(|_| BrokenError)
+    }
+
+    fn insert(&mut self, segment: &DurableSegment) -> Result<(), BrokenError> {
+        let n = self.commits;
+        self.commits += 1;
+        if n == self.fail_at {
+            return Err(BrokenError);
+        }
+        self.store.insert(segment).map_err(|_| BrokenError)
+    }
+}
+
+#[test]
+fn rows_committed_by_a_run_that_failed_are_counted() {
+    let (fs, lock, journals) = recorded(2);
+    let store = FailsOnce {
+        store: FakeStore::new(&fs, &db()),
+        commits: 0,
+        fail_at: 1,
+    };
+    let publisher = publisher(&lock, store);
+    assert!(publisher.queue().send(journals));
+    let report = publisher.finish().unwrap();
+    // The first run committed window 0, then failed at window 1; the last
+    // try committed window 1.
+    assert_eq!(report.errors().len(), 1);
+    assert_eq!(starts(report.rows()), vec![0, 1_000]);
+    assert!(report.is_complete());
+    assert!(!needs_salvage(lock.session()).unwrap());
+}

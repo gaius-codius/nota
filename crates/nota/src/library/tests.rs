@@ -60,6 +60,9 @@ fn sessions_are_numbered_from_one_and_never_reused() {
     // highest number.
     StdFs.create_dir(&tmp.0.join("a/b/sessions/7")).unwrap();
     StdFs.create_dir(&tmp.0.join("a/b/sessions/notes")).unwrap();
+    // Not a name a session is given.
+    StdFs.create_dir(&tmp.0.join("a/b/sessions/09")).unwrap();
+    StdFs.create_dir(&tmp.0.join("a/b/sessions/+10")).unwrap();
     assert_eq!(ids(&library), [1, 2, 7]);
     assert_eq!(library.create().unwrap().id, SessionId::new(8));
     // Opening again keeps them.
@@ -141,4 +144,38 @@ fn a_store_that_cant_open_fails_that_session_only() {
         "{done:?}"
     );
     assert!(needs_salvage(&SessionDir::new(session.id, StdFs, &session.audio())).unwrap());
+}
+
+#[test]
+fn session_numbers_that_run_out_are_an_error() {
+    let tmp = TestDir::new("overflow");
+    let library = Library::open(&tmp.0).unwrap();
+    StdFs
+        .create_dir(&tmp.0.join("sessions").join(u64::MAX.to_string()))
+        .unwrap();
+    let err = library.create().unwrap_err();
+    assert!(err.to_string().contains("free session number"), "{err}");
+}
+
+#[test]
+fn a_relative_directory_is_in_the_working_directory() {
+    assert_eq!(parent_of(Path::new("rec")), Some(Path::new(".")));
+    assert_eq!(parent_of(Path::new("a/rec")), Some(Path::new("a")));
+    assert_eq!(parent_of(Path::new("/rec")), Some(Path::new("/")));
+    assert_eq!(parent_of(Path::new("/")), None);
+}
+
+#[test]
+fn salvage_that_leaves_journals_says_so() {
+    let tmp = TestDir::new("left");
+    let library = Library::open(&tmp.0).unwrap();
+    let session = library.create().unwrap();
+    // A directory under a journal's name: there, but it can't be read.
+    let journal = nota_recorder::journal::JournalId::new(0).file_name();
+    StdFs.create_dir(&session.audio().join(journal)).unwrap();
+    let done = library.salvage_all(length()).unwrap();
+    assert!(
+        matches!(done[..], [Salvaged::Left(id)] if id == session.id),
+        "{done:?}"
+    );
 }

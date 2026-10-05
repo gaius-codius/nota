@@ -9,8 +9,9 @@ publish.workspace = true
 
 [features]
 # `nota record --tone yes`: a synthetic tone in place of the audio server,
-# for the end-to-end tests. Turned on by the self dev-dependency below;
-# never in a release build.
+# for the end-to-end tests. Turned on by the self dev-dependency below, so
+# any build that also builds nota's tests has it; `cargo build -p nota`
+# (the release build) doesn't.
 fake-capture = []
 
 [[test]]
@@ -35,7 +36,7 @@ nota = { path = ".", features = ["fake-capture"] }
 nota-core = { path = "../nota-core", features = ["fake-clock"] }
 nota-recorder = { path = "../nota-recorder" }
 # A pseudo-terminal for the end-to-end test, and signals to send.
-rustix = { workspace = true, features = ["pty", "termios", "process", "fs"] }
+rustix = { workspace = true, features = ["pty", "termios", "process", "fs", "event"] }
 
 [lints]
 workspace = true

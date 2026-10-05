@@ -14,7 +14,8 @@ use nota_recorder::capture::{CaptureBackend, CaptureError, CaptureSender, Source
 const PERIOD: Duration = Duration::from_millis(20);
 
 /// Each source plays a square wave of its own pitch, timed by the session
-/// clock.
+/// clock. Two device names act out failures: `missing` can't be opened,
+/// and `fails` stops with an error after half a second.
 #[derive(Debug)]
 pub(crate) struct Tone {
     pub(crate) clock: Arc<dyn Clock>,
@@ -45,6 +46,10 @@ impl CaptureBackend for Tone {
         rate: SampleRate,
         events: CaptureSender,
     ) -> Result<ToneStream, CaptureError> {
+        if *source == Source::Device("missing".into()) {
+            return Err(CaptureError::DeviceNotAvailable(source.clone()));
+        }
+        let fails = *source == Source::Device("fails".into());
         let half_period: u64 = match source {
             Source::SystemAudio => 20,
             _ => 30,
@@ -74,6 +79,10 @@ impl CaptureBackend for Tone {
                         .collect();
                     events.audio(&chunk);
                     sent = due.max(sent);
+                    if fails && elapsed >= Duration::from_millis(500) {
+                        events.failed(CaptureError::Backend("the tone failed".into()));
+                        break;
+                    }
                 }
             })
             .map_err(|e| CaptureError::Backend(e.to_string()))?;

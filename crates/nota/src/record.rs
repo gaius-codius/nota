@@ -136,9 +136,14 @@ pub(crate) fn segment_length() -> SegmentLength {
     SegmentLength::default_at(RATE)
 }
 
-/// The recorder thread's result: the writer, how recording ended, and how
-/// many journal failures it reported.
-type Recorded = (SessionWriter<StdFs>, Result<(), RecordError>, usize);
+/// The recorder thread's result: the writer, how recording ended, how
+/// many journal failures it reported, and the streams that failed.
+type Recorded = (
+    SessionWriter<StdFs>,
+    Result<(), RecordError>,
+    usize,
+    Vec<String>,
+);
 
 #[expect(
     clippy::too_many_lines,
@@ -152,11 +157,17 @@ fn record_with<B: CaptureBackend>(
     let mut outcome = Outcome::default();
     let (ui, ui_events) = mpsc::channel::<Event>();
     let signals = listen_for_signals(ui.clone())?;
+    // The terminal first: without one there's nothing to record into.
+    let screen = Screen::enter()?;
 
     let library = Library::open(&args.data)?;
     for salvaged in library.salvage_all(segment_length())? {
         outcome.notes.push(match salvaged {
             Salvaged::Done(id) => format!("salvaged session {}", id.get()),
+            Salvaged::Left(id) => format!(
+                "salvaged session {}, but some of its journals are still to publish",
+                id.get()
+            ),
             Salvaged::InUse(id) => format!("session {} is in use; not salvaged", id.get()),
             Salvaged::Failed(id, e) => format!("salvaging session {} failed: {e}", id.get()),
         });
@@ -183,12 +194,15 @@ fn record_with<B: CaptureBackend>(
     if captures.is_empty() {
         return Err(format!("nothing to record: {}", outcome.notes.join("; ")).into());
     }
+    // Each track's first epoch starts when its own stream did: a stream
+    // opened later doesn't push the first one's audio later.
     let mut timelines = Vec::new();
-    for &track in events.tracks() {
+    for capture in &captures {
+        let track = capture.track();
         let first = writer.first_free_sample(track);
         writer.start_track(track, EpochId::new(0), first)?;
         let mut timeline = TrackTimeline::new(track);
-        timeline.open_epoch(clock.now(), first, RATE)?;
+        timeline.open_epoch(capture.started_at(), first, RATE)?;
         timelines.push(timeline);
     }
 
@@ -202,10 +216,12 @@ fn record_with<B: CaptureBackend>(
     let recorder = {
         let queue = publisher.queue();
         let live_inputs = live_inputs.clone();
+        let ui = ui.clone();
         thread::Builder::new()
             .name("nota-recorder".into())
             .spawn(move || -> Recorded {
                 let mut failures = 0;
+                let mut lost = Vec::new();
                 let result =
                     record_tracks(&mut writer, &mut timelines, &events, &mut |track, e| {
                         match e {
@@ -214,28 +230,38 @@ fn record_with<B: CaptureBackend>(
                                 let _sent = queue.send(journals);
                             }
                             e => {
-                                if matches!(e, RecorderEvent::JournalFailed(_)) {
-                                    failures += 1;
+                                match &e {
+                                    RecorderEvent::JournalFailed(_) => failures += 1,
+                                    RecorderEvent::CaptureFailed(error) => {
+                                        lost.push(format!("{}: {error}", track_name(track)));
+                                    }
+                                    _ => {}
                                 }
                                 let _ = live_inputs.send(LiveInput::Recorder(track, e));
                             }
                         }
                     });
-                (writer, result, failures)
+                // Every stream has ended, or recording failed: the screen
+                // has nothing more to show, so close it and stop.
+                let _ = ui.send(Event::Close);
+                (writer, result, failures, lost)
             })?
     };
 
     // The screen, until it's closed.
-    let shown = show(args, &listening.join(" + "), clock, &ui, &ui_events);
+    let shown = show(screen, args, &listening.join(" + "), clock, &ui, &ui_events);
     drop(ui);
 
     // Stop, in order.
     drop(captures);
-    let (writer, how_it_ended, failures) = recorder
+    let (writer, how_it_ended, failures, failed_streams) = recorder
         .join()
         .map_err(|_| "the recorder stopped unexpectedly")?;
     if let Err(e) = how_it_ended {
         outcome.notes.push(format!("recording stopped early: {e}"));
+    }
+    for stream in failed_streams {
+        outcome.notes.push(format!("stopped recording {stream}"));
     }
     if failures > 0 {
         outcome.notes.push(format!(
@@ -261,32 +287,42 @@ fn record_with<B: CaptureBackend>(
     signals.close();
     drop(lock);
 
-    match shown {
-        Ok(marks) => {
-            if marks > 0 {
-                outcome.notes.push(format!(
-                    "{marks} marks and notes made; they aren't saved yet"
-                ));
-            }
-            Ok(outcome)
-        }
-        Err(e) => Err(format!(
-            "{e} (the recording was saved to {})",
-            outcome.session.display()
-        )
-        .into()),
+    let shown = shown?;
+    if let Some(problem) = shown.problem {
+        outcome.notes.push(problem);
     }
+    if shown.marks > 0 {
+        outcome.notes.push(format!(
+            "{} marks and notes made; they aren't saved yet",
+            shown.marks
+        ));
+    }
+    Ok(outcome)
 }
 
-/// Shows the Recording screen until it's closed, and restores the
-/// terminal. Returns how many marks and notes were made.
+/// How the screen went.
+struct Shown {
+    /// Marks and notes made.
+    marks: usize,
+    /// Why it closed, if not as asked: the terminal failed (as after a
+    /// hangup). The recording stops all the same.
+    problem: Option<String>,
+}
+
+/// Shows the Recording screen on `screen` until it's closed, then restores
+/// the terminal.
+///
+/// # Errors
+///
+/// Only if the input thread can't start.
 fn show(
+    mut screen: Screen,
     args: &RecordArgs,
     listening: &str,
     clock: &Arc<dyn Clock>,
     ui: &Sender<Event>,
     ui_events: &Receiver<Event>,
-) -> Result<usize, BoxError> {
+) -> io::Result<Shown> {
     let theme = if std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()) {
         Theme::no_color()
     } else {
@@ -299,18 +335,19 @@ fn show(
         theme,
     );
     let (annotations, made) = mpsc::channel::<Annotation>();
-    let mut screen = Screen::enter()?;
     let input = InputThread::spawn(ui.clone(), Arc::clone(clock))?;
     let ran = nota_tui::run(screen.terminal(), &mut recording, ui_events, &annotations);
     // Keys may be gone with the terminal; nothing to do about it.
     let _ = input.stop();
     drop(screen);
     let marks = made.try_iter().count();
-    match ran {
-        Ok(Ended::Stopped | Ended::Closed) | Err(RunError::InputLost(_)) => Ok(marks),
-        Err(RunError::Terminal(e)) => Err(format!("drawing the screen failed: {e}").into()),
-        Err(RunError::AnnotationsClosed(_)) => Ok(marks + 1),
-    }
+    let (marks, problem) = match ran {
+        Ok(Ended::Stopped | Ended::Closed) => (marks, None),
+        Err(RunError::InputLost(kind)) => (marks, Some(format!("the keyboard was lost: {kind}"))),
+        Err(RunError::Terminal(e)) => (marks, Some(format!("the screen failed: {e}"))),
+        Err(RunError::AnnotationsClosed(_)) => (marks + 1, None),
+    };
+    Ok(Shown { marks, problem })
 }
 
 /// The handle that stops the signal thread.
@@ -428,6 +465,15 @@ fn note_published(outcome: &mut Outcome, report: &PublishReport) {
             let _ = write!(note, " (last error: {e})");
         }
         outcome.notes.push(note);
+    }
+}
+
+/// How the summary names a track.
+fn track_name(track: Option<TrackId>) -> &'static str {
+    match track {
+        Some(MIC) => "the mic",
+        Some(SYSTEM) => "the system audio",
+        _ => "a track",
     }
 }
 

@@ -15,9 +15,10 @@ use crate::session::{FinishedJournal, SessionStore};
 /// A thread that publishes each batch of finished journals sent to it, in
 /// order, as [`publish_journals`] does.
 ///
-/// A batch that fails, or a journal in it that couldn't be read, is kept
-/// and tried again with the next batch, and once more when the publisher
-/// finishes; what still fails is left on disk for
+/// A journal still on disk after a publish run (the run failed, the
+/// journal couldn't be read, or a committed segment that doesn't match its
+/// file holds it back) is kept and tried again with the next batch, and
+/// once more when the publisher finishes; what still fails is left on disk for
 /// the next start's salvage, which loses nothing (see the
 /// [`segment`](super) module). Recording never waits for it: sending a
 /// batch only puts it on a channel.
@@ -53,7 +54,9 @@ pub struct PublishReport {
 }
 
 impl PublishReport {
-    /// Every row committed, in order.
+    /// Every row in the session's store once publishing finished, in
+    /// order: those committed by runs that went on to fail too. If the
+    /// store couldn't be read then, the rows the successful runs reported.
     #[must_use]
     pub fn rows(&self) -> &[SegmentRow] {
         &self.rows
@@ -66,10 +69,12 @@ impl PublishReport {
         &self.errors
     }
 
-    /// The journals not published at the last try: its run failed, or
-    /// they were there but couldn't be read (see
-    /// [`Published::unread`](super::Published::unread)). They're still on
-    /// disk, for salvage at the next start.
+    /// The journals still on disk after the last try: its run failed,
+    /// they couldn't be read (see
+    /// [`Published::unread`](super::Published::unread)), or a finding
+    /// holds their audio back (see
+    /// [`Published::findings`](super::Published::findings)). They're left
+    /// for salvage at the next start.
     #[must_use]
     pub fn left(&self) -> &[FinishedJournal] {
         &self.left
@@ -155,11 +160,14 @@ fn publish_all<S: Fs, T: SegmentStore>(
         publish_pending(&mut session, length, &mut pending, &mut report);
     }
     report.left = pending;
+    if let Ok(rows) = session.parts().1.rows() {
+        report.rows = rows;
+    }
     report
 }
 
-/// One publish run over `pending`. If it succeeds, only the journals it
-/// couldn't read are kept, to try again; if it fails, all are.
+/// One publish run over `pending`; afterwards only the journals still on
+/// disk are kept, to try again. If the directory can't be listed, all are.
 fn publish_pending<S: Fs, T: SegmentStore>(
     session: &mut SessionStore<S, T>,
     length: SegmentLength,
@@ -167,15 +175,12 @@ fn publish_pending<S: Fs, T: SegmentStore>(
     report: &mut PublishReport,
 ) {
     match publish_journals(session, length, pending) {
-        Ok(published) => {
-            report.rows.extend_from_slice(published.segments());
-            *pending = published
-                .unread()
-                .iter()
-                .map(|(journal, _)| FinishedJournal::new(journal.session(), journal.id()))
-                .collect();
-        }
+        Ok(published) => report.rows.extend_from_slice(published.segments()),
         Err(error) => report.errors.push(error),
+    }
+    let dir = session.session();
+    if let Ok(there) = dir.fs().list(dir.dir()) {
+        pending.retain(|journal| there.contains(&dir.dir().join(journal.id().file_name())));
     }
 }
 

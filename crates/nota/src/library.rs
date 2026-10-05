@@ -50,6 +50,10 @@ impl SessionPaths {
 pub(crate) enum Salvaged {
     /// It had journals left, and salvage published them.
     Done(SessionId),
+    /// Salvage ran, but left journals it couldn't publish yet (unreadable,
+    /// or held back by a segment that doesn't match its row); the next
+    /// start tries again.
+    Left(SessionId),
     /// Another nota is using it; it's left alone.
     InUse(SessionId),
     /// Salvage failed; the journals are still there for the next start.
@@ -75,7 +79,12 @@ impl Library {
             .list(&self.sessions())?
             .into_iter()
             .filter_map(|dir| {
-                let id = dir.file_name()?.to_str()?.parse().ok()?;
+                let name = dir.file_name()?.to_str()?;
+                let id: u64 = name.parse().ok()?;
+                // Only the name a session is given: not `07` or `+7`.
+                if id.to_string() != name {
+                    return None;
+                }
                 Some(SessionPaths {
                     id: SessionId::new(id),
                     dir,
@@ -102,7 +111,10 @@ impl Library {
     /// Makes a new session's directories, numbered after every session
     /// there.
     pub(crate) fn create(&self) -> io::Result<SessionPaths> {
-        let mut next = self.existing()?.last().map_or(1, |s| s.id.get() + 1);
+        let mut next = match self.existing()?.last() {
+            Some(last) => last.id.get().checked_add(1).ok_or_else(no_number)?,
+            None => 1,
+        };
         // Another nota may take the same number first: try the next.
         for _ in 0..16 {
             let dir = self.sessions().join(next.to_string());
@@ -117,12 +129,18 @@ impl Library {
                     StdFs.sync_dir(&paths.dir)?;
                     return Ok(paths);
                 }
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => next += 1,
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                    next = next.checked_add(1).ok_or_else(no_number)?;
+                }
                 Err(e) => return Err(e),
             }
         }
-        Err(io::Error::other("couldn't find a free session number"))
+        Err(no_number())
     }
+}
+
+fn no_number() -> io::Error {
+    io::Error::other("couldn't find a free session number")
 }
 
 /// Salvages `session` if it has journals left. `None` if it had nothing to
@@ -146,6 +164,7 @@ fn salvage_one(session: &SessionPaths, length: SegmentLength) -> Option<Salvaged
     };
     let mut bound = SessionStore::new(lock, store);
     Some(match salvage(&mut bound, length) {
+        Ok(_) if needs_salvage(&dir).unwrap_or(true) => Salvaged::Left(session.id),
         Ok(_) => Salvaged::Done(session.id),
         Err(e) => Salvaged::Failed(session.id, e.to_string()),
     })
@@ -158,15 +177,22 @@ fn ensure_dir(dir: &Path) -> io::Result<()> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(e),
     }
-    let parent = dir
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
+    let parent = parent_of(dir)
         .ok_or_else(|| io::Error::other(format!("{} has no parent", dir.display())))?;
     ensure_dir(parent)?;
     match StdFs.create_dir(dir) {
         Ok(()) => StdFs.sync_dir(parent),
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
         Err(e) => Err(e),
+    }
+}
+
+/// The directory `dir` is in: for a relative path with one part, the
+/// working directory. `None` for a root.
+fn parent_of(dir: &Path) -> Option<&Path> {
+    match dir.parent()? {
+        p if p.as_os_str().is_empty() => Some(Path::new(".")),
+        p => Some(p),
     }
 }
 

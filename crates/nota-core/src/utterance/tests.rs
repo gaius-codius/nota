@@ -206,6 +206,24 @@ fn a_follower_accepts_an_epoch_that_starts_as_the_last_audio_ends() {
 }
 
 #[test]
+fn a_follower_accepts_an_epoch_with_no_audio_before_it() {
+    // The stream reopened twice without a sample between: the first epoch
+    // holds nothing.
+    let mut timeline = TrackTimeline::new(MIC);
+    timeline
+        .open_epoch(ms(0), SampleIndex::ZERO, rate())
+        .unwrap();
+    timeline
+        .open_epoch(ms(500), SampleIndex::ZERO, rate())
+        .unwrap();
+    let mut follower = TrackTimeline::new(MIC);
+    for epoch in timeline.epochs() {
+        follower.follow(epoch).unwrap();
+    }
+    assert_eq!(follower, timeline);
+}
+
+#[test]
 fn not_next_reads_plainly() {
     let e = EpochError::NotNext {
         expected: EpochId::new(2),

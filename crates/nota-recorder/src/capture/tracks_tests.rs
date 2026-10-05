@@ -144,6 +144,13 @@ fn record_both(mic: Vec<Step>, system: Vec<Step>) -> Recorded {
         captures.iter().map(Capture::track).collect::<Vec<_>>(),
         [MIC, SYSTEM]
     );
+    // Each stream's start is read from the clock as it's opened.
+    for capture in &captures {
+        assert_eq!(
+            capture.started_at(),
+            SessionTime::from_nanos(10_000_000_000)
+        );
+    }
     let (done, finished) = mpsc::channel();
     thread::spawn(move || {
         let mut reported = Vec::new();
@@ -426,4 +433,56 @@ fn streams_that_cant_start_leave_the_others_running() {
     );
     assert_eq!(events.tracks(), [SYSTEM]);
     assert_eq!(events.rate(), rate());
+}
+
+#[test]
+fn a_track_that_fails_first_leaves_the_other_recording_until_it_stops() {
+    // In this order on the channel: the mic fails, then the system audio
+    // still arrives, then the system stream stops.
+    let fs = FakeFs::with_dirs([dir()]);
+    let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let session = SessionDir::new(SESSION, fs.clone(), &dir()).lock().unwrap();
+    let length = SegmentLength::new(SampleCount::new(1_000)).unwrap();
+    let mut writer = SessionWriter::open(&session, rate(), length, clock).unwrap();
+    let mut timelines = Vec::new();
+    for track in [MIC, SYSTEM] {
+        writer
+            .start_track(track, EpochId::new(0), SampleIndex::ZERO)
+            .unwrap();
+        let mut timeline = TrackTimeline::new(track);
+        timeline
+            .open_epoch(SessionTime::ZERO, SampleIndex::ZERO, rate())
+            .unwrap();
+        timelines.push(timeline);
+    }
+    let (tx, rx) = mpsc::channel();
+    let failure = CaptureError::Backend("gone".into());
+    tx.send((MIC, CaptureEvent::Failed(failure.clone())))
+        .unwrap();
+    tx.send((SYSTEM, CaptureEvent::Audio(samples(SYSTEM, 0, 30))))
+        .unwrap();
+    tx.send((MIC, CaptureEvent::Stopped)).unwrap();
+    tx.send((SYSTEM, CaptureEvent::Audio(samples(SYSTEM, 30, 20))))
+        .unwrap();
+    tx.send((SYSTEM, CaptureEvent::Stopped)).unwrap();
+    // Never seen: recording ended with the system stream.
+    tx.send((SYSTEM, CaptureEvent::Audio(samples(SYSTEM, 50, 5))))
+        .unwrap();
+    let events = CaptureReceiver {
+        events: rx,
+        rate: rate(),
+        tracks: vec![MIC, SYSTEM],
+    };
+    let mut failed = Vec::new();
+    record_tracks(&mut writer, &mut timelines, &events, &mut |t, e| {
+        if let RecorderEvent::CaptureFailed(e) = e {
+            failed.push((t, e));
+        }
+    })
+    .unwrap();
+    assert_eq!(failed, [(Some(MIC), failure)]);
+    assert_eq!(writer.next_sample(SYSTEM), Some(SampleIndex::new(50)));
+    assert_eq!(writer.next_sample(MIC), Some(SampleIndex::ZERO));
+    let journals = writer.finish().unwrap();
+    assert_eq!(by_track(&fs, &journals)[&SYSTEM], samples(SYSTEM, 0, 50));
 }

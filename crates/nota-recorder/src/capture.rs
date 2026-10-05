@@ -285,6 +285,7 @@ pub trait CaptureBackend {
 pub struct Capture<T> {
     stream: Option<T>,
     track: TrackId,
+    started_at: SessionTime,
     stopped: mpsc::Sender<(TrackId, CaptureEvent)>,
     stopping: Arc<AtomicBool>,
 }
@@ -294,6 +295,14 @@ impl<T> Capture<T> {
     #[must_use]
     pub const fn track(&self) -> TrackId {
         self.track
+    }
+
+    /// When the stream was started, by the session clock: read just before
+    /// it was opened, so no audio it delivers can come from earlier. Open
+    /// the track's first epoch here.
+    #[must_use]
+    pub const fn started_at(&self) -> SessionTime {
+        self.started_at
     }
 }
 
@@ -364,9 +373,11 @@ pub fn start_tracks<B: CaptureBackend>(
             clock: Arc::clone(clock),
             stopping: Arc::clone(&stopping),
         };
+        let started_at = clock.now();
         let capture = backend.start(source, rate, sender).map(|stream| Capture {
             stream: Some(stream),
             track: *track,
+            started_at,
             stopped: tx.clone(),
             stopping,
         });
