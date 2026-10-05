@@ -82,7 +82,10 @@ pub struct EngineConfig {
     /// recording) and reported as [`EngineEvent::Skipped`]. A new engine
     /// is given at most half of it, the oldest dropped likewise, so it has
     /// room to catch up; one that still falls further behind than this is
-    /// restarted.
+    /// restarted. Half of it must be well over what a healthy engine holds
+    /// before it confirms (the live chunker's 10 s cap plus decoding), so
+    /// set it to at least 30 s of audio; less restarts every engine as
+    /// behind before it can confirm anything.
     pub max_unconfirmed: SampleCount,
 }
 
