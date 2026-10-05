@@ -5,8 +5,8 @@
 //!
 //! Time has one source, the [`Clock`]. Each track maps its sample count to
 //! session time through a [`TrackTimeline`] of epochs; a new epoch starts
-//! whenever the track's stream is reopened, and the time between epochs is a
-//! gap with no audio.
+//! whenever the track's stream is reopened or the audio server reports an
+//! overrun (audio lost), and the time between epochs is a gap with no audio.
 //!
 //! ```
 //! use std::time::Duration;

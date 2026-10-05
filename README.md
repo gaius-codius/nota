@@ -14,8 +14,8 @@ Linux comes first; macOS and Windows are planned.
 ## Building
 
 nota builds with the Rust toolchain pinned in `rust-toolchain.toml`. On
-Linux, the recorder needs the PipeWire and ALSA headers, pkg-config and
-libclang (`scripts/install-linux-build-deps.sh` lists them for Debian and
+Linux, the recorder needs the PipeWire, ALSA and D-Bus headers, pkg-config
+and libclang (`scripts/install-linux-build-deps.sh` lists them for Debian and
 Ubuntu).
 
 The speech engine links sherpa-onnx's static libraries. Fetch them once per

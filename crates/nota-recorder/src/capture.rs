@@ -10,10 +10,12 @@
 //! write and fsync.
 //!
 //! The channel is unbounded: while the disk stalls, audio queues in memory
-//! (32 KB a second at 16 kHz) rather than being dropped, and the recorder
-//! catches up when the disk does. In the steady state the callback doesn't
-//! allocate: the channel has room reserved, and the recorder hands each
-//! sample buffer back for the callback to fill again. Each track's
+//! rather than being dropped, and the recorder catches up when the disk
+//! does. Each buffer queued holds at least 8 KB whatever the stream's
+//! quantum, so a stall costs about 0.2 to 0.4 MB a second per track, not
+//! the 32 KB a second of the audio itself. In the steady state the
+//! callback doesn't allocate: the channel has room reserved, and the
+//! recorder hands each sample buffer back for the callback to fill again. Each track's
 //! [`Progress`] counts the audio waiting in the channel, so what a crash
 //! would lose can be measured from the audio the server delivered, not
 //! only from what reached the journal.
@@ -58,8 +60,10 @@
 //! track whose stream fails is reported and the others record on; the
 //! recorder returns once every stream has stopped or failed. Every
 //! journal's fsync is checked after every event, whichever track it came
-//! from, and while no audio arrives, so each track keeps its own
-//! durable-loss bound.
+//! from, and while no audio arrives. The fsyncs are made one after another
+//! on that thread, so a track's audio can wait in the channel while
+//! another track's journal is fsync'd: with two tracks, the bounded-loss
+//! rule holds only while their fsyncs together stay under about 200 ms.
 //!
 //! On Linux, [`PipeWireBackend`] captures through cpal's `PipeWire` host. It
 //! links `libpipewire-0.3`, `libasound` (cpal's ALSA host is always built
@@ -585,7 +589,9 @@ pub fn record_track<S: Fs>(
 /// fsync'd, and so are they all when nothing arrives for 100 ms: each
 /// track's durable position stays within about
 /// [`SYNC_INTERVAL`](crate::journal::SYNC_INTERVAL) of what it captured,
-/// however busy or quiet the other tracks are.
+/// however busy or quiet the other tracks are. Its audio waits in the
+/// channel meanwhile, though, so against what the server *delivered* it
+/// also trails by the other tracks' fsyncs (see the module docs).
 ///
 /// Each track's [`Progress`] (from [`CaptureReceiver::progress`]) moves on
 /// as its audio is appended and its journals are fsync'd.
@@ -645,6 +651,14 @@ pub fn record_tracks<S: Fs>(
     let mut live: BTreeSet<TrackId> = events.tracks().into_iter().collect();
     while !live.is_empty() {
         let outcome = match events.next(IDLE_SYNC_CHECK) {
+            // A stream can report something before its start fails; its
+            // track was never started, so there's nothing to record it in.
+            Received::Event(track, event) if !events.tracks.iter().any(|(t, _)| *t == track) => {
+                if let CaptureEvent::Audio(buffer) = event {
+                    events.events.recycle(buffer);
+                }
+                continue;
+            }
             Received::Event(track, event) => {
                 match handle(writer, timelines, track, event, report)? {
                     Handled::Recorded(outcome, spent) => {

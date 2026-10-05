@@ -83,12 +83,15 @@ pub(crate) struct Draft {
 
 impl Recording {
     /// A Recording screen for the session `title`, capturing from `source`
-    /// (shown in the footer), timed by the session `clock`.
+    /// (shown in the footer), timed by the session `clock`. Control and
+    /// bidirectional formatting characters in either are dropped, as in
+    /// the transcript, so they can't reorder or break the row.
     #[must_use]
     pub fn new(title: String, source: String, clock: Arc<dyn Clock>, theme: Theme) -> Self {
+        let drawn = |text: String| text.chars().filter(|&c| is_drawn(c)).collect();
         Self {
-            title,
-            source,
+            title: drawn(title),
+            source: drawn(source),
             clock,
             theme,
             levels: LevelHistory::default(),
@@ -270,6 +273,18 @@ mod tests {
 
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn the_title_and_source_keep_only_what_is_drawn() {
+        let screen = Recording::new(
+            "Lab\u{202e}3\u{7}".into(),
+            "mic\u{2066} + system".into(),
+            Arc::new(FakeClock::new(SessionTime::ZERO)),
+            Theme::no_color(),
+        );
+        assert_eq!(screen.title, "Lab3");
+        assert_eq!(screen.source, "mic + system");
     }
 
     fn type_text(screen: &mut Recording, text: &str) {

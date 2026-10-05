@@ -140,13 +140,16 @@ impl Running {
         reason = "opening the pseudo-terminal's other end"
     )]
     fn start_as(data: &Path, extra: &[&str], own_group: bool) -> Self {
-        let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).unwrap();
+        // Close-on-exec, so nota holds only the slave: closing the test's
+        // master is then a real hangup.
+        let master =
+            openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC).unwrap();
         grantpt(&master).unwrap();
         unlockpt(&master).unwrap();
         let name = ptsname(&master, Vec::new()).unwrap();
         let slave = rustix::fs::open(
             name.as_c_str(),
-            OFlags::RDWR | OFlags::NOCTTY,
+            OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC,
             Mode::empty(),
         )
         .unwrap();

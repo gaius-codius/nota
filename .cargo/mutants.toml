@@ -5,8 +5,9 @@
 #
 # Whether the kernel grants real-time priority depends on the machine's
 # rtprio limit. CI's runners have none, so a promotion that always reports
-# failure can't be told apart there; it's caught where the limit allows
-# SCHED_FIFO, as on the development machine.
+# failure can't be told apart there, and this file applies to every run.
+# The test asserts the promotion wherever the limit allows SCHED_FIFO, so
+# running it on such a machine (the development machine) checks it.
 exclude_re = [
   "impl .*Debug for PipeWireStream",
   "replace promote_current_thread -> bool with false",

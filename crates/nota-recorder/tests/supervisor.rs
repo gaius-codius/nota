@@ -589,6 +589,34 @@ fn poison_on_one_track_spares_the_others() {
     }
 }
 
+/// The poison is on the later track while the earlier one's audio stands
+/// still (speech that never reaches a cut): both look stuck at every
+/// failure. The earlier track is the first suspect, but the later one must
+/// still be found, rather than the earlier one losing its audio over and
+/// over while the engine keeps dying.
+#[test]
+fn poison_on_a_later_track_is_found_while_an_earlier_one_stands_still() {
+    let other = TrackId::new(1);
+    let (mut supervisor, mut events) = start(fake(&["echo", "--every", "100", "--poison", "1002"]));
+    events.online();
+    supervisor.send_audio(poisoned(other, 0)).unwrap();
+    let skipped_on = |events: &Events, want: TrackId| {
+        events
+            .seen
+            .iter()
+            .filter(|(_, e)| matches!(e, EngineEvent::Skipped { track, .. } if *track == want))
+            .count()
+    };
+    let mut k = 0;
+    while skipped_on(&events, other) == 0 && k < 200 {
+        supervisor.send_audio(on_track(TRACK, k)).unwrap();
+        k += 1;
+        events.pause(Duration::from_millis(50));
+    }
+    assert_eq!(skipped_on(&events, other), 1, "{:#?}", events.seen);
+    assert!(skipped_on(&events, TRACK) <= 1, "{:#?}", events.seen);
+}
+
 /// Audio that stops coming without a flush is flushed after a while, so
 /// the engine isn't left holding it (and isn't then taken for hung).
 #[test]
