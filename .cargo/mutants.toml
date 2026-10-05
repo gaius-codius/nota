@@ -2,4 +2,12 @@
 
 # The PipeWire stream's Debug impl only names the type, and a test would need
 # a running PipeWire to make one.
-exclude_re = ["impl .*Debug for PipeWireStream"]
+#
+# Whether the kernel grants real-time priority depends on the machine's
+# rtprio limit. CI's runners have none, so a promotion that always reports
+# failure can't be told apart there; it's caught where the limit allows
+# SCHED_FIFO, as on the development machine.
+exclude_re = [
+  "impl .*Debug for PipeWireStream",
+  "replace promote_current_thread -> bool with false",
+]

@@ -128,11 +128,14 @@ mod linux {
         let (writer, mut journals, notices, failures, refused, result) = recorder
             .join()
             .map_err(|_| "the recorder thread panicked")?;
-        result?;
         let captured = writer
             .next_sample(TRACK)
             .ok_or("the track wasn't started")?;
-        journals.extend(writer.finish()?);
+        // Finished even if the stream failed, so its last unsynced second
+        // is fsync'd before the error is reported.
+        let finished = writer.finish();
+        result?;
+        journals.extend(finished?);
 
         let wall = stopped
             .checked_duration_since(started)

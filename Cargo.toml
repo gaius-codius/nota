@@ -34,6 +34,9 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 signal-hook = "0.3"
 # Each segment's checksum in its row.
 sha2 = { version = "0.10", default-features = false, features = ["std"] }
+# Real-time scheduling for the capture stream's thread, within the user's
+# RLIMIT_RTPRIO (before cpal falls back to rtkit). Only nota-recorder uses it.
+thread-priority = { version = "3.1", default-features = false }
 # Grapheme clusters and their display width, measured the way ratatui draws
 # them, for wrapping and cutting text on the screen.
 unicode-segmentation = "1.12"

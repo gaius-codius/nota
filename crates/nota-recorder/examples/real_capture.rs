@@ -18,8 +18,8 @@
 //!   `<ref>` (unsynced), the audio
 //!   the recorder captured, to check the recovered audio against. `<log>`
 //!   gets one fsync'd line for each journal fsync (when, captured, durable
-//!   before and after), each committed row, each overrun or journal
-//!   failure, and the stop. Keep `<log>` and `<ref>` off the filesystem
+//!   before and after, delivered), each committed row, each overrun or
+//!   journal failure, and the stop. Keep `<log>` and `<ref>` off the filesystem
 //!   under test.
 //! - `salvage <dir> --segment-seconds K [--stop-after N]` runs salvage,
 //!   counting its operations and stopping after the Nth as `write` does.
@@ -30,9 +30,9 @@
 //!   left, in order and without gaps from the first sample, holding at least
 //!   everything fsync'd and exactly the audio captured, and every committed
 //!   row; a second salvage changes nothing; the durable position was never
-//!   more than the journal's sync interval (850 ms) behind the captured one,
-//!   nor more than 1.1 s behind the audio delivered (both below); no audio
-//!   was lost before the journal. It prints one `result` line
+//!   more than the journal's sync interval (850 ms) behind the captured
+//!   one, nor more than 1.1 s behind the audio delivered or the wall clock
+//!   (all below); no audio was lost before the journal. It prints one `result` line
 //!   with the measurements and a digest of the files and rows. With
 //!   `--recovered yes`, for a disk that crashed again after a completed
 //!   salvage, salvage must also find nothing left to do.
@@ -48,13 +48,15 @@
 //!   journals fed the engine without a gap, that everything sent was
 //!   confirmed, and that the text reads as `TEXT`.
 //!
-//! "Captured" is what the recorder has written to the journal. Audio still
-//! queued between the stream and the recorder isn't counted there, so the
-//! lag is also measured against the wall clock since the first frame was
-//! written (which slightly undercounts the queue at the start). That one
-//! is the bounded-loss rule, 1.1 s; behind the journal, durable must stay
-//! within the sync interval. Fsync times only mean something on a real
-//! disk: tmpfs makes every fsync free.
+//! "Captured" is what the recorder has written to the journal. "Delivered"
+//! is that and the audio still queued between the stream and the recorder,
+//! from the track's [`Progress`](nota_recorder::capture::Progress): what
+//! the server handed over, and what a kill loses beyond durable. Behind
+//! delivered is the bounded-loss rule, 1.1 s; behind the journal, durable
+//! must stay within the sync interval. The lag is also measured against
+//! the wall clock since the first frame was written (which slightly
+//! undercounts the queue at the start), as a cross-check. Fsync times only
+//! mean something on a real disk: tmpfs makes every fsync free.
 
 #[cfg(target_os = "linux")]
 fn main() -> std::process::ExitCode {
@@ -74,7 +76,7 @@ mod linux {
     use std::path::{Path, PathBuf};
     use std::process::{Command, ExitCode};
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex, mpsc};
+    use std::sync::{Arc, Mutex, OnceLock, mpsc};
     use std::thread;
     use std::time::Duration;
 
@@ -84,8 +86,8 @@ mod linux {
         TrackId, TrackTimeline,
     };
     use nota_recorder::capture::{
-        CaptureNotice, CaptureReceiver, PipeWireBackend, RecordError, RecorderEvent, Source,
-        record_track, start,
+        CaptureNotice, CaptureReceiver, PipeWireBackend, Progress, RecordError, RecorderEvent,
+        Source, record_track, start,
     };
     use nota_recorder::engine::{
         EngineCommand, EngineConfig, EngineEvent, EngineStatus, EngineSupervisor,
@@ -266,14 +268,14 @@ mod linux {
     ///
     ///   start <first sample>
     ///   first <t ns> <end of the first frame>
-    ///   sync <t ns> <captured> <durable before> <durable after>
+    ///   sync <t ns> <captured> <durable before> <durable after> <delivered>
     ///   row <epoch> <start> <end> <sha256 hex>
     ///   overrun <t ns>
     ///   journal-failed <t ns>
     ///   slow <kind> <class> <t ns> <took ns>
     ///   late <op> <kind> <class>
-    ///   stop <op> <kind> <class> <t ns> <captured> <durable>
-    ///   end <t ns> <captured> <durable>
+    ///   stop <op> <kind> <class> <t ns> <captured> <durable> <delivered>
+    ///   end <t ns> <captured> <durable> <delivered>
     #[derive(Debug)]
     struct Log(StdFile);
 
@@ -303,6 +305,9 @@ mod linux {
         journals: Mutex<BTreeMap<PathBuf, Vec<u8>>>,
         /// The end of the audio fsync'd.
         durable: AtomicU64,
+        /// The track's progress, for the audio delivered, once capture has
+        /// started.
+        progress: OnceLock<Progress>,
         anchored: AtomicBool,
         log: Option<Mutex<Log>>,
         /// Where each journal's writes are copied, and the copies.
@@ -336,6 +341,7 @@ mod linux {
                 marker: None,
                 journals: Mutex::new(BTreeMap::new()),
                 durable: AtomicU64::new(0),
+                progress: OnceLock::new(),
                 anchored: AtomicBool::new(false),
                 log: None,
                 reference: None,
@@ -363,6 +369,16 @@ mod linux {
                 .get(path)
                 .and_then(|bytes| read_journal(bytes).range())
                 .map(|r| r.end().get()))
+        }
+
+        /// The end of the audio the server delivered: captured, and queued
+        /// for the recorder. At least `captured`, which the tap may see
+        /// before the recorder's progress does.
+        fn delivered(&self, captured: u64) -> u64 {
+            self.progress
+                .get()
+                .map_or(0, |p| p.now().delivered.get())
+                .max(captured)
         }
 
         /// The end of everything written: the furthest valid frame in any
@@ -422,11 +438,12 @@ mod linux {
 
         fn stop(&self, op: usize, kind: &str, path: &Path) -> io::Result<()> {
             let t = nanos(self.0.clock.now());
+            let captured = self.0.captured()?;
             let line = format!(
-                "stop {op} {kind} {} {t} {} {}",
+                "stop {op} {kind} {} {t} {captured} {} {}",
                 class(path),
-                self.0.captured()?,
-                self.0.durable.load(Ordering::SeqCst)
+                self.0.durable.load(Ordering::SeqCst),
+                self.0.delivered(captured)
             );
             self.0.log(&line)?;
             if let Some(marker) = &self.0.marker {
@@ -489,7 +506,9 @@ mod linux {
             let before = self.0.durable.fetch_max(end, Ordering::SeqCst);
             if end > before {
                 let t = nanos(self.0.clock.now());
-                self.0.log(&format!("sync {t} {end} {before} {end}"))?;
+                let delivered = self.0.delivered(end);
+                self.0
+                    .log(&format!("sync {t} {end} {before} {end} {delivered}"))?;
             }
             Ok(())
         }
@@ -690,6 +709,9 @@ mod linux {
         };
 
         let (capture, events) = start(&PipeWireBackend, TRACK, &source, RATE, &clock)?;
+        if let Some(progress) = events.progress(TRACK) {
+            let _ = fs.0.progress.set(progress);
+        }
         let mut timeline = TrackTimeline::new(TRACK);
         timeline.open_epoch(clock.now(), SampleIndex::ZERO, RATE)?;
         let recorder = {
@@ -702,21 +724,25 @@ mod linux {
         let (writer, notices, failures, result, unlogged) = recorder
             .join()
             .map_err(|_| "the recorder thread panicked")?;
+        // Finished even if the stream failed, so its last unsynced audio is
+        // fsync'd before the error is reported.
+        let last = writer.finish();
         result?;
         if let Some(e) = unlogged {
             return Err(e.into());
         }
-        let last = writer.finish()?;
+        let last = last?;
         let _ = to_publish.send(last);
         drop(to_publish);
         publisher
             .join()
             .map_err(|_| "the publisher thread panicked")??;
         let t = nanos(clock.now());
+        let captured = fs.0.captured()?;
         fs.0.log(&format!(
-            "end {t} {} {}",
-            fs.0.captured()?,
-            fs.0.durable.load(Ordering::SeqCst)
+            "end {t} {captured} {} {}",
+            fs.0.durable.load(Ordering::SeqCst),
+            fs.0.delivered(captured)
         ))?;
         let overruns = notices
             .iter()
@@ -842,17 +868,32 @@ mod linux {
         rows: Vec<(u64, u64, u64, String)>,
         /// (t, end of the first frame)
         first: Option<(u64, u64)>,
-        /// (t, captured, durable before)
-        syncs: Vec<(u64, u64, u64)>,
-        /// (op, kind, class, t, captured, durable)
-        stop: Option<(u64, String, String, u64, u64, u64)>,
-        /// (t, captured, durable)
-        end: Option<(u64, u64, u64)>,
+        /// (t, captured, durable before, delivered)
+        syncs: Vec<(u64, u64, u64, u64)>,
+        /// (op, kind, class, t, captured, durable, delivered)
+        stop: Option<(u64, String, String, u64, u64, u64, u64)>,
+        /// (t, captured, durable, delivered)
+        end: Option<(u64, u64, u64, u64)>,
         overruns: usize,
         journal_failures: usize,
         /// (kind:class, t, took ns), slowest first after reading.
         slow: Vec<(String, u64, u64)>,
         late: usize,
+    }
+
+    impl Promised {
+        /// Where the run ended (the crash point, or `none`), with what was
+        /// captured and delivered then.
+        fn at_end(&self) -> (String, u64, u64) {
+            if let Some((op, kind, class, _, captured, _, delivered)) = &self.stop {
+                (format!("{op}:{kind}:{class}"), *captured, *delivered)
+            } else {
+                let (captured, delivered) = self
+                    .end
+                    .map_or((0, 0), |(_, captured, _, delivered)| (captured, delivered));
+                ("none".to_owned(), captured, delivered)
+            }
+        }
     }
 
     fn read_log(path: &Path) -> Res<Promised> {
@@ -875,7 +916,7 @@ mod linux {
                 Some("start") => {}
                 Some("first") => p.first = Some((n(1)?, n(2)?)),
                 Some("sync") => {
-                    p.syncs.push((n(1)?, n(2)?, n(3)?));
+                    p.syncs.push((n(1)?, n(2)?, n(3)?, n(5)?));
                     p.durable = p.durable.max(n(4)?);
                 }
                 Some("row") => p.rows.push((n(1)?, n(2)?, n(3)?, s(4)?)),
@@ -883,9 +924,11 @@ mod linux {
                 Some("slow") => p.slow.push((format!("{}:{}", s(1)?, s(2)?), n(3)?, n(4)?)),
                 Some("late") => p.late += 1,
                 Some("journal-failed") => p.journal_failures += 1,
-                Some("stop") => p.stop = Some((n(1)?, s(2)?, s(3)?, n(4)?, n(5)?, n(6)?)),
+                Some("stop") => {
+                    p.stop = Some((n(1)?, s(2)?, s(3)?, n(4)?, n(5)?, n(6)?, n(7)?));
+                }
                 Some("end") => {
-                    p.end = Some((n(1)?, n(2)?, n(3)?));
+                    p.end = Some((n(1)?, n(2)?, n(3)?, n(4)?));
                     p.durable = p.durable.max(n(3)?);
                 }
                 _ => return Err(format!("bad log line {line:?}").into()),
@@ -1114,12 +1157,13 @@ mod linux {
         let max_journal_lag = SampleCount::started_within(SYNC_INTERVAL, RATE)
             .ok_or("the sync interval overflows")?
             .get();
-        if lag.max > max_journal_lag || lag.wall_max > MAX_LAG {
+        if lag.max > max_journal_lag || lag.delivered_max > MAX_LAG || lag.wall_max > MAX_LAG {
             let behind = format!(
-                "durable was {:.0} ms behind the journal (bound {:.0} ms) and {:.0} ms behind \
-                 the wall clock (bound {:.0} ms)",
+                "durable was {:.0} ms behind the journal (bound {:.0} ms), {:.0} ms behind \
+                 the audio delivered and {:.0} ms behind the wall clock (bound {:.0} ms)",
                 ms(lag.max),
                 ms(max_journal_lag),
+                ms(lag.delivered_max),
                 ms(lag.wall_max),
                 ms(MAX_LAG)
             );
@@ -1138,22 +1182,18 @@ mod linux {
         if audio.len() >= 16_000 && peak <= MIN_PEAK {
             return Err("the captured audio is silent".into());
         }
-        let (stop, captured_at_end) = match &promised.stop {
-            Some((op, kind, class, _, captured, _)) => (format!("{op}:{kind}:{class}"), *captured),
-            None => (
-                "none".to_owned(),
-                promised.end.map_or(0, |(_, captured, _)| captured),
-            ),
-        };
+        let (stop, captured_at_end, delivered_at_end) = promised.at_end();
         Ok(format!(
-            "stop={stop} captured={captured_at_end} durable={} recovered={recovered} \
-             loss_ms={:.1} beyond_durable_ms={:.1} lag_max_ms={:.1} wall_lag_max_ms={:.1} \
-             syncs={} rows={} salvaged={} deleted={} late_ops={} slowest_op={} peak_dbfs={:.1} \
-             state={}",
+            "stop={stop} delivered={delivered_at_end} captured={captured_at_end} durable={} \
+             recovered={recovered} loss_ms={:.1} loss_delivered_ms={:.1} beyond_durable_ms={:.1} \
+             lag_max_ms={:.1} delivered_lag_max_ms={:.1} wall_lag_max_ms={:.1} syncs={} rows={} \
+             salvaged={} deleted={} late_ops={} slowest_op={} peak_dbfs={:.1} state={}",
             promised.durable,
             ms(captured_at_end.saturating_sub(recovered)),
+            ms(delivered_at_end.saturating_sub(recovered)),
             ms(recovered.saturating_sub(promised.durable)),
             ms(lag.max),
+            ms(lag.delivered_max),
             ms(lag.wall_max),
             promised.syncs.len(),
             after.rows.len(),
@@ -1224,26 +1264,33 @@ mod linux {
     #[derive(Debug)]
     struct Lag {
         max: u64,
-        /// Behind the wall clock since the first frame, which counts audio
-        /// queued before the recorder too.
+        /// Behind the audio delivered, which counts audio queued before the
+        /// recorder too.
+        delivered_max: u64,
+        /// Behind the wall clock since the first frame.
         wall_max: u64,
     }
 
     impl Lag {
         fn of(p: &Promised) -> Self {
-            let mut points: Vec<(u64, u64, u64)> = p.syncs.clone();
-            if let Some((_, _, _, t, captured, durable)) = &p.stop {
-                points.push((*t, *captured, *durable));
+            let mut points: Vec<(u64, u64, u64, u64)> = p.syncs.clone();
+            if let Some((_, _, _, t, captured, durable, delivered)) = &p.stop {
+                points.push((*t, *captured, *durable, *delivered));
             }
             let max = points
                 .iter()
-                .map(|&(_, captured, durable)| captured.saturating_sub(durable))
+                .map(|&(_, captured, durable, _)| captured.saturating_sub(durable))
+                .max()
+                .unwrap_or(0);
+            let delivered_max = points
+                .iter()
+                .map(|&(_, _, durable, delivered)| delivered.saturating_sub(durable))
                 .max()
                 .unwrap_or(0);
             let wall_max = p.first.map_or(0, |(t0, end0)| {
                 points
                     .iter()
-                    .map(|&(t, _, durable)| {
+                    .map(|&(t, _, durable, _)| {
                         let since = t.saturating_sub(t0);
                         let wall = end0 + since * u64::from(RATE.hz()) / 1_000_000_000;
                         wall.saturating_sub(durable)
@@ -1251,7 +1298,11 @@ mod linux {
                     .max()
                     .unwrap_or(0)
             });
-            Self { max, wall_max }
+            Self {
+                max,
+                delivered_max,
+                wall_max,
+            }
         }
     }
 
@@ -1461,9 +1512,10 @@ mod linux {
                 let (writer, result, notices) = recorder
                     .join()
                     .map_err(|_| "the recorder thread panicked")?;
+                let finished = writer.finish();
                 result?;
                 lost = notices;
-                writer.finish()?;
+                finished?;
                 let _ = feed_tx.send(Feed::End);
                 if let Some(f) = feeding.take() {
                     supervisor = Some(f.join().map_err(|_| "the feeder panicked")??);
