@@ -583,7 +583,7 @@ impl Supervisor {
             let behind = self
                 .tracks
                 .get(&track)
-                .is_some_and(|replay| replay.unconfirmed() > keep.get());
+                .is_some_and(|replay| replay.unconfirmed() > keep);
             if behind {
                 self.fail(OfflineReason::Behind);
             }

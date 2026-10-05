@@ -182,6 +182,12 @@ impl SampleCount {
         Self(self.0.saturating_add(other.0))
     }
 
+    /// This many samples less `other`, stopping at none.
+    #[must_use]
+    pub const fn saturating_sub(self, other: Self) -> Self {
+        Self(self.0.saturating_sub(other.0))
+    }
+
     /// How long this many samples last at `rate`, rounded up to a whole
     /// nanosecond. `None` if that doesn't fit in [`SessionTime`]'s range.
     #[must_use]
@@ -414,6 +420,14 @@ mod tests {
         assert_eq!(
             SampleCount::new(u64::MAX - 1).saturating_add(SampleCount::new(5)),
             SampleCount::new(u64::MAX)
+        );
+        assert_eq!(
+            SampleCount::new(7).saturating_sub(SampleCount::new(3)),
+            SampleCount::new(4)
+        );
+        assert_eq!(
+            SampleCount::new(3).saturating_sub(SampleCount::new(7)),
+            SampleCount::ZERO
         );
     }
 
