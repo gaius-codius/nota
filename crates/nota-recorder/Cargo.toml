@@ -30,10 +30,13 @@ nota-core = { path = "../nota-core" }
 nota-store = { path = "../nota-store" }
 sha2.workspace = true
 
-# cpal's PipeWire host; it links libpipewire-0.3 and libasound (see the
-# `capture` module's docs for the build dependencies).
+# cpal's PipeWire host; it links libpipewire-0.3, libasound and, for rtkit
+# (`realtime-dbus`), libdbus-1 (see the `capture` module's docs for the
+# build dependencies). thread-priority promotes the stream's thread to
+# real time directly, where the user's rtprio limit allows it.
 [target.'cfg(target_os = "linux")'.dependencies]
-cpal = { workspace = true, features = ["pipewire"] }
+cpal = { workspace = true, features = ["pipewire", "realtime-dbus"] }
+thread-priority.workspace = true
 
 [dev-dependencies]
 claxon.workspace = true

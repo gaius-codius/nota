@@ -61,7 +61,9 @@ deny = [
   { crate = "libspa", wrappers = ["pipewire"] },
   { crate = "libspa-sys", wrappers = ["libspa", "pipewire", "pipewire-sys"] },
   { crate = "alsa", wrappers = ["cpal"] },
-  { crate = "alsa-sys", wrappers = ["alsa"] },
+  # cpal's `realtime` feature (rtkit, through `realtime-dbus`) depends on
+  # alsa-sys directly.
+  { crate = "alsa-sys", wrappers = ["alsa", "cpal"] },
 ]
 
 [sources]

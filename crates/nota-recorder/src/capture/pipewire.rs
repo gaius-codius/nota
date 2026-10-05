@@ -1,10 +1,71 @@
 //! Capture through cpal's `PipeWire` host.
+//!
+//! # Real-time priority
+//!
+//! The stream's callback runs on a thread cpal starts for it. On its first
+//! buffer the callback moves that thread to `SCHED_FIFO` at
+//! [`RT_PRIORITY`] itself, which the kernel allows within the user's
+//! `RLIMIT_RTPRIO` (a `realtime` or `pipewire` group, say). cpal's
+//! `realtime-dbus` feature also asks rtkit to make it real-time, from a
+//! thread of its own: that covers desktops where only rtkit grants it.
+//! `PipeWire`'s own module-rt tries them in the same order. rtkit's refusal
+//! is reported as a [`CaptureNotice::Warning`] only if the direct promotion
+//! failed too; if both succeed, rtkit's priority is the one that stays.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, DeviceId, ErrorKind, HostId, StreamConfig};
 use nota_core::SampleRate;
+use thread_priority::{
+    RealtimeThreadSchedulePolicy, ThreadPriority, ThreadPriorityValue, ThreadSchedulePolicy,
+    set_thread_priority_and_policy, thread_native_id,
+};
 
 use super::{CaptureBackend, CaptureError, CaptureNotice, CaptureSender, Source};
+
+/// The `SCHED_FIFO` priority the callback's thread asks for: `PipeWire`'s
+/// default for client threads, below its own (88).
+const RT_PRIORITY: u8 = 83;
+
+/// Moves the calling thread to `SCHED_FIFO` at [`RT_PRIORITY`]. `false` if
+/// the kernel refused, as it does beyond the user's `RLIMIT_RTPRIO`.
+fn promote_current_thread() -> bool {
+    ThreadPriorityValue::try_from(RT_PRIORITY).is_ok_and(|value| {
+        set_thread_priority_and_policy(
+            thread_native_id(),
+            ThreadPriority::Crossplatform(value),
+            ThreadSchedulePolicy::Realtime(RealtimeThreadSchedulePolicy::Fifo),
+        )
+        .is_ok()
+    })
+}
+
+/// Promotes the callback's thread once, on its first buffer, and
+/// remembers whether that worked.
+#[derive(Debug)]
+struct Promotion {
+    tried: bool,
+    promoted: Arc<AtomicBool>,
+}
+
+impl Promotion {
+    fn new() -> Self {
+        Self {
+            tried: false,
+            promoted: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Runs `promote` the first time only.
+    fn on_buffer(&mut self, promote: impl FnOnce() -> bool) {
+        if !self.tried {
+            self.tried = true;
+            self.promoted.store(promote(), Ordering::SeqCst);
+        }
+    }
+}
 
 /// Captures from `PipeWire`, through cpal. `PipeWire` converts whatever the
 /// device runs at to mono 16-bit samples at the rate asked for.
@@ -13,6 +74,11 @@ use super::{CaptureBackend, CaptureError, CaptureNotice, CaptureSender, Source};
 /// follows the default output when it changes; so does
 /// [`Source::Microphone`] for the default input. A [`Source::Device`]
 /// stays on that node.
+///
+/// The stream's thread asks for real-time priority on its first buffer:
+/// `SCHED_FIFO` directly where the user's rtprio limit allows it, and rtkit
+/// otherwise. Refused both ways, it records at normal priority and reports
+/// a [`CaptureNotice::Warning`].
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PipeWireBackend;
 
@@ -55,15 +121,27 @@ impl CaptureBackend for PipeWireBackend {
         };
         let errors = events.clone();
         let failed_source = source.clone();
+        let mut promotion = Promotion::new();
+        let promoted = Arc::clone(&promotion.promoted);
         let stream = device
             .build_input_stream::<i16, _, _>(
                 config,
-                // Only a copy into the channel: no I/O and no waiting on the
-                // recorder; one allocation per buffer.
-                move |samples: &[i16], _| events.audio(samples),
-                move |error: cpal::Error| match stream_error(&failed_source, &error) {
-                    Ok(notice) => errors.notice(notice),
-                    Err(failure) => errors.failed(failure),
+                // Only a copy into the channel, in a buffer it already has:
+                // no I/O, no waiting on the recorder, and in the steady
+                // state no allocation. The first buffer also asks for
+                // real-time priority, one system call.
+                move |samples: &[i16], _| {
+                    promotion.on_buffer(promote_current_thread);
+                    events.audio(samples);
+                },
+                move |error: cpal::Error| match stream_error(
+                    &failed_source,
+                    &error,
+                    promoted.load(Ordering::SeqCst),
+                ) {
+                    Some(Ok(notice)) => errors.notice(notice),
+                    Some(Err(failure)) => errors.failed(failure),
+                    None => {}
                 },
                 None,
             )
@@ -74,21 +152,30 @@ impl CaptureBackend for PipeWireBackend {
 }
 
 /// What an error the running stream reports means: a notice, with
-/// capture going on, or a failure that ends it.
-fn stream_error(source: &Source, error: &cpal::Error) -> Result<CaptureNotice, CaptureError> {
-    match error.kind() {
+/// capture going on, a failure that ends it, or nothing to report. With
+/// `promoted`, the thread is already real-time, so rtkit's refusal doesn't
+/// matter.
+fn stream_error(
+    source: &Source,
+    error: &cpal::Error,
+    promoted: bool,
+) -> Option<Result<CaptureNotice, CaptureError>> {
+    Some(match error.kind() {
         ErrorKind::Xrun => Ok(CaptureNotice::Overrun),
         ErrorKind::DeviceChanged => Ok(CaptureNotice::RouteChanged),
-        // Real-time priority refused (cpal's `realtime` feature is off, so
-        // it isn't asked for yet), and the default-device watch failing to
-        // start (`BackendError`, the only one a running `PipeWire` stream
-        // reports): the stream goes on.
-        ErrorKind::RealtimeDenied | ErrorKind::BackendError => {
+        // Real-time priority refused by rtkit, or cpal unable to start the
+        // thread that asks rtkit (the only `ResourceExhausted` a running
+        // stream reports).
+        ErrorKind::RealtimeDenied | ErrorKind::ResourceExhausted if promoted => return None,
+        // The same with the direct promotion refused too, and anything
+        // cpal flags as a backend error while the stream runs, such as the
+        // default-device watch failing to start: the stream goes on.
+        ErrorKind::RealtimeDenied | ErrorKind::ResourceExhausted | ErrorKind::BackendError => {
             Ok(CaptureNotice::Warning(error.to_string()))
         }
         ErrorKind::DeviceNotAvailable => Err(CaptureError::DeviceNotAvailable(source.clone())),
         _ => Err(CaptureError::Backend(error.to_string())),
-    }
+    })
 }
 
 /// Why the stream couldn't be opened or started.
@@ -120,27 +207,69 @@ mod tests {
                 CaptureNotice::Warning("detail".into()),
             ),
             (
+                ErrorKind::ResourceExhausted,
+                CaptureNotice::Warning("detail".into()),
+            ),
+            (
                 ErrorKind::BackendError,
                 CaptureNotice::Warning("detail".into()),
             ),
         ] {
-            assert_eq!(stream_error(&mic, &error(kind)), Ok(notice), "{kind:?}");
+            assert_eq!(
+                stream_error(&mic, &error(kind), false),
+                Some(Ok(notice.clone())),
+                "{kind:?}"
+            );
+            if ![ErrorKind::RealtimeDenied, ErrorKind::ResourceExhausted].contains(&kind) {
+                assert_eq!(
+                    stream_error(&mic, &error(kind), true),
+                    Some(Ok(notice)),
+                    "{kind:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rtkit_refusing_after_a_direct_promotion_is_not_reported() {
+        let mic = Source::Microphone;
+        for kind in [ErrorKind::RealtimeDenied, ErrorKind::ResourceExhausted] {
+            assert_eq!(stream_error(&mic, &error(kind), true), None, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn the_thread_is_promoted_on_the_first_buffer_only() {
+        for outcome in [true, false] {
+            let mut promotion = Promotion::new();
+            assert!(!promotion.promoted.load(Ordering::SeqCst));
+            let mut calls = 0;
+            for _ in 0..3 {
+                promotion.on_buffer(|| {
+                    calls += 1;
+                    outcome
+                });
+            }
+            assert_eq!(calls, 1);
+            assert_eq!(promotion.promoted.load(Ordering::SeqCst), outcome);
         }
     }
 
     #[test]
     fn other_stream_errors_are_failures() {
         let mic = Source::Microphone;
-        assert_eq!(
-            stream_error(&mic, &error(ErrorKind::DeviceNotAvailable)),
-            Err(CaptureError::DeviceNotAvailable(mic.clone()))
-        );
-        for kind in [ErrorKind::StreamInvalidated, ErrorKind::Other] {
+        for promoted in [false, true] {
             assert_eq!(
-                stream_error(&mic, &error(kind)),
-                Err(CaptureError::Backend("detail".into())),
-                "{kind:?}"
+                stream_error(&mic, &error(ErrorKind::DeviceNotAvailable), promoted),
+                Some(Err(CaptureError::DeviceNotAvailable(mic.clone())))
             );
+            for kind in [ErrorKind::StreamInvalidated, ErrorKind::Other] {
+                assert_eq!(
+                    stream_error(&mic, &error(kind), promoted),
+                    Some(Err(CaptureError::Backend("detail".into()))),
+                    "{kind:?}"
+                );
+            }
         }
     }
 

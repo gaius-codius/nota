@@ -382,8 +382,10 @@ for mode in "${MODES[@]}"; do
       n++
       for (i = 3; i <= NF; i++) { split($i, kv, "="); v[kv[1]] = kv[2] }
       if (v["lag_max_ms"] + 0 > lag) lag = v["lag_max_ms"] + 0
+      if (v["delivered_lag_max_ms"] + 0 > dlag) dlag = v["delivered_lag_max_ms"] + 0
       if (v["wall_lag_max_ms"] + 0 > wall) wall = v["wall_lag_max_ms"] + 0
       if (v["loss_ms"] + 0 > loss) loss = v["loss_ms"] + 0
+      if (v["loss_delivered_ms"] + 0 > dloss) dloss = v["loss_delivered_ms"] + 0
       if (v["loss_ms"] + 0 > 0) lossy++
       late += v["late_ops"]
       if (v["slowest_op"] != "none") {
@@ -396,7 +398,8 @@ for mode in "${MODES[@]}"; do
       delete v
     }
     END {
-      printf "  %s: %d points passed; max lag %.1f ms (wall clock %.1f ms); max loss %.1f ms;", mode, n, lag, wall, loss
+      printf "  %s: %d points passed; max lag %.1f ms behind the journal, %.1f ms behind the audio delivered (wall clock %.1f ms);", mode, n, lag, dlag, wall
+      printf " max loss %.1f ms of the journal, %.1f ms of the audio delivered;", loss, dloss
       printf " recovered past durable up to %.1f ms; interrupted salvage matched %d times\n", beyond, cut
       printf "    points that lost unsynced audio: %d; operations that landed after the crash point: %d\n", lossy, late
       printf "    slowest disk operation: %s\n", (slowest_what == "" ? "none over 100 ms" : slowest_what)
