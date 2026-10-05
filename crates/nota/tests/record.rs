@@ -272,9 +272,11 @@ fn s_asks_first_and_y_stops_with_everything_saved() {
     let at = nota.len();
     nota.press("s");
     assert!(nota.shows_after(at, "stop recording?"), "{}", nota.output());
-    // Not yet: `n` keeps recording.
-    nota.press("n");
+    // Not yet: `n` keeps recording. (The offset is taken before the key:
+    // the screen redraws only cells that change, so a redraw missed
+    // isn't drawn again.)
     let at = nota.len();
+    nota.press("n");
     assert!(nota.shows_after(at, "s stop"));
     assert_eq!(nota.child.try_wait().unwrap(), None);
     // Ctrl+C asks too; `y` stops.
