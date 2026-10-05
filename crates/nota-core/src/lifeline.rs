@@ -16,6 +16,7 @@
 //!
 //! Elsewhere there's no tie, and stdin closing stays the only path.
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use std::ffi::OsStr;
 use std::io;
 
@@ -39,37 +40,31 @@ pub enum Tie {
 
 /// Ties this process (the engine) to its parent (the recorder): the kernel
 /// kills it when the parent dies. Call it first thing, before anything
-/// slow.
+/// slow. Off Linux it's [`Tie::Unsupported`].
 ///
 /// # Errors
 ///
 /// If the kernel refuses, or [`RECORDER_PID_VAR`] is set but isn't a
 /// process id.
-#[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn tie_to_recorder() -> io::Result<Tie> {
-    use rustix::process::{Signal, getppid, set_parent_process_death_signal};
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        use rustix::process::{Signal, getppid, set_parent_process_death_signal};
 
-    set_parent_process_death_signal(Some(Signal::KILL))?;
-    // Read after the signal is set: a recorder that dies from here on
-    // kills the engine, and one that died before has left it with another
-    // parent.
-    let parent = getppid().map(|pid| pid.as_raw_nonzero().get());
-    check_parent(std::env::var_os(RECORDER_PID_VAR).as_deref(), parent)
-}
-
-/// As on Linux, where it's [`Tie::Unsupported`]: stdin closing is the only
-/// path.
-///
-/// # Errors
-///
-/// Never.
-#[cfg(not(any(target_os = "linux", target_os = "android")))]
-pub fn tie_to_recorder() -> io::Result<Tie> {
+        set_parent_process_death_signal(Some(Signal::KILL))?;
+        // Read after the signal is set: a recorder that dies from here on
+        // kills the engine, and one that died before has left it with
+        // another parent.
+        let parent = getppid().map(|pid| pid.as_raw_nonzero().get());
+        check_parent(std::env::var_os(RECORDER_PID_VAR).as_deref(), parent)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     Ok(Tie::Unsupported)
 }
 
 /// Whether the engine's `parent` is the recorder named by `named` (the
 /// variable's value), if one is named.
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn check_parent(named: Option<&OsStr>, parent: Option<i32>) -> io::Result<Tie> {
     let Some(named) = named else {
         return Ok(Tie::Tied);
@@ -94,7 +89,7 @@ fn check_parent(named: Option<&OsStr>, parent: Option<i32>) -> io::Result<Tie> {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "linux", target_os = "android")))]
 mod tests {
     use super::*;
 
@@ -130,7 +125,6 @@ mod tests {
 
     /// The death signal is set, on the calling thread's task: the one the
     /// kernel checks when the parent dies.
-    #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
     fn tying_sets_the_death_signal() {
         use rustix::process::{Signal, parent_process_death_signal};
