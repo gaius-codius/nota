@@ -128,8 +128,9 @@ stamp=$dest/sherpa-onnx-lib.sha256
 # (`cargo clean -p` only cleans one profile).
 clean_sys() {
   local target_dir
-  # Cargo's own answer, so build.target-dir and CARGO_TARGET_DIR count.
-  target_dir=$(cd "$repo" && cargo metadata --format-version 1 --no-deps --offline |
+  # Cargo's own answer, so build.target-dir and CARGO_TARGET_DIR count. From
+  # the caller's directory, as their builds resolve a relative one.
+  target_dir=$(cargo metadata --manifest-path "$repo/Cargo.toml" --format-version 1 --no-deps --offline |
     sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p' | sed 's/\\\\/\\/g') ||
     die "cargo metadata failed"
   [[ -n $target_dir ]] || die "cargo metadata gave no target directory"
