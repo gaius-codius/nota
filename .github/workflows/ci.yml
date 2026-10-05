@@ -27,6 +27,12 @@ jobs:
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: scripts/install-linux-build-deps.sh
+      - run: scripts/sherpa-onnx.test.sh
+      # The sherpa-onnx libraries, from the archive pinned by SHA-256; every
+      # build links these (.cargo/config.toml), never an unchecked download.
+      - name: Fetch the pinned sherpa-onnx libraries
+        shell: bash
+        run: scripts/sherpa-onnx.sh
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked
       - uses: crate-ci/typos@00f422f3b19c57bc6338715ebfe3316d38768461 # v1.50.3
@@ -40,16 +46,11 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      # rust-cache keeps sherpa-onnx-sys's build-script output but deletes the
-      # files it downloaded into target/sherpa-onnx-prebuilt, leaving empty
-      # directories. Remove both, so the build script runs and downloads again.
-      - name: Rerun the sherpa-onnx-sys build script
+      # The sherpa-onnx libraries, from the archive pinned by SHA-256; every
+      # build links these (.cargo/config.toml), never an unchecked download.
+      - name: Fetch the pinned sherpa-onnx libraries
         shell: bash
-        run: |
-          if [ -d target ]; then
-            find target \( -path '*/.fingerprint/sherpa-onnx-sys-*' -o -name sherpa-onnx-prebuilt \) \
-              -prune -exec rm -rf {} +
-          fi
+        run: scripts/sherpa-onnx.sh
       - run: scripts/install-linux-build-deps.sh
       # The engine tests' models and speech fixture. The script checks every
       # model file against its pinned SHA-256 on each run, cached or not, and
@@ -102,7 +103,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: docker://rhysd/actionlint:1.7.12
+      - uses: docker://rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
         with:
           args: -color
       - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
@@ -124,9 +125,29 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: scripts/check-no-gpl.test.sh
       - run: |
-          lib=$(scripts/sherpa-onnx-no-tts.sh "$RUNNER_TEMP/sherpa-onnx")
+          lib=$(scripts/sherpa-onnx.sh --no-tts "$RUNNER_TEMP/sherpa-onnx")
           SHERPA_ONNX_LIB_DIR=$lib cargo build --release -p nota --locked
       - run: scripts/check-no-gpl.sh target/release/nota
+
+  fuzz:
+    # fuzz/ is its own workspace, outside the normal build and tests; this
+    # keeps its targets compiling. It builds them and doesn't fuzz.
+    name: Fuzz targets build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: fuzz
+      - run: scripts/install-linux-build-deps.sh
+      # Must match the afl crate in fuzz/Cargo.lock.
+      - run: cargo install cargo-afl --version 0.18.2 --locked
+      - run: cargo afl config --build
+      - run: cargo afl build --locked
+        working-directory: fuzz
 
   mutants:
     # Every mutant of the lines this PR changes in the core and recorder
@@ -185,16 +206,11 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      # rust-cache keeps sherpa-onnx-sys's build-script output but deletes the
-      # files it downloaded into target/sherpa-onnx-prebuilt, leaving empty
-      # directories. Remove both, so the build script runs and downloads again.
-      - name: Rerun the sherpa-onnx-sys build script
+      # The sherpa-onnx libraries, from the archive pinned by SHA-256; every
+      # build links these (.cargo/config.toml), never an unchecked download.
+      - name: Fetch the pinned sherpa-onnx libraries
         shell: bash
-        run: |
-          if [ -d target ]; then
-            find target \( -path '*/.fingerprint/sherpa-onnx-sys-*' -o -name sherpa-onnx-prebuilt \) \
-              -prune -exec rm -rf {} +
-          fi
+        run: scripts/sherpa-onnx.sh
       - run: cargo build --workspace --all-targets --locked
 
   coverage:
@@ -207,16 +223,11 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install && rustup component add llvm-tools-preview
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      # rust-cache keeps sherpa-onnx-sys's build-script output but deletes the
-      # files it downloaded into target/sherpa-onnx-prebuilt, leaving empty
-      # directories. Remove both, so the build script runs and downloads again.
-      - name: Rerun the sherpa-onnx-sys build script
+      # The sherpa-onnx libraries, from the archive pinned by SHA-256; every
+      # build links these (.cargo/config.toml), never an unchecked download.
+      - name: Fetch the pinned sherpa-onnx libraries
         shell: bash
-        run: |
-          if [ -d target ]; then
-            find target \( -path '*/.fingerprint/sherpa-onnx-sys-*' -o -name sherpa-onnx-prebuilt \) \
-              -prune -exec rm -rf {} +
-          fi
+        run: scripts/sherpa-onnx.sh
       - run: scripts/install-linux-build-deps.sh
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:

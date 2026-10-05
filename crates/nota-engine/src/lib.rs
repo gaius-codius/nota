@@ -15,15 +15,16 @@
 //! | onnxruntime | MIT. It bundles others, all permissive or MPL-2.0 (onnxruntime's `ThirdPartyNotices.txt`): abseil and flatbuffers (Apache-2.0), protobuf and re2 (BSD-3-Clause), Eigen (MPL-2.0) |
 //! | kissfft | BSD-3-Clause |
 //!
-//! By default the build script downloads upstream's archive with
-//! text-to-speech, which adds piper-phonemize (MIT) and espeak-ng and
-//! ucd-tools (GPL-3.0-or-later). nota doesn't use text-to-speech, but the
-//! archive's C API references it, so the linker keeps them. That's fine for
-//! development and tests, since nothing is distributed from them, but a
-//! plain `cargo build --release` has them too. A build for distribution must
-//! point `SHERPA_ONNX_LIB_DIR` at upstream's archive built without
-//! text-to-speech (`scripts/sherpa-onnx-no-tts.sh`) and pass
-//! `scripts/check-no-gpl.sh`; CI does both.
+//! Every build links an archive pinned by SHA-256, which
+//! `scripts/sherpa-onnx.sh` checks and unpacks (`.cargo/config.toml` points
+//! `SHERPA_ONNX_LIB_DIR` at it), never the sys crate's unchecked download.
+//! On Linux x86-64 that is upstream's archive built without text-to-speech.
+//! On macOS and Windows it is still the default archive, which adds
+//! piper-phonemize (MIT) and espeak-ng and ucd-tools (GPL-3.0-or-later):
+//! nota doesn't use text-to-speech, but the archive's C API references it,
+//! so the linker keeps them, and nothing may be distributed from those
+//! builds. A build for distribution uses `scripts/sherpa-onnx.sh --no-tts`
+//! and passes `scripts/check-no-gpl.sh`; CI does both.
 //! cargo-deny doesn't see native archives.
 
 pub mod child;

@@ -16,7 +16,7 @@ ignore = []
 # distributed binary (if nota uses espeak-ng, it runs as a separate program). MPL-2.0 is file-level copyleft: allowed, but
 # check any new MPL crate in review. This sees crates only, not native
 # archives: sherpa-onnx's default archive links GPL text-to-speech libraries,
-# so a build for distribution must use scripts/sherpa-onnx-no-tts.sh and pass
+# so a build for distribution must use scripts/sherpa-onnx.sh --no-tts and pass
 # scripts/check-no-gpl.sh (CI's no-gpl job does both).
 allow = [
   "MIT",
@@ -52,6 +52,16 @@ deny = [
   # Audio capture (cpal, with its PipeWire and ALSA bindings) stays in the
   # recorder.
   { crate = "cpal", wrappers = ["nota-recorder"] },
+  # The native crates under those two may only be reached through them, so
+  # no other crate can link sherpa-onnx, PipeWire or ALSA by depending on
+  # them directly.
+  { crate = "sherpa-onnx-sys", wrappers = ["sherpa-onnx"] },
+  { crate = "pipewire", wrappers = ["cpal"] },
+  { crate = "pipewire-sys", wrappers = ["pipewire"] },
+  { crate = "libspa", wrappers = ["pipewire"] },
+  { crate = "libspa-sys", wrappers = ["libspa", "pipewire", "pipewire-sys"] },
+  { crate = "alsa", wrappers = ["cpal"] },
+  { crate = "alsa-sys", wrappers = ["alsa"] },
 ]
 
 [sources]

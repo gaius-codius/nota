@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fails if a nota binary links GPL code from sherpa-onnx's text-to-speech:
 # espeak-ng (any `espeak` symbol) or ucd-tools (`ucd_` symbols). Builds for
-# distribution use the no-TTS libraries (sherpa-onnx-no-tts.sh); this proves
+# distribution use the no-TTS libraries (sherpa-onnx.sh --no-tts); this proves
 # it.
 #
 # The binary must still have its symbol table, or the check would pass on
