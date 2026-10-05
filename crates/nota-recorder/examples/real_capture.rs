@@ -88,7 +88,7 @@ mod linux {
         record_track, start,
     };
     use nota_recorder::engine::{
-        EngineCommand, EngineConfig, EngineEvent, EngineStatus, EngineStderr, EngineSupervisor,
+        EngineCommand, EngineConfig, EngineEvent, EngineStatus, EngineSupervisor,
     };
     use nota_recorder::fs::{Fs, FsFile, StdFile, StdFs, StdLock, Synced};
     use nota_recorder::journal::{JournalId, SYNC_INTERVAL, read_journal};
@@ -1270,11 +1270,7 @@ mod linux {
         .into_iter()
         .map(OsString::from)
         .collect();
-        Ok(EngineConfig::new(EngineCommand {
-            program,
-            args,
-            stderr: EngineStderr::Null,
-        }))
+        Ok(EngineConfig::new(EngineCommand { program, args }))
     }
 
     /// Feeds each new journal frame to the engine, in order; returns the
