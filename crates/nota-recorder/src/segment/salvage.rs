@@ -221,8 +221,11 @@ pub fn salvage<S: Fs, T: SegmentStore>(
     publish(session, length, &journals)
 }
 
-/// Whether the session's directory holds journals: a session that was still
-/// recording when nota stopped, and needs [`salvage`].
+/// Whether the session's directory holds journals, so [`salvage`] may have
+/// work to do. A session that was still recording when nota stopped holds
+/// some, but so can one already salvaged: salvage keeps a journal it can't
+/// read, or whose audio is held up by a row that doesn't match its file
+/// (see [`Published`]). Salvaging such a session again changes nothing.
 ///
 /// # Errors
 ///
