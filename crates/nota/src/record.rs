@@ -15,7 +15,7 @@
 //!   levels and text into screen updates (see [`crate::live`]).
 //! - **Engine events:** passes the supervisor's events to the live thread.
 //! - **Signals:** turns SIGHUP, SIGTERM and SIGINT into a request to close
-//!   the screen.
+//!   the screen, and notes SIGXCPU (see below).
 //!
 //! # Stopping
 //!
@@ -28,6 +28,15 @@
 //! meanwhile: the default action would kill the process before the last
 //! segments are published. Anything left unpublished (a disk error, say) is
 //! salvaged at the next start.
+//!
+//! # SIGXCPU
+//!
+//! Where rtkit grants the capture thread real-time priority, it also sets
+//! the process's `RLIMIT_RTTIME` soft limit to about one quantum: a
+//! real-time thread that runs longer than that without blocking gets
+//! SIGXCPU, whose default action would end the recording. Here it's only
+//! noted, and the summary warns about it. rtkit's hard limit (SIGKILL,
+//! 200 ms by default) still stops a runaway real-time thread.
 
 use std::error::Error;
 use std::fmt::Write as _;
@@ -282,7 +291,13 @@ fn record_with<B: CaptureBackend>(
     let _ = live.join();
     let report = publisher.finish()?;
     note_published(&mut outcome, &report);
-    signals.close();
+    if signals.close() {
+        outcome.notes.push(
+            "the capture thread ran past its real-time budget at least once \
+             (SIGXCPU); the recording carried on"
+                .to_owned(),
+        );
+    }
     drop(lock);
 
     let shown = shown?;
@@ -352,31 +367,43 @@ fn show(
 #[cfg(unix)]
 struct SignalThread {
     handle: signal_hook::iterator::Handle,
-    thread: JoinHandle<()>,
+    /// Returns whether a SIGXCPU arrived.
+    thread: JoinHandle<bool>,
 }
 
 #[cfg(unix)]
 impl SignalThread {
-    fn close(self) {
+    /// Stops the thread, and returns whether a SIGXCPU arrived.
+    fn close(self) -> bool {
         self.handle.close();
-        let _ = self.thread.join();
+        self.thread.join().unwrap_or(false)
     }
 }
 
 /// From now on, SIGHUP, SIGTERM and SIGINT close the screen rather than
 /// end the process: the recording then stops in order (see the module
-/// docs).
+/// docs). SIGXCPU is only noted. Signals of one kind that arrive close
+/// together may come through as one, so whether any arrived is all that's
+/// known.
 #[cfg(unix)]
 fn listen_for_signals(ui: Sender<Event>) -> io::Result<SignalThread> {
-    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
-    let mut signals = signal_hook::iterator::Signals::new([SIGHUP, SIGTERM, SIGINT])?;
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGXCPU};
+    let mut signals = signal_hook::iterator::Signals::new([SIGHUP, SIGTERM, SIGINT, SIGXCPU])?;
     let handle = signals.handle();
     let thread = thread::Builder::new()
         .name("nota-signals".into())
         .spawn(move || {
-            for _ in signals.forever() {
-                let _ = ui.send(Event::Close);
+            let mut overran = false;
+            for signal in signals.forever() {
+                if signal == SIGXCPU {
+                    overran = true;
+                } else {
+                    let _ = ui.send(Event::Close);
+                }
             }
+            // Once closed, the iterator stops without reading what's
+            // still pending: a SIGXCPU during the stop would be missed.
+            overran || signals.pending().any(|signal| signal == SIGXCPU)
         })?;
     Ok(SignalThread { handle, thread })
 }
@@ -388,7 +415,9 @@ struct SignalThread;
 
 #[cfg(not(unix))]
 impl SignalThread {
-    fn close(self) {}
+    fn close(self) -> bool {
+        false
+    }
 }
 
 #[cfg(not(unix))]

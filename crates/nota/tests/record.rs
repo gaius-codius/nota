@@ -1,8 +1,8 @@
 //! `nota record` end to end, on a pseudo-terminal, recording a synthetic
 //! tone on both tracks (`--tone yes`, built only for tests): stopping from
 //! the keyboard asks first; SIGHUP and SIGTERM stop it with every track's
-//! audio published; the terminal is restored however it ends; a recording
-//! killed outright is salvaged at the next start; and the engine child
+//! audio published; SIGXCPU only warns; the terminal is restored however
+//! it ends; a recording killed outright is salvaged at the next start; and the engine child
 //! sits outside the recorder's process group, so the terminal's hangup
 //! leaves it to the recorder, yet it ends when the recorder is killed. The
 //! engine's tests skip (and say so on stderr) without the test models, and
@@ -392,6 +392,36 @@ fn sighup_stops_with_everything_saved_and_the_terminal_restored() {
 #[test]
 fn sigterm_stops_with_everything_saved_and_the_terminal_restored() {
     stops_on(Signal::TERM, "term");
+}
+
+#[test]
+fn sigxcpu_only_warns_and_recording_carries_on() {
+    // What rtkit's RLIMIT_RTTIME soft limit sends when the capture thread
+    // runs past its real-time budget.
+    let tmp = TestDir::new("xcpu");
+    let mut nota = recording(&tmp.0);
+    nota.signal(Signal::XCPU);
+    pause(Duration::from_millis(500));
+    assert_eq!(
+        nota.child.try_wait().unwrap(),
+        None,
+        "SIGXCPU ended the recording: {}",
+        nota.output()
+    );
+    let at = nota.len();
+    nota.signal(Signal::TERM);
+    let status = nota.exits().expect("nota didn't stop");
+    assert!(status.success(), "{status:?}: {}", nota.output());
+    assert!(nota.terminal_restored());
+    assert!(
+        nota.shows_after(
+            at,
+            "the capture thread ran past its real-time budget at least once (SIGXCPU)"
+        ),
+        "{}",
+        nota.output()
+    );
+    assert_saved(&tmp.0, 1, &[0, 1], 1_950);
 }
 
 #[test]
