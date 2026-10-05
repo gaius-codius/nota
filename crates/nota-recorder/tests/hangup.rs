@@ -1,5 +1,6 @@
 //! The engine child outlives a signal to the recorder's process group, and
-//! still ends when the recorder dies (GAI-202).
+//! still ends when the recorder dies (GAI-202), even while it's busy
+//! loading (GAI-203).
 //!
 //! When a terminal closes, the kernel sends SIGHUP to its whole foreground
 //! process group. The recorder catches it and stops in order; the engine
@@ -100,12 +101,16 @@ fn say(line: &str) {
 /// test so that this binary can run it alone; run as an ordinary test, with
 /// no [`HOST`] set, it does nothing. `hup` records until SIGHUP, then
 /// stops as `nota record` does and checks the engine saw it through; `kill`
-/// records until it's killed.
+/// records until it's killed; `load` starts an engine that takes a minute
+/// to load, and waits to be killed.
 #[test]
 fn host() {
     let Some(mode) = std::env::var_os(HOST) else {
         return;
     };
+    if mode == "load" {
+        loading_host();
+    }
     let hangup = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(signal_hook::consts::SIGHUP, Arc::clone(&hangup)).unwrap();
     let mut config = EngineConfig::new(EngineCommand {
@@ -177,6 +182,47 @@ fn host() {
     }
     assert_eq!(end, 12 * CHUNK, "{seen:#?}");
     say("done");
+}
+
+/// [`host`] in `load` mode: an engine that is still loading its models
+/// (saying hello after a minute) when the host is killed.
+fn loading_host() {
+    let mut config = EngineConfig::new(EngineCommand {
+        program: PathBuf::from(env!("CARGO_BIN_EXE_nota-fake-engine")),
+        args: ["echo", "--hello-delay-ms", "60000"]
+            .map(OsString::from)
+            .to_vec(),
+    });
+    // Longer than the load: the engine isn't restarted for being slow.
+    config.start_timeout = Duration::from_secs(120);
+    let clock = Arc::new(SystemClock::start().unwrap());
+    let (_supervisor, _events) = EngineSupervisor::start(config, clock).unwrap();
+    let mut engine = None;
+    assert!(wait_until(Duration::from_secs(10), || {
+        engine = engine_of(std::process::id());
+        engine.is_some()
+    }));
+    // Time to read the recorder's hello and start loading.
+    pause(Duration::from_millis(300));
+    say(&format!("engine {}", engine.unwrap()));
+    say("ready");
+    pause(Duration::from_secs(60));
+    panic!("not killed");
+}
+
+/// The fake engine `parent` is running, if any. (The kernel keeps 15
+/// bytes of a command's name.)
+fn engine_of(parent: u32) -> Option<u32> {
+    std::fs::read_dir("/proc")
+        .unwrap()
+        .flatten()
+        .find_map(|entry| {
+            let pid: u32 = entry.file_name().to_str()?.parse().ok()?;
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+            let (name, fields) = stat.rsplit_once(") ")?;
+            let child = fields.split(' ').nth(1) == Some(&parent.to_string());
+            (child && name.ends_with("(nota-fake-engin") && alive(pid)).then_some(pid)
+        })
 }
 
 /// A recorder running [`host`] in a process group of its own.
@@ -286,6 +332,22 @@ fn a_killed_recorder_still_ends_the_engine() {
     assert!(
         wait_until(SHUTDOWN_GRACE, || !alive(engine)),
         "the engine outlived its recorder"
+    );
+    assert!(!host.exits().success());
+}
+
+/// Acceptance (GAI-203): a recorder killed outright while its engine is
+/// still loading its models (a load faked to take a minute, during which
+/// the engine doesn't read its stdin) ends the engine within the shutdown
+/// grace.
+#[test]
+fn a_recorder_killed_while_the_engine_loads_ends_it_within_the_grace() {
+    let (mut host, engine) = Host::start("load");
+    assert!(alive(engine));
+    kill_process(host.pid(), Signal::KILL).unwrap();
+    assert!(
+        wait_until(SHUTDOWN_GRACE, || !alive(engine)),
+        "the loading engine outlived its recorder"
     );
     assert!(!host.exits().success());
 }

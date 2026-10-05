@@ -597,10 +597,10 @@ fn a_hangup_to_the_group_leaves_the_engine_to_nota() {
     assert_saved(&tmp.0, 1, &[0, 1], 1_450);
 }
 
-/// Acceptance (GAI-202), end to end: nota killed outright still takes the
-/// engine with it, since its stdin closes. (The supervisor's own test holds
-/// it to the shutdown grace; the real engine may still be loading its
-/// models here, so this allows for that.)
+/// Acceptance (GAI-202, GAI-203), end to end: nota killed outright takes
+/// the engine with it within the supervisor's 3 s shutdown grace, even if
+/// the engine is still loading its models, as it may be here: the kernel
+/// kills it when nota dies.
 #[test]
 fn a_killed_nota_takes_its_engine_with_it() {
     let Some(models) = test_models() else {
@@ -609,9 +609,10 @@ fn a_killed_nota_takes_its_engine_with_it() {
     let tmp = TestDir::new("engine-killed");
     let (mut nota, engine) = recording_with_the_engine(&tmp.0, &models);
     nota.signal(Signal::KILL);
-    assert!(nota.exits().is_some());
+    // Counted from the kill: nota is gone at once.
     assert!(
-        wait_until(Duration::from_secs(20), || !alive(engine)),
+        wait_until(Duration::from_secs(3), || !alive(engine)),
         "the engine outlived nota"
     );
+    assert!(nota.exits().is_some());
 }
