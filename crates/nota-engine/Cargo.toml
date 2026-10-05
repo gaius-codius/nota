@@ -9,8 +9,9 @@ publish.workspace = true
 
 [dependencies]
 nota-core = { path = "../nota-core" }
-# Pinned exactly: its build script downloads the matching prebuilt static
-# sherpa-onnx and onnxruntime archive, so a version bump changes native code.
+# Pinned exactly: a version bump changes native code, and
+# scripts/sherpa-onnx.sh pins the matching static sherpa-onnx and
+# onnxruntime archive by checksum (it fails until both are bumped together).
 sherpa-onnx = { version = "=1.13.8", default-features = false, features = ["static"] }
 
 # Setting stdout aside for the protocol (`run_asr`).

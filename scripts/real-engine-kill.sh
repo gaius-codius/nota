@@ -38,9 +38,13 @@ for f in "$FIXTURE" "$MODELS/silero_vad_v6.onnx" "$MODELS/parakeet-tdt-0.6b-v3-i
 done
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
+# Absolute, since the engine is built from the repo and the recorder from here.
+[[ -z ${CARGO_TARGET_DIR:-} || $CARGO_TARGET_DIR == /* ]] || export CARGO_TARGET_DIR=$PWD/$CARGO_TARGET_DIR
 cargo build --manifest-path "$REPO/Cargo.toml" --release --locked --quiet \
   -p nota-recorder --example real_capture
-cargo build --manifest-path "$REPO/Cargo.toml" --release --locked --quiet -p nota --bin nota
+# From the repo, so its .cargo/config.toml points the build at the pinned
+# sherpa-onnx libraries (scripts/sherpa-onnx.sh).
+(cd "$REPO" && cargo build --release --locked --quiet -p nota --bin nota)
 TARGET=${CARGO_TARGET_DIR:-$REPO/target}/release
 BIN=$TARGET/examples/real_capture
 ENGINE=$TARGET/nota

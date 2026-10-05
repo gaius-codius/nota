@@ -7,3 +7,13 @@ rustflags = ["-C", "target-feature=+crt-static"]
 
 [target.aarch64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# sherpa-onnx's libraries come from the archive scripts/sherpa-onnx.sh pins
+# by SHA-256 and unpacks here, never from the sys crate's own unchecked
+# download. Run the script once per clone (and after `cargo clean`); until
+# then, builds that link sherpa-onnx fail with "SHERPA_ONNX_LIB_DIR does not
+# exist". An SHERPA_ONNX_LIB_DIR set in the environment wins. Cargo reads
+# this file only when it runs inside the repo; nota-engine's build script
+# stops a build from elsewhere, where the variable is unset.
+[env]
+SHERPA_ONNX_LIB_DIR = { value = "target/sherpa-onnx/sherpa-onnx-lib", relative = true }

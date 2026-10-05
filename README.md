@@ -11,6 +11,27 @@ models are opt-in and always marked.
 
 Linux comes first; macOS and Windows are planned.
 
+## Building
+
+nota builds with the Rust toolchain pinned in `rust-toolchain.toml`. On
+Linux, the recorder needs the PipeWire and ALSA headers, pkg-config and
+libclang (`scripts/install-linux-build-deps.sh` lists them for Debian and
+Ubuntu).
+
+The speech engine links sherpa-onnx's static libraries. Fetch them once per
+clone, and again after `cargo clean`:
+
+```sh
+scripts/sherpa-onnx.sh
+cargo build
+```
+
+The script downloads the archive for your platform, checks it against the
+SHA-256 it pins and unpacks it into `target/sherpa-onnx/sherpa-onnx-lib`,
+which `.cargo/config.toml` points the build at. Run cargo from inside the
+repo, where that file applies. Until it has run, the build stops
+with "SHERPA_ONNX_LIB_DIR does not exist".
+
 ## Licence
 
 Licensed under either of

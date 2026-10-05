@@ -1,8 +1,12 @@
 # Fuzzing
 
 `fuzz/` is a separate Cargo workspace (it is excluded from the root one), so
-it is not built or run by CI or `cargo nextest`. It is for occasional long
-runs with AFL++ through `cargo-afl`.
+`cargo nextest` doesn't run it. It is for occasional long runs with AFL++
+through `cargo-afl`. CI builds the targets with `cargo afl build --locked`,
+so they keep compiling, but doesn't fuzz. When a change to the recorder's
+dependencies makes that fail on `fuzz/Cargo.lock`, run `cargo metadata` in
+`fuzz/` (it adds the missing packages and keeps the rest) and commit the
+lock file.
 
 ## journal_reader
 

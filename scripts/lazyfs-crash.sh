@@ -33,7 +33,7 @@
 # Failing points keep their backing directory, promises and logs under the
 # work directory.
 
-set -euo pipefail
+set -Eeuo pipefail
 
 LAZYFS=${LAZYFS:-$HOME/.local/share/nota/lazyfs/lazyfs/build/lazyfs}
 STEP=1
@@ -60,7 +60,11 @@ die() { echo "lazyfs-crash: $*" >&2; exit 2; }
 
 [[ -x $LAZYFS ]] || die "no LazyFS binary at $LAZYFS (set LAZYFS)"
 command -v fusermount3 > /dev/null || die "fusermount3 not found"
-[[ $STEP =~ ^[1-9][0-9]*$ ]] || die "--step needs a positive number"
+# At most 9 digits, so bash arithmetic can't overflow.
+[[ $STEP =~ ^[1-9][0-9]{0,8}$ ]] || die "--step needs a positive number"
+[[ $FROM =~ ^[1-9][0-9]{0,8}$ ]] || die "--from needs a positive number"
+[[ -z $TO || $TO =~ ^[1-9][0-9]{0,8}$ ]] || die "--to needs a positive number"
+[[ -z $TO || $FROM -le $TO ]] || die "--from $FROM is after --to $TO"
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 cargo build --manifest-path "$REPO/Cargo.toml" --example lazyfs_crash --locked --quiet
@@ -86,6 +90,13 @@ unmount() {
   fi
   if [[ -n $LZ_PID ]]; then
     # LazyFS exits once unmounted (with status 134: it aborts on every exit).
+    # One that never mounted, or hangs, is killed by its PID.
+    lazyfs_gone() { ! kill -0 "$LZ_PID" 2> /dev/null; }
+    if ! wait_for 10 lazyfs_gone; then
+      kill -9 "$LZ_PID" 2> /dev/null || true
+      # A killed LazyFS that had mounted leaves it "not connected".
+      [[ -z $MNT ]] || fusermount3 -uz "$MNT" 2> /dev/null || true
+    fi
     wait "$LZ_PID" 2> /dev/null || true
     LZ_PID=
   fi
@@ -104,6 +115,8 @@ cleanup() {
   unmount
 }
 trap cleanup EXIT
+# Exit status 1 means failed points; anything unexpected is 2, with a line.
+trap 'echo "lazyfs-crash: unexpected failure at line $LINENO" >&2; exit 2' ERR
 trap 'exit 130' INT TERM
 
 # Waits up to $1 seconds for the command after it to succeed.
@@ -165,12 +178,14 @@ clear_cache() {
 
 # How many operations a full run does, on the plain disk.
 mkdir "$WORK/count" "$WORK/count/rec"
-TOTAL=$("$BIN" write "$WORK/count/rec" "$WORK/count/promises" | sed -n 's/^ops //p')
+TOTAL=$("$BIN" write "$WORK/count/rec" "$WORK/count/promises" | sed -n 's/^ops //p') ||
+  die "the write workload failed on the plain disk"
 [[ $TOTAL =~ ^[0-9]+$ ]] || die "the write workload didn't report its operation count"
 "$BIN" check "$WORK/count/rec" "$WORK/count/promises" > /dev/null ||
   die "an uncrashed run fails its own check"
 TO=${TO:-$TOTAL}
 [[ $TO -le $TOTAL ]] || TO=$TOTAL
+[[ $FROM -le $TO ]] || die "--from $FROM is past the last point, $TO (a full run has $TOTAL operations)"
 
 echo "LazyFS crash checks: $TOTAL operations; points $FROM..$TO step $STEP; work dir $WORK"
 
@@ -178,7 +193,9 @@ PASS=0
 FAILED=()
 START=$SECONDS
 
-# run_point N: 0 if every check passed.
+# run_point N: a failed point leaves its reason in point-N/result; a passed
+# one removes point-N. Called outside any `if`, so `set -e` still stops the
+# script on an unexpected error.
 run_point() {
   local n=$1
   local dir=$WORK/point-$n
@@ -196,7 +213,7 @@ run_point() {
     WRITER_PID=
     echo "point $n: the writer finished without reaching its crash point" > "$dir/result"
     unmount
-    return 1
+    return 0
   fi
   kill -9 "$WRITER_PID"
   wait "$WRITER_PID" 2> /dev/null || true
@@ -206,24 +223,25 @@ run_point() {
   if ! "$BIN" check "$dir/mnt/rec" "$promises" > "$dir/check.out" 2>&1; then
     { echo "point $n: after the crash"; cat "$dir/check.out"; } > "$dir/result"
     unmount
-    return 1
+    return 0
   fi
   clear_cache "$dir"
   if ! "$BIN" check "$dir/mnt/rec" "$promises" --recovered > "$dir/recheck.out" 2>&1; then
     { echo "point $n: after salvage and a second crash"; cat "$dir/recheck.out"; } > "$dir/result"
     unmount
-    return 1
+    return 0
   fi
   unmount
   rm -rf "$dir"
 }
 
 for ((n = FROM; n <= TO; n += STEP)); do
-  if run_point "$n"; then
-    PASS=$((PASS + 1))
-  else
+  run_point "$n"
+  if [[ -e $WORK/point-$n/result ]]; then
     FAILED+=("$n")
     sed 's/^/  /' "$WORK/point-$n/result" >&2
+  else
+    PASS=$((PASS + 1))
   fi
   if (((n - FROM) / STEP % 20 == 19)); then
     echo "  ... point $n: $PASS passed, ${#FAILED[@]} failed ($((SECONDS - START))s)"
