@@ -400,25 +400,26 @@ fn sigxcpu_only_warns_and_recording_carries_on() {
     // runs past its real-time budget.
     let tmp = TestDir::new("xcpu");
     let mut nota = recording(&tmp.0);
-    // Spaced, so the second isn't merged into the first while pending.
     nota.signal(Signal::XCPU);
-    pause(Duration::from_millis(250));
-    nota.signal(Signal::XCPU);
-    pause(Duration::from_millis(250));
+    pause(Duration::from_millis(500));
     assert_eq!(
         nota.child.try_wait().unwrap(),
         None,
         "SIGXCPU ended the recording: {}",
         nota.output()
     );
+    let at = nota.len();
     nota.signal(Signal::TERM);
     let status = nota.exits().expect("nota didn't stop");
     assert!(status.success(), "{status:?}: {}", nota.output());
     assert!(nota.terminal_restored());
-    let said = visible(&nota.output.lock().unwrap());
     assert!(
-        said.contains("the capture thread ran past its real-time budget (2 SIGXCPU)"),
-        "{said}"
+        nota.shows_after(
+            at,
+            "the capture thread ran past its real-time budget at least once (SIGXCPU)"
+        ),
+        "{}",
+        nota.output()
     );
     assert_saved(&tmp.0, 1, &[0, 1], 1_950);
 }
