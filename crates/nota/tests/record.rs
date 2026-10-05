@@ -4,8 +4,10 @@
 //! audio published; the terminal is restored however it ends; and a
 //! recording killed outright is salvaged at the next start.
 
-// Test code throughout: clippy allows unwraps and panics in it.
+// Test code throughout: clippy allows unwraps and panics in it. Recording
+// works on Linux only for now.
 #![cfg(test)]
+#![cfg(target_os = "linux")]
 
 use std::io::{Read, Write};
 use std::os::fd::OwnedFd;

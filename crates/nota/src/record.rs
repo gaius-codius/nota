@@ -47,8 +47,6 @@ use nota_recorder::segment::{PublishReport, Publisher, SegmentLength};
 use nota_recorder::session::{SessionDir, SessionStore, SessionWriter};
 use nota_store::Store;
 use nota_tui::{Annotation, Ended, Event, InputThread, Recording, RunError, Theme};
-use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
-use signal_hook::iterator::Signals;
 
 use crate::library::{Library, Salvaged};
 use crate::live::{Actions, Live};
@@ -351,11 +349,13 @@ fn show(
 }
 
 /// The handle that stops the signal thread.
+#[cfg(unix)]
 struct SignalThread {
     handle: signal_hook::iterator::Handle,
     thread: JoinHandle<()>,
 }
 
+#[cfg(unix)]
 impl SignalThread {
     fn close(self) {
         self.handle.close();
@@ -366,8 +366,10 @@ impl SignalThread {
 /// From now on, SIGHUP, SIGTERM and SIGINT close the screen rather than
 /// end the process: the recording then stops in order (see the module
 /// docs).
+#[cfg(unix)]
 fn listen_for_signals(ui: Sender<Event>) -> io::Result<SignalThread> {
-    let mut signals = Signals::new([SIGHUP, SIGTERM, SIGINT])?;
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+    let mut signals = signal_hook::iterator::Signals::new([SIGHUP, SIGTERM, SIGINT])?;
     let handle = signals.handle();
     let thread = thread::Builder::new()
         .name("nota-signals".into())
@@ -377,6 +379,25 @@ fn listen_for_signals(ui: Sender<Event>) -> io::Result<SignalThread> {
             }
         })?;
     Ok(SignalThread { handle, thread })
+}
+
+/// Elsewhere nothing records yet (see [`record`]), so there's nothing to
+/// stop in order.
+#[cfg(not(unix))]
+struct SignalThread;
+
+#[cfg(not(unix))]
+impl SignalThread {
+    fn close(self) {}
+}
+
+#[cfg(not(unix))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the same shape as the Unix version"
+)]
+fn listen_for_signals(_ui: Sender<Event>) -> io::Result<SignalThread> {
+    Ok(SignalThread)
 }
 
 /// Starts the engine, with its events passed to the live thread.
