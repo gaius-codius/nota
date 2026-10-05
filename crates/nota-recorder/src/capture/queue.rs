@@ -27,12 +27,19 @@ use nota_core::{SampleCount, SampleIndex, TrackId};
 
 use super::CaptureEvent;
 
-/// Events the queue has room for before it grows: about 20 s of audio at
-/// `PipeWire`'s usual quantum, far longer than an fsync.
+/// Events the queue has room for before it grows: about 20 s of one
+/// stream's audio at `PipeWire`'s usual quantum (10 s each for two), far
+/// longer than an fsync.
 pub(super) const RESERVED_EVENTS: usize = 1_024;
 
-/// Buffers the queue keeps for the callbacks to fill again. A stream needs
-/// two or three in the steady state; the rest, after a stall, are freed.
+/// The least room a new sample buffer gets: more than `PipeWire`'s largest
+/// usual quantum at 16 kHz (8192 frames at 48 kHz), so a buffer handed
+/// back still fits when the quantum grows.
+pub(super) const MIN_BUFFER: usize = 4_096;
+
+/// Buffers the queue keeps for the callbacks to fill again, for all its
+/// streams. Each needs two or three in the steady state; the rest, after a
+/// stall, are freed.
 pub(super) const SPARE_BUFFERS: usize = 64;
 
 /// What the senders and the recorder share.
@@ -43,6 +50,8 @@ struct State {
     spare: Vec<Vec<i16>>,
     /// Senders still able to send. At none, an empty queue is closed.
     senders: usize,
+    /// The receiver has gone: what's sent is dropped, as `mpsc` drops it.
+    closed: bool,
     /// Buffers sending had to allocate, because none was spare.
     allocated: u64,
 }
@@ -74,6 +83,7 @@ impl Queue {
                 events: VecDeque::with_capacity(RESERVED_EVENTS),
                 spare: Vec::with_capacity(SPARE_BUFFERS),
                 senders: 1,
+                closed: false,
                 allocated: 0,
             }),
             changed: Condvar::new(),
@@ -115,6 +125,17 @@ impl Queue {
         }
     }
 
+    /// The receiver has gone: drops what's queued and everything sent from
+    /// now on, so streams that outlive the recorder don't fill memory.
+    pub(super) fn close(&self) {
+        let mut state = self.lock();
+        state.closed = true;
+        let events = std::mem::take(&mut state.events);
+        let spare = std::mem::take(&mut state.spare);
+        drop(state);
+        drop((events, spare));
+    }
+
     /// How many buffers sending has had to allocate so far.
     #[cfg(test)]
     pub(super) fn allocated(&self) -> u64 {
@@ -146,7 +167,12 @@ impl Drop for QueueSender {
 impl QueueSender {
     /// Queues `event` from `track`.
     pub(super) fn send(&self, track: TrackId, event: CaptureEvent) {
-        self.0.lock().events.push_back((track, event));
+        let mut state = self.0.lock();
+        if state.closed {
+            return;
+        }
+        state.events.push_back((track, event));
+        drop(state);
         self.0.changed.notify_one();
     }
 
@@ -154,12 +180,19 @@ impl QueueSender {
     /// is one.
     pub(super) fn audio(&self, track: TrackId, samples: &[i16]) {
         let mut state = self.0.lock();
+        if state.closed {
+            return;
+        }
         let mut buffer = if let Some(buffer) = state.spare.pop() {
             buffer
         } else {
             state.allocated += 1;
-            Vec::with_capacity(samples.len())
+            Vec::with_capacity(samples.len().max(MIN_BUFFER))
         };
+        if buffer.capacity() < samples.len() {
+            // Growing it is an allocation too.
+            state.allocated += 1;
+        }
         buffer.clear();
         buffer.extend_from_slice(samples);
         state.events.push_back((track, CaptureEvent::Audio(buffer)));
@@ -191,7 +224,9 @@ pub struct Positions {
     pub delivered: SampleIndex,
     /// The end of what the recorder has appended to the track's journals.
     pub captured: SampleIndex,
-    /// The end of what an fsync has made durable.
+    /// The end of what an fsync has made durable on the track's current
+    /// journal. Audio a broken journal lost is behind it too: a gap, no
+    /// longer at risk.
     pub durable: SampleIndex,
 }
 
@@ -221,9 +256,9 @@ impl Progress {
     }
 
     /// The track's positions now. Read while the recorder runs, `delivered`
-    /// may for a moment count a buffer the recorder has just appended
-    /// twice, but never misses one, and `durable` is never past
-    /// `captured`.
+    /// counts every buffer sent before the call (one sent during it may or
+    /// may not be in), and may for a moment count a buffer the recorder
+    /// has just appended twice; `durable` is never past `captured`.
     #[must_use]
     pub fn now(&self) -> Positions {
         // Durable, queued, then captured: the recorder moves captured on
@@ -293,16 +328,59 @@ mod tests {
         assert!(matches!(queue.next(Duration::ZERO), Received::Closed));
     }
 
+    /// Runs `next` with a timeout far beyond the test's own: it passes only
+    /// if a send or a sender leaving wakes it.
+    fn next_woken(queue: &Arc<Queue>) -> Received {
+        let queue = Arc::clone(queue);
+        let (done, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(queue.next(Duration::from_secs(3_600)));
+        });
+        received.recv_timeout(Duration::from_secs(10)).unwrap()
+    }
+
     #[test]
     fn a_waiting_recorder_wakes_when_audio_arrives() {
         let (queue, sender) = Queue::new();
-        let feeder = std::thread::spawn(move || sender.audio(MIC, &[7]));
-        assert_eq!(audio(queue.next(Duration::from_secs(10))), [7]);
-        feeder.join().unwrap();
+        let waiting = Arc::clone(&queue);
+        let woken = std::thread::spawn(move || next_woken(&waiting));
+        // Sent while the recorder may already be waiting, or not yet.
+        sender.audio(MIC, &[7]);
+        assert_eq!(audio(woken.join().unwrap()), [7]);
+        let second = sender.clone();
+        let waiting = Arc::clone(&queue);
+        let woken = std::thread::spawn(move || next_woken(&waiting));
+        second.send(MIC, CaptureEvent::Stopped);
         assert!(matches!(
-            queue.next(Duration::from_secs(10)),
-            Received::Closed
+            woken.join().unwrap(),
+            Received::Event(MIC, CaptureEvent::Stopped)
         ));
+    }
+
+    #[test]
+    fn a_waiting_recorder_wakes_when_the_last_sender_leaves() {
+        let (queue, sender) = Queue::new();
+        let waiting = Arc::clone(&queue);
+        let woken = std::thread::spawn(move || next_woken(&waiting));
+        drop(sender);
+        assert!(matches!(woken.join().unwrap(), Received::Closed));
+    }
+
+    #[test]
+    fn once_closed_nothing_sent_is_kept() {
+        let (queue, sender) = Queue::new();
+        sender.audio(MIC, &[1]);
+        let buffer = audio(queue.next(Duration::ZERO));
+        queue.recycle(buffer);
+        sender.audio(MIC, &[2]);
+        queue.close();
+        sender.audio(MIC, &[3]);
+        sender.send(MIC, CaptureEvent::Stopped);
+        let state = queue.lock();
+        assert!(state.events.is_empty());
+        assert!(state.spare.is_empty());
+        drop(state);
+        assert_eq!(queue.allocated(), 1);
     }
 
     #[test]
@@ -319,6 +397,27 @@ mod tests {
             assert_eq!(buffer.as_ptr(), at, "round {round}");
             queue.recycle(buffer);
         }
+        assert_eq!(queue.allocated(), 1);
+    }
+
+    #[test]
+    fn a_buffer_too_small_for_the_audio_counts_as_allocated() {
+        let (queue, sender) = Queue::new();
+        sender.audio(MIC, &[0; MIN_BUFFER]);
+        let buffer = audio(queue.next(Duration::ZERO));
+        assert!(buffer.capacity() >= MIN_BUFFER);
+        queue.recycle(buffer);
+        // A bigger quantum than any buffer was made for.
+        sender.audio(MIC, &vec![1; MIN_BUFFER * 2]);
+        assert_eq!(audio(queue.next(Duration::ZERO)), vec![1; MIN_BUFFER * 2]);
+        assert_eq!(queue.allocated(), 2);
+        // A first buffer is made big enough for a growing quantum.
+        let (queue, sender) = Queue::new();
+        sender.audio(MIC, &[0; 16]);
+        let buffer = audio(queue.next(Duration::ZERO));
+        queue.recycle(buffer);
+        sender.audio(MIC, &[0; MIN_BUFFER]);
+        audio(queue.next(Duration::ZERO));
         assert_eq!(queue.allocated(), 1);
     }
 

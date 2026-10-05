@@ -30,9 +30,9 @@
 //!   left, in order and without gaps from the first sample, holding at least
 //!   everything fsync'd and exactly the audio captured, and every committed
 //!   row; a second salvage changes nothing; the durable position was never
-//!   more than the journal's sync interval (850 ms) behind the captured one,
-//!   nor more than 1.1 s behind the audio delivered, nor behind the wall
-//!   clock (all below); no audio was lost before the journal. It prints one `result` line
+//!   more than the journal's sync interval (850 ms) behind the captured
+//!   one, nor more than 1.1 s behind the audio delivered or the wall clock
+//!   (all below); no audio was lost before the journal. It prints one `result` line
 //!   with the measurements and a digest of the files and rows. With
 //!   `--recovered yes`, for a disk that crashed again after a completed
 //!   salvage, salvage must also find nothing left to do.
@@ -724,11 +724,14 @@ mod linux {
         let (writer, notices, failures, result, unlogged) = recorder
             .join()
             .map_err(|_| "the recorder thread panicked")?;
+        // Finished even if the stream failed, so its last unsynced audio is
+        // fsync'd before the error is reported.
+        let last = writer.finish();
         result?;
         if let Some(e) = unlogged {
             return Err(e.into());
         }
-        let last = writer.finish()?;
+        let last = last?;
         let _ = to_publish.send(last);
         drop(to_publish);
         publisher
@@ -1509,9 +1512,10 @@ mod linux {
                 let (writer, result, notices) = recorder
                     .join()
                     .map_err(|_| "the recorder thread panicked")?;
+                let finished = writer.finish();
                 result?;
                 lost = notices;
-                writer.finish()?;
+                finished?;
                 let _ = feed_tx.send(Feed::End);
                 if let Some(f) = feeding.take() {
                     supervisor = Some(f.join().map_err(|_| "the feeder panicked")??);

@@ -85,7 +85,6 @@ use nota_core::{
 };
 
 use crate::fs::Fs;
-use crate::journal::DurablePosition;
 use crate::session::{FinishedJournal, SessionError, SessionWriter};
 
 #[cfg(target_os = "linux")]
@@ -239,6 +238,14 @@ pub struct CaptureReceiver {
     rate: SampleRate,
     /// The tracks whose streams started, in order, with their progress.
     tracks: Vec<(TrackId, Progress)>,
+}
+
+impl Drop for CaptureReceiver {
+    /// Streams still running send into nothing from now on, as with a
+    /// dropped `mpsc` receiver.
+    fn drop(&mut self) {
+        self.events.close();
+    }
 }
 
 impl CaptureReceiver {
@@ -628,6 +635,10 @@ pub fn record_tracks<S: Fs>(
     for (track, progress) in &events.tracks {
         if let Some(next) = writer.next_sample(*track) {
             progress.appended(0, next);
+            // Recording starts here: nothing before is this run's to lose.
+            if writer.durable(*track).is_none() {
+                progress.synced(next);
+            }
         }
     }
     note_durable(writer, events);
@@ -638,7 +649,11 @@ pub fn record_tracks<S: Fs>(
                 match handle(writer, timelines, track, event, report)? {
                     Handled::Recorded(outcome, spent) => {
                         if let Some(buffer) = spent {
-                            note_appended(writer, events, track, buffer.len());
+                            // An append refused outright (`Overflow`) recorded
+                            // nothing: those samples still count as queued.
+                            if !matches!(outcome, Err((_, SessionError::Overflow))) {
+                                note_appended(writer, events, track, buffer.len());
+                            }
                             events.events.recycle(buffer);
                         }
                         outcome
@@ -673,16 +688,15 @@ fn note_appended<S: Fs>(
     }
 }
 
-/// Notes how far each track's journal is durable. Between journals, the
-/// last one ended with an fsync, so everything captured is.
+/// Notes how far each track's current journal is durable. Between
+/// journals nothing moves: the last journal may have ended with its fsync,
+/// or broken, leaving a gap, and a journal's own durable position is the
+/// only proof either way. A track that has started no journal yet has
+/// nothing at risk before its first sample.
 fn note_durable<S: Fs>(writer: &SessionWriter<S>, events: &CaptureReceiver) {
     for (track, progress) in &events.tracks {
-        let durable = writer
-            .durable(*track)
-            .map(DurablePosition::end)
-            .or_else(|| writer.next_sample(*track));
-        if let Some(durable) = durable {
-            progress.synced(durable);
+        if let Some(durable) = writer.durable(*track) {
+            progress.synced(durable.end());
         }
     }
 }

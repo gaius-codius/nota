@@ -8,9 +8,14 @@
 //! `RLIMIT_RTPRIO` (a `realtime` or `pipewire` group, say). cpal's
 //! `realtime-dbus` feature also asks rtkit to make it real-time, from a
 //! thread of its own: that covers desktops where only rtkit grants it.
-//! `PipeWire`'s own module-rt tries them in the same order. rtkit's refusal
-//! is reported as a [`CaptureNotice::Warning`] only if the direct promotion
-//! failed too; if both succeed, rtkit's priority is the one that stays.
+//! `PipeWire`'s own module-rt tries them in the same order. cpal asks rtkit
+//! whatever the direct promotion did: rtkit's refusal is reported as a
+//! [`CaptureNotice::Warning`] only if the direct promotion failed too (or
+//! the refusal came back first), and if both succeed, rtkit's priority
+//! (`SCHED_RR` 10) is the one that stays. Asking rtkit also lowers the
+//! process's `RLIMIT_RTTIME` soft limit to about one quantum: a real-time
+//! thread that runs that long without blocking gets `SIGXCPU`. The callback
+//! blocks every buffer, so it stays well inside.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -129,7 +134,7 @@ impl CaptureBackend for PipeWireBackend {
                 // Only a copy into the channel, in a buffer it already has:
                 // no I/O, no waiting on the recorder, and in the steady
                 // state no allocation. The first buffer also asks for
-                // real-time priority, one system call.
+                // real-time priority, a few system calls.
                 move |samples: &[i16], _| {
                     promotion.on_buffer(promote_current_thread);
                     events.audio(samples);
@@ -163,13 +168,14 @@ fn stream_error(
     Some(match error.kind() {
         ErrorKind::Xrun => Ok(CaptureNotice::Overrun),
         ErrorKind::DeviceChanged => Ok(CaptureNotice::RouteChanged),
-        // Real-time priority refused by rtkit, or cpal unable to start the
-        // thread that asks rtkit (the only `ResourceExhausted` a running
-        // stream reports).
-        ErrorKind::RealtimeDenied | ErrorKind::ResourceExhausted if promoted => return None,
-        // The same with the direct promotion refused too, and anything
-        // cpal flags as a backend error while the stream runs, such as the
-        // default-device watch failing to start: the stream goes on.
+        // Real-time priority refused by rtkit.
+        ErrorKind::RealtimeDenied if promoted => return None,
+        // The same with the direct promotion refused too (or not tried
+        // yet); cpal unable to start the thread that asks rtkit, as the
+        // stream is built (the only `ResourceExhausted` a stream reports
+        // through this callback); and anything cpal flags as a backend
+        // error while the stream runs, such as the default-device watch
+        // failing to start: the stream goes on.
         ErrorKind::RealtimeDenied | ErrorKind::ResourceExhausted | ErrorKind::BackendError => {
             Ok(CaptureNotice::Warning(error.to_string()))
         }
@@ -220,7 +226,7 @@ mod tests {
                 Some(Ok(notice.clone())),
                 "{kind:?}"
             );
-            if ![ErrorKind::RealtimeDenied, ErrorKind::ResourceExhausted].contains(&kind) {
+            if kind != ErrorKind::RealtimeDenied {
                 assert_eq!(
                     stream_error(&mic, &error(kind), true),
                     Some(Ok(notice)),
@@ -233,9 +239,10 @@ mod tests {
     #[test]
     fn rtkit_refusing_after_a_direct_promotion_is_not_reported() {
         let mic = Source::Microphone;
-        for kind in [ErrorKind::RealtimeDenied, ErrorKind::ResourceExhausted] {
-            assert_eq!(stream_error(&mic, &error(kind), true), None, "{kind:?}");
-        }
+        assert_eq!(
+            stream_error(&mic, &error(ErrorKind::RealtimeDenied), true),
+            None
+        );
     }
 
     #[test]

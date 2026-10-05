@@ -64,6 +64,11 @@ deny = [
   # cpal's `realtime` feature (rtkit, through `realtime-dbus`) depends on
   # alsa-sys directly.
   { crate = "alsa-sys", wrappers = ["alsa", "cpal"] },
+  # rtkit over D-Bus (cpal's `realtime-dbus`): libdbus only through cpal's
+  # real-time promotion.
+  { crate = "audio_thread_priority", wrappers = ["cpal"] },
+  { crate = "dbus", wrappers = ["audio_thread_priority"] },
+  { crate = "libdbus-sys", wrappers = ["dbus"] },
 ]
 
 [sources]
