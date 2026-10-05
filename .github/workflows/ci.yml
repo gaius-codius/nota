@@ -163,10 +163,10 @@ jobs:
   mutants-shard:
     # Every mutant of the lines this PR changes in the core and recorder
     # crates must be caught by a test. A missed or timed-out mutant fails.
-    # The mutants are split into consecutive slices, one per shard, so the
-    # check takes about a quarter of the time; the job below gathers them.
+    # The mutants are split into consecutive slices, a quarter of them per
+    # shard, run side by side; the job below gathers the results.
     # The weekly full run is in mutants.yml.
-    name: Mutation testing (shard ${{ matrix.shard }} of ${{ strategy.job-total }})
+    name: Mutation testing (shard ${{ strategy.job-index }} of ${{ strategy.job-total }})
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -174,6 +174,8 @@ jobs:
       # One shard failing doesn't stop the others, so a run reports every
       # missed mutant at once.
       fail-fast: false
+      # One leg per shard. The shard number is the leg's index, so it can't
+      # disagree with the count if the matrix grows another axis.
       matrix:
         shard: [0, 1, 2, 3]
     env:
@@ -202,7 +204,7 @@ jobs:
         run: git diff --src-prefix=a/ --dst-prefix=b/ "$PR_BASE...HEAD" > "$RUNNER_TEMP/pr.diff"
       # A shard whose slice is empty finds no mutants and passes.
       - env:
-          SHARD: ${{ matrix.shard }}
+          SHARD: ${{ strategy.job-index }}
           SHARDS: ${{ strategy.job-total }}
         run: >-
           cargo mutants --in-diff "$RUNNER_TEMP/pr.diff"
@@ -212,13 +214,15 @@ jobs:
       - if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: mutants-shard-${{ matrix.shard }}
+          name: mutants-shard-${{ strategy.job-index }}
           path: ${{ runner.temp }}/mutants.out
 
   mutants:
     # The required check. It passes only if every shard passed: a failed,
     # cancelled or skipped shard fails it, and it runs even then (always()),
-    # so it can't be skipped, which a ruleset would count as passing.
+    # so it can't be skipped, which a ruleset would count as passing. A run
+    # cancelled by a newer push therefore fails here too; that commit is
+    # superseded.
     name: Mutation testing (changed code)
     if: always() && github.event_name == 'pull_request'
     needs: mutants-shard
@@ -228,8 +232,11 @@ jobs:
       - env:
           SHARDS_RESULT: ${{ needs.mutants-shard.result }}
         run: |
-          echo "Shards: $SHARDS_RESULT"
-          [ "$SHARDS_RESULT" = success ]
+          if [ "$SHARDS_RESULT" != success ]; then
+            echo "::error::Mutation testing shards: $SHARDS_RESULT (every shard must pass)"
+            exit 1
+          fi
+          echo "Every mutation testing shard passed."
 
   build:
     name: Build (${{ matrix.os }})
