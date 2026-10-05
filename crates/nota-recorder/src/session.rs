@@ -450,6 +450,12 @@ impl<S: Fs> SessionWriter<S> {
         ended
     }
 
+    /// The epoch `track` is recording in, or `None` if it wasn't started.
+    #[must_use]
+    pub fn epoch(&self, track: TrackId) -> Option<EpochId> {
+        self.tracks.get(&track).map(|t| t.epoch)
+    }
+
     /// The rate stamped on every journal this writer starts.
     #[must_use]
     pub const fn rate(&self) -> SampleRate {

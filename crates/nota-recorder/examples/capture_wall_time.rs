@@ -32,7 +32,9 @@ mod linux {
     use std::thread;
     use std::time::Duration;
 
-    use nota_core::{Clock, EpochId, SampleCount, SampleIndex, SampleRate, SessionId, SystemClock};
+    use nota_core::{
+        Clock, EpochId, SampleCount, SampleIndex, SampleRate, SessionId, SystemClock, TrackTimeline,
+    };
     use nota_recorder::capture::{
         CaptureNotice, PipeWireBackend, RecorderEvent, Source, record_track, start,
     };
@@ -92,16 +94,26 @@ mod linux {
         )?;
         writer.start_track(TRACK, EpochId::new(0), SampleIndex::ZERO)?;
 
-        let (capture, events) = start(&PipeWireBackend, &source, rate)?;
+        let mut timeline = TrackTimeline::new(TRACK);
+        timeline.open_epoch(clock.now(), SampleIndex::ZERO, rate)?;
+        let (capture, events) = start(
+            &PipeWireBackend,
+            &source,
+            rate,
+            Arc::clone(&clock) as Arc<dyn Clock>,
+        )?;
         let started = clock.now();
         let recorder = thread::spawn(move || {
             let mut journals = Vec::new();
             let mut notices = Vec::new();
             let mut failures = 0_usize;
-            let result = record_track(&mut writer, TRACK, &events, &mut |e| match e {
+            let result = record_track(&mut writer, &mut timeline, &events, &mut |e| match e {
                 RecorderEvent::Finished(j) => journals.extend(j),
-                RecorderEvent::JournalFailed(_) => failures += 1,
+                RecorderEvent::JournalFailed(_) | RecorderEvent::EpochRefused(_) => {
+                    failures += 1;
+                }
                 RecorderEvent::Capture(n) => notices.push(n),
+                RecorderEvent::Epoch(_) => {}
             });
             (writer, journals, notices, failures, result)
         });

@@ -81,7 +81,7 @@ mod linux {
     use nota_core::messages::AudioChunk;
     use nota_core::{
         Clock, EpochId, SampleCount, SampleIndex, SampleRate, SessionId, SessionTime, SystemClock,
-        TrackId,
+        TrackId, TrackTimeline,
     };
     use nota_recorder::capture::{
         CaptureNotice, CaptureReceiver, PipeWireBackend, RecordError, RecorderEvent, Source,
@@ -689,11 +689,13 @@ mod linux {
             })
         };
 
-        let (capture, events) = start(&PipeWireBackend, &source, RATE)?;
+        let mut timeline = TrackTimeline::new(TRACK);
+        timeline.open_epoch(clock.now(), SampleIndex::ZERO, RATE)?;
+        let (capture, events) = start(&PipeWireBackend, &source, RATE, Arc::clone(&clock))?;
         let recorder = {
             let to_publish = to_publish.clone();
             let fs = fs.clone();
-            thread::spawn(move || record(writer, &events, &to_publish, &fs))
+            thread::spawn(move || record(writer, timeline, &events, &to_publish, &fs))
         };
         wait(Duration::from_secs(seconds));
         drop(capture);
@@ -743,6 +745,7 @@ mod linux {
     /// publisher and logging audio lost before the journal.
     fn record(
         mut writer: SessionWriter<TapFs>,
+        mut timeline: TrackTimeline,
         events: &CaptureReceiver,
         to_publish: &mpsc::Sender<Vec<FinishedJournal>>,
         fs: &TapFs,
@@ -750,7 +753,7 @@ mod linux {
         let mut notices = Vec::new();
         let mut failures = 0_usize;
         let mut unlogged = None;
-        let result = record_track(&mut writer, TRACK, events, &mut |e| {
+        let result = record_track(&mut writer, &mut timeline, events, &mut |e| {
             let logged = match e {
                 RecorderEvent::Finished(j) => {
                     let _ = to_publish.send(j);
@@ -760,6 +763,8 @@ mod linux {
                     failures += 1;
                     fs.0.note("journal-failed")
                 }
+                // Rows carry their epoch; the checks compare them as is.
+                RecorderEvent::Epoch(_) | RecorderEvent::EpochRefused(_) => Ok(()),
                 RecorderEvent::Capture(n) => {
                     let logged = if n == CaptureNotice::Overrun {
                         fs.0.note("overrun")
@@ -1386,11 +1391,13 @@ mod linux {
             let sent = Arc::clone(&sent);
             thread::spawn(move || feeder(supervisor, &feed_rx, &sent))
         };
-        let (capture, capture_events) = start(&PipeWireBackend, &source, RATE)?;
+        let mut timeline = TrackTimeline::new(TRACK);
+        timeline.open_epoch(clock.now(), SampleIndex::ZERO, RATE)?;
+        let (capture, capture_events) = start(&PipeWireBackend, &source, RATE, Arc::clone(&clock))?;
         let recorder = thread::spawn(move || {
             // Audio lost before the journal: the engine never sees it either.
             let mut lost = 0_usize;
-            let result = record_track(&mut writer, TRACK, &capture_events, &mut |e| {
+            let result = record_track(&mut writer, &mut timeline, &capture_events, &mut |e| {
                 if matches!(
                     e,
                     RecorderEvent::JournalFailed(_)
