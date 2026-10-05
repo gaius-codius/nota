@@ -127,11 +127,19 @@ impl Running {
         Self::start_with(data, &[])
     }
 
+    fn start_with(data: &Path, extra: &[&str]) -> Self {
+        Self::start_as(data, extra, false)
+    }
+
+    /// Starts `nota record`; with `own_group`, in a process group of its
+    /// own, as a terminal's job is, so the test can signal the group.
+    /// Otherwise it stays in the test's group, so it goes with the test if
+    /// the test is killed.
     #[expect(
         clippy::disallowed_methods,
         reason = "opening the pseudo-terminal's other end"
     )]
-    fn start_with(data: &Path, extra: &[&str]) -> Self {
+    fn start_as(data: &Path, extra: &[&str], own_group: bool) -> Self {
         let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).unwrap();
         grantpt(&master).unwrap();
         unlockpt(&master).unwrap();
@@ -152,18 +160,19 @@ impl Running {
             },
         )
         .unwrap();
-        let child = Command::new(env!("CARGO_BIN_EXE_nota"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_nota"));
+        command
             .args(["record", "--tone", "yes", "--title", "Workshop", "--data"])
             .arg(data)
             .args(extra)
             .stdin(Stdio::from(slave.try_clone().unwrap()))
             .stdout(Stdio::from(slave.try_clone().unwrap()))
             .stderr(Stdio::from(slave.try_clone().unwrap()))
-            .env_remove("NO_COLOR")
-            // A process group of its own, as a terminal's job has.
-            .process_group(0)
-            .spawn()
-            .unwrap();
+            .env_remove("NO_COLOR");
+        if own_group {
+            command.process_group(0);
+        }
+        let child = command.spawn().unwrap();
         let master = std::fs::File::from(master);
         let output = Arc::new(Mutex::new(Vec::new()));
         let mut copy = master.try_clone().unwrap();
@@ -518,14 +527,15 @@ fn process_group(pid: u32) -> u32 {
     stat(pid).unwrap()[2].parse().unwrap()
 }
 
-/// The engine children `nota` (process `parent`) is running now.
+/// The engine children `nota` (process `parent`) is running now, leaving
+/// out any that have exited and are still to be reaped.
 fn engines_of(parent: u32) -> Vec<u32> {
     let mut found = Vec::new();
     for entry in std::fs::read_dir("/proc").unwrap().flatten() {
         let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse().ok()) else {
             continue;
         };
-        let child = stat(pid).is_some_and(|f| f[1] == parent.to_string());
+        let child = stat(pid).is_some_and(|f| f[0] != "Z" && f[1] == parent.to_string());
         let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
         if child && cmdline.windows(11).any(|w| w == b"engine\0asr\0") {
             found.push(pid);
@@ -539,7 +549,7 @@ fn engines_of(parent: u32) -> Vec<u32> {
 fn recording_with_the_engine(data: &Path, models: &Path) -> (Running, u32) {
     let parakeet = models.join("parakeet-tdt-0.6b-v3-int8");
     let vad = models.join("silero_vad_v6.onnx");
-    let nota = Running::start_with(
+    let nota = Running::start_as(
         data,
         &[
             "--parakeet",
@@ -547,23 +557,21 @@ fn recording_with_the_engine(data: &Path, models: &Path) -> (Running, u32) {
             "--vad",
             vad.to_str().unwrap(),
         ],
+        true,
     );
     assert!(nota.shows_after(0, "s stop"), "{}", nota.output());
-    let mut engines = Vec::new();
-    assert!(
-        wait_until(Duration::from_secs(10), || {
-            engines = engines_of(nota.pid());
-            !engines.is_empty()
-        }),
-        "no engine started"
-    );
     pause(Duration::from_millis(1_500));
+    // One engine, still the first: nothing has restarted it.
+    let engines = engines_of(nota.pid());
+    assert_eq!(engines.len(), 1, "{engines:?}");
     (nota, engines[0])
 }
 
 /// Acceptance (GAI-202), end to end: the engine runs in a process group of
 /// its own, so the hangup a closing terminal sends nota's group doesn't
-/// reach it, and nota still stops with everything saved.
+/// reach it or restart it, and nota still stops with everything saved. (A
+/// tone has no words, so the text reaching the end is shown by the
+/// recorder's `hangup` test.)
 #[test]
 fn a_hangup_to_the_group_leaves_the_engine_to_nota() {
     let Some(models) = test_models() else {
@@ -574,6 +582,14 @@ fn a_hangup_to_the_group_leaves_the_engine_to_nota() {
     assert_eq!(process_group(nota.pid()), nota.pid());
     assert_eq!(process_group(engine), engine);
     nota.signal_group(Signal::HUP);
+    // While nota stops, the engine it had is the only one: none restarted.
+    let mut others = Vec::new();
+    let stopped = wait_until(Duration::from_secs(20), || {
+        others.extend(engines_of(nota.pid()).into_iter().filter(|&p| p != engine));
+        nota.child.try_wait().unwrap().is_some()
+    });
+    assert!(stopped, "nota didn't stop");
+    assert!(others.is_empty(), "the engine was restarted: {others:?}");
     let status = nota.exits().expect("nota didn't stop");
     assert!(status.success(), "{status:?}: {}", nota.output());
     assert!(nota.terminal_restored());

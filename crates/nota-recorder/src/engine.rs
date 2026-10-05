@@ -21,8 +21,8 @@
 //!
 //! The engine's stderr is always captured, never passed through: the TUI
 //! owns the terminal. On Unix the engine runs in a process group of its
-//! own, so signals the terminal sends the recorder's group (SIGHUP when it
-//! closes, SIGINT for Ctrl+C) don't reach it; it exits when its stdin
+//! own, so signals sent to the recorder's group (the terminal's SIGHUP when
+//! it closes) don't reach it; it exits when its stdin
 //! closes, so it still ends when the recorder does.
 //!
 //! Audio goes to the journal separately and never through here, so the
@@ -904,8 +904,8 @@ fn start_child(
     let mut child = Command::new(&command.program);
     child.args(&command.args);
     // A process group of its own, so a signal to the recorder's group (the
-    // terminal's SIGHUP when it closes, Ctrl+C's SIGINT) doesn't reach the
-    // engine: only the supervisor decides when it stops. It still ends with
+    // terminal's SIGHUP when it closes) doesn't reach the engine: only the
+    // supervisor decides when it stops. It still ends with
     // the recorder, however that dies: its stdin closes.
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut child, 0);

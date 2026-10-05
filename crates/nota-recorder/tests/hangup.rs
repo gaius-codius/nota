@@ -25,7 +25,7 @@ use std::thread;
 use std::time::Duration;
 
 use nota_core::messages::AudioChunk;
-use nota_core::{Clock, SampleIndex, SampleRate, SystemClock, TrackId};
+use nota_core::{SampleIndex, SampleRate, SystemClock, TrackId};
 use nota_recorder::engine::{
     EngineCommand, EngineConfig, EngineEvent, EngineStatus, EngineSupervisor,
 };
@@ -96,8 +96,9 @@ fn say(line: &str) {
     out.flush().unwrap();
 }
 
-/// The recorder's side, run in its own process by the tests below; does
-/// nothing when run as a test of its own. `hup` records until SIGHUP, then
+/// The recorder's side, run in its own process by the tests below. It's a
+/// test so that this binary can run it alone; run as an ordinary test, with
+/// no [`HOST`] set, it does nothing. `hup` records until SIGHUP, then
 /// stops as `nota record` does and checks the engine saw it through; `kill`
 /// records until it's killed.
 #[test]
@@ -280,14 +281,11 @@ fn a_hangup_to_the_recorders_group_leaves_the_engine_to_the_recorder() {
 #[test]
 fn a_killed_recorder_still_ends_the_engine() {
     let (mut host, engine) = Host::start("kill");
-    let clock = SystemClock::start().unwrap();
     kill_process(host.pid(), Signal::KILL).unwrap();
-    let killed = clock.now();
-    assert!(!host.exits().success());
+    // Counted from the kill: the engine's stdin closes as the host dies.
     assert!(
         wait_until(SHUTDOWN_GRACE, || !alive(engine)),
         "the engine outlived its recorder"
     );
-    let took = clock.now().checked_duration_since(killed).unwrap();
-    assert!(took < SHUTDOWN_GRACE, "{took:?}");
+    assert!(!host.exits().success());
 }
