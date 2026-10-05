@@ -40,8 +40,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use nota_core::SessionId;
 
@@ -103,7 +102,7 @@ impl<S: Fs> SessionDir<S> {
             session: self.clone(),
             held: Arc::new(Held {
                 _guard: guard,
-                using: AtomicU8::new(0),
+                using: Mutex::new(Using::default()),
             }),
         })
     }
@@ -140,16 +139,15 @@ impl<S: Fs> SessionLock<S> {
     /// drops; refused, with the use in the way, if it's in use for anything
     /// `what` excludes (see [`Use`]).
     pub(crate) fn begin(&self, what: Use) -> Result<InUse<S::Lock>, Use> {
-        let bit = what.bit();
-        self.held
-            .using
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |now| {
-                (now & what.excludes() == 0).then_some(now | bit)
-            })
-            .map_err(|now| Use::in_the_way(now & what.excludes()))?;
+        let mut using = self.held.using();
+        if let Some(busy) = using.in_the_way_of(what) {
+            return Err(busy);
+        }
+        *using.flag(what) = true;
+        drop(using);
         Ok(InUse {
             held: Arc::clone(&self.held),
-            bit,
+            what,
         })
     }
 }
@@ -158,7 +156,45 @@ impl<S: Fs> SessionLock<S> {
 #[derive(Debug)]
 struct Held<L> {
     _guard: L,
-    using: AtomicU8,
+    using: Mutex<Using>,
+}
+
+impl<L> Held<L> {
+    /// Nothing panics while holding it, so a poisoned state is still
+    /// consistent.
+    fn using(&self) -> MutexGuard<'_, Using> {
+        self.using.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// Which uses are under way.
+#[derive(Debug, Default)]
+struct Using {
+    recording: bool,
+    publishing: bool,
+    salvaging: bool,
+}
+
+impl Using {
+    fn flag(&mut self, what: Use) -> &mut bool {
+        match what {
+            Use::Recording => &mut self.recording,
+            Use::Publishing => &mut self.publishing,
+            Use::Salvaging => &mut self.salvaging,
+        }
+    }
+
+    /// A use under way that `what` can't run alongside, if any.
+    fn in_the_way_of(&self, what: Use) -> Option<Use> {
+        if self.salvaging {
+            return Some(Use::Salvaging);
+        }
+        match what {
+            Use::Recording | Use::Salvaging if self.recording => Some(Use::Recording),
+            Use::Publishing | Use::Salvaging if self.publishing => Some(Use::Publishing),
+            _ => None,
+        }
+    }
 }
 
 /// What a session's owner is doing with it. Each excludes another of its
@@ -175,47 +211,17 @@ pub enum Use {
     Salvaging,
 }
 
-impl Use {
-    const fn bit(self) -> u8 {
-        match self {
-            Self::Recording => 1,
-            Self::Publishing => 2,
-            Self::Salvaging => 4,
-        }
-    }
-
-    /// The uses this one can't run alongside, as bits.
-    const fn excludes(self) -> u8 {
-        match self {
-            Self::Recording => Self::Recording.bit() | Self::Salvaging.bit(),
-            Self::Publishing => Self::Publishing.bit() | Self::Salvaging.bit(),
-            Self::Salvaging => 7,
-        }
-    }
-
-    /// One of the uses in `bits`, which isn't empty.
-    const fn in_the_way(bits: u8) -> Self {
-        if bits & 4 != 0 {
-            Self::Salvaging
-        } else if bits & 1 != 0 {
-            Self::Recording
-        } else {
-            Self::Publishing
-        }
-    }
-}
-
 /// The session in use for one thing, until dropped. Holds the lock too, so
 /// the session stays owned while it's in use.
 #[derive(Debug)]
 pub(crate) struct InUse<L> {
     held: Arc<Held<L>>,
-    bit: u8,
+    what: Use,
 }
 
 impl<L> Drop for InUse<L> {
     fn drop(&mut self) {
-        self.held.using.fetch_and(!self.bit, Ordering::AcqRel);
+        *self.held.using().flag(self.what) = false;
     }
 }
 
