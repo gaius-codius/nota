@@ -4,7 +4,8 @@
 //! Usage: `nota-fake-engine MODE [--every N] [--after K] [--delay-ms D] [--poison V] [--on-poison exit|hang]`
 //!
 //! `D` (`--delay-ms`, default 0) is how long every answer takes: a slow but
-//! working engine. With `--poison V`, any mode exits 101 on receiving audio
+//! working engine. `--hello-delay-ms L` (default 0) is how long it takes to
+//! say hello, as loading models does. With `--poison V`, any mode exits 101 on receiving audio
 //! that holds the sample value `V`, as an engine might abort on some input;
 //! with `--on-poison hang` it goes silent instead.
 //!
@@ -84,6 +85,7 @@ struct Args {
     every: u64,
     after: u64,
     delay_ms: u64,
+    hello_delay_ms: u64,
     poison: Option<i16>,
     /// Whether poison hangs the engine rather than killing it.
     poison_hangs: bool,
@@ -98,6 +100,7 @@ impl Args {
             every: 1,
             after: 0,
             delay_ms: 0,
+            hello_delay_ms: 0,
             poison: None,
             poison_hangs: false,
         };
@@ -120,6 +123,7 @@ impl Args {
                 "--every" if value > 0 => parsed.every = value,
                 "--after" => parsed.after = value,
                 "--delay-ms" => parsed.delay_ms = value,
+                "--hello-delay-ms" => parsed.hello_delay_ms = value,
                 _ => return None,
             }
         }
@@ -167,6 +171,9 @@ impl<W: Write> Engine<W> {
     }
 
     fn hello(&mut self) -> io::Result<()> {
+        if self.args.hello_delay_ms > 0 {
+            slow_down(self.args.hello_delay_ms);
+        }
         let version = match self.args.mode {
             Mode::NoHello => return Ok(()),
             Mode::WrongVersion => ProtocolVersion::new(ProtocolVersion::CURRENT.get() + 1),
@@ -342,6 +349,7 @@ mod tests {
                 every: 1,
                 after: 0,
                 delay_ms: 0,
+                hello_delay_ms: 0,
                 poison: None,
                 poison_hangs: false,
             })
@@ -365,6 +373,7 @@ mod tests {
                 every: 2,
                 after: 3,
                 delay_ms: 5,
+                hello_delay_ms: 0,
                 poison: Some(-7),
                 poison_hangs: true,
             })

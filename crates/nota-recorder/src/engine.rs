@@ -33,8 +33,8 @@ use std::fmt;
 use std::io::{self, BufReader, BufWriter, Read};
 use std::path::PathBuf;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
-use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -79,10 +79,10 @@ pub struct EngineConfig {
     pub idle_flush: Duration,
     /// The most unconfirmed audio kept per track. While the engine is
     /// down, older audio is dropped from the live view (it's still in the
-    /// recording) and reported as [`EngineEvent::Skipped`]. A running
-    /// engine that falls further behind than this is restarted, and the
-    /// oldest audio dropped down to half of it, so the live view catches
-    /// up.
+    /// recording) and reported as [`EngineEvent::Skipped`]. A new engine
+    /// is given at most half of it, the oldest dropped likewise, so it has
+    /// room to catch up; one that still falls further behind than this is
+    /// restarted.
     pub max_unconfirmed: SampleCount,
 }
 
@@ -582,9 +582,6 @@ impl Supervisor {
                 .get(&track)
                 .is_some_and(|replay| replay.unconfirmed() > keep.get());
             if behind {
-                // Dropping to half leaves the next engine room to catch up,
-                // rather than falling behind again at once.
-                self.trim(track, SampleCount::new(keep.get() / 2));
                 self.fail(OfflineReason::Behind);
             }
             return;
@@ -663,6 +660,14 @@ impl Supervisor {
             }
             other => other,
         };
+        // A new engine gets at most half the limit, so it has room to catch
+        // up rather than falling behind on the next audio however long the
+        // outage was.
+        let half = SampleCount::new(self.config.max_unconfirmed.get() / 2);
+        let tracks: Vec<TrackId> = self.tracks.keys().copied().collect();
+        for track in tracks {
+            self.trim(track, half);
+        }
         self.send_unsent();
     }
 
@@ -840,16 +845,38 @@ fn kill(mut process: Child) -> Option<ExitStatus> {
     if let Ok(Some(status)) = process.try_wait() {
         return Some(status);
     }
-    within(REAP_WAIT, move || process.wait().ok()).flatten()
+    let shared = Arc::new(Mutex::new(Some(process)));
+    let reaper = Arc::clone(&shared);
+    match within(REAP_WAIT, move || reap(&reaper)) {
+        Ok(status) => status,
+        Err(Late::TooLong) => None,
+        // No thread to leave it to: wait here rather than leave it
+        // unreaped.
+        Err(Late::NoThread) => reap(&shared),
+    }
+}
+
+/// Waits for the engine in `slot`, if it's still there.
+fn reap(slot: &Mutex<Option<Child>>) -> Option<ExitStatus> {
+    let taken = slot.lock().unwrap_or_else(PoisonError::into_inner).take();
+    taken.and_then(|mut process| process.wait().ok())
+}
+
+/// Why [`within`] has no result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Late {
+    /// The work took longer than allowed; it carries on regardless.
+    TooLong,
+    /// No thread could be started, so the work never ran.
+    NoThread,
 }
 
 /// Runs `work` on a thread of its own and waits up to `limit` for its
-/// result; `None` if it takes longer (it carries on regardless) or the
-/// thread can't be started.
+/// result.
 fn within<T: Send + 'static>(
     limit: Duration,
     work: impl FnOnce() -> T + Send + 'static,
-) -> Option<T> {
+) -> Result<T, Late> {
     let (tx, rx) = mpsc::sync_channel(1);
     thread::Builder::new()
         .name("nota-engine-reaper".into())
@@ -857,8 +884,8 @@ fn within<T: Send + 'static>(
             // Nobody may be waiting any more; that's fine.
             let _ = tx.send(work());
         })
-        .ok()?;
-    rx.recv_timeout(limit).ok()
+        .map_err(|_| Late::NoThread)?;
+    rx.recv_timeout(limit).map_err(|_| Late::TooLong)
 }
 
 fn start_child(
@@ -1039,12 +1066,17 @@ mod tests {
 
     #[test]
     fn work_that_takes_too_long_is_left_behind() {
-        assert_eq!(within(Duration::from_secs(5), || 7), Some(7));
+        assert_eq!(within(Duration::from_secs(5), || 7), Ok(7));
         // A wait stuck forever, as on an engine stuck in the kernel.
         let (keep, stuck) = mpsc::channel::<()>();
         let took = within(Duration::from_millis(50), move || stuck.recv().is_ok());
-        assert_eq!(took, None);
+        assert_eq!(took, Err(Late::TooLong));
         drop(keep);
+    }
+
+    #[test]
+    fn an_engine_already_taken_is_not_waited_for() {
+        assert_eq!(reap(&Mutex::new(None)), None);
     }
 
     #[test]

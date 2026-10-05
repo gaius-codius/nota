@@ -99,6 +99,14 @@ impl Events {
     }
 
     fn confirmed_to(&mut self, end: u64, within: Duration) {
+        // Seen already, while pausing.
+        let seen = self
+            .seen
+            .iter()
+            .any(|(_, e)| matches!(e, EngineEvent::Confirmed { up_to, .. } if up_to.get() >= end));
+        if seen {
+            return;
+        }
         self.until(
             within,
             |e| matches!(e, EngineEvent::Confirmed { up_to, .. } if up_to.get() >= end),
@@ -138,6 +146,17 @@ impl Events {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Waits `time`, keeping the events that come meanwhile.
+    fn pause(&mut self, time: Duration) {
+        let deadline = self.clock.now().checked_add(time).unwrap();
+        while let Some(left) = deadline.checked_duration_since(self.clock.now()) {
+            match self.rx.recv_timeout(left) {
+                Ok(event) => self.seen.push((self.clock.now(), event)),
+                Err(_) => break,
+            }
+        }
     }
 
     /// The ranges reported skipped, as `(start, end)`.
@@ -306,6 +325,8 @@ fn a_hung_engine_is_killed_and_restarted() {
     assert_eq!(events.offline(Duration::from_secs(10)), OfflineReason::Hung);
     assert_eq!(events.offline(Duration::from_secs(10)), OfflineReason::Hung);
     assert_eq!(events.offline(Duration::from_secs(10)), OfflineReason::Hung);
+    // A skip would come with the fourth failure; the fifth is 500 ms off.
+    events.pause(Duration::from_millis(200));
     assert!(
         !events
             .seen
@@ -676,6 +697,39 @@ fn an_engine_that_falls_too_far_behind_is_restarted() {
     assert!(!events.skipped().is_empty());
     // Nothing more than the limit was ever held: every gap is accounted
     // for, and no text is repeated.
+    events.assert_tiles_with_skips(30 * CHUNK);
+}
+
+/// A new engine starts with room to catch up: audio that piled up to the
+/// limit while it loaded doesn't put it behind on the next chunk, which
+/// would restart it before it could confirm anything, every time.
+#[test]
+fn an_engine_that_loads_slowly_is_not_taken_for_behind() {
+    // Loading takes 1 s, in which 10 chunks arrive: more than the limit.
+    // Like the real engine it confirms only every few chunks, and decoding
+    // takes a while (though it's twice as fast as real time), so the next
+    // chunk always arrives before a new engine's first confirmation.
+    let mut config = fake(&[
+        "echo",
+        "--every",
+        "3",
+        "--delay-ms",
+        "150",
+        "--hello-delay-ms",
+        "1000",
+    ]);
+    config.max_unconfirmed = SampleCount::new(8 * CHUNK);
+    let (mut supervisor, mut events) = start(config);
+    // Audio in real time, 100 ms a chunk, for 3 s.
+    for k in 0..30 {
+        send(&mut supervisor, k..k + 1);
+        events.pause(Duration::from_millis(100));
+    }
+    supervisor.flush(TRACK);
+    events.confirmed_to(30 * CHUNK, Duration::from_secs(10));
+    assert!(events.offline_reasons().is_empty(), "{:#?}", events.seen);
+    // What piled up past half the limit was dropped; the rest is text.
+    assert!(!events.skipped().is_empty());
     events.assert_tiles_with_skips(30 * CHUNK);
 }
 
