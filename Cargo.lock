@@ -1613,7 +1613,9 @@ dependencies = [
  "nota-recorder",
  "nota-store",
  "proptest",
+ "rustix",
  "sha2",
+ "signal-hook",
  "thread-priority",
 ]
 

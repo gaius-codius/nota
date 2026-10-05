@@ -23,6 +23,10 @@ required-features = ["fake-engine"]
 name = "supervisor"
 required-features = ["fake-engine"]
 
+[[test]]
+name = "hangup"
+required-features = ["fake-engine"]
+
 [dependencies]
 crc32fast.workspace = true
 flacenc.workspace = true
@@ -45,6 +49,12 @@ claxon.workspace = true
 nota-recorder = { path = ".", features = ["fake-engine"] }
 nota-core = { path = "../nota-core", features = ["fake-clock"] }
 proptest.workspace = true
+
+# The hangup test: a recorder in a process group of its own that catches
+# SIGHUP as `nota record` does, and signals to send it.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+rustix = { workspace = true, features = ["process"] }
+signal-hook.workspace = true
 
 [lints]
 workspace = true

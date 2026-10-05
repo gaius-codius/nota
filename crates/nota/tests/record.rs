@@ -1,8 +1,13 @@
 //! `nota record` end to end, on a pseudo-terminal, recording a synthetic
 //! tone on both tracks (`--tone yes`, built only for tests): stopping from
 //! the keyboard asks first; SIGHUP and SIGTERM stop it with every track's
-//! audio published; the terminal is restored however it ends; and a
-//! recording killed outright is salvaged at the next start.
+//! audio published; the terminal is restored however it ends; a recording
+//! killed outright is salvaged at the next start; and the engine child
+//! sits outside the recorder's process group, so the terminal's hangup
+//! leaves it to the recorder, yet it ends when the recorder is killed. The
+//! engine's tests skip (and say so on stderr) without the test models, and
+//! fail instead when `NOTA_REQUIRE_TEST_MODELS=1`, as in CI; see
+//! `scripts/fetch-test-models.sh`.
 
 // Test code throughout: clippy allows unwraps and panics in it. Recording
 // works on Linux only for now.
@@ -11,6 +16,7 @@
 
 use std::io::{Read, Write};
 use std::os::fd::OwnedFd;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,7 +32,7 @@ use nota_recorder::session::SessionDir;
 use nota_store::Store;
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::fs::{Mode, OFlags};
-use rustix::process::{Pid, Signal, kill_process};
+use rustix::process::{Pid, Signal, kill_process, kill_process_group};
 use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
 use rustix::termios::{LocalModes, Winsize, tcgetattr, tcsetwinsize};
 
@@ -121,11 +127,19 @@ impl Running {
         Self::start_with(data, &[])
     }
 
+    fn start_with(data: &Path, extra: &[&str]) -> Self {
+        Self::start_as(data, extra, false)
+    }
+
+    /// Starts `nota record`; with `own_group`, in a process group of its
+    /// own, as a terminal's job is, so the test can signal the group.
+    /// Otherwise it stays in the test's group, so it goes with the test if
+    /// the test is killed.
     #[expect(
         clippy::disallowed_methods,
         reason = "opening the pseudo-terminal's other end"
     )]
-    fn start_with(data: &Path, extra: &[&str]) -> Self {
+    fn start_as(data: &Path, extra: &[&str], own_group: bool) -> Self {
         let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).unwrap();
         grantpt(&master).unwrap();
         unlockpt(&master).unwrap();
@@ -146,16 +160,19 @@ impl Running {
             },
         )
         .unwrap();
-        let child = Command::new(env!("CARGO_BIN_EXE_nota"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_nota"));
+        command
             .args(["record", "--tone", "yes", "--title", "Workshop", "--data"])
             .arg(data)
             .args(extra)
             .stdin(Stdio::from(slave.try_clone().unwrap()))
             .stdout(Stdio::from(slave.try_clone().unwrap()))
             .stderr(Stdio::from(slave.try_clone().unwrap()))
-            .env_remove("NO_COLOR")
-            .spawn()
-            .unwrap();
+            .env_remove("NO_COLOR");
+        if own_group {
+            command.process_group(0);
+        }
+        let child = command.spawn().unwrap();
         let master = std::fs::File::from(master);
         let output = Arc::new(Mutex::new(Vec::new()));
         let mut copy = master.try_clone().unwrap();
@@ -226,6 +243,15 @@ impl Running {
     fn signal(&self, signal: Signal) {
         let pid = Pid::from_child(&self.child);
         kill_process(pid, signal).unwrap();
+    }
+
+    /// Sends `signal` to the process group, as a closing terminal does.
+    fn signal_group(&self, signal: Signal) {
+        kill_process_group(Pid::from_child(&self.child), signal).unwrap();
+    }
+
+    fn pid(&self) -> u32 {
+        self.child.id()
     }
 
     fn exits(&mut self) -> Option<ExitStatus> {
@@ -453,4 +479,139 @@ fn a_stream_that_cant_start_leaves_the_other_recording() {
     let said = visible(&nota.output.lock().unwrap());
     assert!(said.contains("not recording device missing"), "{said}");
     assert_saved(&tmp.0, 1, &[1], 1_450);
+}
+
+/// The test models' directory, or `None` (said on stderr) if they're
+/// absent and not required.
+fn test_models() -> Option<PathBuf> {
+    let root = std::env::var_os("NOTA_TEST_MODELS")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/nota/test-models"))
+        })
+        .unwrap_or_default();
+    let present = root
+        .join("parakeet-tdt-0.6b-v3-int8/encoder.int8.onnx")
+        .is_file()
+        && root.join("silero_vad_v6.onnx").is_file();
+    if !present {
+        assert!(
+            std::env::var_os("NOTA_REQUIRE_TEST_MODELS").is_none_or(|v| v != "1"),
+            "NOTA_REQUIRE_TEST_MODELS=1 but no test models in {} (run scripts/fetch-test-models.sh)",
+            root.display()
+        );
+        let _ = writeln!(
+            std::io::stderr(),
+            "skipped: no test models in {} (run scripts/fetch-test-models.sh)",
+            root.display()
+        );
+    }
+    present.then_some(root)
+}
+
+/// Fields of `/proc/<pid>/stat` after the command's name: state, parent,
+/// process group, and so on; `None` once it's gone.
+fn stat(pid: u32) -> Option<Vec<String>> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, fields) = stat.rsplit_once(") ")?;
+    Some(fields.split(' ').map(str::to_owned).collect())
+}
+
+/// Whether `pid` is running (not gone, and not a zombie).
+fn alive(pid: u32) -> bool {
+    stat(pid).is_some_and(|f| f[0] != "Z")
+}
+
+fn process_group(pid: u32) -> u32 {
+    stat(pid).unwrap()[2].parse().unwrap()
+}
+
+/// The engine children `nota` (process `parent`) is running now, leaving
+/// out any that have exited and are still to be reaped.
+fn engines_of(parent: u32) -> Vec<u32> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse().ok()) else {
+            continue;
+        };
+        let child = stat(pid).is_some_and(|f| f[0] != "Z" && f[1] == parent.to_string());
+        let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+        if child && cmdline.windows(11).any(|w| w == b"engine\0asr\0") {
+            found.push(pid);
+        }
+    }
+    found
+}
+
+/// `nota record` with the engine, recording; returns it and the engine's
+/// process id.
+fn recording_with_the_engine(data: &Path, models: &Path) -> (Running, u32) {
+    let parakeet = models.join("parakeet-tdt-0.6b-v3-int8");
+    let vad = models.join("silero_vad_v6.onnx");
+    let nota = Running::start_as(
+        data,
+        &[
+            "--parakeet",
+            parakeet.to_str().unwrap(),
+            "--vad",
+            vad.to_str().unwrap(),
+        ],
+        true,
+    );
+    assert!(nota.shows_after(0, "s stop"), "{}", nota.output());
+    pause(Duration::from_millis(1_500));
+    // One engine, still the first: nothing has restarted it.
+    let engines = engines_of(nota.pid());
+    assert_eq!(engines.len(), 1, "{engines:?}");
+    (nota, engines[0])
+}
+
+/// Acceptance (GAI-202), end to end: the engine runs in a process group of
+/// its own, so the hangup a closing terminal sends nota's group doesn't
+/// reach it or restart it, and nota still stops with everything saved. (A
+/// tone has no words, so the text reaching the end is shown by the
+/// recorder's `hangup` test.)
+#[test]
+fn a_hangup_to_the_group_leaves_the_engine_to_nota() {
+    let Some(models) = test_models() else {
+        return;
+    };
+    let tmp = TestDir::new("group-hup");
+    let (mut nota, engine) = recording_with_the_engine(&tmp.0, &models);
+    assert_eq!(process_group(nota.pid()), nota.pid());
+    assert_eq!(process_group(engine), engine);
+    nota.signal_group(Signal::HUP);
+    // While nota stops, the engine it had is the only one: none restarted.
+    let mut others = Vec::new();
+    let stopped = wait_until(Duration::from_secs(20), || {
+        others.extend(engines_of(nota.pid()).into_iter().filter(|&p| p != engine));
+        nota.child.try_wait().unwrap().is_some()
+    });
+    assert!(stopped, "nota didn't stop");
+    assert!(others.is_empty(), "the engine was restarted: {others:?}");
+    let status = nota.exits().expect("nota didn't stop");
+    assert!(status.success(), "{status:?}: {}", nota.output());
+    assert!(nota.terminal_restored());
+    assert!(!alive(engine), "nota left its engine running");
+    assert_saved(&tmp.0, 1, &[0, 1], 1_450);
+}
+
+/// Acceptance (GAI-202), end to end: nota killed outright still takes the
+/// engine with it, since its stdin closes. (The supervisor's own test holds
+/// it to the shutdown grace; the real engine may still be loading its
+/// models here, so this allows for that.)
+#[test]
+fn a_killed_nota_takes_its_engine_with_it() {
+    let Some(models) = test_models() else {
+        return;
+    };
+    let tmp = TestDir::new("engine-killed");
+    let (mut nota, engine) = recording_with_the_engine(&tmp.0, &models);
+    nota.signal(Signal::KILL);
+    assert!(nota.exits().is_some());
+    assert!(
+        wait_until(Duration::from_secs(20), || !alive(engine)),
+        "the engine outlived nota"
+    );
 }
