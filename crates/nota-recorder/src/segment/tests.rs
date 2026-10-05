@@ -1014,12 +1014,12 @@ fn a_journal_sync_with_frames_to_cover(how: Recording) -> usize {
     let (clean, _) = clean_run(how);
     let ops = clean.ops();
     // Where in the log a journal is fsync'd with frames written since its
-    // last fsync.
+    // last fsync. A journal's first write is its header.
     let mut unsynced: BTreeMap<&Path, bool> = BTreeMap::new();
     let mut syncs = BTreeSet::new();
     for (i, op) in ops.iter().enumerate() {
         match op {
-            Op::Write { path, len } if is_journal(path) && *len != HEADER_LEN => {
+            Op::Write { path, .. } if is_journal(path) && !is_header(&ops[..i], path) => {
                 unsynced.insert(path, true);
             }
             Op::Sync(path) if is_journal(path) => {
@@ -1059,14 +1059,28 @@ fn replacement_synced_past_replay(after: &[Op]) -> bool {
         return false;
     }
     let mut frames = 0;
-    after.iter().any(|op| match op {
-        Op::Write { path, len } if path == replacement && *len != HEADER_LEN => {
+    after.iter().enumerate().any(|(i, op)| match op {
+        Op::Write { path, .. } if path == replacement && !is_header(&after[..i], path) => {
             frames += 1;
             false
         }
         Op::Sync(path) => path == replacement && frames >= 2,
         _ => false,
     })
+}
+
+/// Whether a write to the journal at `path` after the operations `before`
+/// is its header: the first write since the journal was created.
+fn is_header(before: &[Op], path: &Path) -> bool {
+    before
+        .iter()
+        .rev()
+        .find_map(|op| match op {
+            Op::Create(p) if p == path => Some(true),
+            Op::Write { path: p, .. } if p == path => Some(false),
+            _ => None,
+        })
+        .unwrap_or(false)
 }
 
 /// The audio a test marks the older copy of an overlap with: never what was
@@ -1155,7 +1169,7 @@ fn marking_the_older_copy_shows_which_journal_was_published() {
     let disk = fs.crash(CrashOutcome::KeepAll);
     let (marked, frames) = mark_older_copies(&disk);
     assert!(frames > 0, "nothing overlapped");
-    // Only those frames changed: no newer journal covers the rest.
+    // Only that journal changed: no newer journal covers the others.
     let before = observe(&disk);
     let after = observe(&marked);
     assert_eq!(
@@ -1175,6 +1189,23 @@ fn marking_the_older_copy_shows_which_journal_was_published() {
     salvage_crashed_everywhere(&marked, &promised);
 }
 
+/// Every sample a row or a valid journal frame held before salvage is in a
+/// row after it: salvage publishes all that survived the crash, not only
+/// what the recording promised was durable.
+fn check_all_published(got: &Recovered) -> Result<(), String> {
+    let before = row_samples(&got.before)?.union(&journal_samples(&got.before)?);
+    let after = row_samples(got.after.as_ref().map_err(Clone::clone)?)?;
+    for (track, from, to) in before.ranges() {
+        if let Some(s) = after.first_missing(track, from, to) {
+            return Err(format!(
+                "track {} sample {s} survived the crash but wasn't published",
+                track.get()
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn a_failed_journal_fsync_then_a_crash_anywhere_publishes_the_newer_copy_once() {
     // A journal fsync fails mid-window: the journal breaks, and its
@@ -1183,9 +1214,9 @@ fn a_failed_journal_fsync_then_a_crash_anywhere_publishes_the_newer_copy_once() 
     // may still survive a crash, written back before the error. Crash at
     // every operation, under every standard outcome, with live publishing
     // and without: salvage must publish each sample once, keep everything
-    // durable, and take the overlap from the newer journal. The older copy
-    // is marked with different audio before salvage, so a row holding it
-    // shows as the wrong audio.
+    // durable (and everything else that survived), and take the overlap
+    // from the newer journal. The older copy is marked with different audio
+    // before salvage, so a row holding it shows as the wrong audio.
     for publish in [false, true] {
         let base = Recording {
             steps: 6,
@@ -1210,7 +1241,10 @@ fn a_failed_journal_fsync_then_a_crash_anywhere_publishes_the_newer_copy_once() 
                     again: salvage_fake(&marked),
                 }
             },
-            check,
+            |case: &CrashCase, promised: &Promised, got: &Recovered| {
+                check(case, promised, got)?;
+                check_all_published(got)
+            },
         )
         .dirs([session(), db()])
         .run()
