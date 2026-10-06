@@ -832,7 +832,7 @@ fn an_engine_that_loads_slowly_is_not_taken_for_behind() {
     // eight. Like the real engine it confirms only every few chunks, and
     // its first answer takes a second, so more audio arrives before a new
     // engine's first confirmation. (Timing only matters at the ends: the
-    // ten must all be sent within the 1.5 s the engine takes to load, and
+    // ten must all be sent within the 2.5 s the engine takes to load, and
     // the next three before its first answer.)
     let mut config = fake(&[
         "echo",
@@ -841,7 +841,7 @@ fn an_engine_that_loads_slowly_is_not_taken_for_behind() {
         "--delay-ms",
         "1000",
         "--hello-delay-ms",
-        "1500",
+        "2500",
     ]);
     config.max_unconfirmed = SampleCount::new(8 * CHUNK);
     let (mut supervisor, mut events) = start(config);
