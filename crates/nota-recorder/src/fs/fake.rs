@@ -226,19 +226,19 @@ impl Stall {
     }
 
     /// Waits up to `within` until at least `n` fsyncs are held back, or the
-    /// stall is released; returns whether they are.
+    /// stall is released; returns whether they were held in time.
     pub fn wait_for_held(&self, n: usize, within: std::time::Duration) -> bool {
         let state = self
             .gate
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let (state, _) = self
+        let (state, waited) = self
             .gate
             .changed
             .wait_timeout_while(state, within, |(released, held)| *held < n && !*released)
             .unwrap_or_else(PoisonError::into_inner);
-        state.1 >= n
+        !waited.timed_out() && state.1 >= n
     }
 
     /// How many fsyncs are held back now.

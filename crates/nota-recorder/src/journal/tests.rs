@@ -1407,3 +1407,15 @@ fn an_inline_sync_or_finish_waits_its_turn_behind_a_started_one() {
     let _held = j.begin_sync().unwrap();
     assert!(matches!(j.finish(), Err(JournalError::SyncPending)));
 }
+
+#[test]
+fn append_syncs_once_the_interval_has_passed_though_the_budget_has_room() {
+    let fs = FakeFs::with_dirs([session()]);
+    let (clock, dyn_clock) = fake_clock();
+    let mut j = create(&fs, 0, MIC, 0, dyn_clock).unwrap();
+    j.append(&samples(MIC, 0, 10)).unwrap();
+    assert_eq!(durable_at(&j), 0);
+    clock.advance(SYNC_INTERVAL);
+    j.append(&samples(MIC, 10, 10)).unwrap();
+    assert_eq!(durable_at(&j), 20);
+}

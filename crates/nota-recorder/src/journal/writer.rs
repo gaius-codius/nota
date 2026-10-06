@@ -160,12 +160,10 @@ pub struct JournalWriter<F: FsFile> {
     /// Where the last sync started covers to: anything captured past it
     /// still needs one.
     requested: SampleIndex,
-    /// The numbers of the syncs started and not yet completed, oldest
-    /// first.
-    in_flight: VecDeque<u64>,
-    /// Durable positions proved by syncs that completed while an older
-    /// one hadn't: they count only once every older one has succeeded.
-    early: Vec<(u64, DurablePosition)>,
+    /// The syncs started and not yet counted, oldest first, each with the
+    /// durable position it proved once it succeeded: that counts only once
+    /// every older one has succeeded too.
+    in_flight: VecDeque<(u64, Option<DurablePosition>)>,
     /// The number the next sync started gets.
     next_sync: u64,
     /// Unique to this writer in the process, so a result from another
@@ -294,7 +292,6 @@ impl<F: FsFile> JournalWriter<F> {
             last_sync,
             requested: first,
             in_flight: VecDeque::new(),
-            early: Vec::new(),
             next_sync: 0,
             token: NEXT_TOKEN.fetch_add(1, Ordering::Relaxed),
             broken: false,
@@ -488,7 +485,7 @@ impl<F: FsFile> JournalWriter<F> {
         }
         let seq = self.next_sync;
         self.next_sync += 1;
-        self.in_flight.push_back(seq);
+        self.in_flight.push_back((seq, None));
         self.requested = self.captured;
         self.last_sync = self.clock.now();
         Ok(PendingSync {
@@ -510,35 +507,30 @@ impl<F: FsFile> JournalWriter<F> {
     ///
     /// [`JournalError::Io`] if the fsync failed, which breaks the journal.
     pub fn complete_sync(&mut self, done: SyncDone) -> Result<(), JournalError> {
-        let Some(at) = self
+        let Some(slot) = self
             .in_flight
-            .iter()
-            .position(|&seq| seq == done.seq)
+            .iter_mut()
+            .find(|(seq, _)| *seq == done.seq)
             .filter(|_| done.token == self.token && done.journal == self.header.id())
         else {
             return Ok(());
         };
-        self.in_flight.remove(at);
         match done.result {
             // After a failed fsync nothing unsynced then can be trusted,
-            // even if a later fsync succeeds.
+            // even if a later fsync succeeds. A break clears every sync
+            // still out, so nothing counts after it.
             Err(e) => {
                 self.broken = true;
                 self.in_flight.clear();
-                self.early.clear();
                 Err(JournalError::Io(e))
             }
-            Ok(_) if self.broken => Ok(()),
             Ok(durable) => {
-                self.early.push((done.seq, durable));
-                let oldest = self.in_flight.front().copied().unwrap_or(u64::MAX);
-                let (proved, waiting): (Vec<_>, Vec<_>) =
-                    self.early.drain(..).partition(|&(seq, _)| seq < oldest);
-                self.early = waiting;
-                for (_, durable) in proved {
-                    if durable.end > self.durable.end {
-                        self.durable = durable;
-                    }
+                slot.1 = Some(durable);
+                // Syncs started in order cover ever more, so each counted
+                // moves durable on.
+                while let Some(&(_, Some(durable))) = self.in_flight.front() {
+                    self.durable = durable;
+                    self.in_flight.pop_front();
                 }
                 Ok(())
             }
