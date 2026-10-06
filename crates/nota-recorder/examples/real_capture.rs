@@ -3,8 +3,9 @@
 //! and `scripts/real-engine-kill.sh`.
 //!
 //! - `write <dir> <log> <ref> --source NODE --seconds S --segment-seconds K
-//!   [--stop-after N]` captures one track from the `PipeWire` node `NODE` at
-//!   16 kHz for `S` seconds into `<dir>/session`, with the store at
+//!   [--tracks T] [--stop-after N]` captures `T` tracks (default 1), each
+//!   its own stream from the `PipeWire` node `NODE`, at 16 kHz for `S`
+//!   seconds into `<dir>/session`, with the store at
 //!   `<dir>/nota.db`, publishing each finished journal on a publisher
 //!   thread as it goes, in `K`-second segment windows. Every recorder
 //!   operation that changes the disk, and every row commit, is counted.
@@ -17,15 +18,15 @@
 //!   rereads a journal at each fsync. Each journal write is copied to
 //!   `<ref>` (unsynced), the audio
 //!   the recorder captured, to check the recovered audio against. `<log>`
-//!   gets one fsync'd line for each journal fsync (when, captured, durable
-//!   before and after, delivered), each committed row, each overrun or
-//!   journal failure, and the stop. Keep `<log>` and `<ref>` off the filesystem
+//!   gets one fsync'd line for each journal fsync (its track, when,
+//!   captured, durable before and after, delivered), each committed row,
+//!   each overrun or journal failure, and the stop. Keep `<log>` and `<ref>` off the filesystem
 //!   under test.
 //! - `salvage <dir> --segment-seconds K [--stop-after N]` runs salvage,
 //!   counting its operations and stopping after the Nth as `write` does.
 //! - `check <dir> <log> <ref> --segment-seconds K [--recovered yes]` checks
 //!   the bounded-loss
-//!   criteria: before salvage, every row has its file and every sample
+//!   criteria, for each track: before salvage, every row has its file and every sample
 //!   fsync'd is in a row or a journal; after it, only segments and rows are
 //!   left, in order and without gaps from the first sample, holding at least
 //!   everything fsync'd and exactly the audio captured, and every committed
@@ -55,8 +56,12 @@
 //! delivered is the bounded-loss rule, 1.1 s; behind the journal, durable
 //! must stay within the sync interval. The lag is also measured against
 //! the wall clock since the first frame was written (which slightly
-//! undercounts the queue at the start), as a cross-check. Fsync times only
-//! mean something on a real disk: tmpfs makes every fsync free.
+//! undercounts the queue at the start), as a cross-check. Each is measured
+//! per track, just before each of its fsyncs completes, when it's greatest;
+//! with several tracks, the result shows the worst track, and each track's
+//! lag behind the audio delivered, overall and at the fsyncs that end a
+//! journal at a window boundary. Fsync times only mean something on a real
+//! disk: tmpfs makes every fsync free.
 
 #[cfg(target_os = "linux")]
 fn main() -> std::process::ExitCode {
@@ -68,7 +73,7 @@ fn main() {}
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::error::Error;
     use std::ffi::OsString;
     use std::fmt::{self, Write as _};
@@ -86,20 +91,21 @@ mod linux {
         TrackId, TrackTimeline,
     };
     use nota_recorder::capture::{
-        CaptureNotice, CaptureReceiver, PipeWireBackend, Progress, RecordError, RecorderEvent,
-        Source, record_track, start,
+        Capture, CaptureBackend, CaptureNotice, CaptureReceiver, PipeWireBackend, Progress,
+        RecordError, RecorderEvent, Source, record_track, record_tracks, start, start_tracks,
     };
     use nota_recorder::engine::{
         EngineCommand, EngineConfig, EngineEvent, EngineStatus, EngineSupervisor,
     };
-    use nota_recorder::fs::{Fs, FsFile, StdFile, StdFs, StdLock, Synced};
+    use nota_recorder::fs::{FileSyncer, Fs, FsFile, StdFile, StdFs, StdLock, StdSyncer, Synced};
     use nota_recorder::journal::{JournalId, SYNC_INTERVAL, read_journal};
     use nota_recorder::segment::{
         DurableSegment, Published, SegmentLength, SegmentStore, publish_journals, salvage,
         segment_file_name,
     };
     use nota_recorder::session::{
-        FinishedJournal, MARKS_FILE_NAME, SessionDir, SessionStore, SessionWriter,
+        FinishedJournal, MARKS_FILE_NAME, SessionDir, SessionLock, SessionStore, SessionWriter,
+        Syncing,
     };
     use nota_store::{SegmentRow, Store};
     use sha2::{Digest, Sha256};
@@ -107,6 +113,7 @@ mod linux {
     type Res<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
     const SESSION: SessionId = SessionId::new(1);
+    /// The engine's track.
     const TRACK: TrackId = TrackId::new(0);
     const RATE: SampleRate = SampleRate::SPEECH;
     /// The bounded-loss rule, durable behind the audio delivered: 1.1 s at
@@ -266,16 +273,21 @@ mod linux {
 
     /// The log `write` keeps, one fsync'd line each:
     ///
-    ///   start <first sample>
-    ///   first <t ns> <end of the first frame>
-    ///   sync <t ns> <captured> <durable before> <durable after> <delivered>
-    ///   row <epoch> <start> <end> <sha256 hex>
+    ///   start <track> <first sample>
+    ///   first <track> <t ns> <end of the first frame>
+    ///   sync <track> <t ns> <captured> <durable before> <durable after> <delivered> <began ns>
+    ///   row <track> <epoch> <start> <end> <sha256 hex>
     ///   overrun <t ns>
     ///   journal-failed <t ns>
     ///   slow <kind> <class> <t ns> <took ns>
     ///   late <op> <kind> <class>
-    ///   stop <op> <kind> <class> <t ns> <captured> <durable> <delivered>
-    ///   end <t ns> <captured> <durable> <delivered>
+    ///   stop <track> <op> <kind> <class> <t ns> <captured> <durable> <delivered>
+    ///   end <track> <t ns> <captured> <durable> <delivered>
+    ///
+    /// A sync's captured is the journal's end when its fsync started: what
+    /// the fsync covers. Its time and delivered are read when it completed,
+    /// and `began` when it started.
+    /// `stop` and `end` have a line for each track.
     #[derive(Debug)]
     struct Log(StdFile);
 
@@ -303,12 +315,13 @@ mod linux {
         marker: Option<PathBuf>,
         /// The bytes written to each journal still on disk.
         journals: Mutex<BTreeMap<PathBuf, Vec<u8>>>,
-        /// The end of the audio fsync'd.
-        durable: AtomicU64,
-        /// The track's progress, for the audio delivered, once capture has
+        /// The end of the audio fsync'd, per track.
+        durable: Mutex<BTreeMap<TrackId, u64>>,
+        /// Each track's progress, for the audio delivered, once capture has
         /// started.
-        progress: OnceLock<Progress>,
-        anchored: AtomicBool,
+        progress: OnceLock<BTreeMap<TrackId, Progress>>,
+        /// The tracks whose first frame has been logged.
+        anchored: Mutex<BTreeSet<TrackId>>,
         log: Option<Mutex<Log>>,
         /// Where each journal's writes are copied, and the copies.
         reference: Option<(PathBuf, Mutex<BTreeMap<PathBuf, StdFile>>)>,
@@ -340,9 +353,9 @@ mod linux {
                 stop_after: None,
                 marker: None,
                 journals: Mutex::new(BTreeMap::new()),
-                durable: AtomicU64::new(0),
+                durable: Mutex::new(BTreeMap::new()),
                 progress: OnceLock::new(),
-                anchored: AtomicBool::new(false),
+                anchored: Mutex::new(BTreeSet::new()),
                 log: None,
                 reference: None,
                 frames: None,
@@ -362,36 +375,65 @@ mod linux {
             self.log(&format!("{event} {t}"))
         }
 
-        /// The end of the valid frames written to `path`.
-        fn written_end(&self, path: &Path) -> io::Result<Option<u64>> {
+        /// The track of the journal at `path`, and the end of its valid
+        /// frames.
+        fn written_end(&self, path: &Path) -> io::Result<Option<(TrackId, u64)>> {
             let journals = self.journals.lock().map_err(poisoned)?;
-            Ok(journals
-                .get(path)
-                .and_then(|bytes| read_journal(bytes).range())
-                .map(|r| r.end().get()))
+            Ok(journals.get(path).and_then(|bytes| {
+                let read = read_journal(bytes);
+                Some((read.header()?.track(), read.range()?.end().get()))
+            }))
         }
 
-        /// The end of the audio the server delivered: captured, and queued
-        /// for the recorder. At least `captured`, which the tap may see
-        /// before the recorder's progress does.
-        fn delivered(&self, captured: u64) -> u64 {
+        /// The tracks being recorded, once capture has started.
+        fn tracks(&self) -> Vec<TrackId> {
             self.progress
                 .get()
+                .map(|p| p.keys().copied().collect())
+                .unwrap_or_default()
+        }
+
+        /// The end of `track`'s audio the server delivered: captured, and
+        /// queued for the recorder. At least `captured`, which the tap may
+        /// see before the recorder's progress does.
+        fn delivered(&self, track: TrackId, captured: u64) -> u64 {
+            self.progress
+                .get()
+                .and_then(|p| p.get(&track))
                 .map_or(0, |p| p.now().delivered.get())
                 .max(captured)
         }
 
-        /// The end of everything written: the furthest valid frame in any
-        /// journal still on disk, or what's durable.
-        fn captured(&self) -> io::Result<u64> {
+        /// The end of `track`'s audio fsync'd.
+        fn durable(&self, track: TrackId) -> io::Result<u64> {
+            let durable = self.durable.lock().map_err(poisoned)?;
+            Ok(durable.get(&track).copied().unwrap_or(0))
+        }
+
+        /// The end of everything written to `track`: the furthest valid
+        /// frame in any of its journals still on disk, or what's durable.
+        fn captured(&self, track: TrackId) -> io::Result<u64> {
             let journals = self.journals.lock().map_err(poisoned)?;
             let written = journals
                 .values()
-                .filter_map(|bytes| read_journal(bytes).range())
+                .map(|bytes| read_journal(bytes))
+                .filter(|read| read.header().is_some_and(|h| h.track() == track))
+                .filter_map(|read| read.range())
                 .map(|r| r.end().get())
                 .max()
                 .unwrap_or(0);
-            Ok(written.max(self.durable.load(Ordering::SeqCst)))
+            drop(journals);
+            Ok(written.max(self.durable(track)?))
+        }
+
+        /// `track`'s captured, durable and delivered ends, for a log line.
+        fn positions(&self, track: TrackId) -> io::Result<String> {
+            let captured = self.captured(track)?;
+            Ok(format!(
+                "{captured} {} {}",
+                self.durable(track)?,
+                self.delivered(track, captured)
+            ))
         }
     }
 
@@ -438,14 +480,15 @@ mod linux {
 
         fn stop(&self, op: usize, kind: &str, path: &Path) -> io::Result<()> {
             let t = nanos(self.0.clock.now());
-            let captured = self.0.captured()?;
-            let line = format!(
-                "stop {op} {kind} {} {t} {captured} {} {}",
-                class(path),
-                self.0.durable.load(Ordering::SeqCst),
-                self.0.delivered(captured)
-            );
-            self.0.log(&line)?;
+            for track in self.0.tracks() {
+                let line = format!(
+                    "stop {} {op} {kind} {} {t} {}",
+                    track.get(),
+                    class(path),
+                    self.0.positions(track)?
+                );
+                self.0.log(&line)?;
+            }
             if let Some(marker) = &self.0.marker {
                 let mut file = StdFs.create(marker)?;
                 file.sync()?;
@@ -483,32 +526,40 @@ mod linux {
                     .send(Feed::Bytes(path.to_owned(), bytes.to_vec()));
             }
             if self.0.log.is_some()
-                && !self.0.anchored.load(Ordering::SeqCst)
-                && let Some(end) = self.0.written_end(path)?
+                && let Some((track, end)) = self.0.written_end(path)?
+                && self.0.anchored.lock().map_err(poisoned)?.insert(track)
             {
-                self.0.anchored.store(true, Ordering::SeqCst);
                 let t = nanos(self.0.clock.now());
-                self.0.log(&format!("first {t} {end}"))?;
+                self.0.log(&format!("first {} {t} {end}", track.get()))?;
             }
             Ok(())
         }
 
-        /// Notes a journal fsync: everything written to it is durable, and
-        /// a journal is only written up to its sync before the next starts,
-        /// so its end is also everything captured.
-        fn synced(&self, path: &Path) -> io::Result<()> {
+        /// Notes a completed journal fsync that started at `began`, when the
+        /// journal ended at `covered` (from [`Tap::written_end`], read
+        /// before the fsync): everything written to it by then is durable.
+        fn synced(&self, covered: Option<(TrackId, u64)>, began: SessionTime) -> io::Result<()> {
             if self.0.log.is_none() {
                 return Ok(());
             }
-            let Some(end) = self.0.written_end(path)? else {
+            let Some((track, end)) = covered else {
                 return Ok(());
             };
-            let before = self.0.durable.fetch_max(end, Ordering::SeqCst);
+            let before = {
+                let mut durable = self.0.durable.lock().map_err(poisoned)?;
+                let at = durable.entry(track).or_insert(0);
+                let before = *at;
+                *at = before.max(end);
+                before
+            };
             if end > before {
                 let t = nanos(self.0.clock.now());
-                let delivered = self.0.delivered(end);
-                self.0
-                    .log(&format!("sync {t} {end} {before} {end} {delivered}"))?;
+                let delivered = self.0.delivered(track, end);
+                self.0.log(&format!(
+                    "sync {} {t} {end} {before} {end} {delivered} {}",
+                    track.get(),
+                    nanos(began)
+                ))?;
             }
             Ok(())
         }
@@ -579,7 +630,44 @@ mod linux {
         }
     }
 
+    /// Fsyncs a [`TapFile`] from the writer's sync threads, tapped as its
+    /// own fsyncs are.
+    #[derive(Debug)]
+    struct TapSyncer {
+        syncer: StdSyncer,
+        path: PathBuf,
+        fs: TapFs,
+    }
+
+    impl FileSyncer for TapSyncer {
+        fn sync(&self) -> io::Result<Synced> {
+            tapped_sync(&self.fs, &self.path, || self.syncer.sync())
+        }
+    }
+
+    /// Runs `sync`, an fsync of the file at `path`, counted, and logged as
+    /// a journal's fsync of what was written to it before it started.
+    fn tapped_sync(
+        fs: &TapFs,
+        path: &Path,
+        sync: impl FnOnce() -> io::Result<Synced>,
+    ) -> io::Result<Synced> {
+        fs.counted("fsync", path, || {
+            let covered = if is_journal(path) {
+                fs.0.written_end(path)?
+            } else {
+                None
+            };
+            let began = fs.0.clock.now();
+            let synced = sync()?;
+            fs.synced(covered, began)?;
+            Ok(synced)
+        })
+    }
+
     impl FsFile for TapFile {
+        type Syncer = TapSyncer;
+
         fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
             let (file, path, fs) = (&mut self.file, &self.path, &self.fs);
             fs.counted("write", path, || {
@@ -592,13 +680,15 @@ mod linux {
         }
 
         fn sync(&mut self) -> io::Result<Synced> {
-            let (file, path, fs) = (&mut self.file, &self.path, &self.fs);
-            fs.counted("fsync", path, || {
-                let synced = file.sync()?;
-                if is_journal(path) {
-                    fs.synced(path)?;
-                }
-                Ok(synced)
+            let file = &mut self.file;
+            tapped_sync(&self.fs, &self.path, || file.sync())
+        }
+
+        fn syncer(&self) -> io::Result<TapSyncer> {
+            Ok(TapSyncer {
+                syncer: self.file.syncer()?,
+                path: self.path.clone(),
+                fs: self.fs.clone(),
             })
         }
     }
@@ -653,6 +743,11 @@ mod linux {
         let source = Source::Device(args.flag("source")?.to_owned());
         let seconds = args.number("seconds")?;
         let length = args.length()?;
+        let count = u32::try_from(args.optional("tracks")?.unwrap_or(1))?;
+        if count == 0 {
+            return Err("--tracks must be at least 1".into());
+        }
+        let tracks: Vec<TrackId> = (0..count).map(TrackId::new).collect();
         let stop_after = args
             .optional("stop-after")?
             .map(usize::try_from)
@@ -681,46 +776,35 @@ mod linux {
         let fs = TapFs(Arc::new(tap));
 
         let session = SessionDir::new(SESSION, fs.clone(), &session_path).lock()?;
-        let mut writer = SessionWriter::open(&session, RATE, length, Arc::clone(&clock))?;
-        writer.start_track(TRACK, EpochId::new(0), SampleIndex::ZERO)?;
-        fs.0.log("start 0")?;
+        // Fsyncs on a thread per track, as `nota record` runs them.
+        let mut writer = SessionWriter::open(&session, RATE, length, Arc::clone(&clock))?
+            .with_syncing(Syncing::Threads);
+        for &track in &tracks {
+            writer.start_track(track, EpochId::new(0), SampleIndex::ZERO)?;
+            fs.0.log(&format!("start {} 0", track.get()))?;
+        }
 
         // Publishing runs on its own thread, so the recorder never waits
         // for an encode.
         let (to_publish, finished) = mpsc::channel::<Vec<FinishedJournal>>();
         let publisher = {
-            let fs = fs.clone();
-            let session = session.clone();
-            thread::spawn(move || -> Res<()> {
-                let mut store = store;
-                let counted = CountedStore {
-                    store: &mut store,
-                    fs: fs.clone(),
-                };
-                let mut bound = SessionStore::new(session, counted);
-                for batch in finished {
-                    let done = publish_journals(&mut bound, length, &batch)?;
-                    for row in done.segments() {
-                        fs.0.log(&row_line(row))?;
-                    }
-                }
-                Ok(())
-            })
+            let (fs, session) = (fs.clone(), session.clone());
+            thread::spawn(move || publish(&fs, session, store, length, &finished))
         };
 
-        let (capture, events) = start(&PipeWireBackend, TRACK, &source, RATE, &clock)?;
-        if let Some(progress) = events.progress(TRACK) {
-            let _ = fs.0.progress.set(progress);
-        }
-        let mut timeline = TrackTimeline::new(TRACK);
-        timeline.open_epoch(clock.now(), SampleIndex::ZERO, RATE)?;
+        let (captures, timelines, events) = start_capture(&tracks, &source, &clock)?;
+        let progress = tracks
+            .iter()
+            .filter_map(|&t| events.progress(t).map(|p| (t, p)))
+            .collect();
+        let _ = fs.0.progress.set(progress);
         let recorder = {
             let to_publish = to_publish.clone();
             let fs = fs.clone();
-            thread::spawn(move || record(writer, timeline, &events, &to_publish, &fs))
+            thread::spawn(move || record(writer, timelines, &events, &to_publish, &fs))
         };
         wait(Duration::from_secs(seconds));
-        drop(capture);
+        drop(captures);
         let (writer, notices, failures, result, unlogged) = recorder
             .join()
             .map_err(|_| "the recorder thread panicked")?;
@@ -738,12 +822,13 @@ mod linux {
             .join()
             .map_err(|_| "the publisher thread panicked")??;
         let t = nanos(clock.now());
-        let captured = fs.0.captured()?;
-        fs.0.log(&format!(
-            "end {t} {captured} {} {}",
-            fs.0.durable.load(Ordering::SeqCst),
-            fs.0.delivered(captured)
-        ))?;
+        for &track in &tracks {
+            fs.0.log(&format!(
+                "end {} {t} {}",
+                track.get(),
+                fs.0.positions(track)?
+            ))?;
+        }
         let overruns = notices
             .iter()
             .filter(|n| **n == CaptureNotice::Overrun)
@@ -756,6 +841,57 @@ mod linux {
         Ok(failures == 0)
     }
 
+    /// Publishes each batch of finished journals as it comes, logging the
+    /// rows committed.
+    fn publish(
+        fs: &TapFs,
+        session: SessionLock<TapFs>,
+        mut store: Store,
+        length: SegmentLength,
+        finished: &mpsc::Receiver<Vec<FinishedJournal>>,
+    ) -> Res<()> {
+        let counted = CountedStore {
+            store: &mut store,
+            fs: fs.clone(),
+        };
+        let mut bound = SessionStore::new(session, counted);
+        for batch in finished {
+            let done = publish_journals(&mut bound, length, &batch)?;
+            for row in done.segments() {
+                fs.0.log(&row_line(row))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The streams `write` records, one per track from `source`, each with
+    /// its timeline's first epoch opened as it started.
+    fn start_capture(
+        tracks: &[TrackId],
+        source: &Source,
+        clock: &Arc<dyn Clock>,
+    ) -> Res<(
+        Vec<Capture<PipeWireStream>>,
+        Vec<TrackTimeline>,
+        CaptureReceiver,
+    )> {
+        let sources: Vec<(TrackId, Source)> = tracks.iter().map(|&t| (t, source.clone())).collect();
+        let (started, events) = start_tracks(&PipeWireBackend, &sources, RATE, clock);
+        let mut captures = Vec::new();
+        let mut timelines = Vec::new();
+        for capture in started {
+            let capture = capture?;
+            let mut timeline = TrackTimeline::new(capture.track());
+            timeline.open_epoch(capture.started_at(), SampleIndex::ZERO, RATE)?;
+            timelines.push(timeline);
+            captures.push(capture);
+        }
+        Ok((captures, timelines, events))
+    }
+
+    /// A running `PipeWire` stream.
+    type PipeWireStream = <PipeWireBackend as CaptureBackend>::Stream;
+
     /// What the recorder thread hands back: the writer, the stream's
     /// notices, the journal failures, how recording ended, and the first
     /// failure to log a lost-audio event.
@@ -767,11 +903,12 @@ mod linux {
         Option<io::Error>,
     );
 
-    /// Records until the capture stops, handing finished journals to the
-    /// publisher and logging audio lost before the journal.
+    /// Records until every capture stops, handing finished journals to the
+    /// publisher and logging audio lost before the journal. A track's
+    /// stream failing fails the run, once the others have stopped.
     fn record(
         mut writer: SessionWriter<TapFs>,
-        mut timeline: TrackTimeline,
+        mut timelines: Vec<TrackTimeline>,
         events: &CaptureReceiver,
         to_publish: &mpsc::Sender<Vec<FinishedJournal>>,
         fs: &TapFs,
@@ -779,7 +916,8 @@ mod linux {
         let mut notices = Vec::new();
         let mut failures = 0_usize;
         let mut unlogged = None;
-        let result = record_track(&mut writer, &mut timeline, events, &mut |e| {
+        let mut failed = None;
+        let result = record_tracks(&mut writer, &mut timelines, events, &mut |_, e| {
             let logged = match e {
                 RecorderEvent::Finished(j) => {
                     let _ = to_publish.send(j);
@@ -790,12 +928,14 @@ mod linux {
                     fs.0.note("journal-failed")
                 }
                 // Rows carry their epoch; the checks compare them as is.
-                // The audio is checked from the journals; one track's
-                // stream failing ends `record_track` with that error.
+                // The audio is checked from the journals.
                 RecorderEvent::Epoch(_)
                 | RecorderEvent::EpochRefused(_)
-                | RecorderEvent::Audio(_)
-                | RecorderEvent::CaptureFailed(_) => Ok(()),
+                | RecorderEvent::Audio(_) => Ok(()),
+                RecorderEvent::CaptureFailed(e) => {
+                    failed.get_or_insert(e);
+                    Ok(())
+                }
                 RecorderEvent::Capture(n) => {
                     let logged = if n == CaptureNotice::Overrun {
                         fs.0.note("overrun")
@@ -810,13 +950,15 @@ mod linux {
                 unlogged.get_or_insert(e);
             }
         });
+        let result = result.and(failed.map_or(Ok(()), |e| Err(RecordError::Capture(e))));
         (writer, notices, failures, result, unlogged)
     }
 
     fn row_line(row: &SegmentRow) -> String {
         let r = row.range();
         format!(
-            "row {} {} {} {}",
+            "row {} {} {} {} {}",
+            row.track().get(),
             row.epoch().get(),
             r.start().get(),
             r.end().get(),
@@ -861,8 +1003,9 @@ mod linux {
     // -----------------------------------------------------------------------
     // check
 
+    /// What the log says about one track.
     #[derive(Debug, Default)]
-    struct Promised {
+    struct TrackLog {
         durable: u64,
         /// (epoch, start, end, sha256 hex)
         rows: Vec<(u64, u64, u64, String)>,
@@ -870,30 +1013,34 @@ mod linux {
         first: Option<(u64, u64)>,
         /// (t, captured, durable before, delivered)
         syncs: Vec<(u64, u64, u64, u64)>,
-        /// (op, kind, class, t, captured, durable, delivered)
-        stop: Option<(u64, String, String, u64, u64, u64, u64)>,
-        /// (t, captured, durable, delivered)
+        /// (t, captured, durable, delivered), at the crash point
+        stop: Option<(u64, u64, u64, u64)>,
+        /// (t, captured, durable, delivered), at the end of a run that
+        /// wasn't crashed
         end: Option<(u64, u64, u64, u64)>,
+    }
+
+    impl TrackLog {
+        /// What was captured and delivered when the run ended: at the
+        /// crash point, or the end.
+        fn at_end(&self) -> (u64, u64) {
+            self.stop
+                .or(self.end)
+                .map_or((0, 0), |(_, captured, _, delivered)| (captured, delivered))
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct Promised {
+        /// Each track recorded, from its `start` line.
+        tracks: BTreeMap<u32, TrackLog>,
+        /// The crash point, as `op:kind:class`.
+        stop: Option<String>,
         overruns: usize,
         journal_failures: usize,
         /// (kind:class, t, took ns), slowest first after reading.
         slow: Vec<(String, u64, u64)>,
         late: usize,
-    }
-
-    impl Promised {
-        /// Where the run ended (the crash point, or `none`), with what was
-        /// captured and delivered then.
-        fn at_end(&self) -> (String, u64, u64) {
-            if let Some((op, kind, class, _, captured, _, delivered)) = &self.stop {
-                (format!("{op}:{kind}:{class}"), *captured, *delivered)
-            } else {
-                let (captured, delivered) = self
-                    .end
-                    .map_or((0, 0), |(_, captured, _, delivered)| (captured, delivered));
-                ("none".to_owned(), captured, delivered)
-            }
-        }
     }
 
     fn read_log(path: &Path) -> Res<Promised> {
@@ -912,46 +1059,67 @@ mod linux {
             let s = |i: usize| -> Res<String> {
                 Ok((*w.get(i).ok_or_else(|| format!("short line {line:?}"))?).to_owned())
             };
+            let id = || -> Res<u32> { Ok(u32::try_from(n(1)?)?) };
             match w.first().copied() {
-                Some("start") => {}
-                Some("first") => p.first = Some((n(1)?, n(2)?)),
-                Some("sync") => {
-                    p.syncs.push((n(1)?, n(2)?, n(3)?, n(5)?));
-                    p.durable = p.durable.max(n(4)?);
+                Some("start") => {
+                    p.tracks.entry(id()?).or_default();
                 }
-                Some("row") => p.rows.push((n(1)?, n(2)?, n(3)?, s(4)?)),
+                Some("first") => p.tracks.entry(id()?).or_default().first = Some((n(2)?, n(3)?)),
+                Some("sync") => {
+                    let track = p.tracks.entry(id()?).or_default();
+                    track.syncs.push((n(2)?, n(3)?, n(4)?, n(6)?));
+                    track.durable = track.durable.max(n(5)?);
+                }
+                Some("row") => {
+                    let row = (n(2)?, n(3)?, n(4)?, s(5)?);
+                    p.tracks.entry(id()?).or_default().rows.push(row);
+                }
+                Some("stop") => {
+                    p.tracks.entry(id()?).or_default().stop = Some((n(5)?, n(6)?, n(7)?, n(8)?));
+                    p.stop = Some(format!("{}:{}:{}", s(2)?, s(3)?, s(4)?));
+                }
+                Some("end") => {
+                    let track = p.tracks.entry(id()?).or_default();
+                    track.end = Some((n(2)?, n(3)?, n(4)?, n(5)?));
+                    track.durable = track.durable.max(n(4)?);
+                }
                 Some("overrun") => p.overruns += 1,
                 Some("slow") => p.slow.push((format!("{}:{}", s(1)?, s(2)?), n(3)?, n(4)?)),
                 Some("late") => p.late += 1,
                 Some("journal-failed") => p.journal_failures += 1,
-                Some("stop") => {
-                    p.stop = Some((n(1)?, s(2)?, s(3)?, n(4)?, n(5)?, n(6)?, n(7)?));
-                }
-                Some("end") => {
-                    p.end = Some((n(1)?, n(2)?, n(3)?, n(4)?));
-                    p.durable = p.durable.max(n(3)?);
-                }
                 _ => return Err(format!("bad log line {line:?}").into()),
             }
         }
         Ok(p)
     }
 
-    /// The audio the recorder wrote, from the copies of its journals: one
-    /// run from sample 0.
-    fn reference(dir: &Path) -> Res<Vec<i16>> {
-        let mut frames = BTreeMap::new();
+    /// The audio the recorder wrote to each track, from the copies of its
+    /// journals: one run from sample 0 each.
+    fn reference(dir: &Path) -> Res<BTreeMap<u32, Vec<i16>>> {
+        let mut frames: BTreeMap<u32, BTreeMap<u64, Vec<i16>>> = BTreeMap::new();
         for path in StdFs.list(dir)? {
-            for frame in read_journal(&StdFs.read(&path)?).frames() {
-                frames.insert(frame.range().start().get(), frame.samples().to_vec());
+            let bytes = StdFs.read(&path)?;
+            let read = read_journal(&bytes);
+            let Some(header) = read.header() else {
+                continue;
+            };
+            let track = frames.entry(header.track().get()).or_default();
+            for frame in read.frames() {
+                track.insert(frame.range().start().get(), frame.samples().to_vec());
             }
         }
-        let mut audio = Vec::new();
-        for (start, samples) in frames {
-            if start != audio.len() as u64 {
-                return Err(format!("the reference has a gap at {}", audio.len()).into());
+        let mut audio = BTreeMap::new();
+        for (track, frames) in frames {
+            let mut run = Vec::new();
+            for (start, samples) in frames {
+                if start != run.len() as u64 {
+                    return Err(
+                        format!("track {track}'s reference has a gap at {}", run.len()).into(),
+                    );
+                }
+                run.extend(samples);
             }
-            audio.extend(samples);
+            audio.insert(track, run);
         }
         Ok(audio)
     }
@@ -1007,11 +1175,16 @@ mod linux {
         audio.get(usize::try_from(start).ok()?..usize::try_from(end).ok()?)
     }
 
-    /// Every row has its file, holding exactly the row's audio as
-    /// captured; returns the rows' ranges, sorted.
-    fn row_ranges(session: &Path, seen: &Observed, audio: &[i16]) -> Res<Vec<(u64, u64)>> {
+    /// Every one of `track`'s rows has its file, holding exactly the row's
+    /// audio as captured; returns the rows' ranges, sorted.
+    fn row_ranges(
+        session: &Path,
+        seen: &Observed,
+        track: u32,
+        audio: &[i16],
+    ) -> Res<Vec<(u64, u64)>> {
         let mut ranges = Vec::new();
-        for row in &seen.rows {
+        for row in seen.rows.iter().filter(|r| r.track().get() == track) {
             let path = session.join(segment_file_name(row.track(), row.range()));
             let Some(bytes) = seen.files.get(&path) else {
                 return Err(format!("a row without its file: {row:?}").into());
@@ -1032,15 +1205,19 @@ mod linux {
         Ok(ranges)
     }
 
-    /// The ranges valid journal frames hold, each checked against the
-    /// audio captured.
-    fn journal_ranges(seen: &Observed, audio: &[i16]) -> Res<Vec<(u64, u64)>> {
+    /// The ranges valid frames of `track`'s journals hold, each checked
+    /// against the audio captured.
+    fn journal_ranges(seen: &Observed, track: u32, audio: &[i16]) -> Res<Vec<(u64, u64)>> {
         let mut ranges = Vec::new();
         for (path, bytes) in &seen.files {
             if !is_journal(path) {
                 continue;
             }
-            for frame in read_journal(bytes).frames() {
+            let read = read_journal(bytes);
+            if read.header().is_none_or(|h| h.track().get() != track) {
+                continue;
+            }
+            for frame in read.frames() {
                 let (start, end) = (frame.range().start().get(), frame.range().end().get());
                 if Some(frame.samples()) != slice(audio, start, end) {
                     return Err(format!("{} misread at {start}..{end}", path.display()).into());
@@ -1100,27 +1277,44 @@ mod linux {
         }
     }
 
+    /// One track's audio from the reference, or none.
+    fn audio_of(audio: &BTreeMap<u32, Vec<i16>>, track: u32) -> &[i16] {
+        audio.get(&track).map_or(&[], Vec::as_slice)
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the checks run in order, before salvage, after it and after a second"
+    )]
     fn run_checks(
         session: &Path,
         store: &mut Store,
         length: SegmentLength,
         promised: &Promised,
-        audio: &[i16],
+        audio: &BTreeMap<u32, Vec<i16>>,
         recovered: bool,
     ) -> Res<String> {
+        if promised.tracks.is_empty() {
+            return Err("the log names no track".into());
+        }
         // Before salvage: rows only with their files, and nothing fsync'd
         // missing from the rows and journals together.
         let before = Observed::read(session, store)?;
-        let in_rows = row_ranges(session, &before, audio).map_err(|e| format!("before: {e}"))?;
-        let mut held = journal_ranges(&before, audio).map_err(|e| format!("before: {e}"))?;
-        held.extend(&in_rows);
-        let on_disk = covered_from_zero(held);
-        if on_disk < promised.durable {
-            return Err(format!(
-                "before: samples {on_disk}..{} were fsync'd but are gone",
-                promised.durable
-            )
-            .into());
+        for (&track, log) in &promised.tracks {
+            let audio = audio_of(audio, track);
+            let in_rows = row_ranges(session, &before, track, audio)
+                .map_err(|e| format!("before: track {track}: {e}"))?;
+            let mut held = journal_ranges(&before, track, audio)
+                .map_err(|e| format!("before: track {track}: {e}"))?;
+            held.extend(&in_rows);
+            let on_disk = covered_from_zero(held);
+            if on_disk < log.durable {
+                return Err(format!(
+                    "before: track {track}: samples {on_disk}..{} were fsync'd but are gone",
+                    log.durable
+                )
+                .into());
+            }
         }
 
         let ours = SessionDir::new(SESSION, StdFs, session).lock()?;
@@ -1136,14 +1330,19 @@ mod linux {
         {
             return Err(format!("salvage left {}", left.display()).into());
         }
-        let ranges = row_ranges(session, &after, audio).map_err(|e| format!("after: {e}"))?;
-        let recovered = rows_in_order(&ranges)?;
-        if recovered < promised.durable {
-            return Err(format!(
-                "after: recovered up to {recovered}, but {} was fsync'd",
-                promised.durable
-            )
-            .into());
+        let mut ends = BTreeMap::new();
+        for (&track, log) in &promised.tracks {
+            let ranges = row_ranges(session, &after, track, audio_of(audio, track))
+                .map_err(|e| format!("after: track {track}: {e}"))?;
+            let end = rows_in_order(&ranges).map_err(|e| format!("track {track}: {e}"))?;
+            if end < log.durable {
+                return Err(format!(
+                    "after: track {track}: recovered up to {end}, but {} was fsync'd",
+                    log.durable
+                )
+                .into());
+            }
+            ends.insert(track, end);
         }
         rows_kept(session, promised, &after)?;
 
@@ -1152,22 +1351,54 @@ mod linux {
             return Err("a second salvage changed something".into());
         }
 
-        let lag = Lag::of(promised);
         // The writer's own budget: the sync interval's worth of audio.
         let max_journal_lag = SampleCount::started_within(SYNC_INTERVAL, RATE)
             .ok_or("the sync interval overflows")?
             .get();
-        if lag.max > max_journal_lag || lag.delivered_max > MAX_LAG || lag.wall_max > MAX_LAG {
-            let behind = format!(
-                "durable was {:.0} ms behind the journal (bound {:.0} ms), {:.0} ms behind \
-                 the audio delivered and {:.0} ms behind the wall clock (bound {:.0} ms)",
-                ms(lag.max),
-                ms(max_journal_lag),
+        let mut worst = Lag::default();
+        let mut by_track = Vec::new();
+        let (mut loss, mut loss_delivered, mut beyond) = (0, 0, 0);
+        let mut recovered_min = u64::MAX;
+        let mut durable_min = u64::MAX;
+        for (&track, log) in &promised.tracks {
+            let lag = Lag::of(log, length);
+            if lag.max > max_journal_lag || lag.delivered_max > MAX_LAG || lag.wall_max > MAX_LAG {
+                let behind = format!(
+                    "track {track}: durable was {:.0} ms behind the journal (bound {:.0} ms), \
+                     {:.0} ms behind the audio delivered ({:.0} ms at window rotations; past \
+                     the bound at {} of {} fsyncs) and {:.0} ms behind the wall clock (bound \
+                     {:.0} ms)",
+                    ms(lag.max),
+                    ms(max_journal_lag),
+                    ms(lag.delivered_max),
+                    ms(lag.rotation_max),
+                    lag.over,
+                    lag.points,
+                    ms(lag.wall_max),
+                    ms(MAX_LAG)
+                );
+                return Err((behind + &slow_ops(promised)).into());
+            }
+            // A second or more of silence means nothing was playing: the run
+            // measured nothing.
+            let audio = audio_of(audio, track);
+            let peak = audio.iter().map(|s| s.saturating_abs()).max().unwrap_or(0);
+            if audio.len() >= 16_000 && peak <= MIN_PEAK {
+                return Err(format!("track {track}'s captured audio is silent").into());
+            }
+            let end = ends.get(&track).copied().unwrap_or(0);
+            let (captured, delivered) = log.at_end();
+            loss = loss.max(captured.saturating_sub(end));
+            loss_delivered = loss_delivered.max(delivered.saturating_sub(end));
+            beyond = beyond.max(end.saturating_sub(log.durable));
+            recovered_min = recovered_min.min(end);
+            durable_min = durable_min.min(log.durable);
+            by_track.push(format!(
+                "{track}:{:.1}/{:.1}",
                 ms(lag.delivered_max),
-                ms(lag.wall_max),
-                ms(MAX_LAG)
-            );
-            return Err((behind + &slow_ops(promised)).into());
+                ms(lag.rotation_max)
+            ));
+            worst = worst.max(&lag);
         }
         if promised.overruns > 0 || promised.journal_failures > 0 {
             return Err(format!(
@@ -1176,26 +1407,29 @@ mod linux {
             )
             .into());
         }
-        // A second or more of silence means nothing was playing: the run
-        // measured nothing.
-        let peak = audio.iter().map(|s| s.saturating_abs()).max().unwrap_or(0);
-        if audio.len() >= 16_000 && peak <= MIN_PEAK {
-            return Err("the captured audio is silent".into());
-        }
-        let (stop, captured_at_end, delivered_at_end) = promised.at_end();
+        let peak = audio
+            .values()
+            .flatten()
+            .map(|s| s.saturating_abs())
+            .max()
+            .unwrap_or(0);
+        let syncs: usize = promised.tracks.values().map(|t| t.syncs.len()).sum();
         Ok(format!(
-            "stop={stop} delivered={delivered_at_end} captured={captured_at_end} durable={} \
-             recovered={recovered} loss_ms={:.1} loss_delivered_ms={:.1} beyond_durable_ms={:.1} \
-             lag_max_ms={:.1} delivered_lag_max_ms={:.1} wall_lag_max_ms={:.1} syncs={} rows={} \
-             salvaged={} deleted={} late_ops={} slowest_op={} peak_dbfs={:.1} state={}",
-            promised.durable,
-            ms(captured_at_end.saturating_sub(recovered)),
-            ms(delivered_at_end.saturating_sub(recovered)),
-            ms(recovered.saturating_sub(promised.durable)),
-            ms(lag.max),
-            ms(lag.delivered_max),
-            ms(lag.wall_max),
-            promised.syncs.len(),
+            "stop={} tracks={} durable={durable_min} recovered={recovered_min} loss_ms={:.1} \
+             loss_delivered_ms={:.1} beyond_durable_ms={:.1} lag_max_ms={:.1} \
+             delivered_lag_max_ms={:.1} wall_lag_max_ms={:.1} rotation_lag_max_ms={:.1} \
+             lag_by_track={} syncs={syncs} rows={} salvaged={} deleted={} late_ops={} \
+             slowest_op={} peak_dbfs={:.1} state={}",
+            promised.stop.as_deref().unwrap_or("none"),
+            promised.tracks.len(),
+            ms(loss),
+            ms(loss_delivered),
+            ms(beyond),
+            ms(worst.max),
+            ms(worst.delivered_max),
+            ms(worst.wall_max),
+            ms(worst.rotation_max),
+            by_track.join(","),
             after.rows.len(),
             first.segments().len(),
             first.deleted().len(),
@@ -1213,9 +1447,15 @@ mod linux {
         ))
     }
 
-    /// The operations that took over 100 ms, for a failure message.
+    /// The operations that took over 100 ms, for a failure message, timed
+    /// from the first frame of any track.
     fn slow_ops(p: &Promised) -> String {
-        let t0 = p.first.map_or(0, |(t, _)| t);
+        let t0 = p
+            .tracks
+            .values()
+            .filter_map(|t| t.first.map(|(t, _)| t))
+            .min()
+            .unwrap_or(0);
         p.slow
             .iter()
             .fold(String::new(), |mut out, (what, t, took)| {
@@ -1231,15 +1471,21 @@ mod linux {
 
     /// Every committed row is still there, and every file has its row.
     fn rows_kept(session: &Path, promised: &Promised, after: &Observed) -> Res<()> {
-        for (epoch, start, end, sha) in &promised.rows {
-            let found = after.rows.iter().any(|r| {
-                u64::from(r.epoch().get()) == *epoch
-                    && r.range().start().get() == *start
-                    && r.range().end().get() == *end
-                    && hex(r.sha256().as_bytes()) == *sha
-            });
-            if !found {
-                return Err(format!("a committed row disappeared: {start}..{end}").into());
+        for (&track, log) in &promised.tracks {
+            for (epoch, start, end, sha) in &log.rows {
+                let found = after.rows.iter().any(|r| {
+                    r.track().get() == track
+                        && u64::from(r.epoch().get()) == *epoch
+                        && r.range().start().get() == *start
+                        && r.range().end().get() == *end
+                        && hex(r.sha256().as_bytes()) == *sha
+                });
+                if !found {
+                    return Err(format!(
+                        "a committed row of track {track} disappeared: {start}..{end}"
+                    )
+                    .into());
+                }
             }
         }
         let named: Vec<PathBuf> = after
@@ -1259,35 +1505,52 @@ mod linux {
         Ok(())
     }
 
-    /// How far durable fell behind captured: just before each fsync, and at
-    /// the stop.
-    #[derive(Debug)]
+    /// How far one track's durable fell behind: just before each fsync
+    /// completed, and at the stop.
+    #[derive(Debug, Default, Clone, Copy)]
     struct Lag {
+        /// Behind the journal: what was unsynced when the fsync started.
         max: u64,
         /// Behind the audio delivered, which counts audio queued before the
         /// recorder too.
         delivered_max: u64,
+        /// Behind the audio delivered, at the fsyncs that ended a journal
+        /// at a window boundary.
+        rotation_max: u64,
         /// Behind the wall clock since the first frame.
         wall_max: u64,
+        /// The fsyncs, and the stop, at which durable was more than the
+        /// bounded-loss rule behind the audio delivered.
+        over: usize,
+        /// How many fsyncs, and the stop, were measured.
+        points: usize,
     }
 
     impl Lag {
-        fn of(p: &Promised) -> Self {
-            let mut points: Vec<(u64, u64, u64, u64)> = p.syncs.clone();
-            if let Some((_, _, _, t, captured, durable, delivered)) = &p.stop {
-                points.push((*t, *captured, *durable, *delivered));
+        fn of(log: &TrackLog, length: SegmentLength) -> Self {
+            let mut points: Vec<(u64, u64, u64, u64)> = log.syncs.clone();
+            if let Some(stop) = log.stop {
+                points.push(stop);
             }
+            let window = length.samples().get();
             let max = points
                 .iter()
                 .map(|&(_, captured, durable, _)| captured.saturating_sub(durable))
                 .max()
                 .unwrap_or(0);
-            let delivered_max = points
+            let behind = |&(_, _, durable, delivered): &(u64, u64, u64, u64)| {
+                delivered.saturating_sub(durable)
+            };
+            let delivered_max = points.iter().map(behind).max().unwrap_or(0);
+            let over = points.iter().filter(|p| behind(p) > MAX_LAG).count();
+            let rotation_max = log
+                .syncs
                 .iter()
-                .map(|&(_, _, durable, delivered)| delivered.saturating_sub(durable))
+                .filter(|&&(_, captured, _, _)| captured > 0 && captured % window == 0)
+                .map(behind)
                 .max()
                 .unwrap_or(0);
-            let wall_max = p.first.map_or(0, |(t0, end0)| {
+            let wall_max = log.first.map_or(0, |(t0, end0)| {
                 points
                     .iter()
                     .map(|&(t, _, durable, _)| {
@@ -1301,7 +1564,22 @@ mod linux {
             Self {
                 max,
                 delivered_max,
+                rotation_max,
                 wall_max,
+                over,
+                points: points.len(),
+            }
+        }
+
+        /// The worse of each measure.
+        fn max(self, other: &Self) -> Self {
+            Self {
+                max: self.max.max(other.max),
+                delivered_max: self.delivered_max.max(other.delivered_max),
+                rotation_max: self.rotation_max.max(other.rotation_max),
+                wall_max: self.wall_max.max(other.wall_max),
+                over: self.over + other.over,
+                points: self.points + other.points,
             }
         }
     }
@@ -1440,7 +1718,8 @@ mod linux {
         // Short windows keep each journal small, as the feeder rereads it.
         let length =
             SegmentLength::new(SampleCount::new(10 * u64::from(RATE.hz()))).ok_or("bad length")?;
-        let mut writer = SessionWriter::open(&session, RATE, length, Arc::clone(&clock))?;
+        let mut writer = SessionWriter::open(&session, RATE, length, Arc::clone(&clock))?
+            .with_syncing(Syncing::Threads);
         writer.start_track(TRACK, EpochId::new(0), SampleIndex::ZERO)?;
 
         let sent = Arc::new(AtomicU64::new(0));

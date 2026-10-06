@@ -5,7 +5,9 @@ use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use super::{Fs, FsFile, Synced, is_a_directory, same_directory, valid_dir, valid_path};
+use super::{
+    FileSyncer, Fs, FsFile, Synced, is_a_directory, same_directory, valid_dir, valid_path,
+};
 
 /// The real filesystem.
 #[derive(Debug, Default, Clone, Copy)]
@@ -117,6 +119,8 @@ impl Fs for StdFs {
 }
 
 impl FsFile for StdFile {
+    type Syncer = StdSyncer;
+
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
         self.0.write_all(bytes)
     }
@@ -128,6 +132,28 @@ impl FsFile for StdFile {
     fn sync(&mut self) -> io::Result<Synced> {
         // fsync. On macOS (v2) it doesn't flush the drive's cache; that
         // platform will need F_FULLFSYNC here.
+        self.0.sync_all()?;
+        Ok(Synced::after_fsync())
+    }
+
+    fn syncer(&self) -> io::Result<StdSyncer> {
+        self.0.try_clone().map(StdSyncer)
+    }
+}
+
+/// Fsyncs a [`StdFile`] from another thread, through its own file
+/// descriptor for the same open file.
+#[derive(Debug)]
+pub struct StdSyncer(File);
+
+impl FileSyncer for StdSyncer {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the durable-write layer is the one place that fsyncs, so only it can make a `Synced`"
+    )]
+    fn sync(&self) -> io::Result<Synced> {
+        // fsync flushes the file, whichever descriptor asks: every write
+        // that returned before it, through any of them, is covered.
         self.0.sync_all()?;
         Ok(Synced::after_fsync())
     }
@@ -328,5 +354,20 @@ mod tests {
             StdFs.sync_dir(&file).unwrap_err().kind(),
             io::ErrorKind::NotADirectory
         );
+    }
+
+    #[test]
+    fn a_syncer_fsyncs_the_same_file_from_another_thread() {
+        let dir = TestDir::new("syncer");
+        let path = dir.0.join("journal");
+        let mut file = StdFs.create(&path).unwrap();
+        let syncer = file.syncer().unwrap();
+        file.write_all(b"before").unwrap();
+        std::thread::spawn(move || syncer.sync().map(|_| ()))
+            .join()
+            .unwrap()
+            .unwrap();
+        file.write_all(b" after").unwrap();
+        assert_eq!(StdFs.read(&path).unwrap(), b"before after");
     }
 }

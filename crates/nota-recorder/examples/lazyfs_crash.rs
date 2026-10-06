@@ -4,9 +4,12 @@
 //! - `write <dir> <promises> [--stop-after N]` records two tracks with live
 //!   publishing into `<dir>/session`, with the store at `<dir>/nota.db`.
 //!   Every recorder filesystem operation that changes the disk (create,
-//!   mkdir, write, fsync, rename, directory fsync, remove) is counted. After
-//!   the Nth, it creates `<promises>.stopped` and blocks forever, so the
-//!   script can SIGKILL it at exactly that point. Whenever the recorder
+//!   mkdir, write, fsync, rename, directory fsync, remove) is counted. The
+//!   journals are fsync'd on a thread per track, as `nota record` does it,
+//!   so the count's order can vary a little from run to run. After the
+//!   Nth, it creates `<promises>.stopped` and every thread blocks forever
+//!   before its next operation, so the script can SIGKILL it at that point;
+//!   an operation another thread already had under way may still land. Whenever the recorder
 //!   reports something durable (a track's durable position, committed
 //!   rows), it appends a line to `<promises>` and fsyncs it. Keep
 //!   `<promises>` off the filesystem under test. Without `--stop-after` it
@@ -28,19 +31,19 @@ use std::fmt::Write as _;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 
 use nota_core::{
     Clock, EpochId, FakeClock, SampleCount, SampleIndex, SampleRate, SessionId, SessionTime,
     TrackId,
 };
-use nota_recorder::fs::{Fs, FsFile, StdFile, StdFs, StdLock, Synced};
+use nota_recorder::fs::{FileSyncer, Fs, FsFile, StdFile, StdFs, StdLock, StdSyncer, Synced};
 use nota_recorder::journal::{JournalId, read_journal};
 use nota_recorder::segment::{
     Published, SegmentLength, publish_journals, salvage, segment_file_name,
 };
-use nota_recorder::session::{MARKS_FILE_NAME, SessionDir, SessionStore, SessionWriter};
+use nota_recorder::session::{MARKS_FILE_NAME, SessionDir, SessionStore, SessionWriter, Syncing};
 use nota_store::{SegmentRow, Store};
 use sha2::{Digest, Sha256};
 
@@ -109,6 +112,9 @@ fn main() -> ExitCode {
 struct CountingFs {
     ops: Arc<AtomicUsize>,
     stop_after: Option<usize>,
+    /// Set at the crash point: every thread stops before its next
+    /// operation.
+    halted: Arc<AtomicBool>,
     marker: PathBuf,
 }
 
@@ -118,12 +124,24 @@ struct CountingFile {
     fs: CountingFs,
 }
 
+/// Fsyncs a [`CountingFile`] from a sync thread, counted.
+#[derive(Debug)]
+struct CountingSyncer {
+    syncer: StdSyncer,
+    fs: CountingFs,
+}
+
 impl CountingFs {
-    /// Counts one operation that has just run; at the crash point, marks it
-    /// and never returns.
-    fn counted<T>(&self, result: io::Result<T>) -> io::Result<T> {
+    /// Runs one operation and counts it; at the crash point, marks it and
+    /// never returns. After the crash point, no operation runs.
+    fn counted<T>(&self, op: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+        if self.halted.load(Ordering::SeqCst) {
+            block_forever();
+        }
+        let result = op();
         let done = self.ops.fetch_add(1, Ordering::SeqCst) + 1;
         if self.stop_after == Some(done) {
+            self.halted.store(true, Ordering::SeqCst);
             stop_here(&self.marker)?;
         }
         result
@@ -141,12 +159,16 @@ fn stop_here(marker: &Path) -> io::Result<()> {
     if let Some(dir) = marker.parent() {
         StdFs.sync_dir(dir)?;
     }
+    block_forever();
+    Err(io::Error::other("the crash point returned"))
+}
+
+/// Blocks this thread until the process is killed.
+fn block_forever() {
     let (keep, wait) = mpsc::channel::<()>();
-    // Nothing ever sends, and `keep` lives until after `recv`, so this
-    // blocks until SIGKILL.
+    // Nothing ever sends, and `keep` lives until after `recv`.
     let _ = wait.recv();
     drop(keep);
-    Err(io::Error::other("the crash point returned"))
 }
 
 impl Fs for CountingFs {
@@ -154,7 +176,7 @@ impl Fs for CountingFs {
     type Lock = StdLock;
 
     fn create(&self, path: &Path) -> io::Result<CountingFile> {
-        let file = self.counted(StdFs.create(path))?;
+        let file = self.counted(|| StdFs.create(path))?;
         Ok(CountingFile {
             file,
             fs: self.clone(),
@@ -162,19 +184,19 @@ impl Fs for CountingFs {
     }
 
     fn create_dir(&self, path: &Path) -> io::Result<()> {
-        self.counted(StdFs.create_dir(path))
+        self.counted(|| StdFs.create_dir(path))
     }
 
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
-        self.counted(StdFs.rename(from, to))
+        self.counted(|| StdFs.rename(from, to))
     }
 
     fn sync_dir(&self, dir: &Path) -> io::Result<()> {
-        self.counted(StdFs.sync_dir(dir))
+        self.counted(|| StdFs.sync_dir(dir))
     }
 
     fn remove(&self, path: &Path) -> io::Result<()> {
-        self.counted(StdFs.remove(path))
+        self.counted(|| StdFs.remove(path))
     }
 
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
@@ -191,14 +213,29 @@ impl Fs for CountingFs {
 }
 
 impl FsFile for CountingFile {
+    type Syncer = CountingSyncer;
+
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
-        let result = self.file.write_all(bytes);
-        self.fs.counted(result)
+        let file = &mut self.file;
+        self.fs.counted(|| file.write_all(bytes))
     }
 
     fn sync(&mut self) -> io::Result<Synced> {
-        let result = self.file.sync();
-        self.fs.counted(result)
+        let file = &mut self.file;
+        self.fs.counted(|| file.sync())
+    }
+
+    fn syncer(&self) -> io::Result<CountingSyncer> {
+        Ok(CountingSyncer {
+            syncer: self.file.syncer()?,
+            fs: self.fs.clone(),
+        })
+    }
+}
+
+impl FileSyncer for CountingSyncer {
+    fn sync(&self) -> io::Result<Synced> {
+        self.fs.counted(|| self.syncer.sync())
     }
 }
 
@@ -361,6 +398,7 @@ fn write_command(args: &[String]) -> Res<()> {
     let fs = CountingFs {
         ops: Arc::new(AtomicUsize::new(0)),
         stop_after,
+        halted: Arc::new(AtomicBool::new(false)),
         marker: PathBuf::from(marker),
     };
     record(&fs, &mut store, &session, &mut log)?;
@@ -375,7 +413,8 @@ fn record(fs: &CountingFs, store: &mut Store, session: &Path, log: &mut PromiseL
     let clock = Arc::new(FakeClock::new(SessionTime::ZERO));
     let dyn_clock: Arc<dyn Clock> = Arc::clone(&clock) as Arc<dyn Clock>;
     let session = SessionDir::new(SESSION, fs.clone(), session).lock()?;
-    let mut writer = SessionWriter::open(&session, rate, length, dyn_clock)?;
+    let mut writer =
+        SessionWriter::open(&session, rate, length, dyn_clock)?.with_syncing(Syncing::Threads);
     let mut store = SessionStore::new(session, store);
     for (track, at) in TRACKS {
         writer.start_track(track, EpochId::new(0), SampleIndex::new(at))?;

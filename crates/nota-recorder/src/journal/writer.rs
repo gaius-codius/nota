@@ -1,18 +1,23 @@
 //! Writing the journal: frames appended as audio arrives, fsync'd every
 //! [`SYNC_INTERVAL`].
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::io;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use nota_core::{Clock, SampleCount, SampleIndex, SampleRate, SessionTime, TrackId};
 
 use super::JournalId;
 use super::format::{JournalHeader, MAX_FRAME_SAMPLES, encode_frame, encode_header};
-use crate::fs::{Fs, FsFile, Synced};
+use crate::fs::{FileSyncer, Fs, FsFile, Synced};
+
+/// The next [`JournalWriter`]'s token.
+static NEXT_TOKEN: AtomicU64 = AtomicU64::new(0);
 
 /// How often the journal is fsync'd while audio arrives: at most this long,
 /// or this much audio, goes unsynced.
@@ -89,6 +94,9 @@ pub enum JournalError {
     /// fsync the kernel may have dropped the unsynced data, so retrying
     /// would only hide the loss. Start a new journal.
     Broken,
+    /// A sync [`JournalWriter::begin_sync`] started hasn't completed, so
+    /// one run here couldn't say what's durable. Complete it first.
+    SyncPending,
 }
 
 impl fmt::Display for JournalError {
@@ -97,6 +105,7 @@ impl fmt::Display for JournalError {
             Self::Io(e) => write!(f, "journal write failed: {e}"),
             Self::SampleOverflow => f.write_str("the track ran out of sample numbers"),
             Self::Broken => f.write_str("the journal broke after an earlier failure"),
+            Self::SyncPending => f.write_str("an earlier sync of the journal hasn't completed"),
         }
     }
 }
@@ -114,21 +123,31 @@ impl std::error::Error for JournalError {
 /// [`SYNC_INTERVAL`].
 ///
 /// It keeps two positions: **captured**, the end of what was written, and
-/// **durable**, the end of what an fsync has confirmed. Each
-/// [`Self::append`] syncs when [`SYNC_INTERVAL`] has passed since the last
-/// sync or that much audio is unsynced, so durable stays within
-/// [`SYNC_INTERVAL`] of captured. Call [`Self::sync_if_due`] on a timer too, so audio
-/// that stops arriving still gets synced.
+/// **durable**, the end of what an fsync has confirmed. Never more than
+/// [`SYNC_INTERVAL`]'s worth of audio is captured and not durable (its
+/// sync budget, which salvage relies on).
+///
+/// It can fsync in two ways:
+/// - **Inline:** each [`Self::append`] syncs when [`SYNC_INTERVAL`] has
+///   passed since the last sync or that much audio is unsynced, so durable
+///   stays within [`SYNC_INTERVAL`] of captured. Call [`Self::sync_if_due`]
+///   on a timer too, so audio that stops arriving still gets synced. An
+///   fsync can take a second or more on a busy disk, so the writer then
+///   belongs on its own thread, fed by a channel, never on the audio
+///   callback.
+/// - **On another thread:** [`Self::append_within`] writes only what fits
+///   in the budget and never syncs. When [`Self::sync_due`],
+///   [`Self::begin_sync`] starts one: its [`PendingSync`] runs anywhere,
+///   while appends go on, and its [`SyncDone`] comes back to
+///   [`Self::complete_sync`]. The durable position it proves is where the
+///   journal stood when the fsync was started, never later.
 ///
 /// After any failed write or fsync the writer is broken: every later call
 /// returns [`JournalError::Broken`].
-///
-/// An fsync can take a second or more on a busy disk, and `append` may run
-/// one, so the writer belongs on its own thread, fed by a channel, never on
-/// the audio callback.
 #[derive(Debug)]
-pub struct JournalWriter<F> {
+pub struct JournalWriter<F: FsFile> {
     file: F,
+    syncer: Arc<F::Syncer>,
     path: PathBuf,
     clock: Arc<dyn Clock>,
     header: JournalHeader,
@@ -136,11 +155,90 @@ pub struct JournalWriter<F> {
     start: SampleIndex,
     captured: SampleIndex,
     durable: DurablePosition,
+    /// When the last sync was started.
     last_sync: SessionTime,
-    /// Written since the last sync.
-    dirty: bool,
+    /// Where the last sync started covers to: anything captured past it
+    /// still needs one.
+    requested: SampleIndex,
+    /// The syncs started and not yet counted, oldest first, each with the
+    /// durable position it proved once it succeeded: that counts only once
+    /// every older one has succeeded too.
+    in_flight: VecDeque<(u64, Option<DurablePosition>)>,
+    /// The number the next sync started gets.
+    next_sync: u64,
+    /// Unique to this writer in the process, so a result from another
+    /// writer's sync, even of a journal with the same id in another
+    /// session, is never taken for one of its own.
+    token: u64,
     broken: bool,
     buf: Vec<u8>,
+}
+
+/// An fsync of a journal, started by [`JournalWriter::begin_sync`] and not
+/// yet run. Run it on any thread, while the journal is still appended to,
+/// and hand what it returns to [`JournalWriter::complete_sync`].
+#[derive(Debug)]
+pub struct PendingSync<Y> {
+    syncer: Arc<Y>,
+    header: JournalHeader,
+    /// Captured when it started: everything the fsync will cover.
+    end: SampleIndex,
+    seq: u64,
+    token: u64,
+}
+
+impl<Y: FileSyncer> PendingSync<Y> {
+    /// The journal it syncs.
+    #[must_use]
+    pub const fn journal(&self) -> JournalId {
+        self.header.id()
+    }
+
+    /// Fsyncs the journal: a durable position up to where it stood when
+    /// the sync was started, or why it failed.
+    #[must_use]
+    pub fn run(self) -> SyncDone {
+        let result = self
+            .syncer
+            .sync()
+            .map(|proof| DurablePosition::after(&proof, self.header, self.end));
+        SyncDone {
+            journal: self.header.id(),
+            seq: self.seq,
+            token: self.token,
+            result,
+        }
+    }
+
+    /// What to complete it with if it never runs (its thread has gone):
+    /// a failure, which breaks the journal. Made before it's handed over,
+    /// since running it consumes it.
+    #[must_use]
+    pub fn lost(&self) -> SyncDone {
+        SyncDone {
+            journal: self.header.id(),
+            seq: self.seq,
+            token: self.token,
+            result: Err(io::Error::other("the journal's sync thread stopped")),
+        }
+    }
+}
+
+/// What a [`PendingSync`] did: for [`JournalWriter::complete_sync`].
+#[derive(Debug)]
+pub struct SyncDone {
+    journal: JournalId,
+    seq: u64,
+    token: u64,
+    result: Result<DurablePosition, io::Error>,
+}
+
+impl SyncDone {
+    /// The journal it synced.
+    #[must_use]
+    pub const fn journal(&self) -> JournalId {
+        self.journal
+    }
 }
 
 impl<F: FsFile> JournalWriter<F> {
@@ -169,9 +267,10 @@ impl<F: FsFile> JournalWriter<F> {
         let made_durable = file
             .write_all(&encode_header(header))
             .and_then(|()| file.sync())
-            .and_then(|proof| fs.sync_dir(dir).map(|()| proof));
-        let proof = match made_durable {
-            Ok(proof) => proof,
+            .and_then(|proof| fs.sync_dir(dir).map(|()| proof))
+            .and_then(|proof| file.syncer().map(|syncer| (proof, syncer)));
+        let (proof, syncer) = match made_durable {
+            Ok(made) => made,
             Err(e) => {
                 // Don't leave a half-made journal to block the next attempt.
                 // Best effort: the original error is the one to report.
@@ -182,6 +281,7 @@ impl<F: FsFile> JournalWriter<F> {
         let last_sync = clock.now();
         Ok(Self {
             file,
+            syncer: Arc::new(syncer),
             path,
             clock,
             header,
@@ -190,7 +290,10 @@ impl<F: FsFile> JournalWriter<F> {
             captured: first,
             durable: DurablePosition::after(&proof, header, first),
             last_sync,
-            dirty: false,
+            requested: first,
+            in_flight: VecDeque::new(),
+            next_sync: 0,
+            token: NEXT_TOKEN.fetch_add(1, Ordering::Relaxed),
             broken: false,
             buf: Vec::new(),
         })
@@ -232,11 +335,33 @@ impl<F: FsFile> JournalWriter<F> {
         self.broken
     }
 
+    /// Whether a sync was started and hasn't completed.
+    #[must_use]
+    pub fn sync_in_flight(&self) -> bool {
+        !self.in_flight.is_empty()
+    }
+
+    /// Whether everything written is durable, with no sync in flight: the
+    /// journal can end without another fsync.
+    #[must_use]
+    pub fn is_settled(&self) -> bool {
+        self.in_flight.is_empty() && self.durable.end == self.captured
+    }
+
     /// Samples captured but not yet fsync'd.
     fn unsynced(&self) -> SampleCount {
         self.captured
             .checked_count_since(self.durable.end)
             .unwrap_or(SampleCount::ZERO)
+    }
+
+    /// How many more samples [`Self::append_within`] takes before a sync
+    /// must complete: the sync budget less what's unsynced.
+    #[must_use]
+    pub fn room(&self) -> u64 {
+        sync_budget(self.header.rate())
+            .get()
+            .saturating_sub(self.unsynced().get())
     }
 
     /// Appends `samples`, continuing where the track left off, syncing
@@ -248,8 +373,37 @@ impl<F: FsFile> JournalWriter<F> {
     /// [`JournalError::SampleOverflow`], with nothing written;
     /// [`JournalError::Io`] if a write or fsync fails, which breaks the
     /// journal (frames before the failure may have been written: see
-    /// [`Self::captured`]); [`JournalError::Broken`].
+    /// [`Self::captured`]); [`JournalError::Broken`];
+    /// [`JournalError::SyncPending`] if it must sync while a sync
+    /// [`Self::begin_sync`] started is outstanding: what it wrote by then
+    /// stays written, and the journal isn't broken.
     pub fn append(&mut self, samples: &[i16]) -> Result<(), JournalError> {
+        let mut rest = samples;
+        loop {
+            let written = self.append_within(rest)?;
+            rest = rest.get(written..).unwrap_or_default();
+            // Never more than the budget unsynced, even within one long
+            // append: a full budget is synced at once.
+            if self.room() == 0 || self.sync_due() {
+                self.sync()?;
+            }
+            if rest.is_empty() {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Appends as much of `samples` as the sync budget leaves room for,
+    /// continuing where the track left off, and returns how many samples
+    /// that was. It never syncs (see [`Self::sync_due`]).
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::SampleOverflow`], with nothing written;
+    /// [`JournalError::Io`] if a write fails, which breaks the journal
+    /// (frames before the failure may have been written: see
+    /// [`Self::captured`]); [`JournalError::Broken`].
+    pub fn append_within(&mut self, samples: &[i16]) -> Result<usize, JournalError> {
         if self.broken {
             return Err(JournalError::Broken);
         }
@@ -260,22 +414,11 @@ impl<F: FsFile> JournalWriter<F> {
 
         // The max is a u32, so it fits in usize on every platform nota builds for.
         let max = usize::try_from(MAX_FRAME_SAMPLES).unwrap_or(usize::MAX);
-        let budget = sync_budget(self.header.rate()).get();
-        let mut rest = samples;
+        let room = usize::try_from(self.room()).unwrap_or(usize::MAX);
+        let (mut rest, _) = samples.split_at(samples.len().min(room));
+        let mut written = 0;
         while !rest.is_empty() {
-            // Never more than the budget unsynced, even within one long
-            // append: a frame never runs past it, and the sync check runs
-            // after every frame.
-            let room = budget.saturating_sub(self.unsynced().get());
-            if room == 0 {
-                self.sync()?;
-                continue;
-            }
-            let len = rest
-                .len()
-                .min(max)
-                .min(usize::try_from(room).unwrap_or(usize::MAX));
-            let (chunk, tail) = rest.split_at(len);
+            let (chunk, tail) = rest.split_at(rest.len().min(max));
             self.buf.clear();
             encode_frame(
                 &mut self.buf,
@@ -284,7 +427,6 @@ impl<F: FsFile> JournalWriter<F> {
                 self.captured,
                 chunk,
             );
-            self.dirty = true;
             if let Err(e) = self.file.write_all(&self.buf) {
                 self.broken = true;
                 return Err(JournalError::Io(e));
@@ -300,10 +442,99 @@ impl<F: FsFile> JournalWriter<F> {
                 return Err(JournalError::SampleOverflow);
             };
             self.captured = captured;
+            written += chunk.len();
             rest = tail;
-            self.sync_if_due()?;
         }
-        Ok(())
+        Ok(written)
+    }
+
+    /// Whether a sync should start now: something is written that no sync
+    /// covers, none is in flight, and [`SYNC_INTERVAL`] has passed since
+    /// the last one started or that much audio is unsynced.
+    #[must_use]
+    pub fn sync_due(&self) -> bool {
+        if self.broken || !self.in_flight.is_empty() || self.captured <= self.requested {
+            return false;
+        }
+        let waited = self
+            .clock
+            .now()
+            .checked_duration_since(self.last_sync)
+            .unwrap_or(Duration::ZERO);
+        waited >= SYNC_INTERVAL || self.room() == 0
+    }
+
+    /// Whether something is written that no sync started covers: the
+    /// journal needs another before it can end.
+    #[must_use]
+    pub fn needs_sync(&self) -> bool {
+        self.captured > self.requested
+    }
+
+    /// Starts a sync of everything written so far, to run with
+    /// [`PendingSync::run`], on any thread, and then complete with
+    /// [`Self::complete_sync`]. Appends may go on meanwhile; the sync
+    /// covers only what was written before it started.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::Broken`].
+    pub fn begin_sync(&mut self) -> Result<PendingSync<F::Syncer>, JournalError> {
+        if self.broken {
+            return Err(JournalError::Broken);
+        }
+        let seq = self.next_sync;
+        self.next_sync += 1;
+        self.in_flight.push_back((seq, None));
+        self.requested = self.captured;
+        self.last_sync = self.clock.now();
+        Ok(PendingSync {
+            syncer: Arc::clone(&self.syncer),
+            header: self.header,
+            end: self.captured,
+            seq,
+            token: self.token,
+        })
+    }
+
+    /// Takes the result of a sync [`Self::begin_sync`] started: the
+    /// durable position moves up to where the journal stood when it
+    /// started, once every older sync has completed too, and never after
+    /// one failed. A result for another writer, or one already taken, is
+    /// ignored.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::Io`] if the fsync failed, which breaks the journal.
+    pub fn complete_sync(&mut self, done: SyncDone) -> Result<(), JournalError> {
+        let Some(slot) = self
+            .in_flight
+            .iter_mut()
+            .find(|(seq, _)| *seq == done.seq)
+            .filter(|_| done.token == self.token && done.journal == self.header.id())
+        else {
+            return Ok(());
+        };
+        match done.result {
+            // After a failed fsync nothing unsynced then can be trusted,
+            // even if a later fsync succeeds. A break clears every sync
+            // still out, so nothing counts after it.
+            Err(e) => {
+                self.broken = true;
+                self.in_flight.clear();
+                Err(JournalError::Io(e))
+            }
+            Ok(durable) => {
+                slot.1 = Some(durable);
+                // Syncs started in order cover ever more, so each counted
+                // moves durable on.
+                while let Some(&(_, Some(durable))) = self.in_flight.front() {
+                    self.durable = durable;
+                    self.in_flight.pop_front();
+                }
+                Ok(())
+            }
+        }
     }
 
     /// Syncs if [`SYNC_INTERVAL`] has passed since the last sync, or that
@@ -316,16 +547,7 @@ impl<F: FsFile> JournalWriter<F> {
         if self.broken {
             return Err(JournalError::Broken);
         }
-        if !self.dirty {
-            return Ok(false);
-        }
-        let waited = self
-            .clock
-            .now()
-            .checked_duration_since(self.last_sync)
-            .unwrap_or(Duration::ZERO);
-        let due = waited >= SYNC_INTERVAL
-            || self.unsynced().get() >= sync_budget(self.header.rate()).get();
+        let due = self.sync_due();
         if due {
             self.sync()?;
         }
@@ -343,34 +565,29 @@ impl<F: FsFile> JournalWriter<F> {
     pub fn finish(mut self) -> Result<DurablePosition, JournalError> {
         if self.broken {
             Err(JournalError::Broken)
-        } else if self.dirty {
-            self.sync().map(|()| self.durable)
-        } else {
+        } else if self.sync_in_flight() {
+            Err(JournalError::SyncPending)
+        } else if self.is_settled() {
             Ok(self.durable)
+        } else {
+            self.sync().map(|()| self.durable)
         }
     }
 
-    /// Fsyncs the journal now, moving the durable position up to the
-    /// captured one.
+    /// Fsyncs the journal now, on this thread, moving the durable position
+    /// up to the captured one.
     ///
     /// # Errors
     ///
     /// [`JournalError::Io`] if the fsync fails, which breaks the journal;
-    /// [`JournalError::Broken`].
+    /// [`JournalError::Broken`]; [`JournalError::SyncPending`], with
+    /// nothing done, while a sync [`Self::begin_sync`] started hasn't
+    /// completed.
     pub fn sync(&mut self) -> Result<(), JournalError> {
-        if self.broken {
-            return Err(JournalError::Broken);
+        if self.sync_in_flight() {
+            return Err(JournalError::SyncPending);
         }
-        let proof = match self.file.sync() {
-            Ok(proof) => proof,
-            Err(e) => {
-                self.broken = true;
-                return Err(JournalError::Io(e));
-            }
-        };
-        self.durable = DurablePosition::after(&proof, self.header, self.captured);
-        self.dirty = false;
-        self.last_sync = self.clock.now();
-        Ok(())
+        let done = self.begin_sync()?.run();
+        self.complete_sync(done)
     }
 }

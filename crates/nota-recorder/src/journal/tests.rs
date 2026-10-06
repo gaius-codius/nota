@@ -1165,3 +1165,257 @@ fn the_scan_skips_frames_out_of_range_and_of_other_tracks() {
         .collect();
     assert_eq!(found, [(0, u64::from(MAX_FRAME_SAMPLES)), (400_000, 5)]);
 }
+
+// ---------------------------------------------------------------------------
+// Syncs started here and run elsewhere.
+
+/// The sync budget at speech rate: 850 ms, 13,600 samples.
+const BUDGET: u64 = 13_600;
+
+fn durable_at(journal: &JournalWriter<<FakeFs as Fs>::File>) -> u64 {
+    journal.durable().end().get()
+}
+
+#[test]
+fn a_sync_completed_after_more_appends_covers_only_what_came_before_it() {
+    let fs = FakeFs::with_dirs([session()]);
+    let (_, clock) = fake_clock();
+    let mut j = create(&fs, 0, MIC, 0, clock).unwrap();
+    j.append_within(&samples(MIC, 0, 100)).unwrap();
+    let job = j.begin_sync().unwrap();
+    assert_eq!(job.journal(), JournalId::new(0));
+    assert!(j.sync_in_flight());
+    j.append_within(&samples(MIC, 100, 50)).unwrap();
+    let done = job.run();
+    assert_eq!(done.journal(), JournalId::new(0));
+    j.complete_sync(done).unwrap();
+    assert!(!j.sync_in_flight());
+    assert_eq!((durable_at(&j), j.captured().get()), (100, 150));
+    assert!(j.needs_sync());
+    assert!(!j.is_settled());
+    // The file itself got the whole fsync: all 150 survive a crash, though
+    // only 100 are promised.
+    let after = fs.crash(CrashOutcome::LoseUnsynced);
+    let read = read_journal(&after.read(&journal_path(0)).unwrap());
+    assert_eq!(read.range().unwrap().end().get(), 150);
+}
+
+#[test]
+fn append_within_stops_at_the_budget_and_never_syncs() {
+    let fs = FakeFs::with_dirs([session()]);
+    let (_, clock) = fake_clock();
+    let mut j = create(&fs, 0, MIC, 0, clock).unwrap();
+    let syncs = |fs: &FakeFs| {
+        fs.ops()
+            .iter()
+            .filter(|op| matches!(op, Op::Sync(_)))
+            .count()
+    };
+    let before = syncs(&fs);
+    assert_eq!(j.room(), BUDGET);
+    assert_eq!(
+        j.append_within(&samples(MIC, 0, BUDGET + 500)).unwrap(),
+        usize::try_from(BUDGET).unwrap()
+    );
+    assert_eq!(syncs(&fs), before);
+    assert_eq!(j.room(), 0);
+    assert!(j.sync_due(), "a full budget is due");
+    assert_eq!(j.append_within(&samples(MIC, BUDGET, 10)).unwrap(), 0);
+    let job = j.begin_sync().unwrap();
+    assert!(!j.sync_due(), "not while one is in flight");
+    assert_eq!(j.append_within(&samples(MIC, BUDGET, 10)).unwrap(), 0);
+    j.complete_sync(job.run()).unwrap();
+    assert_eq!(j.room(), BUDGET);
+    assert!(j.is_settled());
+    assert_eq!(j.append_within(&samples(MIC, BUDGET, 10)).unwrap(), 10);
+    assert_eq!(j.captured().get(), BUDGET + 10);
+}
+
+#[test]
+fn a_sync_is_due_once_the_interval_has_passed_since_the_last_one_started() {
+    let fs = FakeFs::with_dirs([session()]);
+    let (clock, dyn_clock) = fake_clock();
+    let mut j = create(&fs, 0, MIC, 0, dyn_clock).unwrap();
+    // Nothing written: never due.
+    clock.advance(SYNC_INTERVAL);
+    assert!(!j.sync_due());
+    assert!(!j.needs_sync());
+    j.append_within(&samples(MIC, 0, 1)).unwrap();
+    assert!(j.sync_due());
+    let job = j.begin_sync().unwrap();
+    clock.advance(SYNC_INTERVAL);
+    j.append_within(&samples(MIC, 1, 1)).unwrap();
+    assert!(!j.sync_due(), "one is in flight");
+    j.complete_sync(job.run()).unwrap();
+    // The interval since that one started has passed.
+    assert!(j.sync_due());
+    let job = j.begin_sync().unwrap();
+    j.complete_sync(job.run()).unwrap();
+    j.append_within(&samples(MIC, 2, 1)).unwrap();
+    clock.advance(SYNC_INTERVAL.checked_sub(Duration::from_millis(1)).unwrap());
+    assert!(!j.sync_due());
+    clock.advance(Duration::from_millis(1));
+    assert!(j.sync_due());
+}
+
+#[test]
+fn a_failed_sync_breaks_the_journal_and_a_later_success_moves_nothing() {
+    let fs = FakeFs::with_dirs([session()]);
+    let (_, clock) = fake_clock();
+    let mut j = create(&fs, 0, MIC, 0, clock).unwrap();
+    j.append_within(&samples(MIC, 0, 100)).unwrap();
+    let first = j.begin_sync().unwrap();
+    j.append_within(&samples(MIC, 100, 100)).unwrap();
+    let second = j.begin_sync().unwrap();
+    fs.fail_after(0, io::ErrorKind::Other);
+    let failed = first.run();
+    let succeeded = second.run();
+    assert!(matches!(j.complete_sync(failed), Err(JournalError::Io(_))));
+    assert!(j.is_broken());
+    assert!(!j.sync_in_flight());
+    j.complete_sync(succeeded).unwrap();
+    assert_eq!(durable_at(&j), 0);
+    assert!(matches!(j.begin_sync(), Err(JournalError::Broken)));
+    assert!(matches!(j.append_within(&[1]), Err(JournalError::Broken)));
+    assert!(!j.sync_due());
+}
+
+#[test]
+fn a_newer_sync_counts_only_once_every_older_one_has_succeeded() {
+    let fs = FakeFs::with_dirs([session()]);
+    let (_, clock) = fake_clock();
+    let mut j = create(&fs, 0, MIC, 0, clock).unwrap();
+    j.append_within(&samples(MIC, 0, 100)).unwrap();
+    let first = j.begin_sync().unwrap();
+    j.append_within(&samples(MIC, 100, 100)).unwrap();
+    let second = j.begin_sync().unwrap();
+    let (first, second) = (first.run(), second.run());
+    j.complete_sync(second).unwrap();
+    // The older one might yet fail, losing what the newer one covers.
+    assert_eq!(durable_at(&j), 0);
+    assert!(j.sync_in_flight());
+    j.complete_sync(first).unwrap();
+    assert_eq!(durable_at(&j), 200);
+    assert!(!j.sync_in_flight());
+    assert!(j.is_settled());
+
+    // In order, each counts at once.
+    j.append_within(&samples(MIC, 200, 1)).unwrap();
+    let third = j.begin_sync().unwrap();
+    j.append_within(&samples(MIC, 201, 1)).unwrap();
+    let fourth = j.begin_sync().unwrap();
+    j.complete_sync(third.run()).unwrap();
+    assert_eq!(durable_at(&j), 201);
+    assert!(j.sync_in_flight(), "the newer sync is still out");
+    j.complete_sync(fourth.run()).unwrap();
+    assert!(!j.sync_in_flight());
+    assert_eq!(durable_at(&j), 202);
+}
+
+#[test]
+fn an_older_sync_failing_after_a_newer_one_succeeded_proves_nothing() {
+    let fs = FakeFs::with_dirs([session()]);
+    let (_, clock) = fake_clock();
+    let mut j = create(&fs, 0, MIC, 0, clock).unwrap();
+    j.append_within(&samples(MIC, 0, 100)).unwrap();
+    let first = j.begin_sync().unwrap();
+    j.append_within(&samples(MIC, 100, 100)).unwrap();
+    let second = j.begin_sync().unwrap();
+    fs.fail_after(0, io::ErrorKind::Other);
+    let (first, second) = (first.run(), second.run());
+    j.complete_sync(second).unwrap();
+    assert!(matches!(j.complete_sync(first), Err(JournalError::Io(_))));
+    assert_eq!(durable_at(&j), 0);
+    assert!(j.is_broken());
+}
+
+#[test]
+fn a_result_from_another_writer_of_the_same_journal_id_is_ignored() {
+    let (_, clock) = fake_clock();
+    let here = FakeFs::with_dirs([session()]);
+    let there = FakeFs::with_dirs([session()]);
+    let mut mine = create(&here, 0, MIC, 0, Arc::clone(&clock)).unwrap();
+    let mut theirs = create(&there, 0, MIC, 0, clock).unwrap();
+    mine.append_within(&samples(MIC, 0, 100)).unwrap();
+    theirs.append_within(&samples(MIC, 0, 100)).unwrap();
+    let _pending = mine.begin_sync().unwrap();
+    let done = theirs.begin_sync().unwrap().run();
+    mine.complete_sync(done).unwrap();
+    assert_eq!(durable_at(&mine), 0);
+    assert!(mine.sync_in_flight());
+}
+
+#[test]
+fn a_result_for_another_journal_is_ignored() {
+    let fs = FakeFs::with_dirs([session()]);
+    let (_, clock) = fake_clock();
+    let mut mic = create(&fs, 0, MIC, 0, Arc::clone(&clock)).unwrap();
+    let mut system = create(&fs, 1, SYSTEM, 0, clock).unwrap();
+    mic.append_within(&samples(MIC, 0, 100)).unwrap();
+    system.append_within(&samples(SYSTEM, 0, 100)).unwrap();
+    let mic_job = mic.begin_sync().unwrap();
+    let system_job = system.begin_sync().unwrap();
+    mic.complete_sync(system_job.run()).unwrap();
+    assert_eq!(durable_at(&mic), 0);
+    assert!(mic.sync_in_flight());
+    let lost = mic_job.lost();
+    assert_eq!(lost.journal(), JournalId::new(0));
+    system.complete_sync(lost).unwrap();
+    assert!(!system.is_broken());
+    // A lost sync breaks its own journal.
+    let lost = mic.begin_sync().unwrap().lost();
+    assert!(matches!(mic.complete_sync(lost), Err(JournalError::Io(_))));
+    assert!(mic.is_broken());
+}
+
+#[test]
+fn finishing_a_settled_journal_doesnt_fsync_again() {
+    let fs = FakeFs::with_dirs([session()]);
+    let (_, clock) = fake_clock();
+    let mut j = create(&fs, 0, MIC, 0, clock).unwrap();
+    assert!(j.is_settled());
+    j.append_within(&samples(MIC, 0, 10)).unwrap();
+    assert!(!j.is_settled());
+    let job = j.begin_sync().unwrap();
+    assert!(!j.is_settled(), "in flight");
+    j.complete_sync(job.run()).unwrap();
+    assert!(j.is_settled());
+    let ops = fs.ops().len();
+    assert_eq!(j.finish().unwrap().end().get(), 10);
+    assert_eq!(fs.ops().len(), ops);
+}
+
+#[test]
+fn an_inline_sync_or_finish_waits_its_turn_behind_a_started_one() {
+    let fs = FakeFs::with_dirs([session()]);
+    let (_, clock) = fake_clock();
+    let mut j = create(&fs, 0, MIC, 0, clock).unwrap();
+    j.append_within(&samples(MIC, 0, 100)).unwrap();
+    let started = j.begin_sync().unwrap();
+    j.append_within(&samples(MIC, 100, 100)).unwrap();
+    assert!(matches!(j.sync(), Err(JournalError::SyncPending)));
+    assert_eq!(durable_at(&j), 0);
+    assert!(!j.is_broken());
+    assert_eq!(
+        JournalError::SyncPending.to_string(),
+        "an earlier sync of the journal hasn't completed"
+    );
+    j.complete_sync(started.run()).unwrap();
+    j.sync().unwrap();
+    assert_eq!(durable_at(&j), 200);
+    j.append_within(&samples(MIC, 200, 1)).unwrap();
+    let _held = j.begin_sync().unwrap();
+    assert!(matches!(j.finish(), Err(JournalError::SyncPending)));
+}
+
+#[test]
+fn append_syncs_once_the_interval_has_passed_though_the_budget_has_room() {
+    let fs = FakeFs::with_dirs([session()]);
+    let (clock, dyn_clock) = fake_clock();
+    let mut j = create(&fs, 0, MIC, 0, dyn_clock).unwrap();
+    j.append(&samples(MIC, 0, 10)).unwrap();
+    assert_eq!(durable_at(&j), 0);
+    clock.advance(SYNC_INTERVAL);
+    j.append(&samples(MIC, 10, 10)).unwrap();
+    assert_eq!(durable_at(&j), 20);
+}

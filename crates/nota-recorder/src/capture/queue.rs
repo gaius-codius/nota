@@ -223,7 +223,9 @@ pub struct Positions {
     /// The end of the audio the server delivered: what the recorder
     /// captured, and what waits in the queue for it.
     pub delivered: SampleIndex,
-    /// The end of what the recorder has appended to the track's journals.
+    /// The end of what the recorder has handed the session writer: written
+    /// to the track's journals, or held in memory while a full journal's
+    /// fsync runs.
     pub captured: SampleIndex,
     /// The furthest an fsync has made durable on any of the track's
     /// journals. Audio a broken journal lost is behind it too: a gap, no

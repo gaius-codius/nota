@@ -24,7 +24,7 @@ use crate::journal::format::{FRAME_HEADER_LEN, HEADER_LEN, encode_frame};
 use crate::journal::{JournalHeader, JournalId, JournalWriter, read_journal};
 use crate::session::{
     FinishedJournal, MARKS_FILE_NAME, SessionDir, SessionError, SessionLock, SessionStore,
-    SessionWriter, Use,
+    SessionWriter, Syncing, Use,
 };
 use crate::test_dir::TestDir;
 
@@ -118,6 +118,12 @@ struct Promised {
     captured: BTreeMap<TrackId, SampleIndex>,
     /// Rows publishing reported committed.
     rows: Vec<SegmentRow>,
+    /// Audio may wait in memory for an fsync, so what was captured may be
+    /// further than the sync budget past what's durable; what's written
+    /// to a journal still may not.
+    lag_in_memory: bool,
+    /// The most samples that waited in memory for an fsync at once.
+    most_waiting: usize,
 }
 
 impl Promised {
@@ -125,12 +131,15 @@ impl Promised {
         if ok && let Some(next) = writer.next_sample(track) {
             self.captured.insert(track, next);
         }
-        // Between journals, a successful call has ended the last one with a
-        // sync: everything up to the next sample is durable.
+        // When fsyncs complete late, a call that failed promises nothing
+        // new: an ended journal's tail may have become a gap it reported,
+        // with the track's durable position past it. Between journals, a
+        // successful call has ended the last one with a sync: everything up
+        // to the next sample is durable.
         let end = match writer.durable(track) {
-            Some(d) => Some(d.end()),
+            Some(d) if ok || !self.lag_in_memory => Some(d.end()),
             None if ok => writer.next_sample(track),
-            None => None,
+            _ => None,
         };
         if let Some(end) = end {
             let at = self.durable.entry(track).or_insert(end);
@@ -515,7 +524,10 @@ fn worst_lag(promised: &Promised) -> u64 {
 /// No track's journals hold more than [`LAG_LIMIT`] written past what was
 /// fsync'd, measured on the disk the crash left when it kept everything
 /// (`seen`), from the scenario's operations: for frames a call wrote before
-/// it failed, which the writer's word doesn't cover.
+/// it failed, which the writer's word doesn't cover. When audio may wait in
+/// memory for an fsync, a journal's last fsync may still run while the
+/// next journal fills, so the limit holds per journal: salvage's torn-tail
+/// rule.
 fn check_written_lag(case: &CrashCase, promised: &Promised, seen: &Observed) -> Result<(), String> {
     // Per journal, how many of its bytes an fsync covered.
     let mut written: BTreeMap<&Path, usize> = BTreeMap::new();
@@ -565,9 +577,26 @@ fn check_written_lag(case: &CrashCase, promised: &Promised, seen: &Observed) -> 
             .copied()
             .unwrap_or(0)
             .min(bytes.len());
-        if let Some(r) = read_journal(&bytes[..len]).range() {
-            note(track, r.end().get(), true);
+        let synced_end = read_journal(&bytes[..len]).range().map(|r| r.end().get());
+        if let Some(end) = synced_end {
+            note(track, end, true);
         }
+        if promised.lag_in_memory
+            && let Some(r) = read.range()
+        {
+            let durable = synced_end.unwrap_or(r.start().get());
+            let lag = r.end().get().saturating_sub(durable);
+            if lag > LAG_LIMIT {
+                return Err(format!(
+                    "{}: {lag} samples written but not durable (written to {}, durable to {durable})",
+                    path.display(),
+                    r.end().get()
+                ));
+            }
+        }
+    }
+    if promised.lag_in_memory {
+        return Ok(());
     }
     for (track, (end, durable)) in ends {
         let lag = end.saturating_sub(durable);
@@ -624,7 +653,7 @@ fn the_written_lag_counts_frames_past_the_last_fsync() {
             started: BTreeMap::from([(MIC, SampleIndex::ZERO)]),
             durable: BTreeMap::from([(MIC, SampleIndex::ZERO)]),
             captured: BTreeMap::from([(MIC, SampleIndex::ZERO)]),
-            rows: Vec::new(),
+            ..Promised::default()
         };
         assert_eq!(worst_lag(&promised), 0);
         check_written_lag(&case, &promised, &observe(&fs))
@@ -649,7 +678,7 @@ fn the_written_lag_counts_frames_past_the_last_fsync() {
 ///   salvage of what the recording's crash left.
 fn check(case: &CrashCase, promised: &Promised, got: &Recovered) -> Result<(), String> {
     let lag = worst_lag(promised);
-    if lag > LAG_LIMIT {
+    if lag > LAG_LIMIT && !promised.lag_in_memory {
         return Err(format!(
             "{lag} samples captured but not durable: captured {:?}, durable {:?}",
             promised.captured, promised.durable
@@ -712,6 +741,124 @@ fn differences(a: &Observed, b: &Observed) -> String {
         .map(|p| p.display().to_string())
         .collect();
     format!("files {files:?}, rows differ: {}", a.rows != b.rows)
+}
+
+/// Records as [`record_into`] does, but with each fsync held until the
+/// recording runs it: the system track's each step, the mic's only every
+/// third, so audio waits on them, journals end before their last fsync
+/// completes, and fsyncs complete after later writes. Stops at the first
+/// error.
+fn record_late(fs: &FakeFs, fail_at: Option<usize>) -> Promised {
+    let mut promised = Promised {
+        lag_in_memory: true,
+        ..Promised::default()
+    };
+    if let Some(at) = fail_at {
+        fs.fail_after(at, io::ErrorKind::Other);
+    }
+    let _ = record_late_into(fs, &mut promised);
+    promised
+}
+
+fn record_late_into(fs: &FakeFs, promised: &mut Promised) -> Result<(), Box<dyn Error>> {
+    let (clock, dyn_clock) = fake_clock();
+    let lock = owned(fs);
+    let mut writer =
+        SessionWriter::open(&lock, rate(), length(), dyn_clock)?.with_syncing(Syncing::Manual);
+    let mut store = store_on(&lock);
+    for (track, at) in [(MIC, 0_u64), (SYSTEM, 700)] {
+        writer.start_track(track, EpochId::new(0), SampleIndex::new(at))?;
+        promised.started.insert(track, SampleIndex::new(at));
+        promised.durable.insert(track, SampleIndex::new(at));
+        promised.captured.insert(track, SampleIndex::new(at));
+    }
+    let sizes = [250_u64, 100, 400, 1_600, 50, 300];
+    for step in 0..9 {
+        let len = sizes[step % sizes.len()];
+        for track in [MIC, SYSTEM] {
+            let from = writer.next_sample(track).unwrap().get();
+            let appended = writer.append(track, &samples(track, from, len));
+            promised.note(&writer, track, appended.is_ok());
+            promised.most_waiting = promised.most_waiting.max(writer.waiting(track));
+            appended?;
+        }
+        clock.advance(SampleCount::new(len).duration_at(rate()).unwrap());
+        if step % 3 == 2 {
+            writer.run_syncs(MIC, usize::MAX);
+        }
+        writer.run_syncs(SYSTEM, 1);
+        let synced = writer.sync_if_due();
+        for track in [MIC, SYSTEM] {
+            promised.note(&writer, track, synced.is_ok());
+        }
+        synced?;
+        let finished = writer.take_finished();
+        if !finished.is_empty() {
+            let done = publish_journals(&mut store, length(), &finished)?;
+            promised.rows.extend_from_slice(done.segments());
+        }
+    }
+    let ends: Vec<_> = [MIC, SYSTEM]
+        .into_iter()
+        .map(|t| (t, writer.next_sample(t).unwrap()))
+        .collect();
+    let finished = writer.finish()?;
+    for (track, end) in ends {
+        promised.durable.insert(track, end);
+        promised.captured.insert(track, end);
+    }
+    let done = publish_journals(&mut store, length(), &finished)?;
+    promised.rows.extend_from_slice(done.segments());
+    Ok(())
+}
+
+#[test]
+fn a_recording_whose_fsyncs_complete_late_crashed_anywhere_loses_nothing() {
+    let fs = FakeFs::with_dirs([session(), db()]);
+    let clean = record_late(&fs, None);
+    assert!(clean.most_waiting > 0, "no audio waited for an fsync");
+    assert!(clean.rows.len() >= 4, "{:?}", clean.rows);
+    let summary = CrashTest::new(|fs: &FakeFs| record_late(fs, None), recover, check)
+        .dirs([session(), db()])
+        .outcomes(vec![
+            CrashOutcome::LoseUnsynced,
+            CrashOutcome::KeepAll,
+            CrashOutcome::Partial { seed: 3 },
+        ])
+        .run()
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    assert!(summary.scenario_ops > 100, "{summary:?}");
+}
+
+#[test]
+fn a_failure_at_any_operation_while_fsyncs_complete_late_loses_nothing_promised() {
+    let clean = FakeFs::with_dirs([session(), db()]);
+    let whole = record_late(&clean, None);
+    let ops = clean.attempted();
+    let mut broke = 0;
+    for at in 0..ops {
+        let fs = FakeFs::with_dirs([session(), db()]);
+        let promised = record_late(&fs, Some(at));
+        if promised.captured != whole.captured {
+            broke += 1;
+        }
+        for outcome in [CrashOutcome::LoseUnsynced, CrashOutcome::KeepAll] {
+            let crashed = fs.crash(outcome);
+            let case = CrashCase {
+                after_ops: fs.attempted(),
+                ops: fs.ops(),
+                outcome,
+                recovery_crashes: Vec::new(),
+                survived: crashed.copy_disk(),
+                fs: crashed.clone(),
+            };
+            let got = recover(&crashed);
+            check(&case, &promised, &got)
+                .unwrap_or_else(|e| panic!("failing op {at}, {outcome:?}: {e}"));
+        }
+    }
+    // Not vacuous: some failures stopped the recording early.
+    assert!(broke > 0);
 }
 
 fn crash_test(how: Recording) -> CrashTest<impl Fn(&FakeFs) -> Promised, RecoverFn, CheckFn> {

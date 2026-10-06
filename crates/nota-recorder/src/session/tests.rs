@@ -489,3 +489,394 @@ fn a_failed_finish_still_hands_out_its_journals() {
     assert!(err.source().is_some());
     assert_eq!(err.into_finished(), finished(&[0]));
 }
+
+// ---------------------------------------------------------------------------
+// Fsyncs that complete later than they start: `Syncing::Manual` holds each
+// until the test runs it, as a slow disk or a sync thread would.
+
+/// A writer whose fsyncs wait for the test, recording `MIC` from 0.
+fn manual_writer(fs: &FakeFs) -> (Arc<FakeClock>, SessionWriter<FakeFs>) {
+    let (clock, dyn_clock) = clock();
+    let mut w = SessionWriter::open(
+        &session_dir(fs).lock().unwrap(),
+        rate(),
+        length(),
+        dyn_clock,
+    )
+    .unwrap()
+    .with_syncing(Syncing::Manual);
+    w.start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .unwrap();
+    (clock, w)
+}
+
+fn durable_end(w: &SessionWriter<FakeFs>) -> u64 {
+    w.durable(MIC).unwrap().end().get()
+}
+
+/// The range of journal `id`'s valid frames, and its epoch.
+fn journal_range(fs: &FakeFs, id: u64) -> (u64, u64, u32) {
+    let read = read_journal(
+        &fs.read(&dir().join(JournalId::new(id).file_name()))
+            .unwrap(),
+    );
+    let range = read.range().unwrap();
+    (
+        range.start().get(),
+        range.end().get(),
+        read.header().unwrap().epoch().get(),
+    )
+}
+
+#[test]
+fn a_full_journal_holds_the_rest_back_until_its_fsync_completes() {
+    let fs = FakeFs::with_dirs([dir(), PathBuf::from("/db")]);
+    let (_, mut w) = manual_writer(&fs);
+    // The budget (850 samples at 1 kHz) fills, its fsync starts and is held.
+    w.append(MIC, &samples(0, 850)).unwrap();
+    w.append(MIC, &samples(850, 100)).unwrap();
+    assert_eq!(w.waiting(MIC), 100);
+    assert_eq!(w.next_sample(MIC), Some(SampleIndex::new(950)));
+    assert_eq!(
+        journal_range(&fs, 0).1,
+        850,
+        "nothing past the budget written"
+    );
+    assert_eq!(durable_end(&w), 0);
+    // Still held: nothing moves.
+    w.sync_if_due().unwrap();
+    assert_eq!((w.waiting(MIC), durable_end(&w)), (100, 0));
+
+    assert_eq!(w.run_syncs(MIC, 5), 1, "one fsync was started");
+    w.sync_if_due().unwrap();
+    assert_eq!(durable_end(&w), 850);
+    assert_eq!(w.waiting(MIC), 0);
+    assert_eq!(journal_range(&fs, 0).1, 950);
+    assert_eq!(w.finish().unwrap(), finished(&[0]));
+    assert_eq!(
+        joined(&salvaged(&fs.crash(CrashOutcome::LoseUnsynced))),
+        [(0, 950)]
+    );
+}
+
+#[test]
+fn a_sync_covers_only_what_was_written_before_it_started() {
+    let fs = FakeFs::with_dirs([dir(), PathBuf::from("/db")]);
+    let (clock, mut w) = manual_writer(&fs);
+    w.append(MIC, &samples(0, 300)).unwrap();
+    clock.advance(crate::journal::SYNC_INTERVAL);
+    w.sync_if_due().unwrap();
+    // Appended while the fsync is held: it doesn't cover these.
+    w.append(MIC, &samples(300, 200)).unwrap();
+    assert_eq!(w.run_syncs(MIC, 5), 1);
+    w.sync_if_due().unwrap();
+    assert_eq!(durable_end(&w), 300);
+    // None due yet: the interval runs from when that fsync started.
+    assert_eq!(w.run_syncs(MIC, 5), 0);
+    clock.advance(crate::journal::SYNC_INTERVAL);
+    w.sync_if_due().unwrap();
+    assert_eq!(w.run_syncs(MIC, 5), 1);
+    w.sync_if_due().unwrap();
+    assert_eq!(durable_end(&w), 500);
+}
+
+#[test]
+fn an_ended_journal_is_handed_out_once_its_last_fsync_completes() {
+    let fs = FakeFs::with_dirs([dir(), PathBuf::from("/db")]);
+    let (_, mut w) = manual_writer(&fs);
+    w.append(MIC, &samples(0, 1_100)).unwrap();
+    // 850 written; their fsync is held, so the rest waits.
+    assert_eq!(w.waiting(MIC), 250);
+    assert_eq!(w.run_syncs(MIC, 5), 1);
+    w.sync_if_due().unwrap();
+    // The window's last 150 end journal 0, whose last fsync is held; the
+    // next 100 start journal 1.
+    assert_eq!(w.waiting(MIC), 0);
+    assert_eq!(journal_range(&fs, 1), (1_000, 1_100, 0));
+    assert!(w.take_finished().is_empty());
+    // What's known durable is journal 0's, not journal 1's start.
+    let durable = w.durable(MIC).unwrap();
+    assert_eq!(
+        (durable.journal(), durable.end().get()),
+        (JournalId::FIRST, 850)
+    );
+
+    assert_eq!(w.run_syncs(MIC, 5), 1);
+    w.sync_if_due().unwrap();
+    assert_eq!(w.take_finished(), finished(&[0]));
+    let durable = w.durable(MIC).unwrap();
+    assert_eq!(
+        (durable.journal(), durable.end().get()),
+        (JournalId::new(1), 1_000)
+    );
+    assert_eq!(w.finish().unwrap(), finished(&[1]));
+}
+
+#[test]
+fn a_last_fsync_failing_after_the_next_journal_started_is_replayed_and_handed_out_together() {
+    let fs = FakeFs::with_dirs([dir(), PathBuf::from("/db")]);
+    let (_, mut w) = manual_writer(&fs);
+    w.append(MIC, &samples(0, 1_100)).unwrap();
+    assert_eq!(w.run_syncs(MIC, 1), 1);
+    w.sync_if_due().unwrap();
+    // Journal 0's last fsync (850..1,000) fails, after journal 1 started.
+    fs.fail_after(0, io::ErrorKind::Other);
+    assert_eq!(w.run_syncs(MIC, 1), 1);
+    w.sync_if_due().unwrap();
+    // Journal 2 takes over 850..1,000 and is ended in its place.
+    assert_eq!(journal_range(&fs, 2), (850, 1_000, 0));
+    assert!(w.take_finished().is_empty());
+    assert_eq!(durable_end(&w), 850);
+    assert_eq!(w.run_syncs(MIC, 1), 1);
+    w.sync_if_due().unwrap();
+    assert_eq!(w.take_finished(), finished(&[0, 2]));
+    assert_eq!(durable_end(&w), 1_000);
+    assert_eq!(w.finish().unwrap(), finished(&[1]));
+    assert_eq!(
+        joined(&salvaged(&fs.crash(CrashOutcome::LoseUnsynced))),
+        [(0, 1_100)]
+    );
+}
+
+#[test]
+fn a_failed_fsync_found_late_replays_what_was_appended_since() {
+    let fs = FakeFs::with_dirs([dir(), PathBuf::from("/db")]);
+    let (clock, mut w) = manual_writer(&fs);
+    w.append(MIC, &samples(0, 300)).unwrap();
+    clock.advance(crate::journal::SYNC_INTERVAL);
+    w.sync_if_due().unwrap();
+    w.append(MIC, &samples(300, 200)).unwrap();
+    fs.fail_after(0, io::ErrorKind::Other);
+    assert_eq!(w.run_syncs(MIC, 1), 1);
+    w.sync_if_due().unwrap();
+    // Journal 1 holds everything since journal 0's durable start.
+    assert_eq!(journal_range(&fs, 1), (0, 500, 0));
+    let durable = w.durable(MIC).unwrap();
+    assert_eq!(
+        (durable.journal(), durable.end().get()),
+        (JournalId::new(1), 0)
+    );
+    assert_eq!(w.finish().unwrap(), finished(&[0, 1]));
+    assert_eq!(
+        joined(&salvaged(&fs.crash(CrashOutcome::LoseUnsynced))),
+        [(0, 500)]
+    );
+}
+
+#[test]
+fn a_replacement_failing_too_leaves_a_gap_and_hands_out_both() {
+    let fs = FakeFs::with_dirs([dir(), PathBuf::from("/db")]);
+    let (clock, mut w) = manual_writer(&fs);
+    w.append(MIC, &samples(0, 300)).unwrap();
+    clock.advance(crate::journal::SYNC_INTERVAL);
+    w.sync_if_due().unwrap();
+    // The fsync fails, and so does creating the replacement.
+    fs.fail_after(0, io::ErrorKind::Other);
+    assert_eq!(w.run_syncs(MIC, 1), 1);
+    fs.fail_after(0, io::ErrorKind::Other);
+    assert!(matches!(w.sync_if_due(), Err(SessionError::Journal(_))));
+    assert_eq!(w.take_finished(), finished(&[0]));
+    assert_eq!(w.durable(MIC), None);
+    // The next audio starts a new journal after the gap.
+    w.append(MIC, &samples(300, 100)).unwrap();
+    assert_eq!(journal_range(&fs, 2), (300, 400, 0));
+    assert_eq!(w.finish().unwrap(), finished(&[2]));
+}
+
+#[test]
+fn a_new_epoch_writes_audio_held_back_in_the_old_epoch_without_waiting() {
+    let fs = FakeFs::with_dirs([dir(), PathBuf::from("/db")]);
+    let (_, mut w) = manual_writer(&fs);
+    w.append(MIC, &samples(0, 900)).unwrap();
+    assert_eq!(w.waiting(MIC), 50);
+    // The full journal ends with its fsync still held; the 50 go to
+    // another journal in the old epoch, which ends too.
+    w.new_epoch(MIC, EpochId::new(1)).unwrap();
+    assert_eq!(w.waiting(MIC), 0);
+    assert_eq!(w.epoch(MIC), Some((EpochId::new(1), SampleIndex::new(900))));
+    w.append(MIC, &samples(900, 10)).unwrap();
+    assert_eq!(journal_range(&fs, 0), (0, 850, 0));
+    assert_eq!(journal_range(&fs, 1), (850, 900, 0));
+    assert_eq!(journal_range(&fs, 2), (900, 910, 1));
+    assert!(w.take_finished().is_empty(), "nothing waited for an fsync");
+    assert_eq!(w.finish().unwrap(), finished(&[0, 1, 2]));
+    assert_eq!(
+        joined(&salvaged(&fs.crash(CrashOutcome::LoseUnsynced))),
+        [(0, 910)]
+    );
+}
+
+#[test]
+fn a_replacement_of_a_whole_budget_leaves_its_fsync_to_the_sync_thread() {
+    let fs = FakeFs::with_dirs([dir(), PathBuf::from("/db")]);
+    let (_, mut w) = manual_writer(&fs);
+    w.append(MIC, &samples(0, 850)).unwrap();
+    // The full budget's fsync fails: journal 1 takes all 850 over, and its
+    // own fsync is started, held, not run here.
+    fs.fail_after(0, io::ErrorKind::Other);
+    assert_eq!(w.run_syncs(MIC, 1), 1);
+    let syncs = |fs: &FakeFs| {
+        fs.ops()
+            .iter()
+            .filter(|op| matches!(op, Op::Sync(_)))
+            .count()
+    };
+    w.sync_if_due().unwrap();
+    let before = syncs(&fs);
+    assert_eq!(journal_range(&fs, 1), (0, 850, 0));
+    assert_eq!(durable_end(&w), 0);
+    assert_eq!(w.run_syncs(MIC, 1), 1);
+    assert_eq!(syncs(&fs), before + 1);
+    w.sync_if_due().unwrap();
+    assert_eq!(durable_end(&w), 850);
+}
+
+#[test]
+fn finish_waits_for_every_held_fsync() {
+    let fs = FakeFs::with_dirs([dir(), PathBuf::from("/db")]);
+    let (_, mut w) = manual_writer(&fs);
+    w.append(MIC, &samples(0, 1_900)).unwrap();
+    assert_eq!(w.waiting(MIC), 1_050);
+    assert_eq!(w.finish().unwrap(), finished(&[0, 1]));
+    assert_eq!(
+        joined(&salvaged(&fs.crash(CrashOutcome::LoseUnsynced))),
+        [(0, 1_900)]
+    );
+}
+
+#[test]
+fn syncs_on_threads_record_the_same_audio_as_inline() {
+    for syncing in [Syncing::Inline, Syncing::Threads] {
+        let fs = FakeFs::with_dirs([dir(), PathBuf::from("/db")]);
+        let (clock, dyn_clock) = clock();
+        let mut w = SessionWriter::open(
+            &session_dir(&fs).lock().unwrap(),
+            rate(),
+            length(),
+            dyn_clock,
+        )
+        .unwrap()
+        .with_syncing(syncing);
+        w.start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+            .unwrap();
+        let mut at = 0;
+        for len in [300_u64, 300, 300, 300, 300, 300, 700] {
+            w.append(MIC, &samples(at, len)).unwrap();
+            at += len;
+            clock.advance(SampleCount::new(len).duration_at(rate()).unwrap());
+            w.sync_if_due().unwrap();
+        }
+        assert_eq!(w.finish().unwrap(), finished(&[0, 1, 2]), "{syncing:?}");
+        assert_eq!(
+            joined(&salvaged(&fs.crash(CrashOutcome::LoseUnsynced))),
+            [(0, 2_500)],
+            "{syncing:?}"
+        );
+    }
+}
+
+/// A [`FakeFs`] whose journals' data fsyncs, through their syncers, always
+/// fail, while creating a journal (its header fsync) still works: a disk
+/// that takes names but not data.
+#[derive(Debug, Clone)]
+struct NoDataSyncs(FakeFs);
+
+#[derive(Debug)]
+struct NoDataFile(FakeFile);
+
+#[derive(Debug)]
+struct FailingSyncer;
+
+impl crate::fs::FileSyncer for FailingSyncer {
+    fn sync(&self) -> io::Result<crate::fs::Synced> {
+        Err(io::Error::other("EIO"))
+    }
+}
+
+impl crate::fs::FsFile for NoDataFile {
+    type Syncer = FailingSyncer;
+
+    fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.0.write_all(bytes)
+    }
+
+    fn sync(&mut self) -> io::Result<crate::fs::Synced> {
+        self.0.sync()
+    }
+
+    fn syncer(&self) -> io::Result<FailingSyncer> {
+        Ok(FailingSyncer)
+    }
+}
+
+impl Fs for NoDataSyncs {
+    type File = NoDataFile;
+    type Lock = FakeLock;
+
+    fn create(&self, path: &Path) -> io::Result<NoDataFile> {
+        self.0.create(path).map(NoDataFile)
+    }
+
+    fn create_dir(&self, path: &Path) -> io::Result<()> {
+        self.0.create_dir(path)
+    }
+
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.0.rename(from, to)
+    }
+
+    fn sync_dir(&self, dir: &Path) -> io::Result<()> {
+        self.0.sync_dir(dir)
+    }
+
+    fn remove(&self, path: &Path) -> io::Result<()> {
+        self.0.remove(path)
+    }
+
+    fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        self.0.read(path)
+    }
+
+    fn list(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
+        self.0.list(dir)
+    }
+
+    fn lock_dir(&self, dir: &Path) -> io::Result<FakeLock> {
+        self.0.lock_dir(dir)
+    }
+}
+
+#[test]
+fn when_no_data_fsync_ever_succeeds_each_failure_is_replaced_once_then_a_gap() {
+    for syncing in [Syncing::Inline, Syncing::Manual] {
+        let fs = NoDataSyncs(FakeFs::with_dirs([dir(), PathBuf::from("/db")]));
+        let (_, dyn_clock) = clock();
+        let mut w = SessionWriter::open(
+            &session_dir(&fs).lock().unwrap(),
+            rate(),
+            length(),
+            dyn_clock,
+        )
+        .unwrap()
+        .with_syncing(syncing);
+        w.start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+            .unwrap();
+        // The full budget's fsync fails, and so does its replacement's: a
+        // gap, not a replacement of the replacement.
+        let mut failed = w.append(MIC, &samples(0, 850)).is_err();
+        for _ in 0..3 {
+            w.run_syncs(MIC, usize::MAX);
+            failed |= w.sync_if_due().is_err();
+        }
+        assert!(failed, "{syncing:?}: the second failure is reported");
+        assert_eq!(w.take_finished(), finished(&[0, 1]), "{syncing:?}");
+        // Ending a journal the same way: one replacement, then the error.
+        w.append(MIC, &samples(850, 100)).unwrap();
+        let err = w.finish().unwrap_err();
+        assert!(
+            matches!(err.error(), SessionError::Journal(_)),
+            "{syncing:?}: {err}"
+        );
+        assert_eq!(err.into_finished(), finished(&[2, 3]), "{syncing:?}");
+    }
+}

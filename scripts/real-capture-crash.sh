@@ -28,6 +28,15 @@
 # unreached, not failed. The summary counts points by the operation they
 # stopped at.
 #
+# With --tracks T, the recorder captures T tracks, each its own stream of
+# the sink, as `nota record` captures the system audio and the microphone,
+# and every check holds for each track. The lag reported is the worst
+# track's; `lag_by_track` gives each track's lag behind the audio delivered,
+# overall and at the fsyncs that end a journal at a window boundary (ms).
+#
+# --measure-only runs just the uncrashed recording and its check: the lag
+# measurement, without the crash points.
+#
 # Run it on a real disk: on tmpfs every fsync is free, so the lag measures
 # nothing. The default scratch directory is under ~/.cache, and tmpfs is
 # refused unless --allow-tmpfs.
@@ -39,10 +48,11 @@
 # run takes a while: about an hour for both modes at the defaults.
 #
 # Usage: scripts/real-capture-crash.sh [--mode kill|power|both] [--seconds S]
-#          [--segment-seconds K] [--step K] [--from N] [--to N]
-#          [--scratch DIR] [--allow-tmpfs] [--keep]
+#          [--segment-seconds K] [--tracks T] [--step K] [--from N] [--to N]
+#          [--measure-only] [--scratch DIR] [--allow-tmpfs] [--keep]
 #   --mode             which crashes (default both)
 #   --seconds S        recording length per point (default 8)
+#   --tracks T         tracks recorded at once (default 1)
 #   --segment-seconds  segment window, short so publishing runs (default 2)
 #   --step K           every Kth crash point (default 1: all of them)
 #   NOTA_TEST_MODELS   the test models (default ~/.local/share/nota/test-models)
@@ -58,6 +68,8 @@ MODELS=${NOTA_TEST_MODELS:-$HOME/.local/share/nota/test-models}
 MODE=both
 SECONDS_PER_POINT=8
 SEGMENT=2
+TRACKS=1
+MEASURE_ONLY=0
 STEP=1
 FROM=1
 TO=
@@ -72,6 +84,8 @@ while [[ $# -gt 0 ]]; do
     --mode) MODE=$2; shift 2 ;;
     --seconds) SECONDS_PER_POINT=$2; shift 2 ;;
     --segment-seconds) SEGMENT=$2; shift 2 ;;
+    --tracks) TRACKS=$2; shift 2 ;;
+    --measure-only) MEASURE_ONLY=1; shift ;;
     --step) STEP=$2; shift 2 ;;
     --from) FROM=$2; shift 2 ;;
     --to) TO=$2; shift 2 ;;
@@ -92,9 +106,10 @@ case $MODE in
   *) die "--mode is kill, power or both" ;;
 esac
 [[ $STEP =~ ^[1-9][0-9]*$ ]] || die "--step needs a positive number"
+[[ $TRACKS =~ ^[1-9][0-9]*$ ]] || die "--tracks needs a positive number"
 FIXTURE=$MODELS/fixtures/invented-lecture.wav
 [[ -f $FIXTURE ]] || die "no fixture at $FIXTURE (run scripts/fetch-test-models.sh)"
-if [[ $MODE != kill ]]; then
+if [[ $MODE != kill && $MEASURE_ONLY -eq 0 ]]; then
   [[ -x $LAZYFS ]] || die "no LazyFS binary at $LAZYFS (set LAZYFS)"
   command -v fusermount3 > /dev/null || die "fusermount3 not found"
 fi
@@ -219,7 +234,8 @@ PLAYER=$!
 
 # The recorder's options: this sink. Always run "$BIN" itself, never through
 # a function, so a background job's PID is the recorder's.
-WRITE_OPTS=(--source "$SINK" --seconds "$SECONDS_PER_POINT" --segment-seconds "$SEGMENT")
+WRITE_OPTS=(--source "$SINK" --seconds "$SECONDS_PER_POINT" --segment-seconds "$SEGMENT"
+  --tracks "$TRACKS")
 check() { "$BIN" check "$@" --segment-seconds "$SEGMENT"; }
 
 # How many operations an uncrashed run makes, on the plain disk.
@@ -235,6 +251,13 @@ base_recovered=$(sed -n 's/.* recovered=\([0-9]*\) .*/\1/p' "$WORK/count/check.o
 base_rows=$(sed -n 's/.* rows=\([0-9]*\) .*/\1/p' "$WORK/count/check.out")
 [[ ${base_recovered:-0} -ge $(((SECONDS_PER_POINT - 1) * 16000)) && ${base_rows:-0} -ge 2 ]] ||
   die "the uncrashed run recorded too little (recovered ${base_recovered:-0} samples, ${base_rows:-0} rows)"
+if [[ $MEASURE_ONLY -eq 1 ]]; then
+  slow=$(grep -c '^slow ' "$WORK/count/log" || true)
+  echo "slow disk operations (over 100 ms): $slow"
+  grep '^slow ' "$WORK/count/log" | sed 's/^/  /' || true
+  [[ $KEEP -eq 1 ]] || rm -rf "$WORK"
+  exit 0
+fi
 TO=${TO:-$TOTAL}
 [[ $TO -le $TOTAL ]] || TO=$TOTAL
 [[ $FROM -le $TO ]] || die "no crash points in $FROM..$TO (a run makes $TOTAL operations)"
@@ -384,6 +407,7 @@ for mode in "${MODES[@]}"; do
       if (v["lag_max_ms"] + 0 > lag) lag = v["lag_max_ms"] + 0
       if (v["delivered_lag_max_ms"] + 0 > dlag) dlag = v["delivered_lag_max_ms"] + 0
       if (v["wall_lag_max_ms"] + 0 > wall) wall = v["wall_lag_max_ms"] + 0
+      if (v["rotation_lag_max_ms"] + 0 > rot) rot = v["rotation_lag_max_ms"] + 0
       if (v["loss_ms"] + 0 > loss) loss = v["loss_ms"] + 0
       if (v["loss_delivered_ms"] + 0 > dloss) dloss = v["loss_delivered_ms"] + 0
       if (v["loss_ms"] + 0 > 0) lossy++
@@ -398,7 +422,7 @@ for mode in "${MODES[@]}"; do
       delete v
     }
     END {
-      printf "  %s: %d points passed; max lag %.1f ms behind the journal, %.1f ms behind the audio delivered (wall clock %.1f ms);", mode, n, lag, dlag, wall
+      printf "  %s: %d points passed; max lag %.1f ms behind the journal, %.1f ms behind the audio delivered (%.1f ms at window rotations; wall clock %.1f ms);", mode, n, lag, dlag, rot, wall
       printf " max loss %.1f ms of the journal, %.1f ms of the audio delivered;", loss, dloss
       printf " recovered past durable up to %.1f ms; interrupted salvage matched %d times\n", beyond, cut
       printf "    points that lost unsynced audio: %d; operations that landed after the crash point: %d\n", lossy, late
