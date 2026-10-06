@@ -1,7 +1,9 @@
 //! `nota record` end to end, on a pseudo-terminal, recording a synthetic
 //! tone on both tracks (`--tone yes`, built only for tests): stopping from
 //! the keyboard asks first; SIGHUP and SIGTERM stop it with every track's
-//! audio published; SIGXCPU only warns; the terminal is restored however
+//! audio published (exactly what the tone sent, by the count the summary
+//! gives in tone mode); a second signal during the stop is ignored; SIGXCPU
+//! only warns; the terminal is restored however
 //! it ends; a recording killed outright is salvaged at the next start; and the engine child
 //! sits outside the recorder's process group, so the terminal's hangup
 //! leaves it to the recorder, yet it ends when the recorder is killed. The
@@ -324,7 +326,9 @@ fn published(data: &Path, session: u64) -> (Vec<(u32, u64, u64)>, bool) {
 
 /// Each of `tracks` published at least `ms` of audio, from its first
 /// sample without a gap, and nothing is left over; the others nothing.
-fn assert_saved(data: &Path, session: u64, tracks: &[u32], ms: u64) {
+/// Returns where each track's audio ends.
+fn assert_saved(data: &Path, session: u64, tracks: &[u32], ms: u64) -> Vec<(u32, u64)> {
+    let mut ends = Vec::new();
     let (rows, left) = published(data, session);
     assert!(!left, "journals left after the stop");
     for track in [0, 1] {
@@ -344,7 +348,49 @@ fn assert_saved(data: &Path, session: u64, tracks: &[u32], ms: u64) {
             end = next;
         }
         assert!(end >= ms * 16, "track {track}: only {end} samples");
+        ends.push((track, end));
     }
+    ends
+}
+
+/// How many samples the tone sent on each track, from the summary.
+fn tone_sent(said: &str) -> Vec<(u32, u64)> {
+    let mut sent = Vec::new();
+    for line in said.lines() {
+        let Some(rest) = line.trim().strip_prefix("the tone for ") else {
+            continue;
+        };
+        let (source, count) = rest.split_once(" sent ").unwrap();
+        let track = match source {
+            "the microphone" => 0,
+            "the system audio" => 1,
+            other => panic!("a tone for {other}"),
+        };
+        let count = count.strip_suffix(" samples").unwrap().parse().unwrap();
+        sent.push((track, count));
+    }
+    sent.sort_unstable();
+    sent
+}
+
+/// As [`assert_saved`], and each track published exactly what its tone
+/// sent: nothing lost at the end.
+fn assert_everything_sent_saved(
+    nota: &Running,
+    data: &Path,
+    session: u64,
+    tracks: &[u32],
+    ms: u64,
+) {
+    let saved = assert_saved(data, session, tracks, ms);
+    let said = visible(&nota.output.lock().unwrap());
+    let sent = tone_sent(&said);
+    assert_eq!(
+        sent.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
+        tracks,
+        "{said}"
+    );
+    assert_eq!(saved, sent, "saved, then sent");
 }
 
 #[test]
@@ -376,7 +422,7 @@ fn s_asks_first_and_y_stops_with_everything_saved() {
         "never left the alternate screen"
     );
     assert!(nota.output().contains("recorded to"), "{}", nota.output());
-    assert_saved(&tmp.0, 1, &[0, 1], 1_450);
+    assert_everything_sent_saved(&nota, &tmp.0, 1, &[0, 1], 1_450);
 }
 
 fn stops_on(signal: Signal, name: &str) {
@@ -386,7 +432,7 @@ fn stops_on(signal: Signal, name: &str) {
     let status = nota.exits().expect("nota didn't stop");
     assert!(status.success(), "{status:?}: {}", nota.output());
     assert!(nota.terminal_restored());
-    assert_saved(&tmp.0, 1, &[0, 1], 1_450);
+    assert_everything_sent_saved(&nota, &tmp.0, 1, &[0, 1], 1_450);
 }
 
 #[test]
@@ -426,7 +472,7 @@ fn sigxcpu_only_warns_and_recording_carries_on() {
         "{}",
         nota.output()
     );
-    assert_saved(&tmp.0, 1, &[0, 1], 1_950);
+    assert_everything_sent_saved(&nota, &tmp.0, 1, &[0, 1], 1_950);
 }
 
 #[test]
@@ -440,7 +486,21 @@ fn a_signal_while_the_stop_question_is_open_still_stops_safely() {
     let status = nota.exits().expect("nota didn't stop");
     assert!(status.success(), "{status:?}");
     assert!(nota.terminal_restored());
-    assert_saved(&tmp.0, 1, &[0, 1], 1_450);
+    assert_everything_sent_saved(&nota, &tmp.0, 1, &[0, 1], 1_450);
+}
+
+/// A second signal while stopping is ignored: the first one's stop
+/// carries on to the end, and nothing is lost.
+#[test]
+fn a_second_signal_during_the_stop_is_ignored() {
+    let tmp = TestDir::new("twice");
+    let mut nota = recording(&tmp.0);
+    nota.signal(Signal::HUP);
+    nota.signal(Signal::TERM);
+    let status = nota.exits().expect("nota didn't stop");
+    assert!(status.success(), "{status:?}: {}", nota.output());
+    assert!(nota.terminal_restored());
+    assert_everything_sent_saved(&nota, &tmp.0, 1, &[0, 1], 1_450);
 }
 
 #[test]
@@ -465,7 +525,7 @@ fn a_recording_killed_outright_is_salvaged_at_the_next_start() {
     for track in [0, 1] {
         assert!(rows.iter().any(|(t, ..)| *t == track), "{rows:?}");
     }
-    assert_saved(&tmp.0, 2, &[0, 1], 1_450);
+    assert_everything_sent_saved(&next, &tmp.0, 2, &[0, 1], 1_450);
 }
 
 #[test]
@@ -513,7 +573,7 @@ fn a_stream_that_cant_start_leaves_the_other_recording() {
     assert!(status.success(), "{status:?}");
     let said = visible(&nota.output.lock().unwrap());
     assert!(said.contains("not recording device missing"), "{said}");
-    assert_saved(&tmp.0, 1, &[1], 1_450);
+    assert_everything_sent_saved(&nota, &tmp.0, 1, &[1], 1_450);
 }
 
 /// The test models' directory, or `None` (said on stderr) if they're
@@ -629,7 +689,7 @@ fn a_hangup_to_the_group_leaves_the_engine_to_nota() {
     assert!(status.success(), "{status:?}: {}", nota.output());
     assert!(nota.terminal_restored());
     assert!(!alive(engine), "nota left its engine running");
-    assert_saved(&tmp.0, 1, &[0, 1], 1_450);
+    assert_everything_sent_saved(&nota, &tmp.0, 1, &[0, 1], 1_450);
 }
 
 /// Acceptance (GAI-202, GAI-203), end to end: nota killed outright takes
