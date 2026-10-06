@@ -376,7 +376,10 @@ impl<F: FsFile> JournalWriter<F> {
     /// [`JournalError::SampleOverflow`], with nothing written;
     /// [`JournalError::Io`] if a write or fsync fails, which breaks the
     /// journal (frames before the failure may have been written: see
-    /// [`Self::captured`]); [`JournalError::Broken`].
+    /// [`Self::captured`]); [`JournalError::Broken`];
+    /// [`JournalError::SyncPending`] if it must sync while a sync
+    /// [`Self::begin_sync`] started is outstanding: what it wrote by then
+    /// stays written, and the journal isn't broken.
     pub fn append(&mut self, samples: &[i16]) -> Result<(), JournalError> {
         let mut rest = samples;
         loop {

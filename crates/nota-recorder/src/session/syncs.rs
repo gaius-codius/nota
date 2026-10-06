@@ -119,6 +119,7 @@ impl<Y: FileSyncer> TrackSyncs<Y> {
 
     /// Whether a sync has been started and not yet taken by
     /// [`Self::try_next`] or [`Self::next`].
+    #[cfg(test)]
     pub(super) fn is_pending(&self) -> bool {
         !self.outstanding.is_empty()
     }
@@ -233,7 +234,7 @@ mod tests {
         assert!(format!("{syncs:?}").contains("thread"));
         let stall = fs.stall_syncs(&PathBuf::from("/s").join(JournalId::FIRST.file_name()));
         two_syncs(&mut syncs, &mut j);
-        stall.wait_for_held(1);
+        assert!(stall.wait_for_held(1, std::time::Duration::from_secs(10)));
         assert!(syncs.try_next().is_none(), "held on the thread");
         assert!(syncs.is_pending());
         stall.release();

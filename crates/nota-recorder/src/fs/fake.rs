@@ -225,20 +225,30 @@ impl Stall {
         self.gate.changed.notify_all();
     }
 
-    /// Waits until at least `n` fsyncs are held back.
-    pub fn wait_for_held(&self, n: usize) {
-        let mut state = self
+    /// Waits up to `within` until at least `n` fsyncs are held back, or the
+    /// stall is released; returns whether they are.
+    pub fn wait_for_held(&self, n: usize, within: std::time::Duration) -> bool {
+        let state = self
             .gate
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        while state.1 < n && !state.0 {
-            state = self
-                .gate
-                .changed
-                .wait(state)
-                .unwrap_or_else(PoisonError::into_inner);
-        }
+        let (state, _) = self
+            .gate
+            .changed
+            .wait_timeout_while(state, within, |(released, held)| *held < n && !*released)
+            .unwrap_or_else(PoisonError::into_inner);
+        state.1 >= n
+    }
+
+    /// How many fsyncs are held back now.
+    #[must_use]
+    pub fn held(&self) -> usize {
+        self.gate
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .1
     }
 }
 
@@ -903,6 +913,8 @@ impl SplitMix {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     fn p(s: &str) -> PathBuf {
@@ -1606,14 +1618,20 @@ mod tests {
         let stall = fs.stall_syncs(&p("/s/f"));
         let syncer = file.syncer().unwrap();
         let attempted = fs.attempted();
-        let held = std::thread::spawn(move || syncer.sync().map(|_| ()));
-        stall.wait_for_held(1);
+        let done = synced_elsewhere(syncer);
+        assert!(stall.wait_for_held(1, WAIT));
+        assert_eq!(stall.held(), 1);
+        assert!(!stall.wait_for_held(2, Duration::from_millis(20)));
+        assert!(done.try_recv().is_err(), "it waits for the release");
         // Not attempted yet; another file's fsync isn't held.
         assert_eq!(fs.attempted(), attempted);
         other.sync().unwrap();
         file.write_all(b"late").unwrap();
         stall.release();
-        held.join().unwrap().unwrap();
+        assert!(done.recv_timeout(WAIT).unwrap().is_ok());
+        assert_eq!(stall.held(), 0);
+        // Once released, waiting for more returns at once.
+        assert!(!stall.wait_for_held(1, WAIT));
         // Released for good: later fsyncs run at once.
         file.sync().unwrap();
         drop(stall);
@@ -1628,10 +1646,22 @@ mod tests {
         let fs = FakeFs::with_dirs(["/s"]);
         let file = fs.create(&p("/s/f")).unwrap();
         let stall = fs.stall_syncs(&p("/s/f"));
-        let syncer = file.syncer().unwrap();
-        let held = std::thread::spawn(move || syncer.sync().map(|_| ()));
-        stall.wait_for_held(1);
+        let done = synced_elsewhere(file.syncer().unwrap());
+        assert!(stall.wait_for_held(1, WAIT));
         drop(stall);
-        held.join().unwrap().unwrap();
+        assert!(done.recv_timeout(WAIT).unwrap().is_ok());
+    }
+
+    /// Long enough for any thread here, short of a hang.
+    const WAIT: Duration = Duration::from_secs(10);
+
+    /// Runs `syncer`'s fsync on a thread of its own; its result comes back
+    /// on the channel.
+    fn synced_elsewhere(syncer: FakeSyncer) -> std::sync::mpsc::Receiver<io::Result<()>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(syncer.sync().map(|_| ()));
+        });
+        rx
     }
 }

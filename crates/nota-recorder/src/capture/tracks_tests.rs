@@ -606,7 +606,7 @@ fn a_stalled_fsync_on_one_track_never_holds_up_the_other() {
     // A full sync budget (850 samples) starts its fsync, which hangs, and
     // the mic's audio after that waits in memory.
     tx.audio(MIC, &samples(MIC, 100, 800));
-    stall.wait_for_held(1);
+    assert!(stall.wait_for_held(1, Duration::from_secs(10)));
     tx.audio(MIC, &samples(MIC, 900, 50));
 
     // The system audio crosses three budgets and two windows meanwhile, and

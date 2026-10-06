@@ -791,44 +791,19 @@ impl<S: Fs> SessionWriter<S> {
                 .tracks
                 .get_mut(&track)
                 .ok_or(SessionError::UnknownTrack(track))?;
-            if state.ending.is_empty() && !state.syncs.is_pending() {
+            if state.ending.is_empty() {
                 break;
             }
+            // Every ended journal not yet settled has a sync outstanding:
+            // its last, or one in flight when it ended.
             let Some(done) = state.syncs.next() else {
-                // An ended journal with no fsync to wait for: one it still
-                // needs is started, and a broken one is replaced.
-                if let Err(e) = self.restart_ending(track) {
-                    first_error.get_or_insert(e);
-                }
-                continue;
+                break;
             };
             if let Err(e) = self.complete(track, done) {
                 first_error.get_or_insert(e);
             }
         }
         first_error.map_or(Ok(()), Err)
-    }
-
-    /// For the oldest of `track`'s ended journals, which has no fsync
-    /// pending: starts the last one it needs, or replaces it if it broke.
-    fn restart_ending(&mut self, track: TrackId) -> Result<(), SessionError> {
-        let state = self
-            .tracks
-            .get_mut(&track)
-            .ok_or(SessionError::UnknownTrack(track))?;
-        let Some(open) = state.ending.front_mut() else {
-            return Ok(());
-        };
-        if open.writer.is_broken() {
-            return self.replace_ending(track, 0);
-        }
-        match open.writer.begin_sync() {
-            Ok(job) => {
-                state.syncs.start(job);
-                Ok(())
-            }
-            Err(_) => self.replace_ending(track, 0),
-        }
     }
 
     /// Takes every fsync of `track`'s journals that has completed, without
@@ -1105,20 +1080,14 @@ impl<S: Fs> SessionWriter<S> {
         let Some(mut open) = state.journal.take() else {
             return Ok(());
         };
-        let started = if open.writer.needs_sync() {
-            open.writer.begin_sync().map(Some)
-        } else {
-            Ok(None)
-        };
-        state.ending.push_back(open);
-        match started {
-            Ok(Some(job)) => state.syncs.start(job),
-            Ok(None) => {}
-            Err(_) => {
-                let at = state.ending.len() - 1;
-                return self.replace_ending(track, at);
-            }
+        // A journal being written is never broken (a break replaces it at
+        // once), so its last sync can start.
+        if open.writer.needs_sync()
+            && let Ok(job) = open.writer.begin_sync()
+        {
+            state.syncs.start(job);
         }
+        state.ending.push_back(open);
         self.collect(track)
     }
 }
@@ -1167,10 +1136,8 @@ impl<F: FsFile> Open<F> {
         let synced = durable
             .checked_count_since(self.unsynced_from)
             .map_or(0, |n| usize::try_from(n.get()).unwrap_or(usize::MAX));
-        if synced > 0 {
-            self.unsynced.drain(..synced.min(self.unsynced.len()));
-            self.unsynced_from = durable;
-        }
+        self.unsynced.drain(..synced.min(self.unsynced.len()));
+        self.unsynced_from = self.unsynced_from.max(durable);
     }
 
     /// Gives up a broken journal: where its replacement starts, in which
