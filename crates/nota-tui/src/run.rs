@@ -584,16 +584,17 @@ mod tests {
 
     impl Input for Script {
         fn poll(&mut self, timeout: Duration) -> io::Result<bool> {
-            let mut waiting = self.waiting.lock().unwrap();
-            if !waiting.is_empty() {
+            if !self.waiting.lock().unwrap().is_empty() {
                 return Ok(true);
             }
             if timeout.is_zero() {
                 return Ok(false);
             }
+            // Not holding the lock while waiting, or the test could wait
+            // for it indefinitely.
             match self.later.recv_timeout(timeout) {
                 Ok(event) => {
-                    waiting.push_back(event);
+                    self.waiting.lock().unwrap().push_back(event);
                     Ok(true)
                 }
                 Err(_) => Ok(false),
