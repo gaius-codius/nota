@@ -72,14 +72,27 @@ impl Recording {
     }
 
     fn draw_too_small(&self, area: Rect, buf: &mut Buffer) {
-        let message = "make the window larger";
-        let lines = [
-            Line::styled(message, self.theme.text),
-            Line::styled(
-                format!("nota needs {MIN_WIDTH}×{MIN_HEIGHT}"),
-                self.theme.text_hint,
-            ),
-        ];
+        // The stop question shows here too, so a stop is never confirmed
+        // unseen.
+        let lines = if self.is_confirming_stop() {
+            [
+                Line::styled("stop recording?", self.theme.text_bright),
+                Line::from(vec![
+                    Span::styled("y", self.theme.text),
+                    Span::styled(" stop  ", self.theme.text_hint),
+                    Span::styled("n", self.theme.text),
+                    Span::styled(" keep recording", self.theme.text_hint),
+                ]),
+            ]
+        } else {
+            [
+                Line::styled("make the window larger", self.theme.text),
+                Line::styled(
+                    format!("nota needs {MIN_WIDTH}×{MIN_HEIGHT}"),
+                    self.theme.text_hint,
+                ),
+            ]
+        };
         let top = area.y + area.height.saturating_sub(2) / 2;
         for (row, line) in (top..area.bottom()).zip(lines) {
             let x = area.x + area.width.saturating_sub(width_u16(&line)) / 2;
@@ -559,7 +572,9 @@ mod tests {
         let theme = Theme::default();
         let mut screen = screen("Mic", 0);
         screen.update(Update::Recorded(14_200_000));
-        screen.stop = crate::screen::Stop::Asking;
+        screen.stop = crate::screen::Stop::Asking {
+            since: SessionTime::ZERO,
+        };
         let buf = draw(&screen, 62);
         assert_eq!(
             row(&buf, 19),

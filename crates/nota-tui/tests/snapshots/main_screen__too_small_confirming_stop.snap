@@ -1,0 +1,12 @@
+---
+source: crates/nota-tui/tests/main_screen.rs
+expression: terminal.backend()
+---
+"                              "
+"                              "
+"                              "
+"       stop recording?        "
+"   y stop  n keep recording   "
+"                              "
+"                              "
+"                              "

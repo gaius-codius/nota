@@ -156,6 +156,7 @@ pub fn run<B: Backend>(
         // levels costs one draw.
         let waiting = events.try_iter().take(MAX_BATCH - 1);
         for event in std::iter::once(first).chain(waiting) {
+            let was_asking = screen.is_confirming_stop();
             let added = match event {
                 Event::Key { key, at } => screen.handle_key_at(key, at),
                 Event::Update(update) => {
@@ -179,14 +180,22 @@ pub fn run<B: Backend>(
                 save_draft(screen)?;
                 return Ok(Ended::Stopped);
             }
+            // Draw the question before applying another key, so a `y`
+            // queued behind it can't stop the recording unseen.
+            if !was_asking && screen.is_confirming_stop() {
+                break;
+            }
         }
     }
 }
 
 /// A thread that reads keys and resizes from the terminal and sends them as
-/// [`Event`]s, each key stamped with the session clock as it's read. It
-/// stops when told to or dropped (waiting up to a second for the thread
-/// either way), or when nothing receives its events. If reading fails it
+/// [`Event`]s, each key stamped with the session clock as it's read. Keys
+/// already waiting when it starts are discarded: they were typed before the
+/// screen was there to take them (during a slow start-up, say), and a
+/// Ctrl+C then `y` typed because nota looked stuck mustn't stop the new
+/// recording. It stops when told to or dropped (waiting up to a second for
+/// the thread either way), or when nothing receives its events. If reading fails it
 /// sends [`Event::InputLost`] and stops.
 #[derive(Debug)]
 pub struct InputThread {
@@ -197,28 +206,44 @@ pub struct InputThread {
 }
 
 impl InputThread {
-    /// Starts reading the terminal. The terminal should already be in raw
-    /// mode.
+    /// Starts reading the terminal, once the keys already waiting are
+    /// discarded (it waits up to a second for that). The terminal should
+    /// already be in raw mode.
     ///
     /// # Errors
     ///
     /// The thread couldn't be started.
     pub fn spawn(events: Sender<Event>, clock: Arc<dyn Clock>) -> io::Result<Self> {
+        Self::spawn_with(Crossterm, events, clock)
+    }
+
+    fn spawn_with(
+        mut input: impl Input + Send + 'static,
+        events: Sender<Event>,
+        clock: Arc<dyn Clock>,
+    ) -> io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let (finishing, finished) = mpsc::channel::<()>();
+        let (discarded, ready) = mpsc::channel::<()>();
         let handle = thread::Builder::new()
             .name("nota-tui-input".into())
             .spawn({
                 let stop = Arc::clone(&stop);
                 move || {
                     let _finishing = finishing;
-                    let read = read_input(&events, clock.as_ref(), &stop);
+                    let read = input.discard_waiting().and_then(|()| {
+                        drop(discarded);
+                        read_input(&mut input, &events, clock.as_ref(), &stop)
+                    });
                     if let Err(err) = &read {
                         let _ = events.send(Event::InputLost(err.kind()));
                     }
                     read
                 }
             })?;
+        // Before the screen is drawn: a key typed at it mustn't be taken
+        // for one typed ahead. Either way, the thread is done discarding.
+        let _ = ready.recv_timeout(STOP_WAIT);
         Ok(Self {
             stop,
             handle: Some(handle),
@@ -262,12 +287,74 @@ impl Drop for InputThread {
     }
 }
 
-fn read_input(events: &Sender<Event>, clock: &dyn Clock, stop: &AtomicBool) -> io::Result<()> {
+/// Where the input thread reads terminal events: the terminal itself, or a
+/// test's script.
+trait Input {
+    /// Whether an event can be read within `timeout`.
+    fn poll(&mut self, timeout: Duration) -> io::Result<bool>;
+    /// The next event, waiting for it if need be.
+    fn read(&mut self) -> io::Result<event::Event>;
+
+    /// Discards every event that can be read now.
+    fn discard_waiting(&mut self) -> io::Result<()> {
+        while self.poll(Duration::ZERO)? {
+            self.read()?;
+        }
+        Ok(())
+    }
+}
+
+/// The terminal, through crossterm.
+struct Crossterm;
+
+impl Input for Crossterm {
+    fn poll(&mut self, timeout: Duration) -> io::Result<bool> {
+        event::poll(timeout)
+    }
+
+    fn read(&mut self) -> io::Result<event::Event> {
+        event::read()
+    }
+
+    /// Flushes the terminal's input queue too: crossterm reads it 1 KiB at
+    /// a time and is woken only by new input, so a longer queue would
+    /// otherwise outlast the discard and arrive with the next key.
+    fn discard_waiting(&mut self) -> io::Result<()> {
+        #[cfg(unix)]
+        flush_terminal_input();
+        while self.poll(Duration::ZERO)? {
+            self.read()?;
+        }
+        Ok(())
+    }
+}
+
+/// Discards what's waiting in the input queue of the terminal crossterm
+/// reads: stdin if it's a terminal, else the controlling terminal. Only a
+/// help to the discard, so a failure is ignored.
+#[cfg(unix)]
+fn flush_terminal_input() {
+    use rustix::termios::{QueueSelector, tcflush};
+    use std::io::IsTerminal;
+    let stdin = io::stdin();
+    if stdin.is_terminal() {
+        let _ = tcflush(&stdin, QueueSelector::IFlush);
+    } else if let Ok(tty) = std::fs::File::open("/dev/tty") {
+        let _ = tcflush(&tty, QueueSelector::IFlush);
+    }
+}
+
+fn read_input(
+    input: &mut impl Input,
+    events: &Sender<Event>,
+    clock: &dyn Clock,
+    stop: &AtomicBool,
+) -> io::Result<()> {
     while !stop.load(Ordering::Relaxed) {
-        if !event::poll(INPUT_POLL)? {
+        if !input.poll(INPUT_POLL)? {
             continue;
         }
-        let event = match event::read()? {
+        let event = match input.read()? {
             event::Event::Key(key) => Event::Key {
                 key,
                 at: clock.now(),
@@ -284,7 +371,8 @@ fn read_input(events: &Sender<Event>, clock: &dyn Clock, stop: &AtomicBool) -> i
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc;
+    use std::collections::VecDeque;
+    use std::sync::{Mutex, mpsc};
 
     use nota_core::FakeClock;
     use ratatui::backend::TestBackend;
@@ -436,8 +524,10 @@ mod tests {
             key: KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
             at: SessionTime::from_nanos(9),
         };
+        // Half a second after the question opened, so it's an answer.
+        let y = key_at(KeyCode::Char('y'), 9 + 500_000_000);
         // Nothing after the `y` is applied: no mark, no second note.
-        for event in [key('n'), key('o'), ctrl_c, key('y'), key('m'), key('n')] {
+        for event in [key('n'), key('o'), ctrl_c, y, key('m'), key('n')] {
             event_tx.send(event).unwrap();
         }
         // The recorder's sender is still alive: the key alone ends it.
@@ -457,7 +547,8 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(62, 20)).unwrap();
         let (event_tx, event_rx) = mpsc::channel();
         let (note_tx, note_rx) = mpsc::channel();
-        for event in [key('s'), key('y'), key('m')] {
+        let y = key_at(KeyCode::Char('y'), 7 + 500_000_000);
+        for event in [key('s'), y, key('m')] {
             event_tx.send(event).unwrap();
         }
         let ended = run(&mut terminal, &mut screen, &event_rx, &note_tx).unwrap();
@@ -481,6 +572,108 @@ mod tests {
         let sent: Vec<_> = note_rx.try_iter().collect();
         let at = SessionTime::from_nanos(7);
         assert_eq!(sent, [Annotation::Note(Note::new(at, "k").unwrap())]);
+        drop(event_tx);
+    }
+
+    /// Terminal events in two lots: those already waiting when the input
+    /// thread starts, then those the test sends while it runs.
+    struct Script {
+        waiting: Arc<Mutex<VecDeque<event::Event>>>,
+        later: Receiver<event::Event>,
+    }
+
+    impl Input for Script {
+        fn poll(&mut self, timeout: Duration) -> io::Result<bool> {
+            if !self.waiting.lock().unwrap().is_empty() {
+                return Ok(true);
+            }
+            if timeout.is_zero() {
+                return Ok(false);
+            }
+            // Not holding the lock while waiting, or the test could wait
+            // for it indefinitely.
+            match self.later.recv_timeout(timeout) {
+                Ok(event) => {
+                    self.waiting.lock().unwrap().push_back(event);
+                    Ok(true)
+                }
+                Err(_) => Ok(false),
+            }
+        }
+
+        fn read(&mut self) -> io::Result<event::Event> {
+            self.waiting
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| io::Error::other("nothing to read"))
+        }
+    }
+
+    fn terminal_key(code: KeyCode, modifiers: KeyModifiers) -> event::Event {
+        event::Event::Key(KeyEvent::new(code, modifiers))
+    }
+
+    #[test]
+    fn keys_waiting_before_the_screen_starts_are_discarded() {
+        // Ctrl+C then `y`, typed during a slow start-up.
+        let waiting = Arc::new(Mutex::new(VecDeque::from([
+            terminal_key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            terminal_key(KeyCode::Char('y'), KeyModifiers::NONE),
+            event::Event::Resize(80, 24),
+        ])));
+        let (later_tx, later) = mpsc::channel();
+        let script = Script {
+            waiting: Arc::clone(&waiting),
+            later,
+        };
+        let clock = Arc::new(FakeClock::new(SessionTime::from_nanos(42)));
+        let (event_tx, event_rx) = mpsc::channel();
+        let input = InputThread::spawn_with(script, event_tx, clock).unwrap();
+        // Discarded before `spawn` returns, so before the screen is drawn.
+        assert!(waiting.lock().unwrap().is_empty());
+        for event in [
+            terminal_key(KeyCode::Char('m'), KeyModifiers::NONE),
+            event::Event::FocusGained,
+            event::Event::Resize(70, 24),
+        ] {
+            later_tx.send(event).unwrap();
+        }
+        let wait = Duration::from_secs(5);
+        let sent = [
+            event_rx.recv_timeout(wait).unwrap(),
+            event_rx.recv_timeout(wait).unwrap(),
+        ];
+        assert_eq!(
+            sent,
+            [
+                Event::Key {
+                    key: KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
+                    at: SessionTime::from_nanos(42),
+                },
+                Event::Resize,
+            ]
+        );
+        input.stop().unwrap();
+        assert_eq!(event_rx.try_iter().count(), 0);
+    }
+
+    #[test]
+    fn the_question_is_drawn_before_a_queued_y_answers_it() {
+        let clock = Arc::new(FakeClock::new(SessionTime::from_nanos(20)));
+        let mut screen = screen(&clock);
+        let mut terminal = Terminal::new(TestBackend::new(62, 20)).unwrap();
+        let (event_tx, event_rx) = mpsc::channel();
+        let (note_tx, _note_rx) = mpsc::channel();
+        // Both waiting at once, as after a draw that held the loop up.
+        let y = key_at(KeyCode::Char('y'), 7 + 600_000_000);
+        for event in [key('s'), y] {
+            event_tx.send(event).unwrap();
+        }
+        let ended = run(&mut terminal, &mut screen, &event_rx, &note_tx).unwrap();
+        assert_eq!(ended, Ended::Stopped);
+        let screen_text = format!("{}", terminal.backend());
+        assert!(screen_text.contains("stop recording?"), "{screen_text}");
         drop(event_tx);
     }
 }
