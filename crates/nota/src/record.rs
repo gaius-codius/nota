@@ -124,10 +124,10 @@ pub(crate) fn record(args: &RecordArgs) -> Result<Outcome, BoxError> {
         Arc::new(SystemClock::start().map_err(|_| "the system clock can't be read")?);
     #[cfg(feature = "fake-capture")]
     if args.tone {
-        let tone = crate::tone::Tone {
-            clock: Arc::clone(&clock),
-        };
-        return record_with(args, &tone, &clock);
+        let tone = crate::tone::Tone::new(Arc::clone(&clock));
+        let mut outcome = record_with(args, &tone, &clock)?;
+        outcome.notes.extend(tone.report());
+        return Ok(outcome);
     }
     if args.tone {
         return Err("--tone is only for nota's tests".into());
@@ -275,22 +275,17 @@ fn record_with<B: CaptureBackend>(
             "{failures} journal failures; the audio around them may have gaps"
         ));
     }
-    let queue = publisher.queue();
-    match writer.finish() {
-        Ok(last) => {
-            let _sent = queue.send(last);
-        }
-        Err(e) => {
-            outcome.notes.push(format!("finishing the recording: {e}"));
-            let _sent = queue.send(e.into_finished());
-        }
+    // The writer's last journals are published while the live thread
+    // shuts the engine down.
+    let stopped = publisher.finish_recording(writer, || {
+        let _ = live_inputs.send(LiveInput::Done);
+        drop(live_inputs);
+        let _ = live.join();
+    });
+    if let Some(e) = stopped.finishing {
+        outcome.notes.push(format!("finishing the recording: {e}"));
     }
-    drop(queue);
-    let _ = live_inputs.send(LiveInput::Done);
-    drop(live_inputs);
-    let _ = live.join();
-    let report = publisher.finish()?;
-    note_published(&mut outcome, &report);
+    note_published(&mut outcome, &stopped.published?);
     if signals.close() {
         outcome.notes.push(
             "the capture thread ran past its real-time budget at least once \
@@ -388,24 +383,30 @@ impl SignalThread {
 #[cfg(unix)]
 fn listen_for_signals(ui: Sender<Event>) -> io::Result<SignalThread> {
     use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGXCPU};
-    let mut signals = signal_hook::iterator::Signals::new([SIGHUP, SIGTERM, SIGINT, SIGXCPU])?;
+    let signals = signal_hook::iterator::Signals::new([SIGHUP, SIGTERM, SIGINT, SIGXCPU])?;
     let handle = signals.handle();
     let thread = thread::Builder::new()
         .name("nota-signals".into())
-        .spawn(move || {
-            let mut overran = false;
-            for signal in signals.forever() {
-                if signal == SIGXCPU {
-                    overran = true;
-                } else {
-                    let _ = ui.send(Event::Close);
-                }
-            }
-            // Once closed, the iterator stops without reading what's
-            // still pending: a SIGXCPU during the stop would be missed.
-            overran || signals.pending().any(|signal| signal == SIGXCPU)
-        })?;
+        .spawn(move || watch(signals, &ui))?;
     Ok(SignalThread { handle, thread })
+}
+
+/// The signal thread: until `signals` is closed, asks `ui` to close for
+/// every signal but SIGXCPU. Returns whether a SIGXCPU arrived.
+#[cfg(unix)]
+fn watch(mut signals: signal_hook::iterator::Signals, ui: &Sender<Event>) -> bool {
+    use signal_hook::consts::SIGXCPU;
+    let mut overran = false;
+    for signal in signals.forever() {
+        if signal == SIGXCPU {
+            overran = true;
+        } else {
+            let _ = ui.send(Event::Close);
+        }
+    }
+    // Once closed, the iterator stops without reading what's still
+    // pending: a SIGXCPU during the stop would be missed.
+    overran || signals.pending().any(|signal| signal == SIGXCPU)
 }
 
 /// Elsewhere nothing records yet (see [`record`]), so there's nothing to
@@ -533,5 +534,47 @@ fn source_name(source: &Source) -> String {
         Source::SystemAudio => "system audio".to_owned(),
         Source::Microphone => "mic".to_owned(),
         Source::Device(name) => name.clone(),
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use signal_hook::consts::{SIGHUP, SIGXCPU};
+    use signal_hook::iterator::Signals;
+    use signal_hook::low_level::raise;
+
+    use super::*;
+
+    /// A raised signal reaches every `Signals` registered for it, so tests
+    /// that raise one take turns (if run as threads of one process).
+    static RAISING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A SIGXCPU that arrives during the stop, still pending when the
+    /// signal thread is closed, is still noted.
+    #[test]
+    fn a_sigxcpu_still_pending_at_close_is_noted() {
+        let _turn = RAISING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (ui, closes) = mpsc::channel();
+        let signals = Signals::new([SIGHUP, SIGXCPU]).unwrap();
+        // Closed first, so the iterator never reads it: only what's
+        // pending is left to find it.
+        signals.handle().close();
+        raise(SIGXCPU).unwrap();
+        assert!(watch(signals, &ui));
+        assert!(closes.try_recv().is_err(), "SIGXCPU closed the screen");
+    }
+
+    #[test]
+    fn nothing_pending_at_close_is_no_overrun() {
+        let _turn = RAISING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (ui, _closes) = mpsc::channel();
+        let signals = Signals::new([SIGHUP, SIGXCPU]).unwrap();
+        signals.handle().close();
+        raise(SIGHUP).unwrap();
+        assert!(!watch(signals, &ui));
     }
 }

@@ -99,18 +99,17 @@ impl Events {
     }
 
     fn confirmed_to(&mut self, end: u64, within: Duration) {
+        self.confirmed_on_to(TRACK, end, within);
+    }
+
+    /// Waits until `track` is confirmed up to `end`.
+    fn confirmed_on_to(&mut self, track: TrackId, end: u64, within: Duration) {
+        let done = |e: &EngineEvent| matches!(e, EngineEvent::Confirmed { track: t, up_to } if *t == track && up_to.get() >= end);
         // Seen already, while pausing.
-        let seen = self
-            .seen
-            .iter()
-            .any(|(_, e)| matches!(e, EngineEvent::Confirmed { up_to, .. } if up_to.get() >= end));
-        if seen {
+        if self.seen.iter().any(|(_, e)| done(e)) {
             return;
         }
-        self.until(
-            within,
-            |e| matches!(e, EngineEvent::Confirmed { up_to, .. } if up_to.get() >= end),
-        );
+        self.until(within, done);
     }
 
     fn online(&mut self) -> u32 {
@@ -131,12 +130,17 @@ impl Events {
         }
     }
 
-    /// The transcripts seen, as `(start, end)`.
+    /// The transcripts seen on `TRACK`, as `(start, end)`.
     fn transcripts(&self) -> Vec<(u64, u64)> {
+        self.transcripts_on(TRACK)
+    }
+
+    /// The transcripts seen on `track`, as `(start, end)`.
+    fn transcripts_on(&self, track: TrackId) -> Vec<(u64, u64)> {
         self.seen
             .iter()
             .filter_map(|(_, e)| match e {
-                EngineEvent::Transcript(t) => {
+                EngineEvent::Transcript(t) if t.track() == track => {
                     assert_eq!(
                         t.text(),
                         format!("{}-{}", t.range().start().get(), t.range().end().get())
@@ -159,12 +163,17 @@ impl Events {
         }
     }
 
-    /// The ranges reported skipped, as `(start, end)`.
+    /// The ranges of `TRACK` reported skipped, as `(start, end)`.
     fn skipped(&self) -> Vec<(u64, u64)> {
+        self.skipped_on(TRACK)
+    }
+
+    /// The ranges of `track` reported skipped, as `(start, end)`.
+    fn skipped_on(&self, track: TrackId) -> Vec<(u64, u64)> {
         self.seen
             .iter()
             .filter_map(|(_, e)| match e {
-                EngineEvent::Skipped { range, .. } => {
+                EngineEvent::Skipped { track: t, range } if *t == track => {
                     Some((range.start().get(), range.end().get()))
                 }
                 _ => None,
@@ -197,19 +206,25 @@ impl Events {
         assert_eq!(next, end, "{ranges:?}");
     }
 
-    /// Asserts the transcripts cover `[0, end)` exactly once, in order.
+    /// Asserts `TRACK`'s transcripts cover `[0, end)` exactly once, in
+    /// order.
     fn assert_tiles(&self, end: u64) {
+        self.assert_tiles_on(TRACK, end);
+    }
+
+    /// Asserts `track`'s transcripts cover `[0, end)` exactly once, in
+    /// order.
+    fn assert_tiles_on(&self, track: TrackId, end: u64) {
+        let text = self.transcripts_on(track);
         let mut next = 0;
-        for (from, to) in self.transcripts() {
+        for &(from, to) in &text {
             assert_eq!(
-                from,
-                next,
-                "text missing or repeated: {:?}",
-                self.transcripts()
+                from, next,
+                "track {track:?}: text missing or repeated: {text:?}"
             );
             next = to;
         }
-        assert_eq!(next, end, "{:?}", self.transcripts());
+        assert_eq!(next, end, "track {track:?}: {text:?}");
     }
 }
 
@@ -291,6 +306,39 @@ fn sigkill_mid_chunk_loses_nothing_and_resumes() {
     supervisor.flush(TRACK);
     events.confirmed_to(20 * CHUNK, Duration::from_secs(10));
     events.assert_tiles(20 * CHUNK);
+}
+
+/// Both tracks hold unconfirmed audio when the engine is killed: each
+/// track's is resent to the next engine, and its text comes back once.
+#[test]
+fn a_kill_with_two_tracks_held_replays_each_track_once() {
+    let other = TrackId::new(1);
+    let (mut supervisor, mut events) = start(fake(&["echo", "--every", "5"]));
+    let pid = events.online();
+    // Seven chunks a track: the engine answers five of each and holds two.
+    let send_both = |supervisor: &mut EngineSupervisor, chunks: std::ops::Range<u64>| {
+        for k in chunks {
+            supervisor.send_audio(on_track(TRACK, k)).unwrap();
+            supervisor.send_audio(on_track(other, k)).unwrap();
+        }
+    };
+    send_both(&mut supervisor, 0..7);
+    events.confirmed_on_to(TRACK, 5 * CHUNK, Duration::from_secs(10));
+    events.confirmed_on_to(other, 5 * CHUNK, Duration::from_secs(10));
+
+    sigkill(pid);
+    send_both(&mut supervisor, 7..12);
+    let reason = events.offline(Duration::from_secs(10));
+    assert!(matches!(reason, OfflineReason::Exited { .. }), "{reason:?}");
+    assert_ne!(events.online(), pid);
+    supervisor.flush(TRACK);
+    supervisor.flush(other);
+    events.confirmed_on_to(TRACK, 12 * CHUNK, Duration::from_secs(10));
+    events.confirmed_on_to(other, 12 * CHUNK, Duration::from_secs(10));
+    events.assert_tiles_on(TRACK, 12 * CHUNK);
+    events.assert_tiles_on(other, 12 * CHUNK);
+    assert!(events.skipped_on(TRACK).is_empty(), "{:#?}", events.seen);
+    assert!(events.skipped_on(other).is_empty(), "{:#?}", events.seen);
 }
 
 /// Acceptance (GAI-128): a hung engine is killed and restarted after the
@@ -780,32 +828,37 @@ fn falling_behind_is_not_poison() {
 /// would restart it before it could confirm anything, every time.
 #[test]
 fn an_engine_that_loads_slowly_is_not_taken_for_behind() {
-    // Loading takes 1 s, in which 10 chunks arrive: more than the limit.
-    // Like the real engine it confirms only every few chunks, and decoding
-    // takes a while (though it's twice as fast as real time), so the next
-    // chunk always arrives before a new engine's first confirmation.
+    // Ten chunks arrive while the engine loads: more than the limit of
+    // eight. Like the real engine it confirms only every few chunks, and
+    // its first answer takes a second, so more audio arrives before a new
+    // engine's first confirmation. (Timing only matters at the ends: the
+    // ten must all be sent within the 2.5 s the engine takes to load, and
+    // the next three before its first answer.)
     let mut config = fake(&[
         "echo",
         "--every",
         "3",
         "--delay-ms",
-        "150",
-        "--hello-delay-ms",
         "1000",
+        "--hello-delay-ms",
+        "2500",
     ]);
     config.max_unconfirmed = SampleCount::new(8 * CHUNK);
     let (mut supervisor, mut events) = start(config);
-    // Audio in real time, 100 ms a chunk, for 3 s.
-    for k in 0..30 {
-        send(&mut supervisor, k..k + 1);
-        events.pause(Duration::from_millis(100));
-    }
+    send(&mut supervisor, 0..10);
+    events.online();
+    // Held to the limit while it loaded (0..2 dropped), then to half of it
+    // once it's up (2..6 dropped), so three more chunks still fit.
+    send(&mut supervisor, 10..13);
     supervisor.flush(TRACK);
-    events.confirmed_to(30 * CHUNK, Duration::from_secs(10));
+    events.confirmed_to(13 * CHUNK, Duration::from_secs(10));
     assert!(events.offline_reasons().is_empty(), "{:#?}", events.seen);
-    // What piled up past half the limit was dropped; the rest is text.
-    assert!(!events.skipped().is_empty());
-    events.assert_tiles_with_skips(30 * CHUNK);
+    assert_eq!(
+        events.skipped(),
+        [(0, CHUNK), (CHUNK, 2 * CHUNK), (2 * CHUNK, 6 * CHUNK)]
+    );
+    assert_eq!(events.transcripts()[0].0, 6 * CHUNK);
+    events.assert_tiles_with_skips(13 * CHUNK);
 }
 
 /// Audio that hangs every engine it's given is skipped after five hangs
@@ -850,11 +903,13 @@ fn an_engine_that_never_confirms_is_hung() {
     let (mut supervisor, mut events) = start(config);
     events.online();
     let sent_at = events.clock.now();
-    // Twenty answers, 150 ms apart: 3 s of steady text.
-    send(&mut supervisor, 0..20);
+    // Forty answers, 150 ms apart: 6 s of steady text. If text counted as
+    // progress, it would be hung only 500 ms after the last of it; the
+    // bound leaves a loaded machine 2.5 s of slack short of that.
+    send(&mut supervisor, 0..40);
     assert_eq!(events.offline(Duration::from_secs(10)), OfflineReason::Hung);
     let took = events.clock.now().checked_duration_since(sent_at).unwrap();
-    assert!(took < Duration::from_millis(1_500), "hung after {took:?}");
+    assert!(took < Duration::from_secs(3), "hung after {took:?}");
     // Unconfirmed text is never passed on.
     assert!(events.transcripts().is_empty(), "{:#?}", events.seen);
 }
@@ -874,8 +929,10 @@ fn shutdown_flushes_what_the_engine_holds() {
         |e| matches!(e, EngineEvent::Confirmed { track, up_to } if *track == other && up_to.get() == CHUNK),
     );
     // Each track's held audio, as one transcript.
-    assert_eq!(events.transcripts(), [(0, 3 * CHUNK), (0, CHUNK)]);
-    assert!(events.skipped().is_empty(), "{:#?}", events.seen);
+    assert_eq!(events.transcripts_on(TRACK), [(0, 3 * CHUNK)]);
+    assert_eq!(events.transcripts_on(other), [(0, CHUNK)]);
+    assert!(events.skipped_on(TRACK).is_empty(), "{:#?}", events.seen);
+    assert!(events.skipped_on(other).is_empty(), "{:#?}", events.seen);
 }
 
 /// Audio the engine never confirmed by shutdown is reported skipped.

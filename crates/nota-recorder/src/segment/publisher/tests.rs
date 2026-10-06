@@ -216,3 +216,67 @@ fn rows_committed_by_a_run_that_failed_are_counted() {
     assert!(report.is_complete());
     assert!(!needs_salvage(lock.session()).unwrap());
 }
+
+/// The end of a recording whose last journal can't be finished (the disk
+/// is gone): the journals that did finish are still handed to the
+/// publisher, which reports them left for salvage, and the error is
+/// reported. `meanwhile` runs before the wait.
+#[test]
+fn finishing_a_recording_hands_on_what_finished_even_if_finishing_failed() {
+    let fs = FakeFs::with_dirs([session(), db()]);
+    let lock = SessionDir::new(SessionId::new(1), fs.clone(), &session())
+        .lock()
+        .unwrap();
+    let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let mut writer = SessionWriter::open(&lock, rate(), length(), clock).unwrap();
+    writer
+        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .unwrap();
+    // The first window's journal finishes; the second's is still open.
+    let audio: Vec<i16> = (0..1_500).map(|i| (i % 1_000) as i16).collect();
+    writer.append(MIC, &audio).unwrap();
+    let first = fs
+        .paths()
+        .into_iter()
+        .filter(|p| p.starts_with(session()))
+        .min()
+        .unwrap();
+    assert!(first.ends_with("journal-000000"), "{first:?}");
+    let publisher = publisher(&lock, FakeStore::new(&fs, &db()));
+    fs.crash_after(0);
+    let mut ran = false;
+    let stopped = publisher.finish_recording(writer, || ran = true);
+    assert!(ran);
+    assert!(stopped.finishing.is_some());
+    let report = stopped.published.unwrap();
+    assert!(report.rows().is_empty());
+    let left: Vec<PathBuf> = report
+        .left()
+        .iter()
+        .map(|j| session().join(j.id().file_name()))
+        .collect();
+    assert!(left.contains(&first), "{left:?}, {first:?}");
+}
+
+/// A clean end publishes every journal, the last included.
+#[test]
+fn finishing_a_recording_publishes_every_journal() {
+    let fs = FakeFs::with_dirs([session(), db()]);
+    let lock = SessionDir::new(SessionId::new(1), fs.clone(), &session())
+        .lock()
+        .unwrap();
+    let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let mut writer = SessionWriter::open(&lock, rate(), length(), clock).unwrap();
+    writer
+        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .unwrap();
+    let audio: Vec<i16> = (0..1_500).map(|i| (i % 1_000) as i16).collect();
+    writer.append(MIC, &audio).unwrap();
+    let publisher = publisher(&lock, FakeStore::new(&fs, &db()));
+    let stopped = publisher.finish_recording(writer, || {});
+    assert!(stopped.finishing.is_none());
+    let report = stopped.published.unwrap();
+    assert_eq!(starts(report.rows()), vec![0, 1_000]);
+    assert!(report.is_complete());
+    assert!(!needs_salvage(lock.session()).unwrap());
+}
