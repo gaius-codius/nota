@@ -33,6 +33,8 @@ const HEADER: &str = "kind\ttrack\tstart_ms\tend_ms\thanded_ms\tdrawn_ms\n";
 pub(crate) enum Problem {
     /// A transcript that couldn't be placed in session time.
     Dropped,
+    /// A transcript that came after the screen had closed.
+    Late,
     /// Audio the engine never transcribed live.
     Skipped,
     /// The engine went down.
@@ -47,6 +49,7 @@ impl Problem {
     const fn name(self) -> &'static str {
         match self {
             Self::Dropped => "dropped",
+            Self::Late => "late",
             Self::Skipped => "skipped",
             Self::Offline => "offline",
             Self::Epoch => "epoch",

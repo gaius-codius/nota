@@ -45,6 +45,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use nota_core::{Clock, EpochId, SampleRate, SystemClock, TrackId, TrackTimeline};
 use nota_recorder::capture::{
@@ -488,7 +489,8 @@ fn start_engine(
 /// The live thread: feeds the engine and the screen until told recording
 /// is done, then shuts the engine down. With a latency log, notes when each
 /// text is handed to the screen, and anything that keeps text from it, by
-/// `clock`, and returns the log.
+/// `clock`, including what the engine reports after the screen has closed
+/// (waiting up to [`LATE_WAIT`] for it), and returns the log.
 fn spawn_live(
     mut live: Live,
     mut engine: Option<EngineSupervisor>,
@@ -499,21 +501,25 @@ fn spawn_live(
     thread::Builder::new()
         .name("nota-live".into())
         .spawn(move || {
-            for input in inputs {
+            for input in &inputs {
                 let noted = Noted::of(&input);
                 let actions = match input {
                     LiveInput::Recorder(track, event) => live.recorder(track, event),
                     LiveInput::Engine(event) => live.engine(event),
                     LiveInput::Done => break,
                 };
-                let texts: Vec<_> = actions
-                    .updates
-                    .iter()
-                    .filter_map(|u| match u {
-                        Update::Text(text) => Some((text.start(), text.end())),
-                        _ => None,
-                    })
-                    .collect();
+                let texts: Vec<_> = if log.is_some() {
+                    actions
+                        .updates
+                        .iter()
+                        .filter_map(|u| match u {
+                            Update::Text(text) => Some((text.start(), text.end())),
+                            _ => None,
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 apply(actions, engine.as_mut(), &ui);
                 if let Some((log, clock)) = log.as_mut() {
                     let now = clock.now();
@@ -534,9 +540,24 @@ fn spawn_live(
             if let Some(engine) = engine {
                 engine.shutdown();
             }
+            if let Some((log, clock)) = log.as_mut() {
+                // The screen has closed: text from now on never shows.
+                while let Ok(input) = inputs.recv_timeout(LATE_WAIT) {
+                    match Noted::of(&input) {
+                        Noted::Heard(track) => log.problem(Problem::Late, Some(track), clock.now()),
+                        Noted::Problem(problem, track) => log.problem(problem, track, clock.now()),
+                        Noted::Nothing => {}
+                    }
+                }
+            }
             log.map(|(log, _)| log)
         })
 }
+
+/// How long the live thread waits, with a latency log, for what the engine
+/// reports after the screen has closed: its events pass through a thread of
+/// their own.
+const LATE_WAIT: Duration = Duration::from_secs(1);
 
 /// What the latency log notes about one input to the live thread.
 enum Noted {
@@ -652,8 +673,6 @@ mod tests {
     /// text-less events aren't.
     #[test]
     fn the_live_thread_logs_when_each_text_reached_the_screen() {
-        use std::time::Duration;
-
         use nota_core::messages::{AudioChunk, Transcript};
         use nota_core::{FakeClock, SampleIndex, SampleRange, SessionTime};
 
@@ -707,6 +726,8 @@ mod tests {
         // The system audio's first 2 s, from 0.5 s.
         inputs.send(heard(SYSTEM, 0, 32_000)).unwrap();
         inputs.send(LiveInput::Done).unwrap();
+        // After the screen closed: never shown.
+        inputs.send(heard(MIC, 56_000, 72_000)).unwrap();
 
         let log = live.join().unwrap().unwrap();
         let shown = screen
@@ -721,7 +742,8 @@ mod tests {
              text\t0\t500\t3500\t4200\t4230\n\
              dropped\t7\t-\t-\t4200\t-\n\
              skipped\t1\t-\t-\t4200\t-\n\
-             text\t1\t500\t2500\t4200\t4230\n"
+             text\t1\t500\t2500\t4200\t4230\n\
+             late\t0\t-\t-\t4200\t-\n"
         );
     }
 

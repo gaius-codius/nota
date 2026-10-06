@@ -31,11 +31,12 @@
 #   - both: no text is older than the live cap plus 5 s when drawn
 #     (drawn - chunk start <= 15 s);
 #   - every text was drawn, nothing kept text from the screen (a dropped
-#     transcript, skipped audio, the engine offline, a new epoch, a failed
-#     stream), no gap over 1 s between texts once speech has started (a
+#     transcript, text after the screen closed, skipped audio, the engine
+#     offline, a new epoch, a failed stream), no gap over 1 s between texts once speech has started (a
 #     chunk with speech that never showed), and the last text reaches to
 #     within 2 s of the end of its speech;
-#   - nota exits 0 after the SIGHUP (everything published).
+#   - nota exits 0 after the SIGHUP (everything published), and the default
+#     sink is unchanged (the sinks are created at the lowest priority).
 # In continuous speech there's no pause to cut at early: the chunker cuts
 # once a chunk reaches the cap, so a chunk's end is already some seconds old
 # when it's cut. That's what the cap-plus-5 s bound is for; the latency is
@@ -147,7 +148,7 @@ SINKS=()
 for t in $(seq "$TRACKS"); do
   sink="nota_latency_${$}_$t"
   MODULES+=("$(pactl load-module module-null-sink "sink_name=$sink" \
-    "sink_properties=node.description=nota-latency-$t")")
+    "sink_properties=node.description=nota-latency-$t priority.session=1 priority.driver=1")")
   SINKS+=("$sink")
 done
 MIC=${SINKS[0]}
@@ -205,9 +206,9 @@ TERMINAL=
 RECORDER=
 [[ -f $LOG ]] || die "no latency log: $(tail -c 2000 "$OUT")"
 
-if [[ "$(pactl get-default-sink)" != "$default_before" ]]; then
-  echo "live-latency: the default sink changed during the run (was $default_before)" >&2
-fi
+# Not changed back: the user may have changed it themselves meanwhile.
+default_changed=0
+[[ "$(pactl get-default-sink)" == "$default_before" ]] || default_changed=1
 
 # nota's summary, without the terminal's control sequences.
 sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g' "$OUT" | tr '\r' '\n' |
@@ -217,6 +218,10 @@ echo "speech=$SPEECH tracks=$TRACKS offset_ms=$OFFSET_MS spoken_s=$spoken_s"
 status=0
 if [[ $stopped -ne 0 ]]; then
   echo "nota record exited with $stopped after SIGHUP: something wasn't published FAIL"
+  status=1
+fi
+if [[ $default_changed -eq 1 ]]; then
+  echo "the default sink changed during the run (was $default_before) FAIL"
   status=1
 fi
 problems=$(awk -F'\t' 'NR > 1 && $1 != "text"' "$LOG")
