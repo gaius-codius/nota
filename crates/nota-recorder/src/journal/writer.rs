@@ -94,6 +94,9 @@ pub enum JournalError {
     /// fsync the kernel may have dropped the unsynced data, so retrying
     /// would only hide the loss. Start a new journal.
     Broken,
+    /// A sync [`JournalWriter::begin_sync`] started hasn't completed, so
+    /// one run here couldn't say what's durable. Complete it first.
+    SyncPending,
 }
 
 impl fmt::Display for JournalError {
@@ -102,6 +105,7 @@ impl fmt::Display for JournalError {
             Self::Io(e) => write!(f, "journal write failed: {e}"),
             Self::SampleOverflow => f.write_str("the track ran out of sample numbers"),
             Self::Broken => f.write_str("the journal broke after an earlier failure"),
+            Self::SyncPending => f.write_str("an earlier sync of the journal hasn't completed"),
         }
     }
 }
@@ -566,6 +570,8 @@ impl<F: FsFile> JournalWriter<F> {
     pub fn finish(mut self) -> Result<DurablePosition, JournalError> {
         if self.broken {
             Err(JournalError::Broken)
+        } else if self.sync_in_flight() {
+            Err(JournalError::SyncPending)
         } else if self.is_settled() {
             Ok(self.durable)
         } else {
@@ -579,8 +585,13 @@ impl<F: FsFile> JournalWriter<F> {
     /// # Errors
     ///
     /// [`JournalError::Io`] if the fsync fails, which breaks the journal;
-    /// [`JournalError::Broken`].
+    /// [`JournalError::Broken`]; [`JournalError::SyncPending`], with
+    /// nothing done, while a sync [`Self::begin_sync`] started hasn't
+    /// completed.
     pub fn sync(&mut self) -> Result<(), JournalError> {
+        if self.sync_in_flight() {
+            return Err(JournalError::SyncPending);
+        }
         let done = self.begin_sync()?.run();
         self.complete_sync(done)
     }

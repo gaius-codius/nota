@@ -647,6 +647,9 @@ impl<S: Fs> SessionWriter<S> {
     /// journal's sync budget is used up while its fsync runs.
     fn flush(&mut self, track: TrackId) -> Result<(), SessionError> {
         let mut first_error = None;
+        // Whether results were taken since the last write: if the journal
+        // is still full then, the rest waits.
+        let mut collected = false;
         loop {
             let length = self.length;
             let state = self
@@ -677,14 +680,22 @@ impl<S: Fs> SessionWriter<S> {
             let room = usize::try_from(open.writer.room()).unwrap_or(usize::MAX);
             if room == 0 {
                 if open.writer.sync_in_flight() {
-                    // The rest waits for the fsync to complete.
-                    break;
+                    if collected {
+                        // The rest waits for the fsync to complete.
+                        break;
+                    }
+                    collected = true;
+                    if let Err(e) = self.collect(track) {
+                        first_error.get_or_insert(e);
+                    }
+                    continue;
                 }
                 if let Err(e) = self.sync_journal(track) {
                     first_error.get_or_insert(e);
                 }
                 continue;
             }
+            collected = false;
             let n = state.waiting.len().min(in_window).min(room);
             let written = open.writer.append_within(&state.waiting[..n]);
             // Written or not, they're this journal's now: if it broke, its
@@ -711,6 +722,9 @@ impl<S: Fs> SessionWriter<S> {
     }
 
     /// Drops up to `n` of `track`'s waiting samples, oldest first: a gap.
+    /// Only while the track has no journal, which goes on from its own last
+    /// sample: `start_journal` and `replace` fail only before installing
+    /// one.
     fn drop_waiting(&mut self, track: TrackId, n: usize) {
         if let Some(state) = self.tracks.get_mut(&track) {
             let n = n.min(state.waiting.len());
@@ -988,11 +1002,19 @@ impl<S: Fs> SessionWriter<S> {
         replay: Vec<i16>,
         held: Vec<FinishedJournal>,
     ) -> Result<(), SessionError> {
-        let open = self.start_journal(track, at, epoch, replay, held)?;
+        let mut open = self.start_journal(track, at, epoch, replay, held)?;
         if let Some(state) = self.tracks.get_mut(&track) {
+            // A full replay's fsync starts now; its result, like any other,
+            // is taken by a later collect, so nothing another journal did
+            // can come back as this one's failure.
+            if open.writer.sync_due()
+                && let Ok(job) = open.writer.begin_sync()
+            {
+                state.syncs.start(job);
+            }
             state.journal = Some(open);
         }
-        self.sync_journal_if_due(track)
+        Ok(())
     }
 
     /// Makes sure the marks on disk cover journal `id` and `track`'s

@@ -1384,3 +1384,26 @@ fn finishing_a_settled_journal_doesnt_fsync_again() {
     assert_eq!(j.finish().unwrap().end().get(), 10);
     assert_eq!(fs.ops().len(), ops);
 }
+
+#[test]
+fn an_inline_sync_or_finish_waits_its_turn_behind_a_started_one() {
+    let fs = FakeFs::with_dirs([session()]);
+    let (_, clock) = fake_clock();
+    let mut j = create(&fs, 0, MIC, 0, clock).unwrap();
+    j.append_within(&samples(MIC, 0, 100)).unwrap();
+    let started = j.begin_sync().unwrap();
+    j.append_within(&samples(MIC, 100, 100)).unwrap();
+    assert!(matches!(j.sync(), Err(JournalError::SyncPending)));
+    assert_eq!(durable_at(&j), 0);
+    assert!(!j.is_broken());
+    assert_eq!(
+        JournalError::SyncPending.to_string(),
+        "an earlier sync of the journal hasn't completed"
+    );
+    j.complete_sync(started.run()).unwrap();
+    j.sync().unwrap();
+    assert_eq!(durable_at(&j), 200);
+    j.append_within(&samples(MIC, 200, 1)).unwrap();
+    let _held = j.begin_sync().unwrap();
+    assert!(matches!(j.finish(), Err(JournalError::SyncPending)));
+}
