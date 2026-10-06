@@ -233,6 +233,12 @@ impl FinishError {
     pub fn into_finished(self) -> Vec<FinishedJournal> {
         self.finished
     }
+
+    /// The first error, and every finished journal not yet taken.
+    #[must_use]
+    pub fn into_parts(self) -> (SessionError, Vec<FinishedJournal>) {
+        (self.error, self.finished)
+    }
 }
 
 impl fmt::Display for FinishError {

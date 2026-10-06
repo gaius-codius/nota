@@ -11,7 +11,11 @@
 //!
 //! The events are handled on the test's thread, through the recorder's own
 //! [`handle`] and [`settle`], with publishing in step, so every run is
-//! deterministic.
+//! deterministic. The stop is the app's own,
+//! [`Publisher::finish_recording`], on a publisher started at the stop and
+//! given what failed to publish before with the last journals, as the
+//! app's would retry it: the writer finishes before the publisher starts
+//! work, so that stays deterministic too.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -30,7 +34,7 @@ use crate::fs::Fs;
 use crate::fs::crash::{CrashCase, CrashTest};
 use crate::fs::fake::{CrashOutcome, FakeFs};
 use crate::segment::{
-    FakeStore, SegmentLength, SegmentStore, needs_salvage, publish_journals, salvage,
+    FakeStore, Publisher, SegmentLength, SegmentStore, needs_salvage, publish_journals, salvage,
     segment_file_name,
 };
 use crate::session::{FinishedJournal, SessionDir, SessionStore};
@@ -146,9 +150,9 @@ struct Run {
 }
 
 /// Records the script until the stop, then finishes as the app does on a
-/// signal: the streams stop, the writer finishes, and every finished
-/// journal is published, the last batch tried twice as the publisher does.
-/// Stops at the first error the app would stop at.
+/// signal: the streams stop, and [`Publisher::finish_recording`] finishes
+/// the writer and publishes every finished journal. Stops at the first
+/// error the app would stop at.
 fn record(fs: &FakeFs, run: Run) -> Promised {
     let mut promised = Promised::default();
     if let Some(at) = run.fail_at {
@@ -230,32 +234,26 @@ fn record_into(fs: &FakeFs, run: Run, promised: &mut Promised) -> Result<(), Str
         }
     }
 
-    // The stop.
+    // The stop. The app's publisher would hold what failed to publish so
+    // far, and try it again with the last journals.
     let ends: Vec<_> = [MIC, SYSTEM]
         .into_iter()
         .map(|t| (t, writer.next_sample(t)))
         .collect();
-    match writer.finish() {
-        Ok(last) if promised.failures == 0 => {
+    let publisher = Publisher::spawn(store, length()).map_err(|e| e.to_string())?;
+    let stopped = publisher.finish_recording_after(pending, writer, || {});
+    match stopped.finishing {
+        None if promised.failures == 0 => {
             for (track, end) in ends {
                 if let Some(end) = end {
                     promised.durable.insert(track, end.get());
                 }
             }
-            pending.extend(last);
         }
-        Ok(last) => pending.extend(last),
-        Err(e) => {
-            promised.failures += 1;
-            pending.extend(e.into_finished());
-        }
+        None => {}
+        Some(_) => promised.failures += 1,
     }
-    // The publisher's last batch, then its last try.
-    publish(&mut store, &mut pending);
-    if !pending.is_empty() {
-        publish(&mut store, &mut pending);
-    }
-    promised.finalised = pending.is_empty();
+    promised.finalised = stopped.published.is_ok_and(|report| report.is_complete());
     Ok(())
 }
 

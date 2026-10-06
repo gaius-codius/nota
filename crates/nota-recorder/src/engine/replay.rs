@@ -365,6 +365,9 @@ fn join(ranges: &mut Vec<SampleRange>, range: SampleRange) {
 }
 
 #[cfg(test)]
+mod props;
+
+#[cfg(test)]
 mod tests {
     use nota_core::SampleRate;
 
