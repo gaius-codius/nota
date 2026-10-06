@@ -1,11 +1,13 @@
 //! Writing the journal: frames appended as audio arrives, fsync'd every
 //! [`SYNC_INTERVAL`].
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::io;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use nota_core::{Clock, SampleCount, SampleIndex, SampleRate, SessionTime, TrackId};
@@ -13,6 +15,9 @@ use nota_core::{Clock, SampleCount, SampleIndex, SampleRate, SessionTime, TrackI
 use super::JournalId;
 use super::format::{JournalHeader, MAX_FRAME_SAMPLES, encode_frame, encode_header};
 use crate::fs::{FileSyncer, Fs, FsFile, Synced};
+
+/// The next [`JournalWriter`]'s token.
+static NEXT_TOKEN: AtomicU64 = AtomicU64::new(0);
 
 /// How often the journal is fsync'd while audio arrives: at most this long,
 /// or this much audio, goes unsynced.
@@ -151,10 +156,18 @@ pub struct JournalWriter<F: FsFile> {
     /// Where the last sync started covers to: anything captured past it
     /// still needs one.
     requested: SampleIndex,
-    /// The number of the latest sync started and not yet completed.
-    in_flight: Option<u64>,
+    /// The numbers of the syncs started and not yet completed, oldest
+    /// first.
+    in_flight: VecDeque<u64>,
+    /// Durable positions proved by syncs that completed while an older
+    /// one hadn't: they count only once every older one has succeeded.
+    early: Vec<(u64, DurablePosition)>,
     /// The number the next sync started gets.
     next_sync: u64,
+    /// Unique to this writer in the process, so a result from another
+    /// writer's sync, even of a journal with the same id in another
+    /// session, is never taken for one of its own.
+    token: u64,
     broken: bool,
     buf: Vec<u8>,
 }
@@ -169,6 +182,7 @@ pub struct PendingSync<Y> {
     /// Captured when it started: everything the fsync will cover.
     end: SampleIndex,
     seq: u64,
+    token: u64,
 }
 
 impl<Y: FileSyncer> PendingSync<Y> {
@@ -189,6 +203,7 @@ impl<Y: FileSyncer> PendingSync<Y> {
         SyncDone {
             journal: self.header.id(),
             seq: self.seq,
+            token: self.token,
             result,
         }
     }
@@ -201,6 +216,7 @@ impl<Y: FileSyncer> PendingSync<Y> {
         SyncDone {
             journal: self.header.id(),
             seq: self.seq,
+            token: self.token,
             result: Err(io::Error::other("the journal's sync thread stopped")),
         }
     }
@@ -211,6 +227,7 @@ impl<Y: FileSyncer> PendingSync<Y> {
 pub struct SyncDone {
     journal: JournalId,
     seq: u64,
+    token: u64,
     result: Result<DurablePosition, io::Error>,
 }
 
@@ -272,8 +289,10 @@ impl<F: FsFile> JournalWriter<F> {
             durable: DurablePosition::after(&proof, header, first),
             last_sync,
             requested: first,
-            in_flight: None,
+            in_flight: VecDeque::new(),
+            early: Vec::new(),
             next_sync: 0,
+            token: NEXT_TOKEN.fetch_add(1, Ordering::Relaxed),
             broken: false,
             buf: Vec::new(),
         })
@@ -317,15 +336,15 @@ impl<F: FsFile> JournalWriter<F> {
 
     /// Whether a sync was started and hasn't completed.
     #[must_use]
-    pub const fn sync_in_flight(&self) -> bool {
-        self.in_flight.is_some()
+    pub fn sync_in_flight(&self) -> bool {
+        !self.in_flight.is_empty()
     }
 
     /// Whether everything written is durable, with no sync in flight: the
     /// journal can end without another fsync.
     #[must_use]
     pub fn is_settled(&self) -> bool {
-        self.in_flight.is_none() && self.durable.end == self.captured
+        self.in_flight.is_empty() && self.durable.end == self.captured
     }
 
     /// Samples captured but not yet fsync'd.
@@ -430,7 +449,7 @@ impl<F: FsFile> JournalWriter<F> {
     /// the last one started or that much audio is unsynced.
     #[must_use]
     pub fn sync_due(&self) -> bool {
-        if self.broken || self.in_flight.is_some() || self.captured <= self.requested {
+        if self.broken || !self.in_flight.is_empty() || self.captured <= self.requested {
             return false;
         }
         let waited = self
@@ -462,7 +481,7 @@ impl<F: FsFile> JournalWriter<F> {
         }
         let seq = self.next_sync;
         self.next_sync += 1;
-        self.in_flight = Some(seq);
+        self.in_flight.push_back(seq);
         self.requested = self.captured;
         self.last_sync = self.clock.now();
         Ok(PendingSync {
@@ -470,36 +489,51 @@ impl<F: FsFile> JournalWriter<F> {
             header: self.header,
             end: self.captured,
             seq,
+            token: self.token,
         })
     }
 
     /// Takes the result of a sync [`Self::begin_sync`] started: the
     /// durable position moves up to where the journal stood when it
-    /// started, unless an earlier sync failed. A result for another journal
-    /// is ignored.
+    /// started, once every older sync has completed too, and never after
+    /// one failed. A result for another writer, or one already taken, is
+    /// ignored.
     ///
     /// # Errors
     ///
     /// [`JournalError::Io`] if the fsync failed, which breaks the journal.
     pub fn complete_sync(&mut self, done: SyncDone) -> Result<(), JournalError> {
-        if done.journal != self.header.id() {
+        let Some(at) = self
+            .in_flight
+            .iter()
+            .position(|&seq| seq == done.seq)
+            .filter(|_| done.token == self.token && done.journal == self.header.id())
+        else {
             return Ok(());
-        }
-        if self.in_flight == Some(done.seq) {
-            self.in_flight = None;
-        }
+        };
+        self.in_flight.remove(at);
         match done.result {
             // After a failed fsync nothing unsynced then can be trusted,
             // even if a later fsync succeeds.
-            Ok(durable) if !self.broken && durable.end > self.durable.end => {
-                self.durable = durable;
-                Ok(())
-            }
-            Ok(_) => Ok(()),
             Err(e) => {
                 self.broken = true;
-                self.in_flight = None;
+                self.in_flight.clear();
+                self.early.clear();
                 Err(JournalError::Io(e))
+            }
+            Ok(_) if self.broken => Ok(()),
+            Ok(durable) => {
+                self.early.push((done.seq, durable));
+                let oldest = self.in_flight.front().copied().unwrap_or(u64::MAX);
+                let (proved, waiting): (Vec<_>, Vec<_>) =
+                    self.early.drain(..).partition(|&(seq, _)| seq < oldest);
+                self.early = waiting;
+                for (_, durable) in proved {
+                    if durable.end > self.durable.end {
+                        self.durable = durable;
+                    }
+                }
+                Ok(())
             }
         }
     }

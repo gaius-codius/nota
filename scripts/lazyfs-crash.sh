@@ -21,7 +21,8 @@
 # The journals are fsync'd on a thread per track, as `nota record` does it,
 # so the operations' order and count vary a little from run to run. The
 # points are numbered from one uncrashed run; a point past the end of a
-# shorter run is reported as unreached, not failed.
+# shorter run that finished cleanly is reported as unreached, not failed. A
+# run that fails before its point fails it.
 #
 # LazyFS loses unsynced file data and sizes, but not directory entries:
 # creates, renames and unlinks reach the disk at once. So this can't catch a
@@ -215,9 +216,16 @@ run_point() {
   stopped_or_done() { [[ -e $promises.stopped ]] || ! kill -0 "$WRITER_PID" 2> /dev/null; }
   wait_for 60 stopped_or_done || die "point $n: the writer neither stopped nor finished"
   if [[ ! -e $promises.stopped ]]; then
-    wait "$WRITER_PID" || true
+    local status=0
+    wait "$WRITER_PID" || status=$?
     WRITER_PID=
     unmount
+    if [[ $status -ne 0 ]]; then
+      # Only a run that ended cleanly made fewer operations; one that failed
+      # is a failure, kept with its output.
+      echo "point $n: the writer failed (status $status) before its crash point" > "$dir/result"
+      return 0
+    fi
     rm -rf "$dir"
     : > "$dir.unreached"
     return 0

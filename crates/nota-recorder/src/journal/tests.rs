@@ -1281,7 +1281,7 @@ fn a_failed_sync_breaks_the_journal_and_a_later_success_moves_nothing() {
 }
 
 #[test]
-fn an_older_sync_completing_after_a_newer_one_leaves_the_newer_in_flight() {
+fn a_newer_sync_counts_only_once_every_older_one_has_succeeded() {
     let fs = FakeFs::with_dirs([session()]);
     let (_, clock) = fake_clock();
     let mut j = create(&fs, 0, MIC, 0, clock).unwrap();
@@ -1291,20 +1291,58 @@ fn an_older_sync_completing_after_a_newer_one_leaves_the_newer_in_flight() {
     let second = j.begin_sync().unwrap();
     let (first, second) = (first.run(), second.run());
     j.complete_sync(second).unwrap();
-    assert_eq!(durable_at(&j), 200);
-    assert!(!j.sync_in_flight());
-    // The older one proves less: durable stays.
+    // The older one might yet fail, losing what the newer one covers.
+    assert_eq!(durable_at(&j), 0);
+    assert!(j.sync_in_flight());
     j.complete_sync(first).unwrap();
     assert_eq!(durable_at(&j), 200);
+    assert!(!j.sync_in_flight());
+    assert!(j.is_settled());
 
-    let third = j.begin_sync().unwrap();
+    // In order, each counts at once.
     j.append_within(&samples(MIC, 200, 1)).unwrap();
+    let third = j.begin_sync().unwrap();
+    j.append_within(&samples(MIC, 201, 1)).unwrap();
     let fourth = j.begin_sync().unwrap();
     j.complete_sync(third.run()).unwrap();
+    assert_eq!(durable_at(&j), 201);
     assert!(j.sync_in_flight(), "the newer sync is still out");
     j.complete_sync(fourth.run()).unwrap();
     assert!(!j.sync_in_flight());
-    assert_eq!(durable_at(&j), 201);
+    assert_eq!(durable_at(&j), 202);
+}
+
+#[test]
+fn an_older_sync_failing_after_a_newer_one_succeeded_proves_nothing() {
+    let fs = FakeFs::with_dirs([session()]);
+    let (_, clock) = fake_clock();
+    let mut j = create(&fs, 0, MIC, 0, clock).unwrap();
+    j.append_within(&samples(MIC, 0, 100)).unwrap();
+    let first = j.begin_sync().unwrap();
+    j.append_within(&samples(MIC, 100, 100)).unwrap();
+    let second = j.begin_sync().unwrap();
+    fs.fail_after(0, io::ErrorKind::Other);
+    let (first, second) = (first.run(), second.run());
+    j.complete_sync(second).unwrap();
+    assert!(matches!(j.complete_sync(first), Err(JournalError::Io(_))));
+    assert_eq!(durable_at(&j), 0);
+    assert!(j.is_broken());
+}
+
+#[test]
+fn a_result_from_another_writer_of_the_same_journal_id_is_ignored() {
+    let (_, clock) = fake_clock();
+    let here = FakeFs::with_dirs([session()]);
+    let there = FakeFs::with_dirs([session()]);
+    let mut mine = create(&here, 0, MIC, 0, Arc::clone(&clock)).unwrap();
+    let mut theirs = create(&there, 0, MIC, 0, clock).unwrap();
+    mine.append_within(&samples(MIC, 0, 100)).unwrap();
+    theirs.append_within(&samples(MIC, 0, 100)).unwrap();
+    let _pending = mine.begin_sync().unwrap();
+    let done = theirs.begin_sync().unwrap().run();
+    mine.complete_sync(done).unwrap();
+    assert_eq!(durable_at(&mine), 0);
+    assert!(mine.sync_in_flight());
 }
 
 #[test]

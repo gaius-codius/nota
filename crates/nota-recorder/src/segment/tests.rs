@@ -131,12 +131,13 @@ impl Promised {
         if ok && let Some(next) = writer.next_sample(track) {
             self.captured.insert(track, next);
         }
-        // A call that failed promises nothing new: its track's durable
-        // position may now be past audio it lost, a gap it reported.
-        // Between journals, a successful call has ended the last one with a
-        // sync: everything up to the next sample is durable.
+        // When fsyncs complete late, a call that failed promises nothing
+        // new: an ended journal's tail may have become a gap it reported,
+        // with the track's durable position past it. Between journals, a
+        // successful call has ended the last one with a sync: everything up
+        // to the next sample is durable.
         let end = match writer.durable(track) {
-            Some(d) if ok => Some(d.end()),
+            Some(d) if ok || !self.lag_in_memory => Some(d.end()),
             None if ok => writer.next_sample(track),
             _ => None,
         };

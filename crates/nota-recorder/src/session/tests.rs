@@ -684,19 +684,51 @@ fn a_replacement_failing_too_leaves_a_gap_and_hands_out_both() {
 }
 
 #[test]
-fn a_new_epoch_writes_audio_held_back_in_the_old_epoch_first() {
+fn a_new_epoch_writes_audio_held_back_in_the_old_epoch_without_waiting() {
     let fs = FakeFs::with_dirs([dir(), PathBuf::from("/db")]);
     let (_, mut w) = manual_writer(&fs);
     w.append(MIC, &samples(0, 900)).unwrap();
     assert_eq!(w.waiting(MIC), 50);
-    // It waits for the held fsync, writes the 50, and ends the journal.
+    // The full journal ends with its fsync still held; the 50 go to
+    // another journal in the old epoch, which ends too.
     w.new_epoch(MIC, EpochId::new(1)).unwrap();
     assert_eq!(w.waiting(MIC), 0);
     assert_eq!(w.epoch(MIC), Some((EpochId::new(1), SampleIndex::new(900))));
     w.append(MIC, &samples(900, 10)).unwrap();
-    assert_eq!(journal_range(&fs, 0), (0, 900, 0));
-    assert_eq!(journal_range(&fs, 1), (900, 910, 1));
-    assert_eq!(w.finish().unwrap(), finished(&[0, 1]));
+    assert_eq!(journal_range(&fs, 0), (0, 850, 0));
+    assert_eq!(journal_range(&fs, 1), (850, 900, 0));
+    assert_eq!(journal_range(&fs, 2), (900, 910, 1));
+    assert!(w.take_finished().is_empty(), "nothing waited for an fsync");
+    assert_eq!(w.finish().unwrap(), finished(&[0, 1, 2]));
+    assert_eq!(
+        joined(&salvaged(&fs.crash(CrashOutcome::LoseUnsynced))),
+        [(0, 910)]
+    );
+}
+
+#[test]
+fn a_replacement_of_a_whole_budget_leaves_its_fsync_to_the_sync_thread() {
+    let fs = FakeFs::with_dirs([dir(), PathBuf::from("/db")]);
+    let (_, mut w) = manual_writer(&fs);
+    w.append(MIC, &samples(0, 850)).unwrap();
+    // The full budget's fsync fails: journal 1 takes all 850 over, and its
+    // own fsync is started, held, not run here.
+    fs.fail_after(0, io::ErrorKind::Other);
+    assert_eq!(w.run_syncs(MIC, 1), 1);
+    let syncs = |fs: &FakeFs| {
+        fs.ops()
+            .iter()
+            .filter(|op| matches!(op, Op::Sync(_)))
+            .count()
+    };
+    w.sync_if_due().unwrap();
+    let before = syncs(&fs);
+    assert_eq!(journal_range(&fs, 1), (0, 850, 0));
+    assert_eq!(durable_end(&w), 0);
+    assert_eq!(w.run_syncs(MIC, 1), 1);
+    assert_eq!(syncs(&fs), before + 1);
+    w.sync_if_due().unwrap();
+    assert_eq!(durable_end(&w), 850);
 }
 
 #[test]
@@ -740,5 +772,111 @@ fn syncs_on_threads_record_the_same_audio_as_inline() {
             [(0, 2_500)],
             "{syncing:?}"
         );
+    }
+}
+
+/// A [`FakeFs`] whose journals' data fsyncs, through their syncers, always
+/// fail, while creating a journal (its header fsync) still works: a disk
+/// that takes names but not data.
+#[derive(Debug, Clone)]
+struct NoDataSyncs(FakeFs);
+
+#[derive(Debug)]
+struct NoDataFile(FakeFile);
+
+#[derive(Debug)]
+struct FailingSyncer;
+
+impl crate::fs::FileSyncer for FailingSyncer {
+    fn sync(&self) -> io::Result<crate::fs::Synced> {
+        Err(io::Error::other("EIO"))
+    }
+}
+
+impl crate::fs::FsFile for NoDataFile {
+    type Syncer = FailingSyncer;
+
+    fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.0.write_all(bytes)
+    }
+
+    fn sync(&mut self) -> io::Result<crate::fs::Synced> {
+        self.0.sync()
+    }
+
+    fn syncer(&self) -> io::Result<FailingSyncer> {
+        Ok(FailingSyncer)
+    }
+}
+
+impl Fs for NoDataSyncs {
+    type File = NoDataFile;
+    type Lock = FakeLock;
+
+    fn create(&self, path: &Path) -> io::Result<NoDataFile> {
+        self.0.create(path).map(NoDataFile)
+    }
+
+    fn create_dir(&self, path: &Path) -> io::Result<()> {
+        self.0.create_dir(path)
+    }
+
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.0.rename(from, to)
+    }
+
+    fn sync_dir(&self, dir: &Path) -> io::Result<()> {
+        self.0.sync_dir(dir)
+    }
+
+    fn remove(&self, path: &Path) -> io::Result<()> {
+        self.0.remove(path)
+    }
+
+    fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        self.0.read(path)
+    }
+
+    fn list(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
+        self.0.list(dir)
+    }
+
+    fn lock_dir(&self, dir: &Path) -> io::Result<FakeLock> {
+        self.0.lock_dir(dir)
+    }
+}
+
+#[test]
+fn when_no_data_fsync_ever_succeeds_each_failure_is_replaced_once_then_a_gap() {
+    for syncing in [Syncing::Inline, Syncing::Manual] {
+        let fs = NoDataSyncs(FakeFs::with_dirs([dir(), PathBuf::from("/db")]));
+        let (_, dyn_clock) = clock();
+        let mut w = SessionWriter::open(
+            &session_dir(&fs).lock().unwrap(),
+            rate(),
+            length(),
+            dyn_clock,
+        )
+        .unwrap()
+        .with_syncing(syncing);
+        w.start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+            .unwrap();
+        // The full budget's fsync fails, and so does its replacement's: a
+        // gap, not a replacement of the replacement.
+        let mut failed = w.append(MIC, &samples(0, 850)).is_err();
+        for _ in 0..3 {
+            w.run_syncs(MIC, usize::MAX);
+            failed |= w.sync_if_due().is_err();
+        }
+        assert!(failed, "{syncing:?}: the second failure is reported");
+        assert_eq!(w.take_finished(), finished(&[0, 1]), "{syncing:?}");
+        // Ending a journal the same way: one replacement, then the error.
+        w.append(MIC, &samples(850, 100)).unwrap();
+        let err = w.finish().unwrap_err();
+        assert!(
+            matches!(err.error(), SessionError::Journal(_)),
+            "{syncing:?}: {err}"
+        );
+        assert_eq!(err.into_finished(), finished(&[2, 3]), "{syncing:?}");
     }
 }

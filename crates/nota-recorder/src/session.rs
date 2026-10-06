@@ -43,7 +43,10 @@
 //! - A journal that ends (at a window boundary or a new epoch) has its
 //!   last fsync started, and is handed out by
 //!   [`SessionWriter::take_finished`] once that completes, in order. The
-//!   next journal starts meanwhile. Until then the track's
+//!   next journal starts meanwhile. (Broken journals whose replacement
+//!   couldn't start are handed out at once, a gap, even ahead of older
+//!   ones still waiting; journals never overlap, so publishing doesn't
+//!   depend on the order.) Until then the track's
 //!   [`SessionWriter::durable`] is the ended journal's.
 //! - A failure found late is handled as one found at once: the broken
 //!   journal is replaced from its durable position, an ended one by a
@@ -480,8 +483,9 @@ impl<S: Fs> SessionWriter<S> {
 
     /// Moves `track` to `epoch` (its stream reopened): its journal ends, and
     /// the next sample starts a new one. Audio still waiting for an fsync
-    /// is written first, in the old epoch, waiting for that fsync if it
-    /// must.
+    /// is written first, in the old epoch: a journal full while its fsync
+    /// runs is ended, and the rest goes to another journal, so this never
+    /// waits on an fsync.
     ///
     /// # Errors
     ///
@@ -498,7 +502,7 @@ impl<S: Fs> SessionWriter<S> {
         if epoch <= current {
             return Err(SessionError::EpochUsed { track, epoch });
         }
-        let drained = self.drain(track);
+        let drained = self.write_out(track);
         let ended = self.end_journal(track);
         let state = self
             .tracks
@@ -714,6 +718,29 @@ impl<S: Fs> SessionWriter<S> {
         }
     }
 
+    /// Writes all of `track`'s waiting audio without waiting on an fsync:
+    /// each journal still full while its fsync runs is ended, and the rest
+    /// starts another.
+    fn write_out(&mut self, track: TrackId) -> Result<(), SessionError> {
+        let mut first_error = None;
+        loop {
+            if let Err(e) = self.flush(track) {
+                first_error.get_or_insert(e);
+            }
+            let state = self
+                .tracks
+                .get(&track)
+                .ok_or(SessionError::UnknownTrack(track))?;
+            if state.waiting.is_empty() {
+                break;
+            }
+            if let Err(e) = self.end_journal(track) {
+                first_error.get_or_insert(e);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
     /// Writes all of `track`'s waiting audio, waiting for its fsyncs to
     /// complete as needed.
     fn drain(&mut self, track: TrackId) -> Result<(), SessionError> {
@@ -827,7 +854,10 @@ impl<S: Fs> SessionWriter<S> {
             let synced = open.writer.complete_sync(done);
             open.trim();
             return match synced {
-                Ok(()) => Ok(()),
+                Ok(()) => {
+                    open.fresh = false;
+                    Ok(())
+                }
                 Err(_) => self.replace(track),
             };
         }
@@ -844,7 +874,10 @@ impl<S: Fs> SessionWriter<S> {
         let synced = open.writer.complete_sync(done);
         open.trim();
         match synced {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                open.fresh = false;
+                Ok(())
+            }
             Err(_) => self.replace_ending(track, at),
         }
     }
@@ -923,17 +956,23 @@ impl<S: Fs> SessionWriter<S> {
                 return Err(SessionError::Journal(e));
             }
         };
-        // Within one sync budget, so this never fsyncs.
-        if let Err(e) = writer.append(&replay) {
+        // Within one sync budget, so it all fits; its fsync is started
+        // like any other.
+        let written = writer.append_within(&replay);
+        if !matches!(written, Ok(n) if n == replay.len()) {
             // A replacement broke too: give up on these samples.
             hand_out(self.session, &mut held, &mut self.finished, Some(id));
-            return Err(SessionError::Journal(e));
+            return Err(SessionError::Journal(
+                written.err().unwrap_or(JournalError::Broken),
+            ));
         }
+        let fresh = !held.is_empty();
         let mut open = Open {
             writer,
             unsynced: replay,
             unsynced_from: at,
             held,
+            fresh,
         };
         open.trim();
         Ok(open)
@@ -953,7 +992,7 @@ impl<S: Fs> SessionWriter<S> {
         if let Some(state) = self.tracks.get_mut(&track) {
             state.journal = Some(open);
         }
-        Ok(())
+        self.sync_journal_if_due(track)
     }
 
     /// Makes sure the marks on disk cover journal `id` and `track`'s
@@ -979,8 +1018,9 @@ impl<S: Fs> SessionWriter<S> {
     }
 
     /// Replaces `track`'s broken journal with a new one starting at its
-    /// durable position, rewriting the samples since. If that fails, they
-    /// are a gap, and the next samples start a new journal.
+    /// durable position, rewriting the samples since. If that fails, or the
+    /// broken journal was itself a replacement that never synced, they are
+    /// a gap, and the next samples start a new journal.
     fn replace(&mut self, track: TrackId) -> Result<(), SessionError> {
         let state = self
             .tracks
@@ -989,13 +1029,19 @@ impl<S: Fs> SessionWriter<S> {
         let Some(broken) = state.journal.take() else {
             return Ok(());
         };
-        let (from, epoch, unsynced, held) = broken.retire(self.session);
+        let fresh = broken.fresh;
+        let (from, epoch, unsynced, mut held) = broken.retire(self.session);
+        if fresh {
+            hand_out(self.session, &mut held, &mut self.finished, None);
+            return Err(SessionError::Journal(JournalError::Broken));
+        }
         self.open_journal(track, from, epoch, unsynced, held)
     }
 
     /// Replaces the broken journal at `at` among `track`'s ended ones with a
     /// new one starting at its durable position, rewriting the samples
-    /// since, and ends that one too, in its place. If that fails, they are
+    /// since, and ends that one too, in its place. If that fails, or the
+    /// broken journal was itself a replacement that never synced, they are
     /// a gap.
     fn replace_ending(&mut self, track: TrackId, at: usize) -> Result<(), SessionError> {
         let state = self
@@ -1005,7 +1051,12 @@ impl<S: Fs> SessionWriter<S> {
         let Some(broken) = state.ending.remove(at) else {
             return Ok(());
         };
-        let (from, epoch, unsynced, held) = broken.retire(self.session);
+        let fresh = broken.fresh;
+        let (from, epoch, unsynced, mut held) = broken.retire(self.session);
+        if fresh {
+            hand_out(self.session, &mut held, &mut self.finished, None);
+            return Err(SessionError::Journal(JournalError::Broken));
+        }
         let mut open = self.start_journal(track, from, epoch, unsynced, held)?;
         let state = self
             .tracks
@@ -1082,6 +1133,9 @@ struct Open<F: FsFile> {
     /// Broken journals it replaces: handed out with it, so publishing sees
     /// both and the overlap rule holds.
     held: Vec<FinishedJournal>,
+    /// A replacement none of whose fsyncs has succeeded yet: if it breaks
+    /// too, its samples are given up as a gap rather than replaced again.
+    fresh: bool,
 }
 
 impl<F: FsFile> Open<F> {

@@ -614,9 +614,13 @@ fn a_stalled_fsync_on_one_track_never_holds_up_the_other() {
     for from in (0..2_600).step_by(100) {
         tx.audio(SYSTEM, &samples(SYSTEM, from, 100));
     }
-    for _ in 0..2 {
-        wait_for(&seen, |_, e| matches!(e, RecorderEvent::Finished(_)));
-    }
+    let handed_out = std::cell::Cell::new(0);
+    wait_for(&seen, |_, e| {
+        if let RecorderEvent::Finished(journals) = e {
+            handed_out.set(handed_out.get() + journals.len());
+        }
+        handed_out.get() >= 2
+    });
     // Once the next event is handled, the progress has caught up.
     tx.audio(SYSTEM, &samples(SYSTEM, 2_600, 1));
     wait_for(&seen, audio_from(SYSTEM, 2_600));
