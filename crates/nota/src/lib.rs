@@ -17,6 +17,7 @@ use std::process::ExitCode;
 use nota_engine::sherpa::ModelPaths;
 use nota_recorder::capture::Source;
 
+mod latency;
 mod library;
 mod live;
 mod record;
@@ -145,6 +146,7 @@ fn parse_record(args: &[OsString]) -> Result<RecordArgs, String> {
         mic: Source::Microphone,
         system: Source::SystemAudio,
         tone: false,
+        latency_log: None,
     };
     let (mut data, mut parakeet, mut vad) = (None, None, None);
     for (flag, value) in pairs(args)? {
@@ -163,6 +165,8 @@ fn parse_record(args: &[OsString]) -> Result<RecordArgs, String> {
             "--system" => record.system = Source::Device(text()?),
             #[cfg(feature = "fake-capture")]
             "--tone" => record.tone = text()? == "yes",
+            #[cfg(feature = "latency-log")]
+            "--latency-log" => record.latency_log = Some(PathBuf::from(value)),
             _ => return Err(format!("unknown option {flag}")),
         }
     }

@@ -9,7 +9,7 @@
 
 use std::io::{self, Stdout, Write};
 use std::mem::ManuallyDrop;
-use std::sync::Once;
+use std::sync::{Arc, Once};
 
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -20,6 +20,14 @@ use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 
+use nota_core::Clock;
+
+use crate::latency::{DrawEnds, Watched};
+
+/// The screen's output: the terminal, watched for draws only when
+/// measuring latency.
+type Output = CrosstermBackend<Watched<Stdout>>;
+
 /// The terminal set up for the screen. Restored when dropped.
 #[derive(Debug)]
 pub(crate) struct Screen {
@@ -27,16 +35,17 @@ pub(crate) struct Screen {
     /// the error with `eprintln!`, which panics when stderr is the terminal
     /// that has just hung up. [`restore`] shows the cursor instead, and the
     /// buffers are freed at exit (there's one screen per process).
-    terminal: ManuallyDrop<Terminal<CrosstermBackend<Stdout>>>,
+    terminal: ManuallyDrop<Terminal<Output>>,
 }
 
 impl Screen {
-    /// Sets the terminal up for the screen.
+    /// Sets the terminal up for the screen. With `draws`, the end of each
+    /// draw is noted there, by its clock (for the latency log).
     ///
     /// # Errors
     ///
     /// If the terminal can't be set up; whatever was set up is undone.
-    pub(crate) fn enter() -> io::Result<Self> {
+    pub(crate) fn enter(draws: Option<(DrawEnds, Arc<dyn Clock>)>) -> io::Result<Self> {
         install_panic_hook();
         enable_raw_mode()?;
         let set_up = execute!(
@@ -45,7 +54,7 @@ impl Screen {
             EnableBracketedPaste,
             Hide
         )
-        .and_then(|()| Terminal::new(CrosstermBackend::new(io::stdout())));
+        .and_then(|()| Terminal::new(CrosstermBackend::new(Watched::new(io::stdout(), draws))));
         match set_up {
             Ok(terminal) => Ok(Self {
                 terminal: ManuallyDrop::new(terminal),
@@ -58,7 +67,7 @@ impl Screen {
     }
 
     /// The terminal to draw on.
-    pub(crate) fn terminal(&mut self) -> &mut Terminal<CrosstermBackend<Stdout>> {
+    pub(crate) fn terminal(&mut self) -> &mut Terminal<Output> {
         &mut self.terminal
     }
 }
