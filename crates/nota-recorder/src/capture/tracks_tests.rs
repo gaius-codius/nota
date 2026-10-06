@@ -16,7 +16,7 @@ use crate::fs::Fs;
 use crate::fs::fake::FakeFs;
 use crate::journal::read_journal;
 use crate::segment::SegmentLength;
-use crate::session::{FinishedJournal, SessionDir};
+use crate::session::{FinishedJournal, SessionDir, Syncing};
 
 const MIC: TrackId = TrackId::new(0);
 const SYSTEM: TrackId = TrackId::new(1);
@@ -529,4 +529,157 @@ fn events_from_a_stream_that_never_started_are_dropped() {
     assert_eq!(writer.next_sample(SYSTEM), Some(SampleIndex::new(50)));
     let journals = writer.finish().unwrap();
     assert_eq!(by_track(&fs, &journals)[&SYSTEM], samples(SYSTEM, 0, 50));
+}
+
+/// Waits up to 10 s for the recorder to report an event `wanted` picks.
+fn wait_for(
+    seen: &mpsc::Receiver<(Option<TrackId>, RecorderEvent)>,
+    wanted: impl Fn(Option<TrackId>, &RecorderEvent) -> bool,
+) {
+    loop {
+        let (track, event) = seen.recv_timeout(Duration::from_secs(10)).unwrap();
+        if wanted(track, &event) {
+            return;
+        }
+    }
+}
+
+/// Whether `event` is `track`'s audio starting at `first`.
+fn audio_from(track: TrackId, first: u64) -> impl Fn(Option<TrackId>, &RecorderEvent) -> bool {
+    move |_, event| {
+        matches!(event, RecorderEvent::Audio(chunk)
+            if chunk.track() == track && chunk.range().start().get() == first)
+    }
+}
+
+#[test]
+fn a_stalled_fsync_on_one_track_never_holds_up_the_other() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let session = SessionDir::new(SESSION, fs.clone(), &dir()).lock().unwrap();
+    let length = SegmentLength::new(SampleCount::new(1_000)).unwrap();
+    let mut writer = SessionWriter::open(&session, rate(), length, clock)
+        .unwrap()
+        .with_syncing(Syncing::Threads);
+    let mut timelines = Vec::new();
+    for track in [MIC, SYSTEM] {
+        writer
+            .start_track(track, EpochId::new(0), SampleIndex::ZERO)
+            .unwrap();
+        let mut timeline = TrackTimeline::new(track);
+        timeline
+            .open_epoch(SessionTime::ZERO, SampleIndex::ZERO, rate())
+            .unwrap();
+        timelines.push(timeline);
+    }
+    let (tx, rx) = test_channel();
+    let events = CaptureReceiver {
+        events: rx,
+        rate: rate(),
+        tracks: test_tracks(&[MIC, SYSTEM]),
+    };
+    let mic = events.progress(MIC).unwrap();
+    let system = events.progress(SYSTEM).unwrap();
+    let (report, seen) = mpsc::channel();
+    let recorder = thread::spawn(move || {
+        let mut handed_out = Vec::new();
+        let result = record_tracks(&mut writer, &mut timelines, &events, &mut |t, e| {
+            if let RecorderEvent::Finished(journals) = &e {
+                handed_out.extend(
+                    journals
+                        .iter()
+                        .map(|j| FinishedJournal::new(j.session(), j.id())),
+                );
+            }
+            let _ = report.send((t, e));
+        });
+        (writer, result, handed_out)
+    });
+
+    // The mic's first journal exists once its audio is reported; from now
+    // on its fsyncs hang.
+    tx.audio(MIC, &samples(MIC, 0, 100));
+    wait_for(&seen, audio_from(MIC, 0));
+    let mic_journal = dir().join(crate::journal::JournalId::FIRST.file_name());
+    assert!(fs.paths().contains(&mic_journal));
+    let stall = fs.stall_syncs(&mic_journal);
+    // A full sync budget (850 samples) starts its fsync, which hangs, and
+    // the mic's audio after that waits in memory.
+    tx.audio(MIC, &samples(MIC, 100, 800));
+    stall.wait_for_held(1);
+    tx.audio(MIC, &samples(MIC, 900, 50));
+
+    // The system audio crosses three budgets and two windows meanwhile, and
+    // both its journals are handed out, their last fsyncs done.
+    for from in (0..2_600).step_by(100) {
+        tx.audio(SYSTEM, &samples(SYSTEM, from, 100));
+    }
+    for _ in 0..2 {
+        wait_for(&seen, |_, e| matches!(e, RecorderEvent::Finished(_)));
+    }
+    // Once the next event is handled, the progress has caught up.
+    tx.audio(SYSTEM, &samples(SYSTEM, 2_600, 1));
+    wait_for(&seen, audio_from(SYSTEM, 2_600));
+    let (mic_now, system_now) = (mic.now(), system.now());
+    assert_eq!(system_now.durable, SampleIndex::new(2_000));
+    // The recorder took all the mic's audio, though none is durable.
+    assert_eq!(mic_now.captured, SampleIndex::new(950));
+    assert_eq!(mic_now.durable, SampleIndex::ZERO);
+    assert_eq!(mic_now.at_risk().get(), 950);
+    assert!(system_now.at_risk().get() <= 850, "{system_now:?}");
+
+    stall.release();
+    tx.send(MIC, CaptureEvent::Stopped);
+    tx.send(SYSTEM, CaptureEvent::Stopped);
+    let (writer, result, mut journals) = recorder.join().unwrap();
+    result.unwrap();
+    journals.extend(writer.finish().unwrap());
+    let audio = by_track(&fs, &journals);
+    assert_eq!(audio[&MIC], samples(MIC, 0, 950));
+    assert_eq!(audio[&SYSTEM], samples(SYSTEM, 0, 2_601));
+}
+
+#[test]
+fn the_other_tracks_due_fsync_runs_as_soon_as_a_stream_ends() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let fake = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let clock: Arc<dyn Clock> = Arc::clone(&fake) as Arc<dyn Clock>;
+    let session = SessionDir::new(SESSION, fs.clone(), &dir()).lock().unwrap();
+    let length = SegmentLength::new(SampleCount::new(1_000)).unwrap();
+    let mut writer = SessionWriter::open(&session, rate(), length, clock).unwrap();
+    let mut timelines = Vec::new();
+    for track in [MIC, SYSTEM] {
+        writer
+            .start_track(track, EpochId::new(0), SampleIndex::ZERO)
+            .unwrap();
+        let mut timeline = TrackTimeline::new(track);
+        timeline
+            .open_epoch(SessionTime::ZERO, SampleIndex::ZERO, rate())
+            .unwrap();
+        timelines.push(timeline);
+    }
+    let (tx, rx) = test_channel();
+    tx.send(SYSTEM, CaptureEvent::Audio(samples(SYSTEM, 0, 30)));
+    tx.send(
+        MIC,
+        CaptureEvent::Failed(CaptureError::Backend("gone".into())),
+    );
+    tx.send(SYSTEM, CaptureEvent::Stopped);
+    let events = CaptureReceiver {
+        events: rx,
+        rate: rate(),
+        tracks: test_tracks(&[MIC, SYSTEM]),
+    };
+    let system = events.progress(SYSTEM).unwrap();
+    record_tracks(&mut writer, &mut timelines, &events, &mut |_, e| {
+        // The system track's fsync falls due as the mic's stream ends.
+        if matches!(e, RecorderEvent::CaptureFailed(_)) {
+            fake.advance(crate::journal::SYNC_INTERVAL);
+        }
+    })
+    .unwrap();
+    // Synced then, not only once recording stopped.
+    assert_eq!(system.now().durable, SampleIndex::new(30));
+    assert_eq!(writer.durable(SYSTEM).unwrap().end(), SampleIndex::new(30));
+    writer.finish().unwrap();
 }

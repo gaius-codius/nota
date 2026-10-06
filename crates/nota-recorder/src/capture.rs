@@ -60,10 +60,26 @@
 //! track whose stream fails is reported and the others record on; the
 //! recorder returns once every stream has stopped or failed. Every
 //! journal's fsync is checked after every event, whichever track it came
-//! from, and while no audio arrives. The fsyncs are made one after another
-//! on that thread, so a track's audio can wait in the channel while
-//! another track's journal is fsync'd: with two tracks, the bounded-loss
-//! rule holds only while their fsyncs together stay under about 200 ms.
+//! from, after a stream ends, and while no audio arrives.
+//!
+//! # The bound
+//!
+//! A track's durable position trails the audio the server delivered by at
+//! most [`SYNC_INTERVAL`](crate::journal::SYNC_INTERVAL) (850 ms), the
+//! stream's buffering (about 40 ms) and its own journal's fsync, so the
+//! 1.1 s bounded-loss rule holds while that fsync stays under about
+//! 200 ms. That holds for each track whatever the others do only when the
+//! writer's fsyncs run on a thread per track
+//! ([`Syncing::Threads`](crate::session::Syncing::Threads)), as recording
+//! should: the recorder thread then never waits on an fsync, and a track
+//! whose fsync is slow holds only its own audio back, in memory, until it
+//! completes. Inline ([`Syncing::Inline`](crate::session::Syncing::Inline)),
+//! the fsyncs run one after another on the recorder thread, so a track's
+//! audio also waits in the channel while the other tracks' journals are
+//! fsync'd: the rule then holds only while all their fsyncs together stay
+//! under about 200 ms. Creating a journal, at each window boundary, still
+//! fsyncs the new file and its directory on the recorder thread, once per
+//! track per segment window (five minutes by default).
 //!
 //! On Linux, [`PipeWireBackend`] captures through cpal's `PipeWire` host. It
 //! links `libpipewire-0.3`, `libasound` (cpal's ALSA host is always built
@@ -585,13 +601,14 @@ pub fn record_track<S: Fs>(
 /// the recorder thread. Start each track on `writer` first, and open the
 /// same epoch on its timeline, at the session time its stream was started.
 ///
-/// After every event, from whichever track, every journal due an fsync is
-/// fsync'd, and so are they all when nothing arrives for 100 ms: each
-/// track's durable position stays within about
-/// [`SYNC_INTERVAL`](crate::journal::SYNC_INTERVAL) of what it captured,
-/// however busy or quiet the other tracks are. Its audio waits in the
-/// channel meanwhile, though, so against what the server *delivered* it
-/// also trails by the other tracks' fsyncs (see the module docs).
+/// After every event, from whichever track, and after a stream ends,
+/// every journal due an fsync has one started, and so do they all when
+/// nothing arrives for 100 ms: each track's durable position stays within
+/// about [`SYNC_INTERVAL`](crate::journal::SYNC_INTERVAL) of what it
+/// captured, however busy or quiet the other tracks are. Against what the
+/// server *delivered*, it also trails by its own fsync and, unless
+/// `writer` syncs on a thread per track, by the other tracks' fsyncs (see
+/// the module docs).
 ///
 /// Each track's [`Progress`] (from [`CaptureReceiver::progress`]) moves on
 /// as its audio is appended and its journals are fsync'd.
@@ -674,7 +691,7 @@ pub fn record_tracks<S: Fs>(
                     }
                     Handled::Ended => {
                         live.remove(&track);
-                        continue;
+                        Ok(())
                     }
                 }
             }

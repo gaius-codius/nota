@@ -16,8 +16,8 @@ use nota_core::{
 use std::error::Error as _;
 
 use super::*;
-use crate::fs::fake::{FakeFile, FakeFs, FakeLock};
-use crate::fs::{Fs, FsFile, Synced};
+use crate::fs::fake::{FakeFile, FakeFs, FakeLock, FakeSyncer};
+use crate::fs::{FileSyncer, Fs, FsFile, Synced};
 use crate::journal::{JournalId, read_journal};
 use crate::segment::SegmentLength;
 use crate::session::SessionDir;
@@ -258,7 +258,16 @@ struct WatchedFile {
     ops: mpsc::Sender<FileOp>,
 }
 
+/// A [`WatchedFile`]'s fsyncs from a sync thread, reported as its own.
+#[derive(Debug)]
+struct WatchedSyncer {
+    syncer: FakeSyncer,
+    ops: mpsc::Sender<FileOp>,
+}
+
 impl FsFile for WatchedFile {
+    type Syncer = WatchedSyncer;
+
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
         self.file.write_all(bytes)?;
         let _ = self.ops.send(FileOp::Write);
@@ -267,6 +276,21 @@ impl FsFile for WatchedFile {
 
     fn sync(&mut self) -> io::Result<Synced> {
         let synced = self.file.sync()?;
+        let _ = self.ops.send(FileOp::Sync);
+        Ok(synced)
+    }
+
+    fn syncer(&self) -> io::Result<WatchedSyncer> {
+        Ok(WatchedSyncer {
+            syncer: self.file.syncer()?,
+            ops: self.ops.clone(),
+        })
+    }
+}
+
+impl FileSyncer for WatchedSyncer {
+    fn sync(&self) -> io::Result<Synced> {
+        let synced = self.syncer.sync()?;
         let _ = self.ops.send(FileOp::Sync);
         Ok(synced)
     }
@@ -980,22 +1004,51 @@ struct StallingFile {
     fs: Stalling,
 }
 
+impl Stalling {
+    /// Waits while the gate is closed, reporting that it does.
+    fn wait_open(&self) {
+        let (closed, opened) = &*self.gate;
+        let mut closed = closed.lock().unwrap();
+        if *closed {
+            let _ = self.stalled.send(());
+        }
+        while *closed {
+            closed = opened.wait(closed).unwrap();
+        }
+    }
+}
+
+/// A [`StallingFile`]'s fsyncs from a sync thread, stalled as its own.
+#[derive(Debug)]
+struct StallingSyncer {
+    syncer: FakeSyncer,
+    fs: Stalling,
+}
+
 impl FsFile for StallingFile {
+    type Syncer = StallingSyncer;
+
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
         self.file.write_all(bytes)
     }
 
     fn sync(&mut self) -> io::Result<Synced> {
-        let (closed, opened) = &*self.fs.gate;
-        let mut closed = closed.lock().unwrap();
-        if *closed {
-            let _ = self.fs.stalled.send(());
-        }
-        while *closed {
-            closed = opened.wait(closed).unwrap();
-        }
-        drop(closed);
+        self.fs.wait_open();
         self.file.sync()
+    }
+
+    fn syncer(&self) -> io::Result<StallingSyncer> {
+        Ok(StallingSyncer {
+            syncer: self.file.syncer()?,
+            fs: self.fs.clone(),
+        })
+    }
+}
+
+impl FileSyncer for StallingSyncer {
+    fn sync(&self) -> io::Result<Synced> {
+        self.fs.wait_open();
+        self.syncer.sync()
     }
 }
 

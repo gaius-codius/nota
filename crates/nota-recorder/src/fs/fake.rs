@@ -55,6 +55,14 @@
 //!   [`CrashOutcome::LoseUnsynced`] zeroes them, [`CrashOutcome::KeepAll`]
 //!   keeps them, and [`CrashOutcome::Partial`] picks for each failed sync.
 //!
+//! # Stalling
+//!
+//! [`FakeFs::stall_syncs`] holds back every fsync of one file, from its
+//! [`FsFile::sync`] or its [`FsFile::syncer`], until the returned [`Stall`]
+//! is released or dropped: a slow disk, for code that fsyncs on another
+//! thread. A held fsync hasn't started, so it covers what was written by
+//! the time it's let go.
+//!
 //! Directory errors match Linux's too: reading, removing or renaming onto a
 //! directory is `IsADirectory`, and listing or syncing a file is
 //! `NotADirectory`. Renaming a directory is refused (`IsADirectory`), as
@@ -63,9 +71,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
-use super::{Fs, FsFile, Synced, is_a_directory, same_directory, valid_dir, valid_path};
+use super::{
+    FileSyncer, Fs, FsFile, Synced, is_a_directory, same_directory, valid_dir, valid_path,
+};
 
 /// One operation on a [`FakeFs`], as recorded in its log.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,6 +173,79 @@ pub struct FakeFile {
     inode: InodeId,
     /// The name it was created under, for the log.
     path: PathBuf,
+}
+
+/// Fsyncs a [`FakeFile`] from any thread: from [`FsFile::syncer`].
+#[derive(Debug)]
+pub struct FakeSyncer {
+    state: Arc<Mutex<State>>,
+    inode: InodeId,
+    path: PathBuf,
+}
+
+/// Holds back the fsyncs of one file until it's released or dropped: from
+/// [`FakeFs::stall_syncs`].
+#[derive(Debug)]
+pub struct Stall {
+    gate: Arc<Gate>,
+}
+
+#[derive(Debug, Default)]
+struct Gate {
+    /// Whether the stall is over, and how many fsyncs wait on it.
+    state: Mutex<(bool, usize)>,
+    changed: Condvar,
+}
+
+impl Gate {
+    /// Waits until the stall is released.
+    fn wait(&self) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.1 += 1;
+        self.changed.notify_all();
+        while !state.0 {
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        state.1 -= 1;
+    }
+}
+
+impl Stall {
+    /// Lets the held fsyncs, and every later one, run.
+    pub fn release(&self) {
+        let mut state = self
+            .gate
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        state.0 = true;
+        self.gate.changed.notify_all();
+    }
+
+    /// Waits until at least `n` fsyncs are held back.
+    pub fn wait_for_held(&self, n: usize) {
+        let mut state = self
+            .gate
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        while state.1 < n && !state.0 {
+            state = self
+                .gate
+                .changed
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+}
+
+impl Drop for Stall {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -283,6 +366,9 @@ struct State {
     crashed: bool,
     /// The directories locked by a live [`FakeLock`].
     locked: BTreeSet<PathBuf>,
+    /// Files whose fsyncs are held back, by the name they were created
+    /// under.
+    stalls: Vec<(PathBuf, Arc<Gate>)>,
 }
 
 impl State {
@@ -299,6 +385,7 @@ impl State {
             fail: None,
             crashed: false,
             locked: BTreeSet::new(),
+            stalls: Vec::new(),
         }
     }
 
@@ -494,6 +581,19 @@ impl FakeFs {
     /// module docs).
     pub fn fail_after(&self, ops: usize, kind: io::ErrorKind) {
         self.lock().fail = Some((ops, kind));
+    }
+
+    /// Holds back every fsync of the file created at `path`, from now until
+    /// the returned [`Stall`] is released or dropped (see the module docs).
+    /// A held fsync isn't attempted yet: it counts towards
+    /// [`Self::crash_after`] and [`Self::fail_after`] once it runs.
+    #[must_use]
+    pub fn stall_syncs(&self, path: &Path) -> Stall {
+        let gate = Arc::new(Gate::default());
+        self.lock()
+            .stalls
+            .push((path.to_path_buf(), Arc::clone(&gate)));
+        Stall { gate }
     }
 
     /// Every operation that succeeded, in order.
@@ -708,6 +808,8 @@ impl Fs for FakeFs {
 }
 
 impl FsFile for FakeFile {
+    type Syncer = FakeSyncer;
+
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
         let mut state = lock(&self.state);
         if let Err(e) = state.admit() {
@@ -727,22 +829,51 @@ impl FsFile for FakeFile {
     }
 
     fn sync(&mut self) -> io::Result<Synced> {
-        let mut state = lock(&self.state);
-        if let Err(e) = state.admit() {
-            if !state.crashed {
-                // Linux after a failed fsync: the unsynced pages are marked
-                // clean, so they read back but never reach the disk.
-                let inode = state.inode(self.inode)?;
-                let range = (inode.synced, inode.data.len());
-                inode.lost.push(range);
-            }
-            return Err(e);
-        }
-        let inode = state.inode(self.inode)?;
-        inode.synced = inode.data.len();
-        state.log.push(Op::Sync(self.path.clone()));
-        Ok(Synced::after_fsync())
+        sync_file(&self.state, self.inode, &self.path)
     }
+
+    fn syncer(&self) -> io::Result<FakeSyncer> {
+        Ok(FakeSyncer {
+            state: Arc::clone(&self.state),
+            inode: self.inode,
+            path: self.path.clone(),
+        })
+    }
+}
+
+impl FileSyncer for FakeSyncer {
+    fn sync(&self) -> io::Result<Synced> {
+        sync_file(&self.state, self.inode, &self.path)
+    }
+}
+
+/// Fsyncs the file `inode`, created at `path`, once any stall on it is
+/// released.
+fn sync_file(state: &Mutex<State>, inode: InodeId, path: &Path) -> io::Result<Synced> {
+    let stalls: Vec<Arc<Gate>> = lock(state)
+        .stalls
+        .iter()
+        .filter(|(stalled, _)| stalled == path)
+        .map(|(_, gate)| Arc::clone(gate))
+        .collect();
+    for gate in stalls {
+        gate.wait();
+    }
+    let mut state = lock(state);
+    if let Err(e) = state.admit() {
+        if !state.crashed {
+            // Linux after a failed fsync: the unsynced pages are marked
+            // clean, so they read back but never reach the disk.
+            let inode = state.inode(inode)?;
+            let range = (inode.synced, inode.data.len());
+            inode.lost.push(range);
+        }
+        return Err(e);
+    }
+    let file = state.inode(inode)?;
+    file.synced = file.data.len();
+    state.log.push(Op::Sync(path.to_path_buf()));
+    Ok(Synced::after_fsync())
 }
 
 /// `SplitMix64`: a tiny, well-mixed generator, so crash outcomes need no
@@ -1443,5 +1574,64 @@ mod tests {
             b"x",
             "a copy's contents are all durable"
         );
+    }
+
+    #[test]
+    fn a_syncer_fsyncs_its_file_and_counts_as_an_operation() {
+        let fs = FakeFs::with_dirs(["/s"]);
+        let mut file = fs.create(&p("/s/f")).unwrap();
+        let syncer = file.syncer().unwrap();
+        file.write_all(b"ab").unwrap();
+        fs.sync_dir(&p("/s")).unwrap();
+        syncer.sync().unwrap();
+        assert_eq!(fs.ops().last(), Some(&Op::Sync(p("/s/f"))));
+        file.write_all(b"cd").unwrap();
+        // Its failures are a sync's: the unsynced bytes are dropped from
+        // write-back, while what it synced before stays.
+        fs.fail_after(0, io::ErrorKind::Other);
+        assert!(syncer.sync().is_err());
+        file.sync().unwrap();
+        assert_eq!(
+            after_crash(&fs, CrashOutcome::LoseUnsynced, "/s/f"),
+            Some(b"ab\0\0".to_vec())
+        );
+    }
+
+    #[test]
+    fn a_stalled_fsync_waits_for_its_release_and_covers_what_came_before_it_ran() {
+        let fs = FakeFs::with_dirs(["/s"]);
+        let mut file = fs.create(&p("/s/f")).unwrap();
+        let mut other = fs.create(&p("/s/g")).unwrap();
+        fs.sync_dir(&p("/s")).unwrap();
+        let stall = fs.stall_syncs(&p("/s/f"));
+        let syncer = file.syncer().unwrap();
+        let attempted = fs.attempted();
+        let held = std::thread::spawn(move || syncer.sync().map(|_| ()));
+        stall.wait_for_held(1);
+        // Not attempted yet; another file's fsync isn't held.
+        assert_eq!(fs.attempted(), attempted);
+        other.sync().unwrap();
+        file.write_all(b"late").unwrap();
+        stall.release();
+        held.join().unwrap().unwrap();
+        // Released for good: later fsyncs run at once.
+        file.sync().unwrap();
+        drop(stall);
+        assert_eq!(
+            after_crash(&fs, CrashOutcome::LoseUnsynced, "/s/f"),
+            Some(b"late".to_vec())
+        );
+    }
+
+    #[test]
+    fn dropping_a_stall_releases_it() {
+        let fs = FakeFs::with_dirs(["/s"]);
+        let file = fs.create(&p("/s/f")).unwrap();
+        let stall = fs.stall_syncs(&p("/s/f"));
+        let syncer = file.syncer().unwrap();
+        let held = std::thread::spawn(move || syncer.sync().map(|_| ()));
+        stall.wait_for_held(1);
+        drop(stall);
+        held.join().unwrap().unwrap();
     }
 }

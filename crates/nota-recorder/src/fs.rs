@@ -17,6 +17,9 @@
 //!   file's directory entry isn't durable until [`Fs::sync_dir`].
 //! - [`Fs::create_dir`] makes a directory; its entry, in its parent, isn't
 //!   durable until [`Fs::sync_dir`] on the parent.
+//! - [`FsFile::syncer`] gives a handle that fsyncs the file from another
+//!   thread while it's still written: the fsync covers at least every
+//!   write that returned before it started.
 //! - [`FsFile::write_all`] appends; there's no seek. A FLAC segment is
 //!   encoded in memory and published as one append, fsync, rename and
 //!   directory sync. The bytes aren't durable until
@@ -48,7 +51,7 @@ pub mod crash;
 pub mod fake;
 mod real;
 
-pub use real::{StdFile, StdFs, StdLock};
+pub use real::{StdFile, StdFs, StdLock, StdSyncer};
 
 /// A filesystem the recorder writes through.
 pub trait Fs: Send + Sync + fmt::Debug {
@@ -136,6 +139,9 @@ pub trait Fs: Send + Sync + fmt::Debug {
 
 /// A file opened by [`Fs::create`].
 pub trait FsFile: Send + fmt::Debug {
+    /// A handle that fsyncs this file from any thread ([`Self::syncer`]).
+    type Syncer: FileSyncer;
+
     /// Appends `bytes` to the file. They aren't durable until [`Self::sync`].
     ///
     /// # Errors
@@ -153,6 +159,26 @@ pub trait FsFile: Send + fmt::Debug {
     /// succeeds: the kernel may have dropped those bytes from its write-back
     /// while they still read back. Treat the file as broken.
     fn sync(&mut self) -> io::Result<Synced>;
+
+    /// A handle that fsyncs this file, from any thread, while it's still
+    /// being written here. Each of its fsyncs covers at least what was
+    /// written before that fsync started.
+    ///
+    /// # Errors
+    ///
+    /// Any I/O error (the real filesystem duplicates the file descriptor).
+    fn syncer(&self) -> io::Result<Self::Syncer>;
+}
+
+/// Fsyncs one file from any thread: from [`FsFile::syncer`].
+pub trait FileSyncer: Send + Sync + fmt::Debug + 'static {
+    /// As [`FsFile::sync`]: waits until everything written to the file
+    /// before the call is on disk, and returns the proof.
+    ///
+    /// # Errors
+    ///
+    /// As [`FsFile::sync`]: after an error, treat the file as broken.
+    fn sync(&self) -> io::Result<Synced>;
 }
 
 /// Proof that an fsync completed. Only this module's filesystems can make

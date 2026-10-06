@@ -53,7 +53,7 @@ use nota_recorder::capture::{
 use nota_recorder::engine::{EngineCommand, EngineConfig, EngineEvent, EngineSupervisor};
 use nota_recorder::fs::StdFs;
 use nota_recorder::segment::{PublishReport, Publisher, SegmentLength};
-use nota_recorder::session::{SessionDir, SessionStore, SessionWriter};
+use nota_recorder::session::{SessionDir, SessionStore, SessionWriter, Syncing};
 use nota_store::Store;
 use nota_tui::{Annotation, Ended, Event, InputThread, Recording, RunError, Theme};
 
@@ -183,7 +183,10 @@ fn record_with<B: CaptureBackend>(
     outcome.session.clone_from(&session.dir);
     let lock = SessionDir::new(session.id, StdFs, &session.audio()).lock()?;
     let store = Store::open(&session.store())?;
-    let mut writer = SessionWriter::open(&lock, RATE, segment_length(), Arc::clone(clock))?;
+    // A track's fsyncs on a thread of its own: neither track's audio waits
+    // for the other's disk.
+    let mut writer = SessionWriter::open(&lock, RATE, segment_length(), Arc::clone(clock))?
+        .with_syncing(Syncing::Threads);
 
     let sources = [(MIC, args.mic.clone()), (SYSTEM, args.system.clone())];
     let (started, events) = start_tracks(backend, &sources, RATE, clock);

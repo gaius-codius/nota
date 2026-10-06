@@ -18,6 +18,11 @@
 #      have been durable;
 #   6. unmount.
 #
+# The journals are fsync'd on a thread per track, as `nota record` does it,
+# so the operations' order and count vary a little from run to run. The
+# points are numbered from one uncrashed run; a point past the end of a
+# shorter run is reported as unreached, not failed.
+#
 # LazyFS loses unsynced file data and sizes, but not directory entries:
 # creates, renames and unlinks reach the disk at once. So this can't catch a
 # missing directory fsync; the in-memory crash tests cover that.
@@ -194,7 +199,8 @@ FAILED=()
 START=$SECONDS
 
 # run_point N: a failed point leaves its reason in point-N/result; a passed
-# one removes point-N. Called outside any `if`, so `set -e` still stops the
+# one removes point-N, and one this run didn't reach leaves
+# point-N.unreached. Called outside any `if`, so `set -e` still stops the
 # script on an unexpected error.
 run_point() {
   local n=$1
@@ -211,8 +217,9 @@ run_point() {
   if [[ ! -e $promises.stopped ]]; then
     wait "$WRITER_PID" || true
     WRITER_PID=
-    echo "point $n: the writer finished without reaching its crash point" > "$dir/result"
     unmount
+    rm -rf "$dir"
+    : > "$dir.unreached"
     return 0
   fi
   kill -9 "$WRITER_PID"
@@ -235,9 +242,13 @@ run_point() {
   rm -rf "$dir"
 }
 
+UNREACHED=0
 for ((n = FROM; n <= TO; n += STEP)); do
   run_point "$n"
-  if [[ -e $WORK/point-$n/result ]]; then
+  if [[ -e $WORK/point-$n.unreached ]]; then
+    UNREACHED=$((UNREACHED + 1))
+    echo "  point $n unreached: this run made fewer operations"
+  elif [[ -e $WORK/point-$n/result ]]; then
     FAILED+=("$n")
     sed 's/^/  /' "$WORK/point-$n/result" >&2
   else
@@ -249,7 +260,7 @@ for ((n = FROM; n <= TO; n += STEP)); do
 done
 
 RAN=$((PASS + ${#FAILED[@]}))
-echo "Ran $RAN crash points in $((SECONDS - START))s: $PASS passed, ${#FAILED[@]} failed."
+echo "Ran $RAN crash points in $((SECONDS - START))s: $PASS passed, ${#FAILED[@]} failed, $UNREACHED unreached."
 if [[ ${#FAILED[@]} -gt 0 ]]; then
   echo "Failed points: ${FAILED[*]} (details in $WORK/point-N/)"
   exit 1
