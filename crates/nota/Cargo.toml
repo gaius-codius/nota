@@ -13,6 +13,10 @@ publish.workspace = true
 # any build that also builds nota's tests has it; `cargo build -p nota`
 # (the release build) doesn't.
 fake-capture = []
+# `nota record --latency-log FILE`: logs when each text reached the screen,
+# for `scripts/live-latency.sh`. Turned on for nota's tests as above, and
+# off in the release build.
+latency-log = []
 
 [[test]]
 name = "record"
@@ -34,7 +38,7 @@ ratatui.workspace = true
 signal-hook.workspace = true
 
 [dev-dependencies]
-nota = { path = ".", features = ["fake-capture"] }
+nota = { path = ".", features = ["fake-capture", "latency-log"] }
 nota-core = { path = "../nota-core", features = ["fake-clock"] }
 nota-recorder = { path = "../nota-recorder" }
 

@@ -55,8 +55,9 @@ use nota_recorder::fs::StdFs;
 use nota_recorder::segment::{PublishReport, Publisher, SegmentLength};
 use nota_recorder::session::{SessionDir, SessionStore, SessionWriter, Syncing};
 use nota_store::Store;
-use nota_tui::{Annotation, Ended, Event, InputThread, Recording, RunError, Theme};
+use nota_tui::{Annotation, Ended, Event, InputThread, Recording, RunError, Theme, Update};
 
+use crate::latency::LatencyLog;
 use crate::library::{Library, Salvaged};
 use crate::live::{Actions, Live};
 use crate::terminal::Screen;
@@ -86,6 +87,9 @@ pub(crate) struct RecordArgs {
     pub(crate) system: Source,
     /// Record a tone instead of the audio server (tests only).
     pub(crate) tone: bool,
+    /// Log when each text reached the screen to this file
+    /// (`--latency-log`, built only with the `latency-log` feature).
+    pub(crate) latency_log: Option<PathBuf>,
 }
 
 /// How a recording went, for the summary printed after it.
@@ -222,7 +226,14 @@ fn record_with<B: CaptureBackend>(
         Some((parakeet, vad)) => Some(start_engine(parakeet, vad, clock, &live_inputs)?),
         None => None,
     };
-    let live = spawn_live(Live::new(&timelines), engine, live_received, ui.clone())?;
+    let log = args.latency_log.clone().map(LatencyLog::new);
+    let live = spawn_live(
+        Live::new(&timelines),
+        engine,
+        live_received,
+        ui.clone(),
+        log.map(|log| (log, Arc::clone(clock))),
+    )?;
     let recorder = {
         let queue = publisher.queue();
         let live_inputs = live_inputs.clone();
@@ -280,11 +291,15 @@ fn record_with<B: CaptureBackend>(
     }
     // The writer's last journals are published while the live thread
     // shuts the engine down.
+    let mut log = None;
     let stopped = publisher.finish_recording(writer, || {
         let _ = live_inputs.send(LiveInput::Done);
         drop(live_inputs);
-        let _ = live.join();
+        log = live.join().ok().flatten();
     });
+    if let Some(Err(e)) = log.map(|log| log.write()) {
+        outcome.notes.push(format!("writing the latency log: {e}"));
+    }
     if let Some(e) = stopped.finishing {
         outcome.notes.push(format!("finishing the recording: {e}"));
     }
@@ -467,27 +482,50 @@ fn start_engine(
 }
 
 /// The live thread: feeds the engine and the screen until told recording
-/// is done, then shuts the engine down.
+/// is done, then shuts the engine down. With a latency log, notes when each
+/// text is handed to the screen, by `clock`, and returns the log.
 fn spawn_live(
     mut live: Live,
     mut engine: Option<EngineSupervisor>,
     inputs: Receiver<LiveInput>,
     ui: Sender<Event>,
-) -> io::Result<JoinHandle<()>> {
+    mut log: Option<(LatencyLog, Arc<dyn Clock>)>,
+) -> io::Result<JoinHandle<Option<LatencyLog>>> {
     thread::Builder::new()
         .name("nota-live".into())
         .spawn(move || {
             for input in inputs {
-                let actions = match input {
-                    LiveInput::Recorder(track, event) => live.recorder(track, event),
-                    LiveInput::Engine(event) => live.engine(event),
+                let (actions, heard) = match input {
+                    LiveInput::Recorder(track, event) => (live.recorder(track, event), None),
+                    LiveInput::Engine(event) => {
+                        let heard = match &event {
+                            EngineEvent::Transcript(t) => Some(t.track()),
+                            _ => None,
+                        };
+                        (live.engine(event), heard)
+                    }
                     LiveInput::Done => break,
                 };
+                let texts: Vec<_> = actions
+                    .updates
+                    .iter()
+                    .filter_map(|u| match u {
+                        Update::Text(text) => Some((text.start(), text.end())),
+                        _ => None,
+                    })
+                    .collect();
                 apply(actions, engine.as_mut(), &ui);
+                if let (Some((log, clock)), Some(track)) = (log.as_mut(), heard) {
+                    let shown = clock.now();
+                    for (start, end) in texts {
+                        log.note(track, start, end, shown);
+                    }
+                }
             }
             if let Some(engine) = engine {
                 engine.shutdown();
             }
+            log.map(|(log, _)| log)
         })
 }
 
@@ -567,6 +605,75 @@ mod tests {
         raise(SIGXCPU).unwrap();
         assert!(watch(signals, &ui));
         assert!(closes.try_recv().is_err(), "SIGXCPU closed the screen");
+    }
+
+    /// Each text is logged with its track, its chunk's span placed through
+    /// the track's epoch, and when it was handed to the screen; levels and
+    /// text-less events aren't.
+    #[test]
+    fn the_live_thread_logs_when_each_text_reached_the_screen() {
+        use std::time::Duration;
+
+        use nota_core::messages::{AudioChunk, Transcript};
+        use nota_core::{FakeClock, SampleIndex, SampleRange, SessionTime};
+
+        let ms = |ms: u64| SessionTime::from_nanos(ms * 1_000_000);
+        let fake = Arc::new(FakeClock::new(ms(0)));
+        let clock: Arc<dyn Clock> = Arc::clone(&fake) as Arc<dyn Clock>;
+        // The mic opened at 0 ms, the system audio at 500 ms.
+        let timelines: Vec<TrackTimeline> = [(MIC, 0), (SYSTEM, 500)]
+            .into_iter()
+            .map(|(track, at)| {
+                let mut t = TrackTimeline::new(track);
+                t.open_epoch(ms(at), SampleIndex::ZERO, RATE).unwrap();
+                t
+            })
+            .collect();
+        let heard = |track, from: u64, to: u64| {
+            let range = SampleRange::new(SampleIndex::new(from), SampleIndex::new(to)).unwrap();
+            LiveInput::Engine(EngineEvent::Transcript(
+                Transcript::new(track, range, "words".to_owned()).unwrap(),
+            ))
+        };
+        let (inputs, received) = mpsc::channel();
+        let (ui, screen) = mpsc::channel();
+        let log = LatencyLog::new(PathBuf::new());
+        let live = spawn_live(
+            Live::new(&timelines),
+            None,
+            received,
+            ui,
+            Some((log, Arc::clone(&clock))),
+        )
+        .unwrap();
+        let wait_for_text = || loop {
+            if let Event::Update(Update::Text(_)) =
+                screen.recv_timeout(Duration::from_secs(5)).unwrap()
+            {
+                break;
+            }
+        };
+
+        // A second of audio, which only shows a level.
+        let audio = AudioChunk::new(MIC, SampleIndex::ZERO, RATE, vec![100; 16_000]).unwrap();
+        inputs
+            .send(LiveInput::Recorder(Some(MIC), RecorderEvent::Audio(audio)))
+            .unwrap();
+        fake.advance(Duration::from_millis(4_200));
+        // The mic's 0.5–3.5 s, shown at 4.2 s.
+        inputs.send(heard(MIC, 8_000, 56_000)).unwrap();
+        wait_for_text();
+        fake.advance(Duration::from_millis(1_000));
+        // The system audio's first 2 s, from 0.5 s, shown at 5.2 s.
+        inputs.send(heard(SYSTEM, 0, 32_000)).unwrap();
+        wait_for_text();
+        inputs.send(LiveInput::Done).unwrap();
+
+        let log = live.join().unwrap().unwrap();
+        assert_eq!(
+            log.contents(),
+            "track\tstart_ms\tend_ms\tshown_ms\n0\t500\t3500\t4200\n1\t500\t2500\t5200\n"
+        );
     }
 
     #[test]
