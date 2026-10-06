@@ -50,14 +50,16 @@ use nota_core::{Clock, EpochId, SampleRate, SystemClock, TrackId, TrackTimeline}
 use nota_recorder::capture::{
     Capture, CaptureBackend, RecordError, RecorderEvent, Source, record_tracks, start_tracks,
 };
-use nota_recorder::engine::{EngineCommand, EngineConfig, EngineEvent, EngineSupervisor};
+use nota_recorder::engine::{
+    EngineCommand, EngineConfig, EngineEvent, EngineStatus, EngineSupervisor,
+};
 use nota_recorder::fs::StdFs;
 use nota_recorder::segment::{PublishReport, Publisher, SegmentLength};
 use nota_recorder::session::{SessionDir, SessionStore, SessionWriter, Syncing};
 use nota_store::Store;
 use nota_tui::{Annotation, Ended, Event, InputThread, Recording, RunError, Theme, Update};
 
-use crate::latency::LatencyLog;
+use crate::latency::{DrawEnds, LatencyLog, Problem};
 use crate::library::{Library, Salvaged};
 use crate::live::{Actions, Live};
 use crate::terminal::Screen;
@@ -169,7 +171,8 @@ fn record_with<B: CaptureBackend>(
     let (ui, ui_events) = mpsc::channel::<Event>();
     let signals = listen_for_signals(ui.clone())?;
     // The terminal first: without one there's nothing to record into.
-    let screen = Screen::enter()?;
+    let draws = args.latency_log.as_ref().map(|_| DrawEnds::default());
+    let screen = Screen::enter(draws.clone().map(|d| (d, Arc::clone(clock))))?;
 
     let library = Library::open(&args.data)?;
     for salvaged in library.salvage_all(segment_length())? {
@@ -297,7 +300,8 @@ fn record_with<B: CaptureBackend>(
         drop(live_inputs);
         log = live.join().ok().flatten();
     });
-    if let Some(Err(e)) = log.map(|log| log.write()) {
+    let draw_ends = draws.map(|d| d.times()).unwrap_or_default();
+    if let Some(Err(e)) = log.map(|log| log.write(&draw_ends)) {
         outcome.notes.push(format!("writing the latency log: {e}"));
     }
     if let Some(e) = stopped.finishing {
@@ -483,7 +487,8 @@ fn start_engine(
 
 /// The live thread: feeds the engine and the screen until told recording
 /// is done, then shuts the engine down. With a latency log, notes when each
-/// text is handed to the screen, by `clock`, and returns the log.
+/// text is handed to the screen, and anything that keeps text from it, by
+/// `clock`, and returns the log.
 fn spawn_live(
     mut live: Live,
     mut engine: Option<EngineSupervisor>,
@@ -495,15 +500,10 @@ fn spawn_live(
         .name("nota-live".into())
         .spawn(move || {
             for input in inputs {
-                let (actions, heard) = match input {
-                    LiveInput::Recorder(track, event) => (live.recorder(track, event), None),
-                    LiveInput::Engine(event) => {
-                        let heard = match &event {
-                            EngineEvent::Transcript(t) => Some(t.track()),
-                            _ => None,
-                        };
-                        (live.engine(event), heard)
-                    }
+                let noted = Noted::of(&input);
+                let actions = match input {
+                    LiveInput::Recorder(track, event) => live.recorder(track, event),
+                    LiveInput::Engine(event) => live.engine(event),
                     LiveInput::Done => break,
                 };
                 let texts: Vec<_> = actions
@@ -515,10 +515,19 @@ fn spawn_live(
                     })
                     .collect();
                 apply(actions, engine.as_mut(), &ui);
-                if let (Some((log, clock)), Some(track)) = (log.as_mut(), heard) {
-                    let shown = clock.now();
-                    for (start, end) in texts {
-                        log.note(track, start, end, shown);
+                if let Some((log, clock)) = log.as_mut() {
+                    let now = clock.now();
+                    match noted {
+                        Noted::Heard(track) if texts.is_empty() => {
+                            log.problem(Problem::Dropped, Some(track), now);
+                        }
+                        Noted::Heard(track) => {
+                            for (start, end) in texts {
+                                log.text(track, start, end, now);
+                            }
+                        }
+                        Noted::Problem(problem, track) => log.problem(problem, track, now),
+                        Noted::Nothing => {}
                     }
                 }
             }
@@ -527,6 +536,37 @@ fn spawn_live(
             }
             log.map(|(log, _)| log)
         })
+}
+
+/// What the latency log notes about one input to the live thread.
+enum Noted {
+    /// A transcript of the track: its text, or that it was dropped.
+    Heard(TrackId),
+    /// Something that keeps text from the screen.
+    Problem(Problem, Option<TrackId>),
+    Nothing,
+}
+
+impl Noted {
+    fn of(input: &LiveInput) -> Self {
+        match input {
+            LiveInput::Engine(EngineEvent::Transcript(t)) => Self::Heard(t.track()),
+            LiveInput::Engine(EngineEvent::Skipped { track, .. }) => {
+                Self::Problem(Problem::Skipped, Some(*track))
+            }
+            LiveInput::Engine(EngineEvent::Status(EngineStatus::Offline(_))) => {
+                Self::Problem(Problem::Offline, None)
+            }
+            LiveInput::Recorder(
+                track,
+                RecorderEvent::Epoch(_) | RecorderEvent::EpochRefused(_),
+            ) => Self::Problem(Problem::Epoch, *track),
+            LiveInput::Recorder(track, RecorderEvent::CaptureFailed(_)) => {
+                Self::Problem(Problem::Failed, *track)
+            }
+            _ => Self::Nothing,
+        }
+    }
 }
 
 fn apply(actions: Actions, engine: Option<&mut EngineSupervisor>, ui: &Sender<Event>) {
@@ -646,33 +686,42 @@ mod tests {
             Some((log, Arc::clone(&clock))),
         )
         .unwrap();
-        let wait_for_text = || loop {
-            if let Event::Update(Update::Text(_)) =
-                screen.recv_timeout(Duration::from_secs(5)).unwrap()
-            {
-                break;
-            }
-        };
-
         // A second of audio, which only shows a level.
         let audio = AudioChunk::new(MIC, SampleIndex::ZERO, RATE, vec![100; 16_000]).unwrap();
         inputs
             .send(LiveInput::Recorder(Some(MIC), RecorderEvent::Audio(audio)))
             .unwrap();
+        // Everything after this is handed over at 4.2 s: the clock is moved
+        // only before anything is sent, so the live thread can't race it.
         fake.advance(Duration::from_millis(4_200));
-        // The mic's 0.5–3.5 s, shown at 4.2 s.
+        // The mic's 0.5–3.5 s.
         inputs.send(heard(MIC, 8_000, 56_000)).unwrap();
-        wait_for_text();
-        fake.advance(Duration::from_millis(1_000));
-        // The system audio's first 2 s, from 0.5 s, shown at 5.2 s.
+        // A track with no timeline: its text can't be placed.
+        inputs.send(heard(TrackId::new(7), 0, 16_000)).unwrap();
+        inputs
+            .send(LiveInput::Engine(EngineEvent::Skipped {
+                track: SYSTEM,
+                range: SampleRange::new(SampleIndex::ZERO, SampleIndex::new(1_600)).unwrap(),
+            }))
+            .unwrap();
+        // The system audio's first 2 s, from 0.5 s.
         inputs.send(heard(SYSTEM, 0, 32_000)).unwrap();
-        wait_for_text();
         inputs.send(LiveInput::Done).unwrap();
 
         let log = live.join().unwrap().unwrap();
+        let shown = screen
+            .try_iter()
+            .filter(|e| matches!(e, Event::Update(Update::Text(_))))
+            .count();
+        assert_eq!(shown, 2);
+        // Drawn by the draw after the first to end at or after 4.2 s.
         assert_eq!(
-            log.contents(),
-            "track\tstart_ms\tend_ms\tshown_ms\n0\t500\t3500\t4200\n1\t500\t2500\t5200\n"
+            log.contents(&[ms(4_000), ms(4_200), ms(4_230)]),
+            "kind\ttrack\tstart_ms\tend_ms\thanded_ms\tdrawn_ms\n\
+             text\t0\t500\t3500\t4200\t4230\n\
+             dropped\t7\t-\t-\t4200\t-\n\
+             skipped\t1\t-\t-\t4200\t-\n\
+             text\t1\t500\t2500\t4200\t4230\n"
         );
     }
 
