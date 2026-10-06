@@ -275,22 +275,17 @@ fn record_with<B: CaptureBackend>(
             "{failures} journal failures; the audio around them may have gaps"
         ));
     }
-    let queue = publisher.queue();
-    match writer.finish() {
-        Ok(last) => {
-            let _sent = queue.send(last);
-        }
-        Err(e) => {
-            outcome.notes.push(format!("finishing the recording: {e}"));
-            let _sent = queue.send(e.into_finished());
-        }
+    // The writer's last journals are published while the live thread
+    // shuts the engine down.
+    let stopped = publisher.finish_recording(writer, || {
+        let _ = live_inputs.send(LiveInput::Done);
+        drop(live_inputs);
+        let _ = live.join();
+    });
+    if let Some(e) = stopped.finishing {
+        outcome.notes.push(format!("finishing the recording: {e}"));
     }
-    drop(queue);
-    let _ = live_inputs.send(LiveInput::Done);
-    drop(live_inputs);
-    let _ = live.join();
-    let report = publisher.finish()?;
-    note_published(&mut outcome, &report);
+    note_published(&mut outcome, &stopped.published?);
     if signals.close() {
         outcome.notes.push(
             "the capture thread ran past its real-time budget at least once \

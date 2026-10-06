@@ -10,7 +10,7 @@ use nota_store::SegmentRow;
 
 use super::{PublishError, SegmentLength, SegmentStore, publish_journals};
 use crate::fs::Fs;
-use crate::session::{FinishedJournal, SessionStore};
+use crate::session::{FinishedJournal, SessionError, SessionStore, SessionWriter};
 
 /// A thread that publishes each batch of finished journals sent to it, in
 /// order, as [`publish_journals`] does.
@@ -140,6 +140,49 @@ impl Publisher {
     pub fn finish(self) -> Result<PublishReport, PublisherPanicked> {
         drop(self.queue);
         self.thread.join().map_err(|_| PublisherPanicked)
+    }
+}
+
+/// How the end of a recording went (see [`Publisher::finish_recording`]).
+#[derive(Debug)]
+pub struct Stopped {
+    /// Why finishing the writer failed, if it did. The journals it did
+    /// finish were published all the same, and what it couldn't finish is
+    /// left on disk for salvage.
+    pub finishing: Option<SessionError>,
+    /// What publishing did, as [`Publisher::finish`] reports it.
+    pub published: Result<PublishReport, PublisherPanicked>,
+}
+
+impl Publisher {
+    /// Ends a recording once its streams have stopped and the recorder has
+    /// returned: finishes `writer` (a last fsync of every journal), queues
+    /// every journal that finished, even if finishing failed, runs
+    /// `meanwhile` while they're published, then waits for publishing to
+    /// finish as [`Publisher::finish`] does. Drop every other
+    /// [`PublishQueue`] first, or this waits for them.
+    ///
+    /// This is the order every stop takes, however it was asked for.
+    pub fn finish_recording<S: Fs>(
+        self,
+        writer: SessionWriter<S>,
+        meanwhile: impl FnOnce(),
+    ) -> Stopped {
+        let (finishing, last) = match writer.finish() {
+            Ok(last) => (None, last),
+            Err(e) => {
+                let (error, finished) = e.into_parts();
+                (Some(error), finished)
+            }
+        };
+        // A refused batch (the publisher's thread panicked) stays on disk
+        // for salvage; `published` says so.
+        let _sent = self.queue.send(last);
+        meanwhile();
+        Stopped {
+            finishing,
+            published: self.finish(),
+        }
     }
 }
 

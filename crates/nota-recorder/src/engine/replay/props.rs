@@ -334,12 +334,13 @@ fn on_text(
             );
             model.text.push(text(start, end));
         }
-        Err(_) => {
+        Err(violation) => {
             prop_assert!(
                 !fits,
-                "text {}..{} refused; {:?}",
+                "text {}..{} refused ({:?}); {:?}",
                 start,
                 end,
+                violation,
                 model.stream()
             );
             prop_assert_eq!(snapshot(replay), before, "a refused reply changed it");
@@ -382,8 +383,14 @@ fn on_confirmed(replay: &mut Replay, model: &mut Model, up_to: u64) -> Result<()
                 model.engine.pop_front();
             }
         }
-        Err(_) => {
-            prop_assert!(!fits, "confirmed {} refused; {:?}", up_to, model.stream());
+        Err(violation) => {
+            prop_assert!(
+                !fits,
+                "confirmed {} refused ({:?}); {:?}",
+                up_to,
+                violation,
+                model.stream()
+            );
             prop_assert_eq!(snapshot(replay), before, "a refused reply changed it");
         }
     }
