@@ -125,12 +125,8 @@ struct Running {
 }
 
 impl Running {
-    fn start(data: &Path) -> Self {
-        Self::start_with(data, &[])
-    }
-
     fn start_with(data: &Path, extra: &[&str]) -> Self {
-        Self::start_as(data, extra, false)
+        Self::start_as(data, extra, false, &[])
     }
 
     /// Starts `nota record`; with `own_group`, in a process group of its
@@ -141,7 +137,7 @@ impl Running {
         clippy::disallowed_methods,
         reason = "opening the pseudo-terminal's other end"
     )]
-    fn start_as(data: &Path, extra: &[&str], own_group: bool) -> Self {
+    fn start_as(data: &Path, extra: &[&str], own_group: bool, env: &[(&str, &str)]) -> Self {
         // Close-on-exec, so nota holds only the slave: closing the test's
         // master is then a real hangup.
         let master =
@@ -173,7 +169,8 @@ impl Running {
             .stdin(Stdio::from(slave.try_clone().unwrap()))
             .stdout(Stdio::from(slave.try_clone().unwrap()))
             .stderr(Stdio::from(slave.try_clone().unwrap()))
-            .env_remove("NO_COLOR");
+            .env_remove("NO_COLOR")
+            .envs(env.iter().copied());
         if own_group {
             command.process_group(0);
         }
@@ -285,7 +282,12 @@ impl Drop for Running {
 /// Starts recording, and waits until the screen is up and both tracks
 /// have recorded a while.
 fn recording(data: &Path) -> Running {
-    let running = Running::start(data);
+    recording_with(data, &[])
+}
+
+/// [`recording`], with more environment for nota.
+fn recording_with(data: &Path, env: &[(&str, &str)]) -> Running {
+    let running = Running::start_as(data, &[], false, env);
     assert!(running.shows_after(0, "s stop"), "{}", running.output());
     assert!(!running.terminal_restored());
     pause(Duration::from_millis(1_500));
@@ -357,7 +359,12 @@ fn assert_saved(data: &Path, session: u64, tracks: &[u32], ms: u64) -> Vec<(u32,
 fn tone_sent(said: &str) -> Vec<(u32, u64)> {
     let mut sent = Vec::new();
     for line in said.lines() {
-        let Some(rest) = line.trim().strip_prefix("the tone for ") else {
+        // A line not yet read whole is skipped.
+        let Some(rest) = line
+            .trim()
+            .strip_prefix("the tone for ")
+            .filter(|rest| rest.ends_with(" samples"))
+        else {
             continue;
         };
         let (source, count) = rest.split_once(" sent ").unwrap();
@@ -383,6 +390,11 @@ fn assert_everything_sent_saved(
     ms: u64,
 ) {
     let saved = assert_saved(data, session, tracks, ms);
+    // The summary is written just before nota exits; the thread reading
+    // the terminal may not have it yet.
+    wait_until(Duration::from_secs(10), || {
+        tone_sent(&visible(&nota.output.lock().unwrap())).len() == tracks.len()
+    });
     let said = visible(&nota.output.lock().unwrap());
     let sent = tone_sent(&said);
     assert_eq!(
@@ -494,8 +506,16 @@ fn a_signal_while_the_stop_question_is_open_still_stops_safely() {
 #[test]
 fn a_second_signal_during_the_stop_is_ignored() {
     let tmp = TestDir::new("twice");
-    let mut nota = recording(&tmp.0);
+    // Stopping the streams takes 2 s, so the second signal lands in the
+    // stop, after the screen has closed.
+    let mut nota = recording_with(&tmp.0, &[("NOTA_TONE_STOP_DELAY_MS", "2000")]);
     nota.signal(Signal::HUP);
+    assert!(wait_until(Duration::from_secs(10), || nota.terminal_restored()));
+    assert_eq!(
+        nota.child.try_wait().unwrap(),
+        None,
+        "stopped before the second signal"
+    );
     nota.signal(Signal::TERM);
     let status = nota.exits().expect("nota didn't stop");
     assert!(status.success(), "{status:?}: {}", nota.output());
@@ -653,6 +673,7 @@ fn recording_with_the_engine(data: &Path, models: &Path) -> (Running, u32) {
             vad.to_str().unwrap(),
         ],
         true,
+        &[],
     );
     assert!(nota.shows_after(0, "s stop"), "{}", nota.output());
     pause(Duration::from_millis(1_500));

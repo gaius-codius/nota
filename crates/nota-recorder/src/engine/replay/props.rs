@@ -263,7 +263,16 @@ fn snapshot(replay: &Replay) -> String {
     format!("{replay:?}")
 }
 
+/// Marks `dropped` as dropped: each must have been held, and they must be
+/// the oldest audio held.
 fn drop_ranges(model: &mut Model, dropped: &[SampleRange]) -> Result<(), TestCaseError> {
+    if let Some(end) = dropped.last().map(|r| r.end().get()) {
+        for i in 0..end {
+            let kept = model.at(i) == Held::Pushed
+                && !dropped.iter().any(|r| r.contains(SampleIndex::new(i)));
+            prop_assert!(!kept, "sample {} kept while later audio was dropped", i);
+        }
+    }
     let mut last = 0;
     for range in dropped {
         prop_assert!(range.start().get() >= last, "dropped out of order");

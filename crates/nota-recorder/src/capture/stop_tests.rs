@@ -12,8 +12,10 @@
 //! The events are handled on the test's thread, through the recorder's own
 //! [`handle`] and [`settle`], with publishing in step, so every run is
 //! deterministic. The stop is the app's own,
-//! [`Publisher::finish_recording`], on a publisher started at the stop:
-//! only its thread touches the disk then, so that stays deterministic too.
+//! [`Publisher::finish_recording`], on a publisher started at the stop and
+//! given what failed to publish before with the last journals, as the
+//! app's would retry it: the writer finishes before the publisher starts
+//! work, so that stays deterministic too.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -233,16 +235,13 @@ fn record_into(fs: &FakeFs, run: Run, promised: &mut Promised) -> Result<(), Str
     }
 
     // The stop. The app's publisher would hold what failed to publish so
-    // far; this one is given it first.
+    // far, and try it again with the last journals.
     let ends: Vec<_> = [MIC, SYSTEM]
         .into_iter()
         .map(|t| (t, writer.next_sample(t)))
         .collect();
     let publisher = Publisher::spawn(store, length()).map_err(|e| e.to_string())?;
-    if !publisher.queue().send(pending) {
-        return Err("the publisher stopped".into());
-    }
-    let stopped = publisher.finish_recording(writer, || {});
+    let stopped = publisher.finish_recording_after(pending, writer, || {});
     match stopped.finishing {
         None if promised.failures == 0 => {
             for (track, end) in ends {

@@ -18,18 +18,26 @@ const PERIOD: Duration = Duration::from_millis(20);
 /// clock. Two device names act out failures: `missing` can't be opened,
 /// and `fails` stops with an error after half a second. Each source's
 /// count of samples sent is kept, for the summary ([`Tone::report`]), so
-/// the tests can check that everything sent was saved.
+/// the tests can check that everything sent was saved. With
+/// `NOTA_TONE_STOP_DELAY_MS` set, stopping a tone takes that long, which
+/// holds the recording's stop open for a test to signal it meanwhile.
 #[derive(Debug)]
 pub(crate) struct Tone {
     clock: Arc<dyn Clock>,
     sent: Mutex<Vec<(Source, Arc<AtomicU64>)>>,
+    stop_delay: Duration,
 }
 
 impl Tone {
     pub(crate) fn new(clock: Arc<dyn Clock>) -> Self {
+        let stop_delay = std::env::var("NOTA_TONE_STOP_DELAY_MS")
+            .ok()
+            .and_then(|ms| ms.parse().ok())
+            .map_or(Duration::ZERO, Duration::from_millis);
         Self {
             clock,
             sent: Mutex::new(Vec::new()),
+            stop_delay,
         }
     }
 
@@ -52,12 +60,18 @@ impl Tone {
 /// A running tone. Dropping it stops the thread and waits for it.
 #[derive(Debug)]
 pub(crate) struct ToneStream {
+    stop_delay: Duration,
     stop: Option<mpsc::Sender<()>>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl Drop for ToneStream {
     fn drop(&mut self) {
+        if !self.stop_delay.is_zero() {
+            // A pause that isn't a sleep: nothing sends on this channel.
+            let (_keep, never) = mpsc::channel::<()>();
+            let _ = never.recv_timeout(self.stop_delay);
+        }
         drop(self.stop.take());
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -127,6 +141,7 @@ impl CaptureBackend for Tone {
             })
             .map_err(|e| CaptureError::Backend(e.to_string()))?;
         Ok(ToneStream {
+            stop_delay: self.stop_delay,
             stop: Some(stop),
             thread: Some(thread),
         })

@@ -545,10 +545,17 @@ mod tests {
 
     use super::*;
 
+    /// A raised signal reaches every `Signals` registered for it, so tests
+    /// that raise one take turns (if run as threads of one process).
+    static RAISING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// A SIGXCPU that arrives during the stop, still pending when the
     /// signal thread is closed, is still noted.
     #[test]
     fn a_sigxcpu_still_pending_at_close_is_noted() {
+        let _turn = RAISING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (ui, closes) = mpsc::channel();
         let signals = Signals::new([SIGHUP, SIGXCPU]).unwrap();
         // Closed first, so the iterator never reads it: only what's
@@ -561,6 +568,9 @@ mod tests {
 
     #[test]
     fn nothing_pending_at_close_is_no_overrun() {
+        let _turn = RAISING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (ui, _closes) = mpsc::channel();
         let signals = Signals::new([SIGHUP, SIGXCPU]).unwrap();
         signals.handle().close();

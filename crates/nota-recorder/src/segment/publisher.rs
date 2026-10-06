@@ -145,6 +145,7 @@ impl Publisher {
 
 /// How the end of a recording went (see [`Publisher::finish_recording`]).
 #[derive(Debug)]
+#[must_use = "it says whether the recording was finished and published"]
 pub struct Stopped {
     /// Why finishing the writer failed, if it did. The journals it did
     /// finish were published all the same, and what it couldn't finish is
@@ -162,19 +163,34 @@ impl Publisher {
     /// finish as [`Publisher::finish`] does. Drop every other
     /// [`PublishQueue`] first, or this waits for them.
     ///
-    /// This is the order every stop takes, however it was asked for.
+    /// `nota record` stops this way, however the stop was asked for.
     pub fn finish_recording<S: Fs>(
         self,
         writer: SessionWriter<S>,
         meanwhile: impl FnOnce(),
     ) -> Stopped {
-        let (finishing, last) = match writer.finish() {
+        self.finish_recording_after(Vec::new(), writer, meanwhile)
+    }
+
+    /// [`Publisher::finish_recording`], with `earlier` journals (which a
+    /// publisher would be holding to try again) published in the same batch
+    /// as the last ones, so nothing touches the disk while the writer
+    /// finishes.
+    pub(crate) fn finish_recording_after<S: Fs>(
+        self,
+        mut earlier: Vec<FinishedJournal>,
+        writer: SessionWriter<S>,
+        meanwhile: impl FnOnce(),
+    ) -> Stopped {
+        let (finishing, finished) = match writer.finish() {
             Ok(last) => (None, last),
             Err(e) => {
                 let (error, finished) = e.into_parts();
                 (Some(error), finished)
             }
         };
+        earlier.extend(finished);
+        let last = earlier;
         // A refused batch (the publisher's thread panicked) stays on disk
         // for salvage; `published` says so.
         let _sent = self.queue.send(last);
