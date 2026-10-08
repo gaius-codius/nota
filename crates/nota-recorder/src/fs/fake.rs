@@ -452,7 +452,7 @@ impl State {
     }
 
     /// The filesystem that survives a crash now, as `outcome` decides.
-    fn survivor(&self, outcome: CrashOutcome) -> State {
+    fn survivor(&self, outcome: CrashOutcome) -> Self {
         let mut rng = SplitMix(match outcome {
             CrashOutcome::Partial { seed } => seed,
             CrashOutcome::LoseUnsynced | CrashOutcome::KeepAll => 0,
@@ -529,7 +529,7 @@ impl State {
             );
         }
         inodes.retain(|id, _| names.files.values().any(|named| named == id));
-        State::new(inodes, self.next_inode, names)
+        Self::new(inodes, self.next_inode, names)
     }
 }
 
@@ -931,7 +931,7 @@ mod tests {
         let fs = FakeFs::with_dirs(["/s"]);
         let held = fs.lock_dir(&p("/s")).unwrap();
         assert_eq!(
-            fs.clone().lock_dir(&p("/s")).unwrap_err().kind(),
+            fs.lock_dir(&p("/s")).unwrap_err().kind(),
             io::ErrorKind::WouldBlock
         );
         drop(held);
@@ -1089,7 +1089,7 @@ mod tests {
         f.write_all(b"head").unwrap();
         f.sync().unwrap();
         f.write_all(b"0123456789").unwrap();
-        let mut lengths = std::collections::BTreeSet::new();
+        let mut lengths = BTreeSet::new();
         let mut zeroed = false;
         for seed in 0..64 {
             let got = after_crash(&fs, CrashOutcome::Partial { seed }, "/s/j").unwrap();
@@ -1125,14 +1125,14 @@ mod tests {
     fn pending_names_survive_in_any_combination() {
         // Create a then b, no directory sync: a partial crash can keep
         // neither, either one alone, or both.
-        let mut seen = std::collections::BTreeSet::new();
+        let mut seen = BTreeSet::new();
         for seed in 0..64 {
             let fs = FakeFs::with_dirs(["/s"]);
             let _a = fs.create(&p("/s/a")).unwrap();
             let _b = fs.create(&p("/s/b")).unwrap();
             seen.insert(fs.crash(CrashOutcome::Partial { seed }).paths());
         }
-        let all: std::collections::BTreeSet<Vec<PathBuf>> = [
+        let all: BTreeSet<Vec<PathBuf>> = [
             vec![],
             vec![p("/s/a")],
             vec![p("/s/b")],

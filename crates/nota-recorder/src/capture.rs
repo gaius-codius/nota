@@ -6,7 +6,7 @@
 //! touches the disk or waits on the recorder, so an fsync that takes a
 //! second can't make the audio server drop audio. [`record_track`] runs on
 //! the recorder thread, takes the samples off the channel and appends them
-//! to the [`SessionWriter`](crate::session::SessionWriter), which does every
+//! to the [`SessionWriter`], which does every
 //! write and fsync.
 //!
 //! The channel is unbounded: while the disk stalls, audio queues in memory
@@ -55,7 +55,7 @@
 //! [`start_tracks`] starts one stream per track (the system audio and the
 //! microphone, say), all feeding one [`CaptureReceiver`], and
 //! [`record_tracks`] records them on one recorder thread into one
-//! [`SessionWriter`](crate::session::SessionWriter): each track in its own
+//! [`SessionWriter`]: each track in its own
 //! journals, epochs and segments, timed by its own [`TrackTimeline`]. A
 //! track whose stream fails is reported and the others record on; the
 //! recorder returns once every stream has stopped or failed. Every

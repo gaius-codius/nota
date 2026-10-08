@@ -524,7 +524,7 @@ fn a_marks_write_that_fails_is_a_gap_and_the_track_moves_on() {
 fn recording_an_unstarted_track_is_an_error() {
     let fs = FakeFs::with_dirs([dir()]);
     let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
-    let session = SessionDir::new(SESSION, fs.clone(), &dir()).lock().unwrap();
+    let session = SessionDir::new(SESSION, fs, &dir()).lock().unwrap();
     let mut writer = SessionWriter::open(
         &session,
         rate(),
@@ -635,7 +635,7 @@ fn capture_errors_and_sources_read_plainly() {
 fn a_stream_at_another_rate_than_the_journals_records_nothing() {
     let fs = FakeFs::with_dirs([dir()]);
     let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
-    let session = SessionDir::new(SESSION, fs.clone(), &dir()).lock().unwrap();
+    let session = SessionDir::new(SESSION, fs, &dir()).lock().unwrap();
     let mut writer = SessionWriter::open(
         &session,
         rate(),
@@ -873,10 +873,7 @@ fn a_journal_that_breaks_at_the_overrun_is_reported_and_the_epoch_still_moves() 
         run.writer.epoch(MIC),
         Some((EpochId::new(1), SampleIndex::new(10)))
     );
-    assert_eq!(
-        run.timeline.current().map(nota_core::Epoch::id),
-        Some(EpochId::new(1))
-    );
+    assert_eq!(run.timeline.current().map(Epoch::id), Some(EpochId::new(1)));
 }
 
 /// A writer with `MIC` started in `epoch` at sample `at`, and a channel
@@ -1250,7 +1247,7 @@ fn audio_a_broken_journal_couldnt_keep_is_never_counted_durable() {
     // so the journal breaks and no replacement can be made.
     fs.crash_after(10);
     let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
-    let session = SessionDir::new(SESSION, fs.clone(), &dir()).lock().unwrap();
+    let session = SessionDir::new(SESSION, fs, &dir()).lock().unwrap();
     let length = SegmentLength::new(SampleCount::new(1_000)).unwrap();
     let mut writer = SessionWriter::open(&session, rate(), length, Arc::clone(&clock)).unwrap();
     writer

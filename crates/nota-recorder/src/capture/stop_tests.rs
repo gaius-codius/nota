@@ -170,7 +170,7 @@ fn record_into(fs: &FakeFs, run: Run, promised: &mut Promised) -> Result<(), Str
         .map_err(|e| e.to_string())?;
     let mut writer =
         SessionWriter::open(&lock, rate(), length(), dyn_clock).map_err(|e| e.to_string())?;
-    let mut store = SessionStore::new(lock.clone(), FakeStore::new(fs, &db()));
+    let mut store = SessionStore::new(lock, FakeStore::new(fs, &db()));
     let mut timelines = Vec::new();
     for track in [MIC, SYSTEM] {
         writer
@@ -317,8 +317,8 @@ fn next_start(fs: &FakeFs) -> Salvaged {
 }
 
 fn decode(bytes: &[u8]) -> Result<Vec<i16>, String> {
-    let mut reader = claxon::FlacReader::new(std::io::Cursor::new(bytes))
-        .map_err(|e| format!("bad FLAC: {e}"))?;
+    let mut reader =
+        claxon::FlacReader::new(io::Cursor::new(bytes)).map_err(|e| format!("bad FLAC: {e}"))?;
     reader
         .samples()
         .map(|s| {
@@ -455,7 +455,7 @@ fn clean_ops() -> usize {
 fn a_stop_between_any_two_events_finalises_both_tracks() {
     let ops = clean_ops();
     assert!(ops > 150, "{ops}");
-    let mut stops = std::collections::BTreeSet::new();
+    let mut stops = BTreeSet::new();
     for k in 0..=ops {
         let fs = FakeFs::with_dirs([session(), db()]);
         let promised = record(

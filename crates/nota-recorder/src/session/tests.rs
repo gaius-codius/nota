@@ -370,7 +370,7 @@ fn track_errors() {
     assert_eq!(w.next_sample(MIC), Some(SampleIndex::new(u64::MAX - 1)));
     assert!(fs.paths().is_empty());
     assert_eq!(
-        SessionDir::new(SESSION, fs.clone(), Path::new("/missing"))
+        SessionDir::new(SESSION, fs, Path::new("/missing"))
             .lock()
             .unwrap_err()
             .kind(),
@@ -456,7 +456,7 @@ fn sync_if_due_reports_durable_positions_per_journal() {
     assert!(w.take_finished().is_empty());
     let read = read_journal(&fs.read(&dir().join(JournalId::new(1).file_name())).unwrap());
     assert_eq!(
-        read.header().map(crate::journal::JournalHeader::id),
+        read.header().map(JournalHeader::id),
         Some(JournalId::new(1))
     );
 }
@@ -793,7 +793,7 @@ impl crate::fs::FileSyncer for FailingSyncer {
     }
 }
 
-impl crate::fs::FsFile for NoDataFile {
+impl FsFile for NoDataFile {
     type Syncer = FailingSyncer;
 
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {

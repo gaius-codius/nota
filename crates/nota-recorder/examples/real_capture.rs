@@ -788,7 +788,7 @@ mod linux {
         // for an encode.
         let (to_publish, finished) = mpsc::channel::<Vec<FinishedJournal>>();
         let publisher = {
-            let (fs, session) = (fs.clone(), session.clone());
+            let (fs, session) = (fs.clone(), session);
             thread::spawn(move || publish(&fs, session, store, length, &finished))
         };
 

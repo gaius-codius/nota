@@ -1,7 +1,7 @@
 //! The `nota` program. Every role is this one executable:
 //!
 //! - `nota record`: records a session, the system audio and the microphone
-//!   as two tracks, with live text on the Recording screen (see [`record`]
+//!   as two tracks, with live text on the Recording screen (see `record`
 //!   for how it stops safely);
 //! - `nota engine asr`: the speech engine child, which `nota record`
 //!   starts and talks to over stdin and stdout.

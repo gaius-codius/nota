@@ -101,7 +101,7 @@ fn read_all<M: WireMessage>(bytes: &[u8]) -> ReadAll<M> {
 }
 
 /// Every accepted frame re-encodes to exactly the bytes it came from.
-fn assert_canonical<M: WireMessage + std::fmt::Debug>(frames: &[Frame<M>], raw: &[Vec<u8>]) {
+fn assert_canonical<M: WireMessage + fmt::Debug>(frames: &[Frame<M>], raw: &[Vec<u8>]) {
     for (frame, bytes) in frames.iter().zip(raw) {
         assert_eq!(&encode(frame).unwrap(), bytes, "{frame:?}");
     }

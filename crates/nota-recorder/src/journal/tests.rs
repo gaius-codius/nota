@@ -921,11 +921,7 @@ fn frames_out_of_sequence_or_discontinuous_are_invalid() {
         } if track == MIC && expected.get() == 4 && found.get() == 5
     ));
     // The first frame may start anywhere; each one after continues it.
-    let late = build(&[
-        (0, MIC, 900, a.clone()),
-        (1, MIC, 904, b.clone()),
-        (2, MIC, 908, a),
-    ]);
+    let late = build(&[(0, MIC, 900, a.clone()), (1, MIC, 904, b), (2, MIC, 908, a)]);
     let read = read_journal(&late);
     assert_eq!((read.frames().len(), read.end()), (3, ReadEnd::Complete));
     assert_eq!(read.frames()[1].seq(), 1);

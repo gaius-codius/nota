@@ -566,7 +566,7 @@ fn check_written_lag(case: &CrashCase, promised: &Promised, seen: &Observed) -> 
             continue;
         }
         let read = read_journal(bytes);
-        let Some(track) = read.header().map(crate::journal::JournalHeader::track) else {
+        let Some(track) = read.header().map(JournalHeader::track) else {
             continue;
         };
         if let Some(r) = read.range() {
@@ -617,13 +617,12 @@ fn the_written_lag_counts_frames_past_the_last_fsync() {
     let lag_of = |to: u64| {
         let fs = FakeFs::with_dirs([session(), db()]);
         let path = session().join(JournalId::new(0).file_name());
-        let header =
-            crate::journal::JournalHeader::new(JournalId::new(0), MIC, EpochId::new(0), rate());
+        let header = JournalHeader::new(JournalId::new(0), MIC, EpochId::new(0), rate());
         let mut file = fs.create(&path).unwrap();
         file.write_all(&crate::journal::format::encode_header(header))
             .unwrap();
         let mut frames = Vec::new();
-        crate::journal::format::encode_frame(
+        encode_frame(
             &mut frames,
             0,
             MIC,
@@ -633,7 +632,7 @@ fn the_written_lag_counts_frames_past_the_last_fsync() {
         file.write_all(&frames).unwrap();
         file.sync().unwrap();
         frames.clear();
-        crate::journal::format::encode_frame(
+        encode_frame(
             &mut frames,
             1,
             MIC,
@@ -1417,7 +1416,7 @@ fn journals_rotate_at_every_window_even_when_publishing_fails() {
     let lock = owned(&fs);
     let mut writer = SessionWriter::open(&lock, rate(), length(), dyn_clock).unwrap();
     // The store's directory doesn't exist: every publish fails.
-    let mut store = SessionStore::new(lock.clone(), FakeStore::new(&fs, Path::new("/missing")));
+    let mut store = SessionStore::new(lock, FakeStore::new(&fs, Path::new("/missing")));
     writer
         .start_track(MIC, EpochId::new(0), SampleIndex::new(100))
         .unwrap();
@@ -2000,11 +1999,10 @@ fn frames_spanning_the_sync_interval_after_damage_keep_the_journal() {
     // damage is corruption and the journal is kept. Short of that, it could
     // all be a torn tail, and the journal is deleted.
     let corrupt_first = |count: u64| {
-        let header =
-            crate::journal::JournalHeader::new(JournalId::FIRST, MIC, EpochId::new(0), rate());
+        let header = JournalHeader::new(JournalId::FIRST, MIC, EpochId::new(0), rate());
         let mut bytes = crate::journal::format::encode_header(header).to_vec();
         for k in 0..count {
-            crate::journal::format::encode_frame(
+            encode_frame(
                 &mut bytes,
                 k,
                 MIC,
@@ -2763,7 +2761,7 @@ fn an_unreadable_segment_file_claims_nothing_until_it_reads_and_matches() {
         .iter()
         .position(|op| *op == Op::Read(path.clone()))
         .unwrap();
-    let planted = BTreeMap::from([(path.clone(), Some(flac))]);
+    let planted = BTreeMap::from([(path, Some(flac))]);
     for kind in [
         io::ErrorKind::PermissionDenied,
         io::ErrorKind::IsADirectory,

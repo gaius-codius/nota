@@ -648,7 +648,7 @@ fn the_other_tracks_due_fsync_runs_as_soon_as_a_stream_ends() {
     let fs = FakeFs::with_dirs([dir()]);
     let fake = Arc::new(FakeClock::new(SessionTime::ZERO));
     let clock: Arc<dyn Clock> = Arc::clone(&fake) as Arc<dyn Clock>;
-    let session = SessionDir::new(SESSION, fs.clone(), &dir()).lock().unwrap();
+    let session = SessionDir::new(SESSION, fs, &dir()).lock().unwrap();
     let length = SegmentLength::new(SampleCount::new(1_000)).unwrap();
     let mut writer = SessionWriter::open(&session, rate(), length, clock).unwrap();
     let mut timelines = Vec::new();

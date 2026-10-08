@@ -1,7 +1,7 @@
 //! Where segment rows are committed.
 //!
 //! The real store is SQLite ([`nota_store::Store`]). Crash tests use
-//! [`FakeStore`], which keeps rows as files on a `FakeFs`, so a simulated
+//! `FakeStore`, which keeps rows as files on a `FakeFs`, so a simulated
 //! crash covers the rows and the segments together.
 
 use std::error::Error;
@@ -319,7 +319,7 @@ mod fake {
             for cut in 0..bytes.len() {
                 assert_eq!(decode(&bytes[..cut]), None);
             }
-            let mut flipped = bytes.clone();
+            let mut flipped = bytes;
             flipped[9] ^= 1;
             assert_eq!(decode(&flipped), None);
         }

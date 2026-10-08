@@ -296,7 +296,7 @@ fn after_a_flush_a_track_starts_afresh() {
 #[test]
 fn a_failed_write_stops_the_engine() {
     struct Closed;
-    impl io::Write for Closed {
+    impl Write for Closed {
         fn write(&mut self, _: &[u8]) -> io::Result<usize> {
             Err(io::Error::from(io::ErrorKind::BrokenPipe))
         }
