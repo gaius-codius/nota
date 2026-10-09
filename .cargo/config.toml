@@ -14,6 +14,9 @@ rustflags = ["-C", "target-feature=+crt-static"]
 # then, builds that link sherpa-onnx fail with "SHERPA_ONNX_LIB_DIR does not
 # exist". An SHERPA_ONNX_LIB_DIR set in the environment wins. Cargo reads
 # this file only when it runs inside the repo; nota-engine's build script
-# stops a build from elsewhere, where the variable is unset.
+# stops a build from elsewhere, where the variable is unset. The directory's
+# name carries a hash of the pins, so a new pin changes the variable and
+# cargo rebuilds sherpa-onnx-sys in every target directory; the script
+# fails until this line names its directory.
 [env]
-SHERPA_ONNX_LIB_DIR = { value = "target/sherpa-onnx/sherpa-onnx-lib", relative = true }
+SHERPA_ONNX_LIB_DIR = { value = "target/sherpa-onnx/sherpa-onnx-lib-31666b6e566ce903", relative = true }

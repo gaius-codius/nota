@@ -23,8 +23,7 @@ name = "record"
 required-features = ["fake-capture"]
 
 [dependencies]
-# The platform's data directory, where sessions are kept.
-directories = "6"
+directories.workspace = true
 nota-core = { path = "../nota-core" }
 nota-engine = { path = "../nota-engine" }
 nota-recorder = { path = "../nota-recorder" }

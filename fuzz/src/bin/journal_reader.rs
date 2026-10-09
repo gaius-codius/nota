@@ -7,26 +7,19 @@
 use nota_recorder::journal::format::{
     FRAME_HEADER_LEN, HEADER_LEN, MAX_FRAME_SAMPLES, encode_header,
 };
-use nota_recorder::journal::{Invalid, ReadEnd, read_journal};
+use nota_recorder::journal::{Invalid, JournalHeader, ReadEnd, read_journal};
 
 /// `N` bytes of `data` from `at`.
 fn field<const N: usize>(data: &[u8], at: usize) -> [u8; N] {
-    data[at..at + N].try_into().expect("in bounds")
+    let mut out = [0; N];
+    out.copy_from_slice(&data[at..at + N]);
+    out
 }
 
-fn check(data: &[u8]) {
-    let read = read_journal(data);
-    assert!(read.valid_len() <= data.len(), "valid_len past the input");
-
-    let Some(header) = read.header() else {
-        assert!(read.frames().is_empty(), "frames without a header");
-        assert_eq!(read.valid_len(), 0, "valid_len without a header");
-        return;
-    };
-
-    // The header's fields are the input's bytes, checked independently of
-    // the reader: magic, version 2, a CRC that matches, and the id, track,
-    // epoch and rate where the layout puts them.
+/// The header's fields are the input's bytes, checked independently of the
+/// reader: magic, version 2, a CRC that matches, and the id, track, epoch
+/// and rate where the layout puts them.
+fn check_header(data: &[u8], header: JournalHeader) {
     assert!(data.len() >= HEADER_LEN, "a header from too few bytes");
     assert_eq!(&data[..8], b"NOTAJRNL", "header magic");
     assert_eq!(u16::from_le_bytes(field(data, 8)), 2, "header version");
@@ -56,6 +49,19 @@ fn check(data: &[u8]) {
         data[..HEADER_LEN],
         "header re-encodes"
     );
+}
+
+fn check(data: &[u8]) {
+    let read = read_journal(data);
+    assert!(read.valid_len() <= data.len(), "valid_len past the input");
+
+    let Some(header) = read.header() else {
+        assert!(read.frames().is_empty(), "frames without a header");
+        assert_eq!(read.valid_len(), 0, "valid_len without a header");
+        return;
+    };
+
+    check_header(data, header);
 
     let mut expected_len = HEADER_LEN;
     let mut previous_end = None;

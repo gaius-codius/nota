@@ -14,7 +14,13 @@ ignore = []
 [licenses]
 # Permissive licences only. GPL, LGPL and AGPL code is never linked into a
 # distributed binary (if nota uses espeak-ng, it runs as a separate program). MPL-2.0 is file-level copyleft: allowed, but
-# check any new MPL crate in review. This sees crates only, not native
+# check any new MPL crate in review, and list it here once accepted:
+#   - option-ext (through `directories`, in the release binary): accepted
+#     2026-10-09. Two small files, used unmodified; MPL-2.0 asks only that its
+#     source stay available, which crates.io does, and puts no terms on
+#     nota's own files. Replacing `directories` with a hand-written XDG
+#     lookup would drop it, but would also mean writing the macOS and
+#     Windows lookups again for v2 and v3. This sees crates only, not native
 # archives: sherpa-onnx's default archive links GPL text-to-speech libraries,
 # so a build for distribution must use scripts/sherpa-onnx.sh --no-tts and pass
 # scripts/check-no-gpl.sh (CI's no-gpl job does both).

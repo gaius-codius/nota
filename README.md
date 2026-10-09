@@ -19,7 +19,7 @@ and libclang (`scripts/install-linux-build-deps.sh` lists them for Debian and
 Ubuntu).
 
 The speech engine links sherpa-onnx's static libraries. Fetch them once per
-clone, and again after `cargo clean`:
+clone, again after `cargo clean`, and whenever the pins change:
 
 ```sh
 scripts/sherpa-onnx.sh
@@ -27,10 +27,10 @@ cargo build
 ```
 
 The script downloads the archive for your platform, checks it against the
-SHA-256 it pins and unpacks it into `target/sherpa-onnx/sherpa-onnx-lib`,
-which `.cargo/config.toml` points the build at. Run cargo from inside the
-repo, where that file applies. Until it has run, the build stops
-with "SHERPA_ONNX_LIB_DIR does not exist".
+SHA-256 it pins and unpacks it into `target/sherpa-onnx/sherpa-onnx-lib-…`
+(named after the pins), which `.cargo/config.toml` points the build at. Run
+cargo from inside the repo, where that file applies. Until it has run, the
+build stops with "SHERPA_ONNX_LIB_DIR does not exist".
 
 ## Licence
 

@@ -27,11 +27,14 @@ jobs:
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          # sherpa-onnx-sys's cached build bundles the pinned libraries, and
-          # cargo doesn't notice a new pin; a new pin needs a new cache.
+          # sherpa-onnx-sys's cached build bundles the pinned libraries. A
+          # new pin renames their directory, so cargo rebuilds it anyway; a
+          # new cache with each pin keeps old builds from piling up.
           key: sherpa-onnx-${{ hashFiles('scripts/sherpa-onnx.sh') }}
       - run: scripts/install-linux-build-deps.sh
       - run: scripts/sherpa-onnx.test.sh
+      - run: scripts/check-weakened.test.sh
+      - run: scripts/check-files.test.sh
       # The sherpa-onnx libraries, from the archive pinned by SHA-256; every
       # build links these (.cargo/config.toml), never an unchecked download.
       - name: Fetch the pinned sherpa-onnx libraries
@@ -149,7 +152,8 @@ jobs:
 
   fuzz:
     # fuzz/ is its own workspace, outside the normal build and tests; this
-    # keeps its targets compiling. It builds them and doesn't fuzz.
+    # keeps its targets compiling and linted. It builds them and doesn't
+    # fuzz.
     name: Fuzz targets build
     runs-on: ubuntu-latest
     env:
@@ -159,8 +163,9 @@ jobs:
       # SIGILL on an older one. cargo-afl appends RUSTFLAGS after its own
       # flags and rustc takes the last target-cpu, so this pins everything
       # rustc builds to the baseline x86-64 CPU that every runner has. (The
-      # AFL++ runtime is C, built without -march=native, and rebuilt each
-      # run.) It's job-level so rust-cache hashes it into the cache key.
+      # AFL++ runtime is C, built with -march=native when the compiler takes
+      # it; it isn't cached, but rebuilt each run on the runner that uses
+      # it.) It's job-level so rust-cache hashes it into the cache key.
       RUSTFLAGS: -C target-cpu=x86-64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -178,6 +183,10 @@ jobs:
       # rust-cache restored the binary (but not the sources or the runtime).
       - run: cargo install cargo-afl --version 0.18.2 --locked --force
       - run: cargo afl build --locked
+        working-directory: fuzz
+      # fuzz/ copies the workspace's lint table (it can't inherit it), and
+      # the job denies warnings, so the targets meet the same lints.
+      - run: cargo clippy --all-targets --locked
         working-directory: fuzz
 
   mutants-shard:

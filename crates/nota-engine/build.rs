@@ -6,6 +6,15 @@
 //! runs inside the repo; a `cargo build --manifest-path` from elsewhere
 //! would link the unchecked download. This stops that build before anything
 //! links it.
+//!
+//! It can't stop the download itself. Cargo runs a crate's build script only
+//! after its dependencies are built, so by the time this one fails,
+//! sherpa-onnx-sys's build script has already fetched and unpacked its
+//! archive into that target directory. Those bytes are never linked: this
+//! build fails, and a build from inside the repo sets the variable, which
+//! makes the sys crate's build script run again and use the checked
+//! libraries instead. So an unchecked archive can sit in `target/`, unused;
+//! `cargo clean` removes it.
 
 use std::env;
 

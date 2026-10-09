@@ -16,8 +16,12 @@ use nota_recorder::journal::{JournalHeader, JournalId, JournalWriter};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+/// `len` samples of `i * step` for i = 0, 1, 2..., wrapping.
 fn tone(len: usize, step: i16) -> Vec<i16> {
-    (0..len).map(|i| (i as i16).wrapping_mul(step)).collect()
+    std::iter::successors(Some(0_i16), |i| Some(i.wrapping_add(1)))
+        .take(len)
+        .map(|i| i.wrapping_mul(step))
+        .collect()
 }
 
 /// Makes `dir` unless it's already there.
