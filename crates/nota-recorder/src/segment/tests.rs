@@ -3960,7 +3960,21 @@ fn a_journal_that_cant_be_unlinked_is_reported_and_the_rest_published() {
     assert_eq!(done.deleted().len(), journals.len() - 1);
     assert!(!done.deleted().contains(&id));
     let left: Vec<_> = fs.paths().into_iter().filter(|p| is_journal(p)).collect();
-    assert_eq!(left, [stuck]);
+    assert_eq!(left, std::slice::from_ref(&stuck));
+
+    // Failing again, it's reported again, and the directory isn't synced:
+    // nothing in it changed.
+    let still = fs.copy_disk();
+    still.fail_on(&stuck, Fault::Remove, io::ErrorKind::PermissionDenied);
+    let done = salvage(&mut session_store(&still), length()).unwrap();
+    assert_eq!(done.not_deleted(), [(id, io::ErrorKind::PermissionDenied)]);
+    assert!(!still.ops().iter().any(|op| matches!(op, Op::SyncDir(_))));
+    // Gone by the time it's unlinked: that's deleted, not kept.
+    let gone = fs.copy_disk();
+    gone.fail_on(&stuck, Fault::Remove, io::ErrorKind::NotFound);
+    let done = salvage(&mut session_store(&gone), length()).unwrap();
+    assert_eq!(done.deleted(), [id]);
+    assert!(done.not_deleted().is_empty());
 
     // Once it can be, the next run deletes it, and publishes nothing again.
     let fs = fs.copy_disk();
@@ -3984,6 +3998,15 @@ fn a_segment_temp_that_cant_be_removed_blocks_only_its_segment() {
     assert_eq!(done.blocked(), blocked);
     assert_eq!(done.segments(), &rows[1..]);
     assert_eq!(fs.read(&temp).unwrap(), b"a crashed run's temp");
+
+    // A temp that's gone by the time it's removed is nothing to report.
+    let fs = disk.copy_disk();
+    let unplanned = session().join("seg-t5-000000000000.flac.tmp");
+    plant_file(&fs, &unplanned, b"x");
+    fs.fail_on(&unplanned, Fault::Remove, io::ErrorKind::NotFound);
+    let done = salvage(&mut session_store(&fs), length()).unwrap();
+    assert!(done.temps_kept().is_empty(), "{:?}", done.temps_kept());
+    assert_eq!(done.segments(), rows);
 }
 
 #[test]

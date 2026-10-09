@@ -63,6 +63,10 @@
 //! thread. A held fsync hasn't started, so it covers what was written by
 //! the time it's let go.
 //!
+//! Its files are only ever as large as a test makes them, so it doesn't
+//! refuse one longer than [`MAX_READ_LEN`](super::MAX_READ_LEN) as
+//! [`Fs::read`] says the real one does.
+//!
 //! Directory errors match Linux's too: reading, removing or renaming onto a
 //! directory is `IsADirectory`, and listing or syncing a file is
 //! `NotADirectory`. Renaming a directory is refused (`IsADirectory`), as
@@ -74,8 +78,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use super::{
-    FileSyncer, Fs, FsFile, MAX_READ_LEN, Synced, is_a_directory, same_directory, too_large,
-    valid_dir, valid_path,
+    FileSyncer, Fs, FsFile, Synced, is_a_directory, same_directory, valid_dir, valid_path,
 };
 
 /// One operation on a [`FakeFs`], as recorded in its log.
@@ -823,9 +826,6 @@ impl Fs for FakeFs {
         }
         let id = *state.names.files.get(path).ok_or_else(not_found)?;
         let data = state.inode(id)?.data.clone();
-        if u64::try_from(data.len()).map_or(true, |n| n > MAX_READ_LEN) {
-            return Err(too_large());
-        }
         state.log.push(Op::Read(path.to_path_buf()));
         Ok(data)
     }

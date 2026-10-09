@@ -146,27 +146,35 @@ fn read_at_most(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
 }
 
 /// Opens `path` to read without following a symlink at its last component
-/// or waiting on it: `O_NOFOLLOW | O_NONBLOCK`, so a FIFO with no writer
-/// opens at once (and is then refused as not a regular file) rather than
-/// blocking. `O_NONBLOCK` changes nothing for a regular file.
-#[cfg(unix)]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the durable-write layer is the one place that opens files; this opens one read-only"
+/// or waiting on it: on Unix `O_NOFOLLOW | O_NONBLOCK`, so a FIFO with no
+/// writer opens at once (and is then refused as not a regular file) rather
+/// than blocking. `O_NONBLOCK` changes nothing for a regular file. Elsewhere
+/// the type check after it is all the protection there is.
+#[cfg_attr(
+    unix,
+    expect(
+        clippy::disallowed_methods,
+        reason = "the durable-write layer is the one place that opens files; this opens one read-only"
+    )
 )]
 fn open_to_read(path: &Path) -> io::Result<File> {
-    use rustix::fs::{Mode, OFlags};
-    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
-    rustix::fs::open(path, flags, Mode::empty())
-        .map(File::from)
-        .map_err(io::Error::from)
-}
-
-/// Opens `path` to read. Elsewhere than Unix the type check after it is all
-/// the protection there is.
-#[cfg(not(unix))]
-fn open_to_read(path: &Path) -> io::Result<File> {
-    File::open(path)
+    #[cfg(unix)]
+    {
+        use rustix::fs::{Mode, OFlags};
+        let flags = OFlags::from_iter([
+            OFlags::RDONLY,
+            OFlags::NOFOLLOW,
+            OFlags::NONBLOCK,
+            OFlags::CLOEXEC,
+        ]);
+        rustix::fs::open(path, flags, Mode::empty())
+            .map(File::from)
+            .map_err(io::Error::from)
+    }
+    #[cfg(not(unix))]
+    {
+        File::open(path)
+    }
 }
 
 impl FsFile for StdFile {
