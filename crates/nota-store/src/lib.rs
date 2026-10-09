@@ -228,6 +228,10 @@ fn create_private(_path: &Path) -> Result<(), StoreError> {
 
 /// Opens the SQLite file at `path`, never through a symlink, with a busy
 /// timeout for another process's writes.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the one place nota opens a database file: the library, and the M1 stores it migrates"
+)]
 fn connect(path: &Path, flags: OpenFlags) -> Result<Connection, StoreError> {
     let conn = Connection::open_with_flags(path, flags.union(OpenFlags::SQLITE_OPEN_NOFOLLOW))?;
     conn.busy_timeout(BUSY_TIMEOUT)?;

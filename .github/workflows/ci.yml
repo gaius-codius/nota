@@ -35,6 +35,10 @@ jobs:
       - run: scripts/sherpa-onnx.test.sh
       - run: scripts/check-weakened.test.sh
       - run: scripts/check-files.test.sh
+      - run: scripts/check-clippy-bans.test.sh
+      # Every crate in the lock files is classified in clippy-crates.txt, and
+      # what it bans is in clippy.toml.
+      - run: scripts/check-clippy-bans.sh
       # The sherpa-onnx libraries, from the archive pinned by SHA-256; every
       # build links these (.cargo/config.toml), never an unchecked download.
       - name: Fetch the pinned sherpa-onnx libraries
