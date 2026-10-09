@@ -11,11 +11,11 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use super::*;
 
 /// A fresh directory under the system temp dir, removed when dropped.
-struct TestDir(PathBuf);
+pub(super) struct TestDir(pub(super) PathBuf);
 
 impl TestDir {
     #[expect(clippy::disallowed_methods, reason = "test scaffolding")]
-    fn new(name: &str) -> Self {
+    pub(super) fn new(name: &str) -> Self {
         let dir = std::env::temp_dir().join(format!("nota-app-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -518,4 +518,70 @@ fn write_file(path: &Path) {
 #[expect(clippy::disallowed_methods, reason = "test scaffolding")]
 fn remove_file(path: &Path) {
     std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn home_tracks_waiting_running_failed_and_done_jobs() {
+    let tmp = TestDir::new("job-status");
+    let library = library_of_three(&tmp.0);
+    let clock = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let wall = Arc::new(AtomicI64::new(day(3)));
+    let mut listing = listing_of(&library, &clock, &wall);
+    let id = SessionId::new(3);
+    library
+        .db()
+        .with(|db| db.finish_recording(id, None))
+        .unwrap();
+    let job = library
+        .db()
+        .with(|db| db.session_jobs(id))
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        listing
+            .sessions()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.id == 3)
+            .unwrap()
+            .status,
+        Status::Processing
+    );
+    library.db().with(|db| db.start_job(job.id)).unwrap();
+    assert_eq!(
+        listing
+            .sessions()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.id == 3)
+            .unwrap()
+            .status,
+        Status::Processing
+    );
+    library
+        .db()
+        .with(|db| db.end_job(job.id, &nota_store::JobEnd::Failed("broken".into())))
+        .unwrap();
+    let shown = listing
+        .sessions()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.id == 3)
+        .unwrap();
+    assert_eq!(shown.status, Status::NeedsYou);
+    assert_eq!(shown.detail.as_deref(), Some("processing failed: broken"));
+    library
+        .db()
+        .with(|db| db.end_job(job.id, &nota_store::JobEnd::Done))
+        .unwrap();
+    assert_eq!(
+        listing
+            .sessions()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.id == 3)
+            .unwrap()
+            .status,
+        Status::Ready
+    );
 }

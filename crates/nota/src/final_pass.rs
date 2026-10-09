@@ -135,11 +135,16 @@ fn final_pass(
         &mut sink,
         running.stop,
     );
+    pass_end(ended)
+}
+
+/// Engine failures keep committed text and wait for a working engine.
+fn pass_end(ended: PassEnd<StoreError>) -> JobEnd {
     match ended {
         PassEnd::Done => JobEnd::Done,
         PassEnd::Stopped => JobEnd::Waiting(None),
         PassEnd::Sink(e) => stored(&e),
-        end @ (PassEnd::Stalled(_) | PassEnd::Engine(_)) => JobEnd::Failed(end.to_string()),
+        PassEnd::Stalled(_) | PassEnd::Engine(_) => JobEnd::Waiting(Some(Wait::Engine)),
     }
 }
 

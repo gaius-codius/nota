@@ -484,10 +484,10 @@ fn stops_on(signal: Signal, name: &str) {
 
 /// `nota` with no command opens Home. `R` records with the last settings
 /// (a first recording: the default devices, titled "Recording"), stopping
-/// comes back to Home with the new session listed, and `q` closes nota
+/// opens Processing, then esc returns to Home with the session listed; `q` closes nota
 /// with the terminal restored and the recording's summary said.
 #[test]
-fn home_records_and_comes_back_after_the_stop() {
+fn home_records_opens_processing_and_returns_home() {
     let tmp = TestDir::new("home");
     let mut nota = Running::start_home(&tmp.0);
     assert!(
@@ -511,10 +511,18 @@ fn home_records_and_comes_back_after_the_stop() {
     // One word: a draw skips cells that are blank already, such as the
     // spaces between words in the default theme.
     assert!(nota.shows_after(at, "finishing"), "{}", nota.output());
-    assert!(nota.shows_after(at, "✓ ready"), "{}", nota.output());
-    assert!(nota.shows_after(at, "✓ Recording"), "{}", nota.output());
+    assert!(nota.shows_after(at, "transcript"), "{}", nota.output());
+    assert!(nota.shows_after(at, "tab view"), "{}", nota.output());
+    let at = nota.len();
+    nota.press("\u{1b}");
+    assert!(nota.shows_after(at, "Recording"), "{}", nota.output());
     assert!(nota.shows_after(at, "⏎ open"), "{}", nota.output());
     assert!(!nota.terminal_restored());
+
+    let at = nota.len();
+    nota.press("\r");
+    assert!(nota.shows_after(at, "transcript"), "{}", nota.output());
+    assert!(nota.shows_after(at, "tab view"), "{}", nota.output());
 
     // The session is saved and stopped, with the setup's title.
     let (rows, left) = published(&tmp.0, 1);

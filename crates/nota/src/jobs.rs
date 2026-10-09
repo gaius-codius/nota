@@ -23,6 +23,7 @@
 //! queue moves on past one that's waiting, and past one that fails (it
 //! keeps its reason), to the next session's.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -30,6 +31,7 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use nota_core::{Clock, SessionTime, SystemClock};
 use nota_recorder::fs::{Fs, StdFs};
 use nota_store::{Job, JobEnd, JobState, Progress, StoreError, Wait, Writer};
 
@@ -151,6 +153,9 @@ impl Runner {
         capture: impl Capture,
         room: impl Room,
     ) -> io::Result<Self> {
+        let clock: Arc<dyn Clock> = Arc::new(
+            SystemClock::start().map_err(|_| io::Error::other("the system clock can't be read"))?,
+        );
         let dir = data.join("jobs");
         match StdFs.create_dir(&dir) {
             Ok(()) => StdFs.sync_dir(data)?,
@@ -179,6 +184,8 @@ impl Runner {
                     capture,
                     room,
                     shared: looping,
+                    clock,
+                    retry_after: BTreeMap::new(),
                 }
                 .run();
             })?;
@@ -218,6 +225,8 @@ struct Loop<W, C, R> {
     capture: C,
     room: R,
     shared: Arc<Shared>,
+    clock: Arc<dyn Clock>,
+    retry_after: BTreeMap<nota_store::JobId, SessionTime>,
 }
 
 impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
@@ -251,6 +260,15 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
             let JobState::Waiting(waits) = job.state else {
                 continue;
             };
+            if self.retry_after.get(&job.id).is_some_and(|at| {
+                self.clock
+                    .now()
+                    .checked_duration_since(*at)
+                    .unwrap_or_default()
+                    < IDLE
+            }) {
+                continue;
+            }
             // A job waiting for space keeps waiting for it until there's
             // room, whatever else it lacks meanwhile.
             if waits == Some(Wait::Space) && !self.room.room() {
@@ -300,6 +318,11 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
                 return;
             }
             self.shared.sleep(IDLE);
+        }
+        if end == JobEnd::Waiting(Some(Wait::Engine)) {
+            self.retry_after.insert(id, self.clock.now());
+        } else {
+            self.retry_after.remove(&id);
         }
         // Out of space by SQLite's count though the disk check finds room
         // (a quota, a full temp store): don't start it again at once.
