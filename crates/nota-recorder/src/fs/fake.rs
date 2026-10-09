@@ -63,6 +63,10 @@
 //! thread. A held fsync hasn't started, so it covers what was written by
 //! the time it's let go.
 //!
+//! Its files are only ever as large as a test makes them, so it doesn't
+//! refuse one longer than [`MAX_READ_LEN`](super::MAX_READ_LEN) as
+//! [`Fs::read`] says the real one does.
+//!
 //! Directory errors match Linux's too: reading, removing or renaming onto a
 //! directory is `IsADirectory`, and listing or syncing a file is
 //! `NotADirectory`. Renaming a directory is refused (`IsADirectory`), as
@@ -108,6 +112,19 @@ pub enum Op {
     Read(PathBuf),
     /// [`Fs::list`].
     List(PathBuf),
+}
+
+/// An operation [`FakeFs::fail_on`] can fail for one path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fault {
+    /// [`Fs::create`] at the path.
+    Create,
+    /// [`Fs::rename`] from or to the path.
+    Rename,
+    /// [`Fs::remove`] of the path.
+    Remove,
+    /// [`Fs::read`] of the path.
+    Read,
 }
 
 /// What survives a crash beyond the durable view (see the module docs).
@@ -373,6 +390,9 @@ struct State {
     /// An injected failure: after this many more operations, fail the next
     /// one with this error.
     fail: Option<(usize, io::ErrorKind)>,
+    /// Injected failures that last: every operation of this kind on this
+    /// path fails with this error.
+    faults: Vec<(PathBuf, Fault, io::ErrorKind)>,
     crashed: bool,
     /// The directories locked by a live [`FakeLock`].
     locked: BTreeSet<PathBuf>,
@@ -393,6 +413,7 @@ impl State {
             attempted: 0,
             budget: None,
             fail: None,
+            faults: Vec::new(),
             crashed: false,
             locked: BTreeSet::new(),
             stalls: Vec::new(),
@@ -423,6 +444,14 @@ impl State {
             *after -= 1;
         }
         Ok(())
+    }
+
+    /// Fails with the lasting fault set for `op` on `path`, if there is one.
+    fn fault(&self, op: Fault, path: &Path) -> io::Result<()> {
+        match self.faults.iter().find(|(p, o, _)| *o == op && p == path) {
+            Some(&(_, _, kind)) => Err(io::Error::new(kind, "injected failure")),
+            None => Ok(()),
+        }
     }
 
     fn inode(&mut self, id: InodeId) -> io::Result<&mut Inode> {
@@ -593,6 +622,15 @@ impl FakeFs {
         self.lock().fail = Some((ops, kind));
     }
 
+    /// Fails every `op` on `path` from now on with an error of `kind`, as an
+    /// immutable file (`EPERM`) or a failing sector (`EIO`) would, without
+    /// crashing. Each still counts as an operation attempted. It lasts until
+    /// a crash: the filesystem [`Self::crash`] or [`Self::copy_disk`]
+    /// returns has no faults.
+    pub fn fail_on(&self, path: &Path, op: Fault, kind: io::ErrorKind) {
+        self.lock().faults.push((path.to_path_buf(), op, kind));
+    }
+
     /// Holds back every fsync of the file created at `path`, from now until
     /// the returned [`Stall`] is released or dropped (see the module docs).
     /// A held fsync isn't attempted yet: it counts towards
@@ -687,6 +725,7 @@ impl Fs for FakeFs {
         valid_path(path)?;
         let mut state = self.lock();
         state.admit()?;
+        state.fault(Fault::Create, path)?;
         state.parent_exists(path)?;
         if state.names.exists(path) {
             return Err(exists());
@@ -722,6 +761,8 @@ impl Fs for FakeFs {
         same_directory(from, to)?;
         let mut state = self.lock();
         state.admit()?;
+        state.fault(Fault::Rename, from)?;
+        state.fault(Fault::Rename, to)?;
         if state.names.dirs.contains(from) {
             return Err(is_a_directory());
         }
@@ -765,6 +806,7 @@ impl Fs for FakeFs {
         valid_path(path)?;
         let mut state = self.lock();
         state.admit()?;
+        state.fault(Fault::Remove, path)?;
         if state.names.dirs.contains(path) {
             return Err(is_a_directory());
         }
@@ -778,6 +820,7 @@ impl Fs for FakeFs {
         valid_path(path)?;
         let mut state = self.lock();
         state.admit()?;
+        state.fault(Fault::Read, path)?;
         if state.names.dirs.contains(path) {
             return Err(is_a_directory());
         }

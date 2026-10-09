@@ -772,6 +772,7 @@ dependencies = [
  "flacenc",
  "nota-core",
  "nota-store",
+ "rustix",
  "sha2",
  "thread-priority",
 ]

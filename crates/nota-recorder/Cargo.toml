@@ -42,6 +42,11 @@ sha2.workspace = true
 cpal = { workspace = true, features = ["pipewire", "realtime-dbus"] }
 thread-priority.workspace = true
 
+# The real filesystem opens files to read with `O_NOFOLLOW | O_NONBLOCK`
+# (`fs::real`), flags std has no names for.
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["fs"] }
+
 [dev-dependencies]
 claxon.workspace = true
 # Turns on `fake-engine` for test builds only, so the supervisor's tests

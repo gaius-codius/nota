@@ -1,6 +1,7 @@
 //! Starting a recording: the terminal, the session, the tracks and the
 //! threads that record them.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
@@ -19,7 +20,7 @@ use nota_tui::Event;
 
 use super::live::{LiveInput, spawn_live};
 use super::signals::{SignalThread, listen_for_signals};
-use super::summary::{Outcome, track_name};
+use super::summary::{Outcome, file_names, track_name};
 use super::{BoxError, MIC, RATE, RecordArgs, SYSTEM, segment_length};
 use crate::latency::{DrawEnds, LatencyLog};
 use crate::library::{Library, NewSessionRows, Salvaged};
@@ -215,17 +216,41 @@ fn open_timelines<S>(
 /// each.
 fn note_salvaged(library: &Library, outcome: &mut Outcome) -> Result<(), BoxError> {
     for salvaged in library.salvage_all(segment_length())? {
-        outcome.notes.push(match salvaged {
-            Salvaged::Done(id) => format!("salvaged session {}", id.get()),
-            Salvaged::Left(id) => format!(
-                "salvaged session {}, but some of its journals are still to publish",
-                id.get()
-            ),
-            Salvaged::InUse(id) => format!("session {} is in use; not salvaged", id.get()),
-            Salvaged::Failed(id, e) => format!("salvaging session {} failed: {e}", id.get()),
-        });
+        outcome.notes.push(salvage_note(&salvaged));
     }
     Ok(())
+}
+
+/// What the summary says of one salvaged session.
+fn salvage_note(salvaged: &Salvaged) -> String {
+    match salvaged {
+        Salvaged::Done(id, aside) => {
+            format!("salvaged session {}{}", id.get(), set_aside_part(aside))
+        }
+        Salvaged::Left(id, aside) => format!(
+            "salvaged session {}, but some of its journals are still to publish{}",
+            id.get(),
+            set_aside_part(aside)
+        ),
+        Salvaged::InUse(id) => format!("session {} is in use; not salvaged", id.get()),
+        Salvaged::Failed(id, e) => format!("salvaging session {} failed: {e}", id.get()),
+    }
+}
+
+/// The end of a salvage note naming the journals set aside as damaged, or
+/// nothing if there were none.
+fn set_aside_part(aside: &[PathBuf]) -> String {
+    match aside {
+        [] => String::new(),
+        [_] => format!(
+            "; a journal was damaged, so part of it wasn't published: {} is kept",
+            file_names(aside)
+        ),
+        _ => format!(
+            "; journals were damaged, so parts of it weren't published: {} are kept",
+            file_names(aside)
+        ),
+    }
 }
 
 /// The rows the publisher adds for this session: its title and the tracks
@@ -384,5 +409,45 @@ mod tests {
     fn each_track_is_named_for_what_it_records() {
         assert_eq!(track_kind(MIC), TrackKind::Microphone);
         assert_eq!(track_kind(SYSTEM), TrackKind::System);
+    }
+}
+
+#[cfg(test)]
+mod salvage_note_tests {
+    use nota_core::SessionId;
+
+    use super::*;
+
+    fn aside(names: &[&str]) -> Vec<PathBuf> {
+        names
+            .iter()
+            .map(|n| PathBuf::from("/data/sessions/3/audio").join(n))
+            .collect()
+    }
+
+    #[test]
+    fn a_salvaged_session_with_a_journal_set_aside_names_it() {
+        let done = Salvaged::Done(SessionId::new(3), aside(&["journal-000000.unreadable"]));
+        assert_eq!(
+            salvage_note(&done),
+            "salvaged session 3; a journal was damaged, so part of it wasn't published: \
+             journal-000000.unreadable is kept"
+        );
+        let clean = Salvaged::Done(SessionId::new(3), Vec::new());
+        assert_eq!(salvage_note(&clean), "salvaged session 3");
+    }
+
+    #[test]
+    fn a_session_with_journals_left_and_set_aside_says_both() {
+        let left = Salvaged::Left(
+            SessionId::new(3),
+            aside(&["journal-000000.unreadable", "journal-000004.unreadable"]),
+        );
+        assert_eq!(
+            salvage_note(&left),
+            "salvaged session 3, but some of its journals are still to publish; \
+             journals were damaged, so parts of it weren't published: \
+             journal-000000.unreadable, journal-000004.unreadable are kept"
+        );
     }
 }

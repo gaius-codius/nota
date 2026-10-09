@@ -30,8 +30,12 @@
 //! - [`Fs::rename`] moves a file's name within one directory, replacing any
 //!   file at the new name. It isn't durable until that directory is synced.
 //! - [`Fs::remove`] unlinks a name; durable after a directory sync.
-//! - [`Fs::read`] reads a whole file, and [`Fs::list`] a directory's
-//!   entries, as the running system sees them.
+//! - [`Fs::read`] reads a whole regular file, and [`Fs::list`] a
+//!   directory's entries, as the running system sees them. A read never
+//!   blocks on what's under the name and never holds more than
+//!   [`MAX_READ_LEN`] bytes: anything else under a name nota reads (a
+//!   symlink, a FIFO, a device, a file too large for anything nota writes)
+//!   is an error, like a file that can't be read.
 //! - [`Fs::lock_dir`] takes an advisory lock on a directory, without
 //!   waiting: one holder at a time, across processes too. It isn't durable;
 //!   it ends when its guard drops or the process dies.
@@ -108,11 +112,19 @@ pub trait Fs: Send + Sync + fmt::Debug {
     fn remove(&self, path: &Path) -> io::Result<()>;
 
     /// Reads the whole file at `path`, as the running system sees it
-    /// (durable or not).
+    /// (durable or not). Only a regular file is read, not followed through
+    /// a symlink, and only up to [`MAX_READ_LEN`] bytes, so whatever is put
+    /// under a name in a session directory can't hang the reader or run it
+    /// out of memory.
     ///
     /// # Errors
     ///
-    /// Any I/O error, including [`io::ErrorKind::NotFound`].
+    /// Any I/O error, including [`io::ErrorKind::NotFound`];
+    /// [`io::ErrorKind::IsADirectory`] for a directory, an error of kind
+    /// [`io::ErrorKind::InvalidInput`] for anything else that isn't a regular
+    /// file (a symlink may give the kernel's `ELOOP` instead), and
+    /// [`io::ErrorKind::FileTooLarge`] for a file longer than
+    /// [`MAX_READ_LEN`].
     fn read(&self, path: &Path) -> io::Result<Vec<u8>>;
 
     /// The paths of the files and directories in `dir`, sorted, as the
@@ -136,6 +148,12 @@ pub trait Fs: Send + Sync + fmt::Debug {
     /// including a missing directory or one that's a file.
     fn lock_dir(&self, dir: &Path) -> io::Result<Self::Lock>;
 }
+
+/// The longest file [`Fs::read`] reads: 1 GiB. Nothing nota writes comes
+/// near it: a journal is at most one segment window of one track (about
+/// 10 MB for five minutes at 16 kHz), and a segment is that window's audio
+/// as FLAC.
+pub const MAX_READ_LEN: u64 = 1 << 30;
 
 /// A file opened by [`Fs::create`].
 pub trait FsFile: Send + fmt::Debug {
@@ -217,6 +235,14 @@ fn valid_dir(dir: &Path) -> io::Result<()> {
 /// [`Fs::rename`] refuses a directory to move with it too.
 fn is_a_directory() -> io::Error {
     io::Error::new(io::ErrorKind::IsADirectory, "is a directory")
+}
+
+/// A file longer than [`MAX_READ_LEN`], as [`Fs::read`] refuses it.
+fn too_large() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::FileTooLarge,
+        "longer than any file nota writes",
+    )
 }
 
 /// Checks that `from` and `to` are valid paths in the same directory, as

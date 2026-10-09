@@ -2,11 +2,12 @@
 //! its write functions; each call says so with `#[expect]`.
 
 use std::fs::{DirBuilder, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use super::{
-    FileSyncer, Fs, FsFile, Synced, is_a_directory, same_directory, valid_dir, valid_path,
+    FileSyncer, Fs, FsFile, MAX_READ_LEN, Synced, is_a_directory, same_directory, too_large,
+    valid_dir, valid_path,
 };
 
 /// The real filesystem.
@@ -83,8 +84,7 @@ impl Fs for StdFs {
     }
 
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
-        valid_path(path)?;
-        std::fs::read(path)
+        read_at_most(path, MAX_READ_LEN)
     }
 
     fn list(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
@@ -115,6 +115,65 @@ impl Fs for StdFs {
             )),
             Err(std::fs::TryLockError::Error(e)) => Err(e),
         }
+    }
+}
+
+/// [`Fs::read`], refusing a file longer than `limit`.
+fn read_at_most(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+    valid_path(path)?;
+    let file = open_to_read(path)?;
+    let meta = file.metadata()?;
+    if meta.is_dir() {
+        return Err(is_a_directory());
+    }
+    if !meta.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    if meta.len() > limit {
+        return Err(too_large());
+    }
+    // The length is a hint: the file may grow or shrink meanwhile, so the
+    // read itself stops one byte past the limit.
+    let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
+    file.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).map_or(true, |n| n > limit) {
+        return Err(too_large());
+    }
+    Ok(bytes)
+}
+
+/// Opens `path` to read without following a symlink at its last component
+/// or waiting on it: on Unix `O_NOFOLLOW | O_NONBLOCK`, so a FIFO with no
+/// writer opens at once (and is then refused as not a regular file) rather
+/// than blocking. `O_NONBLOCK` changes nothing for a regular file. Elsewhere
+/// the type check after it is all the protection there is.
+#[cfg_attr(
+    unix,
+    expect(
+        clippy::disallowed_methods,
+        reason = "the durable-write layer is the one place that opens files; this opens one read-only"
+    )
+)]
+fn open_to_read(path: &Path) -> io::Result<File> {
+    #[cfg(unix)]
+    {
+        use rustix::fs::{Mode, OFlags};
+        let flags = OFlags::from_iter([
+            OFlags::RDONLY,
+            OFlags::NOFOLLOW,
+            OFlags::NONBLOCK,
+            OFlags::CLOEXEC,
+        ]);
+        rustix::fs::open(path, flags, Mode::empty())
+            .map(File::from)
+            .map_err(io::Error::from)
+    }
+    #[cfg(not(unix))]
+    {
+        File::open(path)
     }
 }
 
@@ -369,5 +428,80 @@ mod tests {
             .unwrap();
         file.write_all(b" after").unwrap();
         assert_eq!(StdFs.read(&path).unwrap(), b"before after");
+    }
+
+    #[cfg(unix)]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a test plants a symlink in its own scratch directory"
+    )]
+    fn symlink(target: &Path, link: &Path) {
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
+
+    /// A FIFO with no writer, a symlink and a directory under names nota
+    /// reads are refused at once: never waited on, never followed.
+    #[cfg(unix)]
+    #[test]
+    fn read_refuses_what_isnt_a_regular_file_without_blocking() {
+        let dir = TestDir::new("not-regular");
+        let fs = StdFs;
+        let fifo = dir.0.join("salvage-findings");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let target = dir.0.join("journal-000001");
+        let mut file = fs.create(&target).unwrap();
+        file.write_all(b"audio").unwrap();
+        let link = dir.0.join("journal-000002");
+        symlink(&target, &link);
+
+        // On a thread, so a read that blocks fails the test instead of
+        // hanging it.
+        let (sent, got) = std::sync::mpsc::channel();
+        let (fifo_path, link_path) = (fifo, link);
+        let _reader = std::thread::spawn(move || {
+            for path in [fifo_path, link_path] {
+                let _ = sent.send(StdFs.read(&path).map_err(|e| e.kind()));
+            }
+        });
+        let within = std::time::Duration::from_secs(10);
+        let from_fifo = got.recv_timeout(within).expect("reading a FIFO blocked");
+        assert_eq!(from_fifo, Err(io::ErrorKind::InvalidInput));
+        let through_link = got.recv_timeout(within).unwrap();
+        assert!(through_link.is_err(), "{through_link:?}");
+        assert_eq!(
+            fs.read(&dir.0.join("..").join(dir.0.file_name().unwrap()))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::IsADirectory
+        );
+        assert_eq!(fs.read(&target).unwrap(), b"audio");
+    }
+
+    #[test]
+    fn read_refuses_a_file_longer_than_its_limit() {
+        let dir = TestDir::new("limit");
+        let fs = StdFs;
+        let path = dir.0.join("journal-000001");
+        let mut file = fs.create(&path).unwrap();
+        file.write_all(b"12345").unwrap();
+        assert_eq!(read_at_most(&path, 5).unwrap(), b"12345");
+        assert_eq!(
+            read_at_most(&path, 4).unwrap_err().kind(),
+            io::ErrorKind::FileTooLarge
+        );
+        // A file whose length says nothing (as /proc's say 0) is cut off by
+        // the read itself.
+        let proc = Path::new("/proc/self/status");
+        if proc.exists() {
+            assert_eq!(
+                read_at_most(proc, 4).unwrap_err().kind(),
+                io::ErrorKind::FileTooLarge
+            );
+            assert!(read_at_most(proc, MAX_READ_LEN).is_ok());
+        }
     }
 }
