@@ -17,10 +17,10 @@
 //! | `track` | each track's kind and source | `nota record` |
 //! | `segment` | each published segment: its track, epoch, samples, SHA-256 | the recorder's publish step and salvage |
 //! | `epoch` | each epoch's first sample, rate and session-time anchor | the epochs package |
-//! | `utterance`, `word` | the heard text, as the engine confirmed it, with word times | the live-transcript package |
-//! | `revision`, `revision_text` | the displayed text: revision 0 is the heard text, each later one a new row | the live-transcript package, then term clean-up |
+//! | `utterance`, `word` | the heard text, as the engine confirmed it, with word times; never changed (V4's triggers) | `nota record`'s live text ([`crate::transcript`]) |
+//! | `revision`, `revision_text` | the displayed text: revision 0 is the heard text, each later one a new row holding only what it changes; never changed | revision 0 with the first utterance, later ones by term clean-up |
 //! | `proposal` | a proposed fix, with the revision, model, pack and thresholds it came from | term clean-up |
-//! | `mark`, `note` | marks and notes made while recording, in session time | the marks-and-notes package |
+//! | `mark`, `note` | marks and notes made while recording, in session time | `nota record`, as each is made ([`crate::annotations`]) |
 //! | `job` | work queued after a stop | the job queue |
 //! | `event` | the timeline: device changes, warnings, gaps | the detectors |
 //!
@@ -196,6 +196,54 @@ CREATE INDEX event_by_time ON event (session_id, at_ns);
 /// says when those started.
 pub(crate) const V3: &str = "
 ALTER TABLE session ADD COLUMN started_at INTEGER CHECK (started_at >= 0);
+";
+
+/// Version 4: the heard text is append-only. Triggers refuse any UPDATE
+/// or DELETE of an utterance, its words, a revision or a revision's text,
+/// and an INSERT that would replace one (`INSERT OR REPLACE` deletes the
+/// row it replaces without firing delete triggers, unless a connection
+/// turns recursive triggers on). SQLite checks them whatever connection
+/// writes, so no tool or later code path can change what was heard.
+pub(crate) const V4: &str = "
+CREATE TRIGGER utterance_never_updated BEFORE UPDATE ON utterance
+BEGIN SELECT RAISE(ABORT, 'heard text is never changed'); END;
+CREATE TRIGGER utterance_never_deleted BEFORE DELETE ON utterance
+BEGIN SELECT RAISE(ABORT, 'heard text is never deleted'); END;
+CREATE TRIGGER utterance_never_replaced BEFORE INSERT ON utterance
+WHEN EXISTS (SELECT 1 FROM utterance WHERE id = NEW.id)
+BEGIN SELECT RAISE(ABORT, 'heard text is never replaced'); END;
+
+CREATE TRIGGER word_never_updated BEFORE UPDATE ON word
+BEGIN SELECT RAISE(ABORT, 'heard text is never changed'); END;
+CREATE TRIGGER word_never_deleted BEFORE DELETE ON word
+BEGIN SELECT RAISE(ABORT, 'heard text is never deleted'); END;
+CREATE TRIGGER word_never_replaced BEFORE INSERT ON word
+WHEN EXISTS (
+    SELECT 1 FROM word WHERE utterance_id = NEW.utterance_id AND position = NEW.position
+)
+BEGIN SELECT RAISE(ABORT, 'heard text is never replaced'); END;
+
+CREATE TRIGGER revision_never_updated BEFORE UPDATE ON revision
+BEGIN SELECT RAISE(ABORT, 'a revision is never changed'); END;
+CREATE TRIGGER revision_never_deleted BEFORE DELETE ON revision
+BEGIN SELECT RAISE(ABORT, 'a revision is never deleted'); END;
+CREATE TRIGGER revision_never_replaced BEFORE INSERT ON revision
+WHEN EXISTS (
+    SELECT 1 FROM revision WHERE session_id = NEW.session_id AND number = NEW.number
+)
+BEGIN SELECT RAISE(ABORT, 'a revision is never replaced'); END;
+
+CREATE TRIGGER revision_text_never_updated BEFORE UPDATE ON revision_text
+BEGIN SELECT RAISE(ABORT, 'a revision is never changed'); END;
+CREATE TRIGGER revision_text_never_deleted BEFORE DELETE ON revision_text
+BEGIN SELECT RAISE(ABORT, 'a revision is never deleted'); END;
+CREATE TRIGGER revision_text_never_replaced BEFORE INSERT ON revision_text
+WHEN EXISTS (
+    SELECT 1 FROM revision_text
+    WHERE session_id = NEW.session_id AND revision = NEW.revision
+      AND utterance_id = NEW.utterance_id
+)
+BEGIN SELECT RAISE(ABORT, 'a revision is never replaced'); END;
 ";
 
 #[cfg(test)]

@@ -376,3 +376,14 @@ fn spans_are_exact_at_speech_rate() {
         ))
     );
 }
+
+#[test]
+fn a_stored_utterance_is_rebuilt_unless_it_ends_before_it_starts() {
+    let u = Utterance::new(SYSTEM, ms(2), ms(5), "clamp it".to_owned()).unwrap();
+    assert_eq!(
+        (u.track(), u.start(), u.end(), u.text()),
+        (SYSTEM, ms(2), ms(5), "clamp it")
+    );
+    assert!(Utterance::new(MIC, ms(5), ms(5), String::new()).is_some());
+    assert_eq!(Utterance::new(MIC, ms(5), ms(4), "x".to_owned()), None);
+}
