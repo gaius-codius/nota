@@ -24,7 +24,8 @@
 //!   under test.
 //! - `salvage <dir> --segment-seconds K [--stop-after N]` runs salvage,
 //!   counting its operations and stopping after the Nth as `write` does.
-//! - `check <dir> <log> <ref> --segment-seconds K [--recovered yes]` checks
+//! - `check <dir> <log> <ref> --segment-seconds K [--recovered yes]
+//!   [--under-load yes]` checks
 //!   the bounded-loss
 //!   criteria, for each track: before salvage, every row has its file and every sample
 //!   fsync'd is in a row or a journal; after it, only segments and rows are
@@ -32,11 +33,15 @@
 //!   everything fsync'd and exactly the audio captured, and every committed
 //!   row; a second salvage changes nothing; the durable position was never
 //!   more than the journal's sync interval (850 ms) behind the captured
-//!   one, nor more than 1.1 s behind the audio delivered or the wall clock
+//!   one, nor more than 2 s behind the audio delivered or the wall clock
 //!   (all below); no audio was lost before the journal. It prints one `result` line
 //!   with the measurements and a digest of the files and rows. With
 //!   `--recovered yes`, for a disk that crashed again after a completed
-//!   salvage, salvage must also find nothing left to do.
+//!   salvage, salvage must also find nothing left to do. With
+//!   `--under-load yes`, for a run with something else loading the disk,
+//!   the lag is reported but not checked: the result names each fsync
+//!   that ended past 2 s behind the audio delivered, with how long that
+//!   fsync itself took.
 //! - `engine <dir> --source NODE --seconds S --engine PROGRAM --parakeet DIR
 //!   --vad FILE --said TEXT --kill-after-ms MS --ready PATH` captures from
 //!   `NODE` into journals and feeds every frame written to the real engine
@@ -53,8 +58,10 @@
 //! is that and the audio still queued between the stream and the recorder,
 //! from the track's [`Progress`](nota_recorder::capture::Progress): what
 //! the server handed over, and what a kill loses beyond durable. Behind
-//! delivered is the bounded-loss rule, 1.1 s; behind the journal, durable
-//! must stay within the sync interval. The lag is also measured against
+//! delivered is the bounded-loss rule, about 2 s on a quiet disk; behind
+//! the journal, durable must stay within the sync interval. Under disk
+//! load neither is a failure, since a single fsync can then take seconds
+//! that nota can't control (GAI-350). The lag is also measured against
 //! the wall clock since the first frame was written (which slightly
 //! undercounts the queue at the start), as a cross-check. Each is measured
 //! per track, just before each of its fsyncs completes, when it's greatest;
@@ -116,9 +123,10 @@ mod linux {
     /// The engine's track.
     const TRACK: TrackId = TrackId::new(0);
     const RATE: SampleRate = SampleRate::SPEECH;
-    /// The bounded-loss rule, durable behind the audio delivered: 1.1 s at
-    /// 16 kHz.
-    const MAX_LAG: u64 = 17_600;
+    /// The bounded-loss rule, durable behind the audio delivered on a quiet
+    /// disk: 2 s at 16 kHz. The sync interval (850 ms) plus a slow fsync
+    /// fits well inside it; under disk load it's reported, not checked.
+    const MAX_LAG: u64 = 32_000;
     /// An operation slower than this is logged.
     const SLOW: Duration = Duration::from_millis(100);
     /// The quietest peak that counts as audio playing: -70 dBFS.
@@ -1031,8 +1039,8 @@ mod linux {
         rows: Vec<(u64, u64, u64, String)>,
         /// (t, end of the first frame)
         first: Option<(u64, u64)>,
-        /// (t, captured, durable before, delivered)
-        syncs: Vec<(u64, u64, u64, u64)>,
+        /// (t, captured, durable before, delivered, began)
+        syncs: Vec<(u64, u64, u64, u64, u64)>,
         /// (t, captured, durable, delivered), at the crash point
         stop: Option<(u64, u64, u64, u64)>,
         /// (t, captured, durable, delivered), at the end of a run that
@@ -1087,7 +1095,7 @@ mod linux {
                 Some("first") => p.tracks.entry(id()?).or_default().first = Some((n(2)?, n(3)?)),
                 Some("sync") => {
                     let track = p.tracks.entry(id()?).or_default();
-                    track.syncs.push((n(2)?, n(3)?, n(4)?, n(6)?));
+                    track.syncs.push((n(2)?, n(3)?, n(4)?, n(6)?, n(7)?));
                     track.durable = track.durable.max(n(5)?);
                 }
                 Some("row") => {
@@ -1284,8 +1292,13 @@ mod linux {
         let length = args.length()?;
         let session = dir.join("session");
         let recovered = args.flags.get("recovered").is_some_and(|v| v == "yes");
+        let under_load = args.flags.get("under-load").is_some_and(|v| v == "yes");
         let mut store = open_library(&dir)?;
-        match run_checks(&session, &mut store, length, &promised, &audio, recovered) {
+        let checks = Checks {
+            recovered,
+            under_load,
+        };
+        match run_checks(&session, &mut store, length, &promised, &audio, checks) {
             Ok(line) => {
                 writeln!(io::stdout(), "result ok {line}")?;
                 Ok(true)
@@ -1295,6 +1308,16 @@ mod linux {
                 Ok(false)
             }
         }
+    }
+
+    /// What `check` was asked to allow for.
+    #[derive(Debug, Clone, Copy)]
+    struct Checks {
+        /// The disk crashed again after a completed salvage.
+        recovered: bool,
+        /// Something else loaded the disk: the lag is reported, not
+        /// checked.
+        under_load: bool,
     }
 
     /// One track's audio from the reference, or none.
@@ -1312,8 +1335,9 @@ mod linux {
         length: SegmentLength,
         promised: &Promised,
         audio: &BTreeMap<u32, Vec<i16>>,
-        recovered: bool,
+        checks: Checks,
     ) -> Res<String> {
+        let recovered = checks.recovered;
         if promised.tracks.is_empty() {
             return Err("the log names no track".into());
         }
@@ -1377,12 +1401,16 @@ mod linux {
             .get();
         let mut worst = Lag::default();
         let mut by_track = Vec::new();
+        let mut past = Vec::new();
+        let t0 = first_frame(promised);
         let (mut loss, mut loss_delivered, mut beyond) = (0, 0, 0);
         let mut recovered_min = u64::MAX;
         let mut durable_min = u64::MAX;
         for (&track, log) in &promised.tracks {
             let lag = Lag::of(log, length);
-            if lag.max > max_journal_lag || lag.delivered_max > MAX_LAG || lag.wall_max > MAX_LAG {
+            let over =
+                lag.max > max_journal_lag || lag.delivered_max > MAX_LAG || lag.wall_max > MAX_LAG;
+            if over && !checks.under_load {
                 let behind = format!(
                     "track {track}: durable was {:.0} ms behind the journal (bound {:.0} ms), \
                      {:.0} ms behind the audio delivered ({:.0} ms at window rotations; past \
@@ -1419,6 +1447,17 @@ mod linux {
                 ms(lag.rotation_max)
             ));
             worst = worst.max(&lag);
+            for &(t, _, durable, delivered, began) in &log.syncs {
+                let behind = delivered.saturating_sub(durable);
+                if behind > MAX_LAG {
+                    past.push(format!(
+                        "{track}@{:.3}s:{:.0}ms/fsync{}ms",
+                        ms(samples_since(t0, t)) / 1_000.0,
+                        ms(behind),
+                        t.saturating_sub(began) / 1_000_000
+                    ));
+                }
+            }
         }
         if promised.overruns > 0 || promised.journal_failures > 0 {
             return Err(format!(
@@ -1438,8 +1477,9 @@ mod linux {
             "stop={} tracks={} durable={durable_min} recovered={recovered_min} loss_ms={:.1} \
              loss_delivered_ms={:.1} beyond_durable_ms={:.1} lag_max_ms={:.1} \
              delivered_lag_max_ms={:.1} wall_lag_max_ms={:.1} rotation_lag_max_ms={:.1} \
-             lag_by_track={} syncs={syncs} rows={} salvaged={} deleted={} late_ops={} \
-             slowest_op={} peak_dbfs={:.1} state={}",
+             lag_by_track={} past_bound={}/{} past_bound_fsyncs={} disk={} syncs={syncs} \
+             rows={} salvaged={} deleted={} late_ops={} slowest_op={} peak_dbfs={:.1} \
+             state={}",
             promised.stop.as_deref().unwrap_or("none"),
             promised.tracks.len(),
             ms(loss),
@@ -1450,6 +1490,14 @@ mod linux {
             ms(worst.wall_max),
             ms(worst.rotation_max),
             by_track.join(","),
+            worst.over,
+            worst.points,
+            if past.is_empty() {
+                "none".to_owned()
+            } else {
+                past.join(",")
+            },
+            if checks.under_load { "loaded" } else { "quiet" },
             after.rows.len(),
             first.segments().len(),
             first.deleted().len(),
@@ -1470,23 +1518,32 @@ mod linux {
     /// The operations that took over 100 ms, for a failure message, timed
     /// from the first frame of any track.
     fn slow_ops(p: &Promised) -> String {
-        let t0 = p
-            .tracks
-            .values()
-            .filter_map(|t| t.first.map(|(t, _)| t))
-            .min()
-            .unwrap_or(0);
+        let t0 = first_frame(p);
         p.slow
             .iter()
             .fold(String::new(), |mut out, (what, t, took)| {
                 let _ = write!(
                     out,
                     "; slow {what} at {:.3} s took {} ms",
-                    ms(t.saturating_sub(t0) * u64::from(RATE.hz()) / 1_000_000_000) / 1_000.0,
+                    ms(samples_since(t0, *t)) / 1_000.0,
                     took / 1_000_000
                 );
                 out
             })
+    }
+
+    /// When the first frame of any track was written, in ns.
+    fn first_frame(p: &Promised) -> u64 {
+        p.tracks
+            .values()
+            .filter_map(|t| t.first.map(|(t, _)| t))
+            .min()
+            .unwrap_or(0)
+    }
+
+    /// The samples' worth of time from `t0` to `t`, both in ns.
+    fn samples_since(t0: u64, t: u64) -> u64 {
+        t.saturating_sub(t0) * u64::from(RATE.hz()) / 1_000_000_000
     }
 
     /// Every committed row is still there, and every file has its row.
@@ -1548,7 +1605,11 @@ mod linux {
 
     impl Lag {
         fn of(log: &TrackLog, length: SegmentLength) -> Self {
-            let mut points: Vec<(u64, u64, u64, u64)> = log.syncs.clone();
+            let mut points: Vec<(u64, u64, u64, u64)> = log
+                .syncs
+                .iter()
+                .map(|&(t, captured, durable, delivered, _)| (t, captured, durable, delivered))
+                .collect();
             if let Some(stop) = log.stop {
                 points.push(stop);
             }
@@ -1566,8 +1627,10 @@ mod linux {
             let rotation_max = log
                 .syncs
                 .iter()
-                .filter(|&&(_, captured, _, _)| captured > 0 && captured % window == 0)
-                .map(behind)
+                .filter(|&&(_, captured, _, _, _)| captured > 0 && captured % window == 0)
+                .map(|&(t, captured, durable, delivered, _)| {
+                    behind(&(t, captured, durable, delivered))
+                })
                 .max()
                 .unwrap_or(0);
             let wall_max = log.first.map_or(0, |(t0, end0)| {

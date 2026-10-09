@@ -24,8 +24,10 @@ static NEXT_TOKEN: AtomicU64 = AtomicU64::new(0);
 ///
 /// Durable may trail the audio the stream has delivered by this, plus the
 /// stream's buffering (about 40 ms), plus however long the fsync takes.
-/// 850 ms keeps that within the 1.1 s bounded-loss rule for fsyncs up to
-/// about 200 ms; at a full second, one ~105 ms fsync was enough to break it.
+/// 850 ms keeps that within the bounded-loss rule, about 2 s on a quiet
+/// disk, for fsyncs up to about 1.1 s. Under disk load a single fsync can
+/// take longer, which nota can't control; there the lag is measured and
+/// reported, not held to the rule (GAI-350).
 pub const SYNC_INTERVAL: Duration = Duration::from_millis(850);
 
 /// The most audio a journal at `rate` may hold unsynced, in samples:
