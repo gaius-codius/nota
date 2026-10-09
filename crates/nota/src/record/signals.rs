@@ -6,6 +6,7 @@ use std::sync::mpsc::Sender;
 #[cfg(unix)]
 use std::thread::{self, JoinHandle};
 
+#[cfg(unix)]
 use nota_core::recorder;
 use nota_tui::Event;
 

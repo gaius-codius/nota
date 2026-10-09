@@ -144,7 +144,15 @@ fn parse_record(args: &[OsString]) -> Result<RecordArgs, String> {
         mic: Input::Default,
         system: Input::Default,
     };
-    let (mut tone, mut latency_log) = (false, None);
+    // Only the test and measurement builds take the options that set these.
+    #[cfg(feature = "fake-capture")]
+    let mut tone = false;
+    #[cfg(not(feature = "fake-capture"))]
+    let tone = false;
+    #[cfg(feature = "latency-log")]
+    let mut latency_log = None;
+    #[cfg(not(feature = "latency-log"))]
+    let latency_log = None;
     let (mut data, mut parakeet, mut vad) = (None, None, None);
     for (flag, value) in pairs(args)? {
         let text = || {
