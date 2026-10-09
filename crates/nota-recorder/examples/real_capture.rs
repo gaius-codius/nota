@@ -63,11 +63,11 @@
 //! load neither is a failure, since a single fsync can then take seconds
 //! that nota can't control (GAI-350). The lag is also measured against
 //! the wall clock since the first frame was written (which slightly
-//! undercounts the queue at the start), as a cross-check. Each is measured
-//! per track, just before each of its fsyncs completes, when it's greatest;
-//! with several tracks, the result shows the worst track, and each track's
-//! lag behind the audio delivered, overall and at the fsyncs that end a
-//! journal at a window boundary. Fsync times only mean something on a real
+//! undercounts the queue at the start), up to the last audio delivered,
+//! as a cross-check. Each is measured per track, just before each of its
+//! fsyncs completes, when it's greatest; with several tracks, the result
+//! shows the worst track, and each track's lag behind the audio delivered,
+//! overall and at the fsyncs that end a journal at a window boundary. Fsync times only mean something on a real
 //! disk: tmpfs makes every fsync free.
 
 #[cfg(target_os = "linux")]
@@ -1596,7 +1596,9 @@ mod linux {
         /// Behind the audio delivered, at the fsyncs that ended a journal
         /// at a window boundary.
         rotation_max: u64,
-        /// Behind the wall clock since the first frame.
+        /// Behind the wall clock since the first frame, up to the last audio
+        /// delivered: after capture stops, the clock runs on with nothing
+        /// left to lose.
         wall_max: u64,
         /// The fsyncs, and the stop, at which durable was more than the
         /// bounded-loss rule behind the audio delivered.
@@ -1635,13 +1637,16 @@ mod linux {
                 })
                 .max()
                 .unwrap_or(0);
+            // Once capture has stopped the wall clock runs on, but no audio
+            // past the last the stream delivered exists to be lost.
+            let delivered_end = points.iter().map(|p| p.3).max().unwrap_or(0);
             let wall_max = log.first.map_or(0, |(t0, end0)| {
                 points
                     .iter()
                     .map(|&(t, _, durable, _)| {
                         let since = t.saturating_sub(t0);
                         let wall = end0 + since * u64::from(RATE.hz()) / 1_000_000_000;
-                        wall.saturating_sub(durable)
+                        wall.min(delivered_end).saturating_sub(durable)
                     })
                     .max()
                     .unwrap_or(0)
