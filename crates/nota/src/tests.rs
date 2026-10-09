@@ -5,8 +5,12 @@ fn args(list: &[&str]) -> Vec<OsString> {
 }
 
 fn engine(list: &[&str]) -> Result<ModelPaths, String> {
+    engine_cutting(list).map(|(paths, _)| paths)
+}
+
+fn engine_cutting(list: &[&str]) -> Result<(ModelPaths, ChunkerConfig), String> {
     match parse(&args(list))? {
-        Command::EngineAsr(paths) => Ok(paths),
+        Command::EngineAsr(paths, chunking) => Ok((paths, chunking)),
         Command::Record(_) | Command::App(_) => Err("record".into()),
     }
 }
@@ -14,14 +18,14 @@ fn engine(list: &[&str]) -> Result<ModelPaths, String> {
 fn record(list: &[&str]) -> Result<RecordArgs, String> {
     match parse(&args(list))? {
         Command::Record(args) => Ok(args),
-        Command::EngineAsr(_) | Command::App(_) => Err("engine".into()),
+        Command::EngineAsr(..) | Command::App(_) => Err("engine".into()),
     }
 }
 
 fn app(list: &[&str]) -> Result<RecordArgs, String> {
     match parse(&args(list))? {
         Command::App(args) => Ok(args),
-        Command::EngineAsr(_) | Command::Record(_) => Err("not the app".into()),
+        Command::EngineAsr(..) | Command::Record(_) => Err("not the app".into()),
     }
 }
 
@@ -43,6 +47,18 @@ fn parses_engine_asr() {
     assert_eq!(paths.threads, 2);
     let default = engine(&["engine", "asr", "--vad", "v", "--parakeet", "p"]).unwrap();
     assert_eq!(default.threads, 4);
+}
+
+#[test]
+fn the_engine_cuts_for_the_live_pass_unless_told_the_final_one() {
+    let base = ["engine", "asr", "--vad", "v", "--parakeet", "p"];
+    let cut = |pass: &[&str]| engine_cutting(&[&base[..], pass].concat()).map(|(_, c)| c);
+    let live = ChunkerConfig::live(SampleRate::SPEECH);
+    let final_pass = ChunkerConfig::final_pass(SampleRate::SPEECH);
+    assert_eq!(cut(&[]), Ok(live));
+    assert_eq!(cut(&["--pass", "live"]), Ok(live));
+    assert_eq!(cut(&["--pass", "final"]), Ok(final_pass));
+    assert!(cut(&["--pass", "fast"]).is_err());
 }
 
 #[test]

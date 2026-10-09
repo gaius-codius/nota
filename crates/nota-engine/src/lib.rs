@@ -93,7 +93,8 @@ impl std::error::Error for EngineError {
 }
 
 /// Runs `nota engine asr`: the protocol on stdin and stdout with the real
-/// models, until stdin closes or the recorder dies.
+/// models, cutting chunks as `chunking` says (the live pass's or the final
+/// pass's), until stdin closes or the recorder dies.
 ///
 /// It first ties itself to the recorder ([`lifeline::tie_to_recorder`]),
 /// before loading anything; if the recorder has already gone, it stops
@@ -107,13 +108,18 @@ impl std::error::Error for EngineError {
 ///
 /// As [`child::run`], or if the recorder's process id it was given isn't
 /// one, or stdout can't be set aside.
-pub fn run_asr(paths: &sherpa::ModelPaths) -> Result<(), EngineError> {
+pub fn run_asr(
+    paths: &sherpa::ModelPaths,
+    chunking: chunker::ChunkerConfig,
+) -> Result<(), EngineError> {
     if lifeline::tie_to_recorder().map_err(EngineError::Tie)? == Tie::Orphaned {
         return Ok(());
     }
     let output = protocol_output().map_err(EngineError::Write)?;
     let input = io::BufReader::new(io::stdin().lock());
-    child::run(input, output, || sherpa::SherpaModels::load(paths))
+    child::run(input, output, chunking, || {
+        sherpa::SherpaModels::load(paths)
+    })
 }
 
 #[cfg(unix)]

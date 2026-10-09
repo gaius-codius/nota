@@ -14,6 +14,7 @@ use nota_core::messages::{AudioChunk, FromEngine, ProtocolVersion, ToEngine};
 use nota_core::protocol::{Frame, FrameReader, encode};
 use nota_core::{SampleIndex, SampleRate, TrackId};
 use nota_engine::child;
+use nota_engine::chunker::ChunkerConfig;
 use nota_engine::sherpa::{ModelPaths, SherpaModels};
 
 /// The test-models directory, if it holds everything.
@@ -107,7 +108,13 @@ fn the_fixture_transcribes() {
     input.extend(encode(&Frame::Message(ToEngine::Flush { track })).unwrap());
 
     let mut output = Vec::new();
-    child::run(&input[..], &mut output, || SherpaModels::load(&paths)).unwrap();
+    child::run(
+        &input[..],
+        &mut output,
+        ChunkerConfig::live(SampleRate::SPEECH),
+        || SherpaModels::load(&paths),
+    )
+    .unwrap();
 
     let mut reader = FrameReader::new(&output[..]);
     assert_eq!(

@@ -297,6 +297,29 @@ fn live_config_is_valid_at_any_rate() {
 }
 
 #[test]
+fn final_pass_config_is_valid_at_any_rate() {
+    for hz in [1, 2, 7, 8_000, 16_000, 48_000, 1_000_000] {
+        let rate = nota_core::SampleRate::new(hz).unwrap();
+        let final_pass = ChunkerConfig::final_pass(rate);
+        let again = ChunkerConfig::new(
+            final_pass.min_pause(),
+            final_pass.target(),
+            final_pass.cap(),
+            final_pass.fallback_window(),
+            final_pass.frame(),
+        )
+        .unwrap();
+        assert_eq!(final_pass, again, "{hz} Hz");
+    }
+    let final_pass = ChunkerConfig::final_pass(nota_core::SampleRate::SPEECH);
+    assert_eq!(final_pass.min_pause().get(), 2_400);
+    assert_eq!(final_pass.target().get(), 240_000);
+    assert_eq!(final_pass.cap().get(), FINAL_CAP);
+    assert_eq!(final_pass.fallback_window().get(), 128_000);
+    assert_eq!(final_pass.frame().get(), 480);
+}
+
+#[test]
 fn config_refuses_out_of_range_values() {
     let c = |p, t, cap, w, f| {
         ChunkerConfig::new(
@@ -425,6 +448,60 @@ proptest! {
                 );
             }
         }
+    }
+}
+
+/// 25 s at 16 kHz: no final-pass chunk is longer.
+const FINAL_CAP: u64 = 400_000;
+
+/// Speech at 16 kHz as a lecture has it, cut with the final pass's config:
+/// stretches of up to 40 s (longer than the cap, so some must be cut in
+/// speech) between pauses of up to 3 s, pushed in blocks of up to 1.25 s,
+/// with the detector up to half a second late.
+fn final_pass_scenario() -> impl Strategy<Value = (u64, u64, Vec<(u64, u64)>, Vec<usize>, u64)> {
+    (
+        0_u64..10_000_000,
+        prop::collection::vec((1_600_u64..48_000, 1_600_u64..640_000), 0..6),
+        prop::collection::vec(1_usize..20_000, 1..6),
+        0_u64..8_000,
+        0_u64..800_000,
+    )
+        .prop_map(|(first, runs, pushes, lag, tail)| {
+            let mut truth = Vec::new();
+            let mut at = first;
+            for (gap, len) in runs {
+                at += gap;
+                truth.push((at, at + len));
+                at += len;
+            }
+            (first, at + tail - first, truth, pushes, lag)
+        })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// Acceptance (GAI-317): with the final pass's config, no chunk is
+    /// longer than 25 s, and the chunks still tile the stream.
+    #[test]
+    fn no_final_pass_chunk_is_longer_than_25_s(
+        (first, len, truth, pushes, lag) in final_pass_scenario()
+    ) {
+        let config = ChunkerConfig::final_pass(nota_core::SampleRate::SPEECH);
+        let mut detector = FakeDetector::new(first, truth, config.min_pause().get(), lag);
+        let samples = audio(first, len, &detector);
+        let chunks = run(config, first, &samples, &mut detector, &pushes);
+        let mut next = first;
+        for chunk in &chunks {
+            prop_assert_eq!(chunk.range().start().get(), next);
+            prop_assert!(!chunk.range().is_empty());
+            prop_assert!(
+                chunk.range().len().get() <= FINAL_CAP,
+                "{:?} is {} samples", chunk.range(), chunk.range().len().get()
+            );
+            next = chunk.range().end().get();
+        }
+        prop_assert_eq!(next, first + len);
     }
 }
 

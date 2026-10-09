@@ -54,7 +54,9 @@ struct Track<D> {
     chunker: Chunker,
 }
 
-/// Runs the protocol on `input` and `output` until `input` ends.
+/// Runs the protocol on `input` and `output` until `input` ends, cutting
+/// each track's audio as `chunking` says (at 16 kHz): the live pass's
+/// config, or the final pass's.
 ///
 /// The recorder's `Hello` must come first; `load` is then called to load
 /// the models, and the engine's `Hello` tells the recorder it's ready.
@@ -69,6 +71,7 @@ struct Track<D> {
 pub fn run<M: Models>(
     input: impl Read,
     mut output: impl Write,
+    chunking: ChunkerConfig,
     load: impl FnOnce() -> Result<M, EngineError>,
 ) -> Result<(), EngineError> {
     let mut reader = FrameReader::new(input);
@@ -90,10 +93,7 @@ pub fn run<M: Models>(
                     std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
                     std::collections::btree_map::Entry::Vacant(entry) => entry.insert(Track {
                         detector: models.detector(chunk.range().start())?,
-                        chunker: Chunker::new(
-                            ChunkerConfig::live(SampleRate::SPEECH),
-                            chunk.range().start(),
-                        ),
+                        chunker: Chunker::new(chunking, chunk.range().start()),
                     }),
                 };
                 let done = accept(track, &chunk)?;

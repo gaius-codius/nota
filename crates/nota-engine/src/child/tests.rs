@@ -99,7 +99,7 @@ fn flush() -> Vec<u8> {
 /// Runs the loop over `input`; returns its result and the frames it wrote.
 fn run_on(input: &[u8]) -> (Result<(), EngineError>, Vec<Frame<FromEngine>>) {
     let mut output = Vec::new();
-    let result = run(input, &mut output, || Ok(FakeModels::default()));
+    let result = run(input, &mut output, live(), || Ok(FakeModels::default()));
     let mut reader = FrameReader::new(&output[..]);
     let mut frames = Vec::new();
     while let Some(frame) = reader.read_frame().unwrap() {
@@ -110,6 +110,47 @@ fn run_on(input: &[u8]) -> (Result<(), EngineError>, Vec<Frame<FromEngine>>) {
 
 /// `speech` samples of speech framed by `silence` samples of silence each
 /// side, 16 kHz.
+fn live() -> ChunkerConfig {
+    ChunkerConfig::live(SampleRate::SPEECH)
+}
+
+/// The transcripts' lengths in samples when 22 s of continuous speech is
+/// cut with `chunking`.
+fn continuous_speech_cut_by(chunking: ChunkerConfig) -> Vec<u64> {
+    let mut input = hello();
+    let samples = vec![1_000_i16; 22 * 16_000];
+    for (k, part) in samples.chunks(16_000).enumerate() {
+        input.extend(audio(k as u64 * 16_000, SampleRate::SPEECH, part.to_vec()));
+    }
+    input.extend(flush());
+    let mut output = Vec::new();
+    run(&input[..], &mut output, chunking, || {
+        Ok(FakeModels::default())
+    })
+    .unwrap();
+    let mut reader = FrameReader::new(&output[..]);
+    let mut lengths = Vec::new();
+    while let Some(frame) = reader.read_frame::<FromEngine>().unwrap() {
+        if let Frame::Message(FromEngine::Transcript(t)) = frame {
+            lengths.push(t.range().len().get());
+        }
+    }
+    lengths
+}
+
+/// The final pass's chunks are cut at its own cap, not the live one's.
+#[test]
+fn the_chunking_given_is_the_one_used() {
+    let live = continuous_speech_cut_by(live());
+    assert!(
+        live.len() >= 3 && live.iter().all(|&n| n <= 160_000),
+        "{live:?}"
+    );
+    let final_pass = continuous_speech_cut_by(ChunkerConfig::final_pass(SampleRate::SPEECH));
+    assert_eq!(final_pass.len(), 1, "{final_pass:?}");
+    assert_eq!(final_pass[0], 22 * 16_000);
+}
+
 fn speech_between_silence(silence: usize, speech: usize) -> Vec<i16> {
     let mut samples = vec![0_i16; silence];
     samples.extend(std::iter::repeat_n(1_000, speech));
@@ -194,7 +235,7 @@ fn stdin_closing_ends_the_loop_cleanly() {
 
     // Before the hello, too, without loading the models.
     let mut output = Vec::new();
-    run(&[][..], &mut output, || -> Result<FakeModels, _> {
+    run(&[][..], &mut output, live(), || -> Result<FakeModels, _> {
         panic!("loaded models with no recorder")
     })
     .unwrap();
@@ -232,7 +273,7 @@ fn stdin_closing_transcribes_what_each_track_still_holds() {
 fn a_mismatched_or_missing_hello_is_refused_before_loading() {
     let refuse = |input: &[u8]| {
         let mut output = Vec::new();
-        let result = run(input, &mut output, || -> Result<FakeModels, _> {
+        let result = run(input, &mut output, live(), || -> Result<FakeModels, _> {
             panic!("loaded models before a good hello")
         });
         assert!(output.is_empty());
@@ -304,14 +345,17 @@ fn a_failed_write_stops_the_engine() {
             Ok(())
         }
     }
-    let result = run(&hello()[..], Closed, || Ok(FakeModels::default()));
+    let result = run(&hello()[..], Closed, live(), || Ok(FakeModels::default()));
     assert!(matches!(result, Err(EngineError::Write(_))));
 }
 
 #[test]
 fn a_model_failure_is_returned() {
-    let result = run(&hello()[..], Vec::new(), || -> Result<FakeModels, _> {
-        Err(EngineError::Model("no model".into()))
-    });
+    let result = run(
+        &hello()[..],
+        Vec::new(),
+        live(),
+        || -> Result<FakeModels, _> { Err(EngineError::Model("no model".into())) },
+    );
     assert!(matches!(result, Err(EngineError::Model(_))));
 }

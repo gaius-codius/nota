@@ -16,7 +16,9 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use nota_core::SampleRate;
 use nota_core::recorder::{self, Input, Setup};
+use nota_engine::chunker::ChunkerConfig;
 use nota_engine::sherpa::ModelPaths;
 
 mod app;
@@ -34,7 +36,7 @@ const USAGE: &str = "\
 usage: nota [--data DIR] [--parakeet DIR --vad FILE]
        nota record [--title TEXT] [--data DIR] [--parakeet DIR --vad FILE]
                    [--mic NODE] [--system NODE]
-       nota engine asr --parakeet DIR --vad FILE [--threads N]";
+       nota engine asr --parakeet DIR --vad FILE [--threads N] [--pass live|final]";
 
 /// What was asked for.
 #[derive(Debug)]
@@ -42,7 +44,7 @@ enum Command {
     /// Home, and recordings from it.
     App(RecordArgs),
     Record(RecordArgs),
-    EngineAsr(ModelPaths),
+    EngineAsr(ModelPaths, ChunkerConfig),
 }
 
 /// Runs the command in `args` (without the program name).
@@ -66,7 +68,7 @@ pub fn main(args: &[OsString]) -> ExitCode {
         }
         // The child's stderr is the recorder's to route; it never reaches
         // the screen's terminal.
-        Command::EngineAsr(paths) => match nota_engine::run_asr(&paths) {
+        Command::EngineAsr(paths, chunking) => match nota_engine::run_asr(&paths, chunking) {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => fail(&format!("nota engine asr: {err}"), 1),
         },
@@ -108,7 +110,8 @@ fn parse(args: &[OsString]) -> Result<Command, String> {
     let mut words = args.iter();
     match words.next().and_then(|a| a.to_str()) {
         Some("engine") if words.next().and_then(|a| a.to_str()) == Some("asr") => {
-            parse_engine(words.as_slice()).map(Command::EngineAsr)
+            parse_engine(words.as_slice())
+                .map(|(paths, chunking)| Command::EngineAsr(paths, chunking))
         }
         Some("record") => parse_record(words.as_slice()).map(Command::Record),
         // No command, or options only: Home.
@@ -132,9 +135,11 @@ fn pairs(args: &[OsString]) -> Result<Vec<(&str, &OsString)>, String> {
     Ok(out)
 }
 
-/// `engine asr` and its options.
-fn parse_engine(args: &[OsString]) -> Result<ModelPaths, String> {
+/// `engine asr` and its options: the models, and how to cut the audio
+/// (`--pass live`, the default, or `--pass final`).
+fn parse_engine(args: &[OsString]) -> Result<(ModelPaths, ChunkerConfig), String> {
     let (mut parakeet, mut vad, mut threads) = (None, None, 4_u16);
+    let mut chunking = ChunkerConfig::live(SampleRate::SPEECH);
     for (flag, value) in pairs(args)? {
         match flag {
             "--parakeet" => parakeet = Some(PathBuf::from(value)),
@@ -146,14 +151,22 @@ fn parse_engine(args: &[OsString]) -> Result<ModelPaths, String> {
                     .filter(|&n| n > 0)
                     .ok_or("--threads takes a positive number")?;
             }
+            "--pass" => {
+                chunking = match value.to_str() {
+                    Some("live") => ChunkerConfig::live(SampleRate::SPEECH),
+                    Some("final") => ChunkerConfig::final_pass(SampleRate::SPEECH),
+                    _ => return Err("--pass takes live or final".into()),
+                };
+            }
             _ => return Err(format!("unknown option {flag}")),
         }
     }
-    Ok(ModelPaths {
+    let paths = ModelPaths {
         parakeet_dir: parakeet.ok_or("--parakeet is required")?,
         vad_model: vad.ok_or("--vad is required")?,
         threads,
-    })
+    };
+    Ok((paths, chunking))
 }
 
 /// Home's options: where the library is, and the engine's models. The
