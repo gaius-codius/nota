@@ -534,6 +534,106 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Where [`saving_crash_child`] works, when it's run as the child.
+    const CRASH_DIR: &str = "NOTA_SAVING_CRASH_DIR";
+
+    /// What the crash child stores.
+    fn crash_heard() -> Option<nota_core::Utterance> {
+        let at = nota_core::SessionTime::from_nanos(3_000_000_000);
+        nota_core::Utterance::new(MIC, at, at, "said before the kill".to_owned())
+    }
+
+    /// The child of [`text_stored_before_a_kill_is_there_after_salvage`]:
+    /// starts a session, stores text and a mark through the saver's
+    /// writes, says so, and waits to be killed. Does nothing unless run
+    /// as that child.
+    #[test]
+    #[expect(clippy::disallowed_methods, reason = "test scaffolding")]
+    fn saving_crash_child() {
+        use nota_core::recorder::Mark;
+        use nota_store::Annotation;
+
+        let Some(root) = std::env::var_os(CRASH_DIR).map(PathBuf::from) else {
+            return;
+        };
+        let library = Library::open(&root).unwrap();
+        let session = library.create().unwrap();
+        let rows = NewSessionRows::new(
+            library.db().clone(),
+            NewSession {
+                id: session.id,
+                title: Some("Workshop".to_owned()),
+                language: None,
+                started_at: None,
+                tracks: Vec::new(),
+            },
+        );
+        let models = (PathBuf::from("/m/parakeet"), PathBuf::from("/m/vad"));
+        let mut write = saving(rows, session.id, Some(heard_by(&models)));
+        write(&ToSave::Heard(crash_heard().unwrap())).unwrap();
+        let at = crash_heard().unwrap().start();
+        write(&ToSave::Annotation(Annotation::Mark(Mark { at }))).unwrap();
+        std::fs::write(root.join("stored"), b"").unwrap();
+        let (_keep, never) = mpsc::channel::<()>();
+        let _ = never.recv_timeout(std::time::Duration::from_secs(60));
+    }
+
+    /// Acceptance (GAI-310): text the saver committed before nota was
+    /// killed outright is there after the next start's salvage. (Salvage
+    /// leaves this session's state alone: it has no audio yet, as a session
+    /// another nota has just made.)
+    #[test]
+    #[expect(clippy::disallowed_methods, reason = "test scaffolding")]
+    fn text_stored_before_a_kill_is_there_after_salvage() {
+        use nota_core::recorder::Mark;
+        use nota_store::Annotation;
+
+        let root = std::env::temp_dir().join(format!("nota-saving-kill-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "record::start::tests::saving_crash_child",
+                "--nocapture",
+            ])
+            .env(CRASH_DIR, &root)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let stored = root.join("stored");
+        let (_keep, never) = mpsc::channel::<()>();
+        for _ in 0..1_000 {
+            if stored.exists() {
+                break;
+            }
+            let _ = never.recv_timeout(std::time::Duration::from_millis(20));
+        }
+        assert!(stored.exists(), "the child never stored its text");
+        child.kill().unwrap();
+        let status = child.wait().unwrap();
+        assert!(!status.success(), "{status:?}");
+
+        let library = Library::open(&root).unwrap();
+        library.salvage_all(segment_length()).unwrap();
+        let id = SessionId::new(1);
+        let (session, utterances, annotations) = library
+            .db()
+            .with(|db| Ok((db.session(id)?, db.utterances(id)?, db.annotations(id)?)))
+            .unwrap();
+        assert_eq!(session.unwrap().title.as_deref(), Some("Workshop"));
+        assert_eq!(utterances.len(), 1);
+        assert_eq!(utterances[0].heard.utterance, crash_heard().unwrap());
+        assert_eq!(
+            annotations,
+            [Annotation::Mark(Mark {
+                at: crash_heard().unwrap().start()
+            })]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn each_track_is_named_for_what_it_records() {
         assert_eq!(track_kind(MIC), TrackKind::Microphone);

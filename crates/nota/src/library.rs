@@ -9,7 +9,8 @@
 //! after the highest on disk or in the database.
 //!
 //! **Recording never waits on the database.** A new session's row is
-//! added by the publisher, before its first segment row, so a database
+//! added by the publisher, before its first segment row (or by the saver
+//! of live text, marks and notes, if that writes first), so a database
 //! that can't be opened holds up publishing (the journals stay on disk)
 //! and never recording. The next start adds any session directory the
 //! database doesn't have, importing its M1 per-session store

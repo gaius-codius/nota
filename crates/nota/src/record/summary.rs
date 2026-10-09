@@ -70,19 +70,37 @@ pub(super) fn show(
     let _ = input.stop();
     // The screen is done giving commands: the thread passes on the last.
     drop(commands);
-    let mut marks = passing.join().unwrap_or(0);
-    let problem = match ran {
-        Ok(Ended::Stopped | Ended::Closed) => None,
-        Err(RunError::InputLost(kind)) => Some(format!("the keyboard was lost: {kind}")),
-        Err(RunError::Terminal(e)) => Some(format!("the screen failed: {e}")),
-        // The thread that passes them on stopped: this one is saved here.
-        Err(RunError::CommandsClosed(command)) => {
-            marks += pass_on([command], save);
-            None
-        }
-    };
+    let passed = passing.join().unwrap_or(0);
+    let (more, problem) = ended(ran, save);
     let screen = problem.is_none().then_some(screen);
-    Ok((Shown { marks, problem }, screen))
+    Ok((
+        Shown {
+            marks: passed + more,
+            problem,
+        },
+        screen,
+    ))
+}
+
+/// How the screen's loop ended: how many more marks and notes it gave
+/// (handed to the saver), and the problem, if it didn't end as asked.
+fn ended<E: std::fmt::Display>(
+    ran: Result<Ended, RunError<E>>,
+    save: &Sender<ToSave>,
+) -> (usize, Option<String>) {
+    match ran {
+        Ok(Ended::Stopped | Ended::Closed) => (0, None),
+        Err(RunError::InputLost(kind)) => (0, Some(format!("the keyboard was lost: {kind}"))),
+        Err(RunError::Terminal(e)) => (0, Some(format!("the screen failed: {e}"))),
+        // The thread that passes them on stopped, which ends the screen:
+        // the one it couldn't take is saved here.
+        Err(RunError::CommandsClosed(command)) => (
+            pass_on([command], save),
+            Some(
+                "marks and notes could no longer be passed on, so the recording stopped".to_owned(),
+            ),
+        ),
+    }
 }
 
 /// Hands each mark and note `commands` gives to the saver, as it comes,
@@ -220,6 +238,40 @@ mod tests {
         // A saver that has gone doesn't stop the counting.
         drop(saved);
         assert_eq!(pass_on([Command::Mark(Mark { at })], &save), 1);
+    }
+
+    /// A mark or note the screen couldn't hand over is saved, counted,
+    /// and the stop it caused is explained.
+    #[test]
+    fn a_command_the_screen_couldnt_hand_over_is_saved() {
+        let at = SessionTime::from_nanos(9);
+        let note = Note::new(at, "last thought").unwrap();
+        let (save, saved) = mpsc::channel();
+        let (more, problem) = ended(
+            Err(RunError::<io::Error>::CommandsClosed(Command::Note(
+                note.clone(),
+            ))),
+            &save,
+        );
+        assert_eq!(more, 1);
+        assert!(problem.unwrap().contains("marks and notes"));
+        assert_eq!(
+            saved.try_iter().collect::<Vec<_>>(),
+            [ToSave::Annotation(Annotation::Note(note))]
+        );
+        assert_eq!(
+            ended(Ok::<_, RunError<io::Error>>(Ended::Stopped), &save),
+            (0, None)
+        );
+        assert_eq!(
+            ended(
+                Err(RunError::<io::Error>::CommandsClosed(Command::Stop)),
+                &save
+            )
+            .0,
+            0
+        );
+        assert!(saved.try_iter().next().is_none());
     }
 
     #[test]

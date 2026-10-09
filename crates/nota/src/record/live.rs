@@ -29,7 +29,7 @@ pub(super) enum LiveInput {
 /// is done, and hands each text placed for the screen to the saver
 /// (`save`). Then it shuts the engine down, and keeps handing on the text
 /// the engine sends meanwhile (its answer to the last flush) until the
-/// engine's events end, waiting up to [`LATE_WAIT`] for each. With a
+/// engine's events end (waiting up to [`LATE_WAIT`] for each). With a
 /// latency log, notes when each text is handed to the screen, and anything
 /// that keeps text from it, by `clock`, including what the engine reports
 /// after the screen has closed, and returns the log.
@@ -102,10 +102,12 @@ pub(super) fn spawn_live(
         })
 }
 
-/// How long the live thread waits for each of the engine's events after
-/// the engine has shut down: they pass through a thread of their own,
-/// which ends once they have, so this only bounds the wait if it doesn't.
-const LATE_WAIT: Duration = Duration::from_secs(1);
+/// The longest the live thread waits for each of the engine's events after
+/// the engine has shut down. They pass through a thread of their own,
+/// which ends once it has passed them all on, and the wait ends with it;
+/// this only bounds a stop whose events thread never ends, and is long
+/// enough that a thread descheduled for a while still gets its text in.
+const LATE_WAIT: Duration = Duration::from_secs(10);
 
 /// What the latency log notes about one input to the live thread.
 enum Noted {

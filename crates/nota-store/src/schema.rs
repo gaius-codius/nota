@@ -199,11 +199,18 @@ ALTER TABLE session ADD COLUMN started_at INTEGER CHECK (started_at >= 0);
 ";
 
 /// Version 4: the heard text is append-only. Triggers refuse any UPDATE
-/// or DELETE of an utterance, its words, a revision or a revision's text,
-/// and an INSERT that would replace one (`INSERT OR REPLACE` deletes the
-/// row it replaces without firing delete triggers, unless a connection
-/// turns recursive triggers on). SQLite checks them whatever connection
-/// writes, so no tool or later code path can change what was heard.
+/// or DELETE of an utterance, its words, a revision or a revision's text;
+/// an INSERT that would replace one (`INSERT OR REPLACE` deletes the row
+/// it replaces without firing delete triggers, unless a connection turns
+/// recursive triggers on); and an INSERT that adds to one already made: a
+/// word for any utterance but the newest (its words go in with it), text
+/// for revision 0 (the heard text has none of its own), or text for any
+/// revision but its session's newest. SQLite checks them on every
+/// connection's writes. (They don't stop a connection that drops them:
+/// nothing in nota does.)
+///
+/// Deleting a session (M5) will need a migration that lets its rows go
+/// with it.
 pub(crate) const V4: &str = "
 CREATE TRIGGER utterance_never_updated BEFORE UPDATE ON utterance
 BEGIN SELECT RAISE(ABORT, 'heard text is never changed'); END;
@@ -222,6 +229,9 @@ WHEN EXISTS (
     SELECT 1 FROM word WHERE utterance_id = NEW.utterance_id AND position = NEW.position
 )
 BEGIN SELECT RAISE(ABORT, 'heard text is never replaced'); END;
+CREATE TRIGGER word_only_with_its_utterance BEFORE INSERT ON word
+WHEN NEW.utterance_id IS NOT (SELECT max(id) FROM utterance)
+BEGIN SELECT RAISE(ABORT, 'heard text is never added to'); END;
 
 CREATE TRIGGER revision_never_updated BEFORE UPDATE ON revision
 BEGIN SELECT RAISE(ABORT, 'a revision is never changed'); END;
@@ -244,6 +254,10 @@ WHEN EXISTS (
       AND utterance_id = NEW.utterance_id
 )
 BEGIN SELECT RAISE(ABORT, 'a revision is never replaced'); END;
+CREATE TRIGGER revision_text_only_in_the_newest BEFORE INSERT ON revision_text
+WHEN NEW.revision = 0
+  OR NEW.revision IS NOT (SELECT max(number) FROM revision WHERE session_id = NEW.session_id)
+BEGIN SELECT RAISE(ABORT, 'a revision is never added to'); END;
 ";
 
 #[cfg(test)]

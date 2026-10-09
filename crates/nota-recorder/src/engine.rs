@@ -854,8 +854,9 @@ impl Supervisor {
 
     /// Waits, until `limit` or its start deadline, for the starting engine
     /// to say hello, and brings it online if it does. Anything else from
-    /// it (its output ending, the wrong version) ends the wait: it's
-    /// killed with what it was queued.
+    /// it (its output ending, the wrong version) ends the wait as it would
+    /// while recording: the engine is reported offline, with why, and what
+    /// it was queued is skipped.
     fn await_hello(&mut self, rx: &Receiver<Input>, limit: SessionTime) {
         let Phase::Starting(running, deadline) = &self.phase else {
             return;
@@ -865,14 +866,10 @@ impl Supervisor {
             match rx.recv_timeout(left) {
                 Ok(Input::Engine {
                     generation: g,
-                    event: FromChild::Frame(Frame::Hello(version)),
-                }) if g == generation => {
-                    if version == ProtocolVersion::CURRENT {
-                        self.online();
-                    }
-                    return;
-                }
-                Ok(Input::Engine { generation: g, .. }) if g == generation => return,
+                    event,
+                }) if g == generation => return self.on_child(event),
+                // From an engine already killed, or audio and flushes no
+                // longer wanted.
                 Ok(_) => {}
                 Err(_) => return,
             }
@@ -1174,6 +1171,68 @@ mod tests {
         let took = within(Duration::from_millis(50), move || stuck.recv().is_ok());
         assert_eq!(took, Err(Late::TooLong));
         drop(keep);
+    }
+
+    fn supervisor(program: &str) -> (Supervisor, Sender<Input>, Receiver<Input>) {
+        let config = EngineConfig::new(EngineCommand {
+            program: PathBuf::from(program),
+            args: Vec::new(),
+        });
+        let clock: Arc<dyn Clock> = Arc::new(nota_core::SystemClock::start().unwrap());
+        let (inputs, rx) = mpsc::channel();
+        let (events, _) = mpsc::channel();
+        (
+            Supervisor::new(config, clock, inputs.clone(), events),
+            inputs,
+            rx,
+        )
+    }
+
+    /// Only audio the engine hasn't confirmed counts: a track with none
+    /// left doesn't hold up a stop.
+    #[test]
+    fn a_track_counts_as_unconfirmed_only_with_audio_left() {
+        let (mut supervisor, _, _) = supervisor("true");
+        assert!(!supervisor.unconfirmed());
+        let track = TrackId::new(0);
+        supervisor.tracks.insert(track, Replay::new(track));
+        assert!(!supervisor.unconfirmed());
+        let chunk =
+            AudioChunk::new(track, SampleIndex::ZERO, SampleRate::SPEECH, vec![0; 10]).unwrap();
+        let now = supervisor.clock.now();
+        if let Some(replay) = supervisor.tracks.get_mut(&track) {
+            replay.push_audio(&chunk, now);
+        }
+        assert!(supervisor.unconfirmed());
+    }
+
+    /// While a stop waits for a loading engine's hello, what an engine
+    /// already killed sends (its output ending) doesn't end the wait.
+    /// `cat` stands in for the engine: it says hello by echoing the
+    /// supervisor's.
+    #[test]
+    fn a_stop_waiting_for_hello_ignores_an_older_engine() {
+        let (mut supervisor, inputs, rx) = supervisor("cat");
+        supervisor.generation = 2;
+        let running = start_child(&supervisor.config.command, 2, &inputs).unwrap();
+        let far = supervisor
+            .clock
+            .now()
+            .checked_add(Duration::from_secs(10))
+            .unwrap();
+        supervisor.phase = Phase::Starting(running, far);
+        inputs
+            .send(Input::Engine {
+                generation: 1,
+                event: FromChild::End,
+            })
+            .unwrap();
+        supervisor.await_hello(&rx, far);
+        assert!(
+            matches!(supervisor.phase, Phase::Online(_)),
+            "{:?}",
+            supervisor.phase
+        );
     }
 
     #[test]

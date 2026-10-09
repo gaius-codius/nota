@@ -64,10 +64,11 @@ pub(super) fn stop<B: CaptureBackend>(
     if let Some(e) = stopped.finishing {
         outcome.notes.push(format!("finishing the recording: {e}"));
     }
-    note_published(&mut outcome, &stopped.published?);
     // Everything the live thread and the screen gave is stored, or given
-    // up on, before the session is marked stopped.
+    // up on, before the session is marked stopped (and before a failed
+    // publisher returns early).
     let saved = saver.finish();
+    note_published(&mut outcome, &stopped.published?);
     match library
         .db()
         .with(|db| db.set_state(session, SessionState::Stopped))

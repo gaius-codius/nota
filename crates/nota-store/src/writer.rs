@@ -1,8 +1,8 @@
 //! The process's one connection to the library database.
 //!
 //! [`Writer`] holds it, and its clones share it, so every thread that
-//! writes (the publisher, the screen's thread) goes through one connection,
-//! one call at a time. It opens the database when it's first used, not
+//! writes (the publisher, the saver of live text, marks and notes, the
+//! screen's thread) goes through one connection, one call at a time. It opens the database when it's first used, not
 //! when it's made: making one does no I/O and can't fail, so recording can
 //! start without the database. A call that can't open it fails, and the
 //! next call tries again. A call that fails in SQLite closes the

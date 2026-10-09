@@ -170,21 +170,65 @@ fn a_store_down_for_good_loses_what_it_was_given_and_says_so() {
 fn the_oldest_are_dropped_past_the_bound() {
     let fake = Fake::default();
     fake.fail(true);
+    // The first two writes wait for the test: the first while everything
+    // is sent, the second (all of it taken off the channel by then) while
+    // the store comes back.
+    let (gate, gated) = mpsc::channel::<()>();
+    let (entered, entering) = mpsc::channel::<()>();
+    let gated_write = {
+        let mut write = fake.write();
+        let mut calls = 0;
+        move |item: &ToSave| {
+            calls += 1;
+            if calls <= 2 {
+                entered.send(()).unwrap();
+                gated.recv().unwrap();
+            }
+            write(item)
+        }
+    };
     let (ui, _screen) = mpsc::channel();
-    let saver = Saver::spawn(fake.write(), ui, clock()).unwrap();
+    let saver = Saver::spawn(gated_write, ui, clock()).unwrap();
     let sender = saver.sender();
     sender.send(mark(0)).unwrap();
+    entering.recv().unwrap();
     for at in 1..=MAX_PENDING {
         sender.send(text(u64::try_from(at).unwrap())).unwrap();
     }
-    // Let it all queue up, then the store comes back.
-    eventually(|| fake.tries() >= 2);
-    let (_keep, never) = mpsc::channel::<()>();
-    let _ = never.recv_timeout(Duration::from_millis(200));
+    drop(sender);
+    gate.send(()).unwrap();
+    entering.recv().unwrap();
     fake.fail(false);
+    gate.send(()).unwrap();
+    let report = saver.finish();
+    assert_eq!(report.lost_annotations, 1, "the oldest is the one dropped");
+    assert_eq!(report.lost_text, 0);
+    assert_eq!(report.text, MAX_PENDING);
+}
+
+/// A store that fails slowly (a lock held elsewhere waits out the busy
+/// timeout) is tried once for everything waiting, not once per item, so
+/// the stop doesn't wait on it item by item.
+#[test]
+fn a_slow_failing_store_is_tried_once_for_everything_waiting() {
+    let fake = Fake::default();
+    fake.fail(true);
+    let slow = {
+        let mut write = fake.write();
+        move |item: &ToSave| {
+            let (_keep, never) = mpsc::channel::<()>();
+            let _ = never.recv_timeout(Duration::from_millis(20));
+            write(item)
+        }
+    };
+    let (ui, _screen) = mpsc::channel();
+    let saver = Saver::spawn(slow, ui, clock()).unwrap();
+    let sender = saver.sender();
+    for at in 0..500 {
+        sender.send(text(at)).unwrap();
+    }
     drop(sender);
     let report = saver.finish();
-    assert_eq!(report.lost_annotations + report.lost_text, 1);
-    assert_eq!(report.text + report.annotations, MAX_PENDING);
-    assert_eq!(report.lost_annotations, 1, "the oldest is the one dropped");
+    assert_eq!(report.lost_text, 500);
+    assert!(fake.tries() <= 4, "{} tries", fake.tries());
 }

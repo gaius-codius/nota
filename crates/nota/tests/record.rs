@@ -797,6 +797,52 @@ fn marks_and_notes_stored_before_a_kill_survive_it_and_salvage() {
     assert!(annotations(&tmp.0, 2).is_empty());
 }
 
+/// Acceptance (GAI-310): the library database failing mid-session (another
+/// connection holding its write lock past the busy timeout) holds up
+/// nothing that records. The recording carries on, and once the lock goes,
+/// what was made meanwhile is saved and every sample is published.
+#[test]
+fn a_library_locked_mid_session_costs_nothing_once_it_is_back() {
+    let tmp = TestDir::new("locked-library");
+    let mut nota = recording(&tmp.0);
+    nota.press("m");
+    assert!(
+        wait_until(Duration::from_secs(10), || annotations(&tmp.0, 1).len()
+            == 1),
+        "{:?}",
+        annotations(&tmp.0, 1)
+    );
+    let lock = rusqlite::Connection::open(tmp.0.join("library.db")).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    nota.press("nmade while locked\r");
+    pause(Duration::from_millis(300));
+    nota.press("m");
+    // Past the store's 5 s busy timeout: its writes fail meanwhile.
+    pause(Duration::from_secs(7));
+    assert_eq!(annotations(&tmp.0, 1).len(), 1, "written through the lock");
+    assert_eq!(
+        nota.child.try_wait().unwrap(),
+        None,
+        "the recording stopped"
+    );
+    lock.execute_batch("COMMIT").unwrap();
+    drop(lock);
+    assert!(
+        wait_until(Duration::from_secs(10), || annotations(&tmp.0, 1).len()
+            == 3),
+        "{:?}",
+        annotations(&tmp.0, 1)
+    );
+    nota.signal(Signal::TERM);
+    let status = nota.exits().expect("nota didn't stop");
+    assert!(status.success(), "{status:?}: {}", nota.output());
+    assert_eq!(
+        annotated(&tmp.0, 1, 30_000),
+        ["◆", "made while locked", "◆"]
+    );
+    assert_everything_sent_saved(&nota, &tmp.0, 1, &[0, 1], 8_000);
+}
+
 /// Acceptance (GAI-310): a library database that can't be written holds up
 /// nothing that records. The recording goes on and stops as usual, the
 /// summary says what wasn't saved, and the journals hold every sample, so
@@ -1015,9 +1061,8 @@ fn a_hangup_to_the_group_leaves_the_engine_to_nota() {
 }
 
 /// Acceptance (GAI-202, GAI-203), end to end: nota killed outright takes
-/// the engine with it within the supervisor's 3 s shutdown grace, even if
-/// the engine is still loading its models, as it may be here: the kernel
-/// kills it when nota dies.
+/// the engine with it, even if the engine is still loading its models, as
+/// it may be here: the kernel kills it when nota dies.
 #[test]
 fn a_killed_nota_takes_its_engine_with_it() {
     let Some(models) = test_models() else {

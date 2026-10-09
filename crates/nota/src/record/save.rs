@@ -7,9 +7,13 @@
 //! given. When a write fails, the item waits with the ones after it and is
 //! tried again (every [`RETRY_EVERY`], and as more come), the screen is
 //! warned ([`Cause::LibraryUnavailable`]), and the warning is cleared once
-//! a write goes through. What's still unsaved when the recording stops is
-//! tried once more, then counted as lost: the audio has it, and the final
-//! pass can rebuild the text from it.
+//! a write goes through. Each try takes everything waiting, so a store
+//! that fails slowly costs one try, not one per item. What's still unsaved
+//! when the recording stops is tried once more, then counted as lost: the
+//! audio has it, and the final pass can rebuild the text from it.
+//!
+//! The screen doesn't show warnings yet (M2's warnings work, GAI-320,
+//! does); the summary says what wasn't saved.
 
 use std::collections::VecDeque;
 use std::io;
@@ -140,6 +144,12 @@ impl<W: FnMut(&ToSave) -> Result<(), StoreError>> Saving<W> {
                 }
             };
             if let Some(item) = received {
+                self.queue(item);
+            }
+            // Everything waiting, so a store that's slow to fail (a lock
+            // held elsewhere waits out the busy timeout) costs one try for
+            // all of it, not one each.
+            for item in inputs.try_iter() {
                 self.queue(item);
             }
             self.write_pending();

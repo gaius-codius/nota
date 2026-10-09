@@ -499,6 +499,44 @@ fn a_shutdown_kills_an_engine_that_stops_confirming() {
     events.assert_tiles_with_skips(3 * CHUNK);
 }
 
+/// The stop's wait for the last text counts from the stop, not from the
+/// engine's last progress while recording: an engine idle for longer than
+/// the request timeout still gets its last flush answered.
+#[test]
+fn a_shutdown_after_a_quiet_spell_still_waits_for_the_last_text() {
+    let mut config = fake(&["echo", "--every", "100", "--delay-ms", "300"]);
+    config.request_timeout = Duration::from_secs(1);
+    let (mut supervisor, mut events) = start(config);
+    events.online();
+    // Longer than the request timeout, with no audio: not hung.
+    events.pause(Duration::from_millis(1_500));
+    send(&mut supervisor, 0..3);
+    supervisor.shutdown();
+    events.rest();
+    events.assert_tiles(3 * CHUNK);
+    assert!(events.skipped().is_empty(), "{:#?}", events.seen);
+}
+
+/// An engine that answers the stop's wait with the wrong version is
+/// reported offline, saying so, and its queued audio skipped.
+#[test]
+fn a_loading_engine_that_fails_at_the_stop_says_why() {
+    let (mut supervisor, mut events) = start(fake(&["wrong-version", "--hello-delay-ms", "500"]));
+    send(&mut supervisor, 0..3);
+    supervisor.shutdown();
+    events.rest();
+    let reasons = events.offline_reasons();
+    assert!(
+        reasons
+            .iter()
+            .any(|r| matches!(r, OfflineReason::Version(_))),
+        "{:#?}",
+        events.seen
+    );
+    events.assert_tiles_with_skips(3 * CHUNK);
+    assert!(events.transcripts().is_empty());
+}
+
 #[test]
 fn an_engine_that_never_says_hello_is_restarted() {
     let mut config = fake(&["no-hello"]);

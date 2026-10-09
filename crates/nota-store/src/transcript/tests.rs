@@ -344,6 +344,24 @@ fn sqlite_refuses_to_change_or_delete_heard_text_or_a_revision() {
     ] {
         assert!(refused(&conn, &sql), "{sql} was allowed");
     }
+    // Nothing is added to what was heard, or to a revision once made.
+    store_more(&dir);
+    for sql in [
+        format!(
+            "INSERT INTO word (utterance_id, position, text, start_ns, end_ns) \
+             VALUES ({id}, 7, 'added', 0, 1)"
+        ),
+        format!(
+            "INSERT INTO revision_text (session_id, revision, utterance_id, text) \
+             VALUES (1, 0, {id}, 'added')"
+        ),
+        format!(
+            "INSERT INTO revision_text (session_id, revision, utterance_id, text) \
+             VALUES (1, 1, {id}, 'added')"
+        ),
+    ] {
+        assert!(refused(&conn, &sql), "{sql} was allowed");
+    }
     // Recursive triggers on make no difference.
     conn.execute_batch("PRAGMA recursive_triggers = ON")
         .unwrap();
@@ -354,9 +372,56 @@ fn sqlite_refuses_to_change_or_delete_heard_text_or_a_revision() {
     drop(conn);
 
     let store = Store::open(&dir.db()).unwrap();
-    let after = (
-        store.utterances(S1).unwrap(),
-        store.revision(S1, RevisionNumber(1)).unwrap(),
+    let mut after_utterances = store.utterances(S1).unwrap();
+    after_utterances.truncate(1);
+    assert_eq!(before.0, after_utterances);
+    let shown = store.revision(S1, RevisionNumber(1)).unwrap();
+    assert_eq!(before.1[0], shown[0]);
+    assert_eq!(
+        store.revision(S1, RevisionNumber(2)).unwrap()[1].text,
+        "fixed"
     );
-    assert_eq!(before, after);
+}
+
+/// A later utterance and a revision 2 after it, so revision 1 is no longer
+/// the newest and utterance 1 not the newest utterance.
+fn store_more(dir: &TestDir) {
+    let mut store = Store::open(&dir.db()).unwrap();
+    let later = store
+        .add_utterance(S1, &heard(MIC, 2_000, 3_000, "later"))
+        .unwrap();
+    store
+        .add_revision(S1, RevisionNumber(1), &[(later, "fixed".to_owned())])
+        .unwrap();
+}
+
+/// The same utterance with other words is another utterance, not a retry.
+#[test]
+fn the_same_utterance_with_other_words_is_stored_again() {
+    let (_dir, mut store) = store("retry-words");
+    let h = heard(MIC, 0, 1_000, "two words");
+    let first = store.add_utterance(S1, &h).unwrap();
+    let mut other = h.clone();
+    other.words.pop();
+    let second = store.add_utterance(S1, &other).unwrap();
+    assert_ne!(second, first);
+    let read = store.utterances(S1).unwrap();
+    assert_eq!(read[0].heard, h);
+    assert_eq!(read[1].heard, other);
+    // An exact retry of either is still the same one.
+    assert_eq!(store.add_utterance(S1, &other).unwrap(), second);
+}
+
+#[test]
+fn a_session_s_revisions_are_listed_in_order() {
+    let (_dir, mut store) = store("list-revisions");
+    assert!(store.revisions(S1).unwrap().is_empty());
+    let a = store.add_utterance(S1, &heard(MIC, 0, 10, "x")).unwrap();
+    assert_eq!(store.revisions(S1).unwrap(), [RevisionNumber::HEARD]);
+    let one = store
+        .add_revision(S1, RevisionNumber::HEARD, &[(a, "y".to_owned())])
+        .unwrap();
+    store.add_utterance(S2, &heard(MIC, 0, 10, "z")).unwrap();
+    assert_eq!(store.revisions(S1).unwrap(), [RevisionNumber::HEARD, one]);
+    assert_eq!(store.revisions(S2).unwrap(), [RevisionNumber::HEARD]);
 }

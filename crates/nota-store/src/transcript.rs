@@ -11,8 +11,11 @@
 //! and has no rows of its own. Every later revision is a new row naming
 //! its parent, with a `revision_text` row for each utterance whose text it
 //! changes; an utterance it doesn't change reads as in its parent, back to
-//! the heard text. A revision is never changed either: a correction is a
-//! new revision.
+//! the heard text. What a revision changes is never changed or added to
+//! afterwards: a correction is a new revision. An utterance stored after a
+//! revision was made reads in it as heard, since the revision didn't change
+//! it. (The final pass's utterances, M2's GAI-317, will need telling apart
+//! from the live ones before revisions show them.)
 
 use std::collections::BTreeMap;
 
@@ -188,13 +191,16 @@ fn words_of(conn: &Connection, key: i64) -> Result<BTreeMap<i64, Vec<Word>>, Sto
     Ok(words)
 }
 
-/// The utterance stored exactly as `heard` in the session, if there is one.
+/// The utterance stored exactly as `heard` in the session, words and all,
+/// if there is one.
 fn same_utterance(conn: &Connection, key: i64, heard: &Heard) -> Result<Option<i64>, StoreError> {
     let u = &heard.utterance;
-    Ok(conn
-        .query_row(
-            "SELECT id FROM utterance WHERE session_id = ?1 AND track = ?2 \
-             AND start_ns = ?3 AND end_ns = ?4 AND text = ?5 AND engine = ?6 AND model = ?7",
+    let mut stmt = conn.prepare(
+        "SELECT id FROM utterance WHERE session_id = ?1 AND track = ?2 \
+         AND start_ns = ?3 AND end_ns = ?4 AND text = ?5 AND engine = ?6 AND model = ?7",
+    )?;
+    let ids = stmt
+        .query_map(
             params![
                 key,
                 i64::from(u.track().get()),
@@ -204,9 +210,16 @@ fn same_utterance(conn: &Connection, key: i64, heard: &Heard) -> Result<Option<i
                 heard.engine,
                 heard.model
             ],
-            |r| r.get(0),
-        )
-        .optional()?)
+            |r| r.get::<_, i64>(0),
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    if ids.is_empty() {
+        return Ok(None);
+    }
+    let mut words = words_of(conn, key)?;
+    Ok(ids
+        .into_iter()
+        .find(|id| words.remove(id).unwrap_or_default() == heard.words))
 }
 
 /// Whether the session has revision `number`.
@@ -221,13 +234,41 @@ fn revision_exists(conn: &Connection, key: i64, number: u32) -> Result<bool, Sto
         .is_some())
 }
 
+/// [`Store::utterances`]' work, on `conn`.
+fn utterances_in(conn: &Connection, key: i64) -> Result<Vec<StoredUtterance>, StoreError> {
+    let mut words = words_of(conn, key)?;
+    let mut stmt = conn.prepare(
+        "SELECT id, track, start_ns, end_ns, text, engine, model FROM utterance \
+         WHERE session_id = ?1 ORDER BY start_ns, end_ns, track, id",
+    )?;
+    let raws = stmt
+        .query_map([key], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+            ))
+        })?
+        .collect::<Result<Vec<RawUtterance>, _>>()?;
+    raws.into_iter()
+        .map(|raw| {
+            let words = words.remove(&raw.0).unwrap_or_default();
+            parse_utterance(raw, words)
+        })
+        .collect()
+}
+
 impl Store {
     /// Stores `heard` as one of the session's utterances, with its words,
     /// in one transaction committed before returning, and gives its
     /// number. The session's revision 0, the heard text, is added with its
     /// first utterance. An utterance stored exactly as `heard` already
-    /// (the same track, span, text, engine and model: a write retried after
-    /// its answer was lost) isn't stored twice; its number comes back.
+    /// (the same track, span, text, engine, model and words: a write retried
+    /// after its answer was lost) isn't stored twice; its number comes back.
     ///
     /// # Errors
     ///
@@ -297,28 +338,32 @@ impl Store {
     /// [`StoreError::Sqlite`] for any SQLite failure.
     pub fn utterances(&self, session: SessionId) -> Result<Vec<StoredUtterance>, StoreError> {
         let key = session_key(session)?;
-        let mut words = words_of(&self.conn, key)?;
-        let mut stmt = self.conn.prepare(
-            "SELECT id, track, start_ns, end_ns, text, engine, model FROM utterance \
-             WHERE session_id = ?1 ORDER BY start_ns, end_ns, track, id",
-        )?;
-        let raws = stmt
-            .query_map([key], |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                    r.get(6)?,
-                ))
-            })?
-            .collect::<Result<Vec<RawUtterance>, _>>()?;
-        raws.into_iter()
-            .map(|raw| {
-                let words = words.remove(&raw.0).unwrap_or_default();
-                parse_utterance(raw, words)
+        // One snapshot: another writer's utterance comes with its words or
+        // not at all.
+        let tx = self.conn.unchecked_transaction()?;
+        utterances_in(&tx, key)
+    }
+
+    /// The session's revisions, in number order: none before its first
+    /// utterance, then revision 0, the heard text, and each made since.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] if a number doesn't parse, and
+    /// [`StoreError::Sqlite`] for any SQLite failure.
+    pub fn revisions(&self, session: SessionId) -> Result<Vec<RevisionNumber>, StoreError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT number FROM revision WHERE session_id = ?1 ORDER BY number")?;
+        let numbers = stmt
+            .query_map([session_key(session)?], |r| r.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        numbers
+            .into_iter()
+            .map(|n| {
+                u32::try_from(n)
+                    .map(RevisionNumber)
+                    .map_err(|_| StoreError::Corrupt(format!("revision number {n}")))
             })
             .collect()
     }
@@ -400,15 +445,16 @@ impl Store {
         number: RevisionNumber,
     ) -> Result<Vec<Line>, StoreError> {
         let key = session_key(session)?;
-        if !revision_exists(&self.conn, key, number.0)? {
+        // One snapshot for the chain, its text and the utterances.
+        let tx = self.conn.unchecked_transaction()?;
+        if !revision_exists(&tx, key, number.0)? {
             return Err(StoreError::NoRevision(session, number.0));
         }
         // The revision and its ancestors, nearest first. Each parent is
         // lower than its child (the schema checks), so the walk ends.
         let mut chain = vec![number.0];
         let mut at = number.0;
-        while let Some(parent) = self
-            .conn
+        while let Some(parent) = tx
             .query_row(
                 "SELECT parent FROM revision WHERE session_id = ?1 AND number = ?2",
                 params![key, i64::from(at)],
@@ -422,11 +468,12 @@ impl Store {
             chain.push(at);
         }
         let mut changed: BTreeMap<i64, String> = BTreeMap::new();
-        let mut stmt = self.conn.prepare(
+        let mut stmt = tx.prepare(
             "SELECT utterance_id, text FROM revision_text \
              WHERE session_id = ?1 AND revision = ?2",
         )?;
-        for revision in chain {
+        // Revision 0 is the heard text, with no text of its own.
+        for revision in chain.into_iter().filter(|&n| n != 0) {
             let rows = stmt
                 .query_map(params![key, i64::from(revision)], |r| {
                     Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
@@ -437,8 +484,7 @@ impl Store {
                 changed.entry(utterance).or_insert(text);
             }
         }
-        Ok(self
-            .utterances(session)?
+        let lines = utterances_in(&tx, key)?
             .into_iter()
             .map(|stored| {
                 let u = stored.heard.utterance;
@@ -452,7 +498,8 @@ impl Store {
                         .unwrap_or_else(|| u.into_text()),
                 }
             })
-            .collect())
+            .collect();
+        Ok(lines)
     }
 }
 
