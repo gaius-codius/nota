@@ -33,7 +33,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use nota_core::SessionId;
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
 pub mod migrate;
 pub mod schema;
@@ -145,7 +145,9 @@ fn parse_session(id: i64) -> Result<SessionId, StoreError> {
 
 /// Creates the file at `path`, readable and writable by its owner only, if
 /// nothing is there. SQLite would create it with the process umask, which
-/// usually lets anyone read it.
+/// usually lets anyone read it. (Its directory entry is made durable by
+/// SQLite, which fsyncs the directory when it creates the write-ahead log
+/// at the first commit.)
 #[cfg(unix)]
 #[expect(
     clippy::disallowed_methods,
@@ -173,9 +175,16 @@ fn create_private(_path: &Path) -> Result<(), StoreError> {
     Ok(())
 }
 
-/// Sets the pragmas every connection needs, and checks each took:
-/// `journal_mode=WAL`, `synchronous=FULL`, `foreign_keys=ON`, and a busy
+/// Opens the SQLite file at `path`, never through a symlink, with a busy
 /// timeout for another process's writes.
+fn connect(path: &Path, flags: OpenFlags) -> Result<Connection, StoreError> {
+    let conn = Connection::open_with_flags(path, flags.union(OpenFlags::SQLITE_OPEN_NOFOLLOW))?;
+    conn.busy_timeout(BUSY_TIMEOUT)?;
+    Ok(conn)
+}
+
+/// Sets the pragmas every connection needs, and checks each took:
+/// `journal_mode=WAL`, `synchronous=FULL` and `foreign_keys=ON`.
 fn configure(conn: &Connection) -> Result<(), StoreError> {
     let mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
     if !mode.eq_ignore_ascii_case("wal") {
@@ -184,7 +193,6 @@ fn configure(conn: &Connection) -> Result<(), StoreError> {
             found: mode,
         });
     }
-    conn.busy_timeout(BUSY_TIMEOUT)?;
     for (name, set, wanted) in [
         ("synchronous", "PRAGMA synchronous = FULL", 2),
         ("foreign_keys", "PRAGMA foreign_keys = ON", 1),
@@ -211,7 +219,9 @@ pub struct Store {
 impl Store {
     /// Opens or creates the library database at `path`, and brings its
     /// schema to the current version ([`migrate`]). A new file is readable
-    /// by its owner only; an existing one keeps its permissions.
+    /// by its owner only; an existing one keeps its permissions. A symlink
+    /// at `path` is refused, and so is a file whose version isn't known,
+    /// before anything in it is changed.
     ///
     /// # Errors
     ///
@@ -219,10 +229,12 @@ impl Store {
     /// [`StoreError::Pragma`] if a pragma didn't take,
     /// [`StoreError::UnknownSchema`] if the schema version isn't known,
     /// [`StoreError::PerSessionStore`] for a per-session store, and
-    /// [`StoreError::Sqlite`] for any other SQLite failure.
+    /// [`StoreError::Sqlite`] for any other SQLite failure, including a
+    /// symlink.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         create_private(path)?;
-        let mut conn = Connection::open(path)?;
+        let mut conn = connect(path, OpenFlags::default())?;
+        migrate::check(&conn)?;
         configure(&conn)?;
         migrate::upgrade(&mut conn)?;
         Ok(Self { conn })

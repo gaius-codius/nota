@@ -2,9 +2,10 @@
 //! the library database.
 //!
 //! The version is SQLite's `user_version`. Opening a library database
-//! brings it to [`VERSION`] one step at a time, each step and the new
-//! version in one transaction, so a crash leaves the old version or the new
-//! one. A newer version than this code knows is refused, never changed.
+//! brings it to [`VERSION`]: every step it needs and the new version in one
+//! transaction, so a crash leaves the old version or the new one. A version
+//! this code doesn't know, newer or not a library's, is refused before
+//! anything in the file is changed.
 //!
 //! | Version | Schema |
 //! |---|---|
@@ -37,39 +38,48 @@ pub const VERSION: i64 = 2;
 /// The per-session store's version.
 const PER_SESSION: i64 = 1;
 
-/// One step: the SQL that takes a database from the version before `to` to
-/// `to`.
-struct Step {
-    to: i64,
-    sql: &'static str,
+/// The SQL that creates each version from an empty file, in order:
+/// version 2. There's no step from 1, which is never a library. A step from
+/// version 2 on will need [`upgrade`] to run only the steps above the file's
+/// version.
+const STEPS: &[&str] = &[schema::V2];
+
+fn version(conn: &Connection) -> Result<i64, StoreError> {
+    Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
 }
 
-/// Every step, in order. Version 2 is created from an empty file; there's
-/// no step from 1, which is never a library.
-const STEPS: &[Step] = &[Step {
-    to: 2,
-    sql: schema::V2,
-}];
-
-/// Brings the database to [`VERSION`].
-pub(crate) fn upgrade(conn: &mut Connection) -> Result<(), StoreError> {
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    match version {
-        VERSION => return Ok(()),
-        PER_SESSION => return Err(StoreError::PerSessionStore),
-        0 => {
-            let tables: i64 =
-                tx.query_row("SELECT count(*) FROM sqlite_schema", [], |r| r.get(0))?;
-            if tables != 0 {
-                return Err(StoreError::UnknownSchema(0));
-            }
-        }
-        other if !(0..VERSION).contains(&other) => return Err(StoreError::UnknownSchema(other)),
-        _ => {}
+/// The library database's version, if it's one this code can open: the
+/// current one, or 0 for an empty file. Reads, never writes. The version
+/// and the tables are read in one statement, so another process's commit
+/// can't fall between them.
+pub(crate) fn check(conn: &Connection) -> Result<i64, StoreError> {
+    let (version, tables): (i64, i64) = conn.query_row(
+        "SELECT (SELECT user_version FROM pragma_user_version), \
+                (SELECT count(*) FROM sqlite_schema)",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    match (version, tables) {
+        (VERSION, _) => Ok(VERSION),
+        (PER_SESSION, _) => Err(StoreError::PerSessionStore),
+        (0, 0) => Ok(0),
+        (other, _) => Err(StoreError::UnknownSchema(other)),
     }
-    for step in STEPS.iter().filter(|step| step.to > version) {
-        tx.execute_batch(step.sql)?;
+}
+
+/// Brings the database to [`VERSION`]. A database at the current version
+/// is only read, so opening one takes no write lock.
+pub(crate) fn upgrade(conn: &mut Connection) -> Result<(), StoreError> {
+    if check(conn)? == VERSION {
+        return Ok(());
+    }
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // Another process may have created the schema since the check.
+    if check(&tx)? == VERSION {
+        return Ok(());
+    }
+    for step in STEPS {
+        tx.execute_batch(step)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()?;
@@ -91,14 +101,10 @@ pub enum Adopted {
 /// The segment rows in the per-session store at `path`, which must exist.
 fn read_per_session(path: &Path) -> Result<Vec<crate::SegmentRow>, StoreError> {
     // Read-write, so SQLite can recover a write-ahead log a crash left, but
-    // never created: a store that isn't there holds nothing to import.
-    let conn = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
-    conn.busy_timeout(crate::BUSY_TIMEOUT)?;
-    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    match version {
+    // never created (a store that isn't there holds nothing to import), and
+    // never through a symlink.
+    let conn = crate::connect(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    match version(&conn)? {
         PER_SESSION => {}
         // Created, but its schema never committed: it holds no rows.
         0 => {

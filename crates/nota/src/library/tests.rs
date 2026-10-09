@@ -111,12 +111,13 @@ fn salvage_at_start_publishes_what_was_left_once() {
     assert!(!needs_salvage(&dir).unwrap());
     let rows = segments(&library, crashed.id);
     assert_eq!(rows.len(), 1);
-    // The clean session has no rows, and both are in the library.
+    // The clean session has no rows, and holds nothing yet, so it isn't
+    // in the library.
     assert!(segments(&library, clean.id).is_empty());
     let listed = library.db().with(|db| db.sessions()).unwrap();
     assert_eq!(
         listed.iter().map(|s| s.id).collect::<Vec<_>>(),
-        [clean.id, crashed.id]
+        [crashed.id]
     );
     // The next start finds nothing to do.
     assert!(library.salvage_all(length()).unwrap().is_empty());
@@ -468,4 +469,125 @@ fn an_m1b_session_directory_is_adopted_and_salvaged() {
     // And the next start finds nothing more to do.
     drop(bound);
     assert!(library.salvage_all(length()).unwrap().is_empty());
+}
+
+#[test]
+fn new_rows_take_their_own_row_back_but_no_one_elses() {
+    let tmp = TestDir::new("own-row");
+    let library = Library::open(&tmp.0).unwrap();
+    let id = SessionId::new(4);
+    let mine = || {
+        let NewSessionRows { pending, .. } = new_rows(&library, id);
+        pending.unwrap()
+    };
+    // Added by a call whose answer was lost: the same title, still
+    // recording. Taken as added.
+    library.db().with(|db| db.create_session(&mine())).unwrap();
+    assert_eq!(new_rows(&library, id).rows(id).unwrap(), vec![]);
+    // The same title, but stopped: not this recording's.
+    library
+        .db()
+        .with(|db| db.set_state(id, SessionState::Stopped))
+        .unwrap();
+    assert!(matches!(
+        new_rows(&library, id).rows(id),
+        Err(StoreError::SessionExists(_))
+    ));
+    // Recording, but another title.
+    let other = SessionId::new(5);
+    let mut theirs = mine();
+    theirs.id = other;
+    theirs.title = Some("another lecture".to_owned());
+    library.db().with(|db| db.create_session(&theirs)).unwrap();
+    assert!(matches!(
+        new_rows(&library, other).rows(other),
+        Err(StoreError::SessionExists(_))
+    ));
+    // Asked about another session than its own.
+    assert!(matches!(
+        new_rows(&library, SessionId::new(6)).rows(other),
+        Err(StoreError::NoSession(s)) if s == other
+    ));
+}
+
+#[test]
+fn a_new_session_records_without_the_database_and_is_added_once_it_is_back() {
+    let tmp = TestDir::new("new-db-gone");
+    let library = Library::open(&tmp.0).unwrap();
+    let session = library.create().unwrap();
+    drop(library);
+    break_db(&tmp.0);
+    let library = Library::open(&tmp.0).unwrap();
+    let (lock, finished) = record(&session, 3_000);
+    let mut bound = SessionStore::new(lock, new_rows(&library, session.id));
+    assert!(publish_journals(&mut bound, length(), &finished).is_err());
+    assert!(needs_salvage(&SessionDir::new(session.id, StdFs, &session.audio())).unwrap());
+    mend_db(&tmp.0);
+    publish_journals(&mut bound, length(), &finished).unwrap();
+    let row = library
+        .db()
+        .with(|db| db.session(session.id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.title.as_deref(), Some("lecture 1"));
+    assert_eq!(covered(&segments(&library, session.id)), [(0, 3_000)]);
+}
+
+#[test]
+fn a_session_with_nothing_in_it_yet_is_left_alone() {
+    let tmp = TestDir::new("fresh");
+    let library = Library::open(&tmp.0).unwrap();
+    // As another nota leaves it between making it and locking it.
+    let fresh = library.create().unwrap();
+    assert!(library.salvage_all(length()).unwrap().is_empty());
+    assert_eq!(library.db().with(|db| db.session(fresh.id)).unwrap(), None);
+    // Once it holds anything, it's adopted.
+    drop(record(&fresh, 10));
+    library.salvage_all(length()).unwrap();
+    assert!(
+        library
+            .db()
+            .with(|db| db.session(fresh.id))
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_session_directory_that_cant_be_listed_is_adopted_later() {
+    use std::os::unix::fs::PermissionsExt as _;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test scaffolding: a session directory that can be entered but not listed"
+    )]
+    fn set_mode(dir: &Path, mode: u32) {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+    let tmp = TestDir::new("unlisted");
+    let library = Library::open(&tmp.0).unwrap();
+    let old = library.create().unwrap();
+    let (lock, finished) = record(&old, 3_000);
+    let mut bound = SessionStore::new(lock, new_rows(&library, old.id));
+    publish_journals(&mut bound, length(), &finished).unwrap();
+    drop(bound);
+    let rows = segments(&library, old.id);
+    drop(record(&old, 500));
+    drop(library);
+    per_session_store(&old.per_session_store(), &rows);
+    remove_db(&tmp.0);
+
+    let library = Library::open(&tmp.0).unwrap();
+    set_mode(&old.dir, 0o300);
+    let done = library.salvage_all(length()).unwrap();
+    set_mode(&old.dir, 0o700);
+    assert!(
+        matches!(&done[..], [Salvaged::Failed(id, why)] if *id == old.id && why.contains("listing")),
+        "{done:?}"
+    );
+    assert_eq!(library.db().with(|db| db.session(old.id)).unwrap(), None);
+    // Listed again, the old store's rows come over.
+    let done = library.salvage_all(length()).unwrap();
+    assert!(matches!(done[..], [Salvaged::Done(_)]), "{done:?}");
+    assert!(rows.iter().all(|r| segments(&library, old.id).contains(r)));
 }

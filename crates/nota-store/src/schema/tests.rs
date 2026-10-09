@@ -210,7 +210,7 @@ fn utterances_and_their_words_keep_their_track() {
 
 #[test]
 fn revisions_chain_and_name_their_utterances() {
-    let (_dir, store) = store("revision");
+    let (_dir, mut store) = store("revision");
     write(
         &store,
         "utterance",
@@ -256,11 +256,36 @@ fn revisions_chain_and_name_their_utterances() {
         columns,
         &[int(1), int(1), int(7), text("x")],
     );
+    // Another session's utterance can't be named.
+    store
+        .create_session(&new_session(SessionId::new(2)))
+        .unwrap();
+    write(
+        &store,
+        "utterance",
+        "id, session_id, track, start_ns, end_ns, text, engine, model",
+        &[
+            int(2),
+            int(2),
+            int(0),
+            int(0),
+            int(10),
+            text("theirs"),
+            text("e"),
+            text("m"),
+        ],
+    );
+    refused(
+        &store,
+        "revision_text",
+        columns,
+        &[int(1), int(1), int(2), text("x")],
+    );
 }
 
 #[test]
 fn proposals_name_their_revision_and_sources() {
-    let (_dir, store) = store("proposal");
+    let (_dir, mut store) = store("proposal");
     write(
         &store,
         "utterance",
@@ -293,6 +318,28 @@ fn proposals_name_their_revision_and_sources() {
     ]];
     write(&store, "proposal", columns, &rows[0]);
     assert_eq!(read(&store, "proposal"), rows);
+    store
+        .create_session(&new_session(SessionId::new(2)))
+        .unwrap();
+    write(
+        &store,
+        "utterance",
+        "id, session_id, track, start_ns, end_ns, text, engine, model",
+        &[
+            int(2),
+            int(2),
+            int(0),
+            int(0),
+            int(10),
+            text("theirs"),
+            text("e"),
+            text("m"),
+        ],
+    );
+    let mut theirs = rows[0].clone();
+    theirs[0] = int(3);
+    theirs[3] = int(2);
+    refused(&store, "proposal", columns, &theirs);
     let mut no_revision = rows[0].clone();
     no_revision[0] = int(2);
     no_revision[2] = int(4);

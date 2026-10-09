@@ -223,6 +223,24 @@ impl Store {
         Ok(())
     }
 
+    /// Marks the session stopped if the library says it's recording, and
+    /// says whether it did. A session that isn't recording, or isn't in the
+    /// library, is only read, so this takes no write lock for it.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] if its row doesn't parse, and
+    /// [`StoreError::Sqlite`] for any SQLite failure.
+    pub fn stop_recording(&mut self, id: SessionId) -> Result<bool, StoreError> {
+        match self.session(id)? {
+            Some(s) if s.state == SessionState::Recording => {
+                self.set_state(id, SessionState::Stopped)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     /// The session's tracks, in number order.
     ///
     /// # Errors

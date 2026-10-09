@@ -5,7 +5,9 @@
 //! to `session`), and every row that belongs to one track of a session names
 //! that too (`track`): segments, epochs, utterances and timeline events. Two
 //! sessions can hold rows at the same track and samples without one ever
-//! claiming the other's.
+//! claiming the other's, and a row that names another row (a revision's
+//! text and a proposal name an utterance) names one of its own session's:
+//! the foreign key includes the session.
 //!
 //! Tables, and who fills them:
 //!
@@ -105,7 +107,8 @@ CREATE TABLE utterance (
     end_ns INTEGER NOT NULL CHECK (end_ns >= start_ns),
     text TEXT NOT NULL,
     engine TEXT NOT NULL,
-    model TEXT NOT NULL
+    model TEXT NOT NULL,
+    UNIQUE (session_id, id)
 ) STRICT;
 CREATE INDEX utterance_by_time ON utterance (session_id, start_ns);
 
@@ -129,17 +132,18 @@ CREATE TABLE revision (
 CREATE TABLE revision_text (
     session_id INTEGER NOT NULL,
     revision INTEGER NOT NULL,
-    utterance_id INTEGER NOT NULL REFERENCES utterance(id),
+    utterance_id INTEGER NOT NULL,
     text TEXT NOT NULL,
     PRIMARY KEY (session_id, revision, utterance_id),
-    FOREIGN KEY (session_id, revision) REFERENCES revision(session_id, number)
+    FOREIGN KEY (session_id, revision) REFERENCES revision(session_id, number),
+    FOREIGN KEY (session_id, utterance_id) REFERENCES utterance(session_id, id)
 ) STRICT;
 
 CREATE TABLE proposal (
     id INTEGER PRIMARY KEY,
     session_id INTEGER NOT NULL,
     revision INTEGER NOT NULL,
-    utterance_id INTEGER NOT NULL REFERENCES utterance(id),
+    utterance_id INTEGER NOT NULL,
     heard TEXT NOT NULL,
     replacement TEXT NOT NULL,
     source TEXT NOT NULL,
@@ -147,7 +151,8 @@ CREATE TABLE proposal (
     pack_version TEXT,
     thresholds TEXT,
     state TEXT NOT NULL,
-    FOREIGN KEY (session_id, revision) REFERENCES revision(session_id, number)
+    FOREIGN KEY (session_id, revision) REFERENCES revision(session_id, number),
+    FOREIGN KEY (session_id, utterance_id) REFERENCES utterance(session_id, id)
 ) STRICT;
 
 CREATE TABLE mark (

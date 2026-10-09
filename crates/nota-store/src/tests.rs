@@ -442,3 +442,67 @@ fn error_display_is_specific() {
 pub(crate) fn raw(path: &Path) -> Connection {
     Connection::open(path).unwrap()
 }
+
+#[test]
+fn stopping_a_recording_session_writes_once() {
+    let dir = TestDir::new("stop");
+    let mut store = open(&dir);
+    assert!(store.stop_recording(S1).unwrap());
+    assert_eq!(
+        store.session(S1).unwrap().unwrap().state,
+        SessionState::Stopped
+    );
+    // Stopped already, or not there: nothing to do.
+    assert!(!store.stop_recording(S1).unwrap());
+    assert!(!store.stop_recording(SessionId::new(9)).unwrap());
+    assert_eq!(
+        store.session(S2).unwrap().unwrap().state,
+        SessionState::Recording
+    );
+}
+
+#[cfg(unix)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test scaffolding: a symlink where the database goes"
+)]
+#[test]
+fn a_symlink_is_never_followed() {
+    let dir = TestDir::new("symlink");
+    let target = dir.0.join("elsewhere.db");
+    // To a database that's there, and to nothing.
+    drop(open(&dir));
+    std::fs::rename(dir.db(), &target).unwrap();
+    std::os::unix::fs::symlink(&target, dir.db()).unwrap();
+    assert!(matches!(Store::open(&dir.db()), Err(StoreError::Sqlite(_))));
+    std::fs::remove_file(dir.db()).unwrap();
+    std::os::unix::fs::symlink(dir.0.join("nothing.db"), dir.db()).unwrap();
+    assert!(Store::open(&dir.db()).is_err());
+    assert!(std::fs::symlink_metadata(dir.0.join("nothing.db")).is_err());
+}
+
+/// Two first opens at once: one may be told the file is busy (a [`Writer`]
+/// opens again at its next call), but none fails otherwise, and the schema
+/// is made once, whole.
+#[test]
+fn a_fresh_file_opened_twice_at_once_gets_one_schema() {
+    let dir = TestDir::new("race");
+    let path = dir.db();
+    let threads: Vec<_> = (0..4)
+        .map(|_| {
+            let path = path.clone();
+            std::thread::spawn(move || Store::open(&path).map(|_| ()))
+        })
+        .collect();
+    for thread in threads {
+        match thread.join().unwrap() {
+            Ok(()) => {}
+            Err(StoreError::Sqlite(rusqlite::Error::SqliteFailure(e, _)))
+                if e.code == rusqlite::ErrorCode::DatabaseBusy => {}
+            Err(e) => panic!("{e}"),
+        }
+    }
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.pragma_text("user_version"), "2");
+    assert_eq!(store.sessions().unwrap(), vec![]);
+}

@@ -37,7 +37,7 @@ fn a_new_file_gets_the_current_schema() {
     let dir = TestDir::new("fresh");
     let store = Store::open(&dir.db()).unwrap();
     assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
-    assert_eq!(STEPS.last().map(|s| s.to), Some(VERSION));
+    assert_eq!(STEPS.len(), 1);
     // Opening again changes nothing.
     drop(store);
     let again = Store::open(&dir.db()).unwrap();
@@ -59,6 +59,11 @@ fn unknown_versions_are_refused_and_left_alone() {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(found, version);
+        // Not even switched to a write-ahead log.
+        let mode: String = raw(&dir.db())
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
     }
 }
 
@@ -172,6 +177,20 @@ fn a_bad_per_session_store_adopts_nothing() {
         store.adopt_session(id, Some(&corrupt)),
         Err(StoreError::Corrupt(m)) if m.contains("epoch")
     ));
+
+    #[cfg(unix)]
+    {
+        let link = dir.0.join("link.db");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "test scaffolding: a symlinked store"
+        )]
+        std::os::unix::fs::symlink(&wrong_version, &link).unwrap();
+        assert!(matches!(
+            store.adopt_session(id, Some(&link)),
+            Err(StoreError::Sqlite(_))
+        ));
+    }
 
     let missing = dir.0.join("missing.db");
     assert!(matches!(

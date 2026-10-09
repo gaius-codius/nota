@@ -391,3 +391,80 @@ mod fake {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use nota_core::{EpochId, SampleIndex, SampleRange, SessionId, TrackId};
+    use nota_store::{NewSession, Store, Writer};
+
+    use super::SegmentStore;
+    use crate::fs::fake::FakeFs;
+    use crate::segment::publish::{DurableSegment, TempSegment};
+    use crate::test_dir::TestDir;
+
+    fn durable(fs: &FakeFs, start: u64) -> DurableSegment {
+        let range = SampleRange::new(SampleIndex::new(start), SampleIndex::new(start + 4)).unwrap();
+        TempSegment::write(
+            fs,
+            Path::new("/s"),
+            TrackId::new(1),
+            EpochId::new(0),
+            range,
+            b"flac",
+        )
+        .unwrap()
+        .sync()
+        .unwrap()
+        .rename(fs)
+        .unwrap()
+        .sync_dir(fs)
+        .unwrap()
+    }
+
+    fn session(id: u64) -> NewSession {
+        NewSession {
+            id: SessionId::new(id),
+            title: None,
+            language: None,
+            tracks: vec![],
+        }
+    }
+
+    /// Commits a row for session 1 through `store`, and reads each
+    /// session's rows back: only session 1 holds it.
+    fn round_trip(store: &mut impl SegmentStore) {
+        let fs = FakeFs::with_dirs(["/s"]);
+        let segment = durable(&fs, 5);
+        store.insert(SessionId::new(1), &segment).unwrap();
+        assert_eq!(store.rows(SessionId::new(1)).unwrap(), [*segment.row()]);
+        assert_eq!(store.rows(SessionId::new(2)).unwrap(), []);
+        // A session the database doesn't hold is refused.
+        assert!(store.insert(SessionId::new(3), &durable(&fs, 20)).is_err());
+    }
+
+    #[test]
+    fn the_library_database_is_a_store_scoped_by_session() {
+        let dir = TestDir::new("sqlite-store");
+        let mut store = Store::open(&dir.0.join("library.db")).unwrap();
+        store.create_session(&session(1)).unwrap();
+        store.create_session(&session(2)).unwrap();
+        round_trip(&mut store);
+    }
+
+    #[test]
+    fn a_shared_writer_is_the_same_store() {
+        let dir = TestDir::new("writer-store");
+        let mut writer = Writer::new(&dir.0.join("library.db"));
+        writer
+            .with(|db| {
+                db.create_session(&session(1))?;
+                db.create_session(&session(2))
+            })
+            .unwrap();
+        round_trip(&mut writer);
+        // Through a clone, the same rows.
+        assert_eq!(writer.clone().rows(SessionId::new(1)).unwrap().len(), 1);
+    }
+}

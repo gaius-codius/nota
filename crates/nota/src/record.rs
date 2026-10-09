@@ -57,7 +57,7 @@ use nota_recorder::engine::{
 use nota_recorder::fs::StdFs;
 use nota_recorder::segment::{PublishReport, Publisher, SegmentLength};
 use nota_recorder::session::{SessionDir, SessionStore, SessionWriter, Syncing};
-use nota_store::{NewSession, SessionState, Track, TrackKind};
+use nota_store::{NewSession, SessionState, StoreError, Track, TrackKind};
 use nota_tui::{Annotation, Ended, Event, InputThread, Recording, RunError, Theme, Update};
 
 use crate::latency::{DrawEnds, LatencyLog, Problem};
@@ -327,13 +327,20 @@ fn record_with<B: CaptureBackend>(
         outcome.notes.push(format!("finishing the recording: {e}"));
     }
     note_published(&mut outcome, &stopped.published?);
-    if let Err(e) = library
+    match library
         .db()
         .with(|db| db.set_state(session.id, SessionState::Stopped))
     {
-        outcome.notes.push(format!(
-            "the library database doesn't have this session yet ({e}); the next start adds it"
-        ));
+        Ok(()) => {}
+        Err(StoreError::NoSession(_)) => outcome.notes.push(
+            "the library database couldn't take this session; the next start adds it, \
+             without its title"
+                .to_owned(),
+        ),
+        Err(e) => outcome.notes.push(format!(
+            "marking the session stopped in the library database failed ({e}); \
+             the next start does it"
+        )),
     }
     if signals.close() {
         outcome.notes.push(
@@ -681,6 +688,12 @@ mod tests {
     use signal_hook::low_level::raise;
 
     use super::*;
+
+    #[test]
+    fn each_track_is_named_for_what_it_records() {
+        assert_eq!(track_kind(MIC), TrackKind::Microphone);
+        assert_eq!(track_kind(SYSTEM), TrackKind::System);
+    }
 
     /// A raised signal reaches every `Signals` registered for it, so tests
     /// that raise one take turns (if run as threads of one process).
