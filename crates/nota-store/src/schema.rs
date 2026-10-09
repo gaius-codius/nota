@@ -23,7 +23,7 @@
 //! | `mark`, `note` | marks and notes made while recording, in session time | `nota record`, as each is made ([`crate::annotations`]) |
 //! | `job` | work queued after a stop | the job queue |
 //! | `event` | the timeline: device changes, warnings, gaps | the detectors |
-//! | `finding` | an index of each session's findings file: rows whose file didn't prove them, and rows that don't parse (V5) | the app, from the findings files ([`crate::findings`]) |
+//! | `finding` | an index of each session's findings file: rows whose file didn't prove them, and rows that don't parse (V5) | the app, from the findings files ([`Store::index_findings`](crate::Store::index_findings)) |
 //!
 //! Session times are nanoseconds from the session's start
 //! ([`SessionTime`](nota_core::SessionTime)); samples are indices at the

@@ -912,7 +912,7 @@ fn repair_row<S: Fs>(
 /// claims: a window can hold several segments (an epoch change, a gap), and
 /// none of them is published while a row over that window is unresolved.
 /// Only rows this run checked are findings: those overlapping a journal it
-/// read (see [`claims`]).
+/// read (see [`check`]).
 fn in_a_bad_window(findings: &[Finding], segment: &PlannedSegment, length: SegmentLength) -> bool {
     let start = segment.range.start();
     let from = SampleIndex::new(
