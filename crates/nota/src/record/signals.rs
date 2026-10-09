@@ -12,7 +12,7 @@ use nota_tui::Event;
 
 /// The handle that stops the signal thread.
 #[cfg(unix)]
-pub(super) struct SignalThread {
+pub(crate) struct SignalThread {
     handle: signal_hook::iterator::Handle,
     /// Returns whether a SIGXCPU arrived.
     thread: JoinHandle<bool>,
@@ -21,7 +21,7 @@ pub(super) struct SignalThread {
 #[cfg(unix)]
 impl SignalThread {
     /// Stops the thread, and returns whether a SIGXCPU arrived.
-    pub(super) fn close(self) -> bool {
+    pub(crate) fn close(self) -> bool {
         self.handle.close();
         self.thread.join().unwrap_or(false)
     }
@@ -33,7 +33,7 @@ impl SignalThread {
 /// together may come through as one, so whether any arrived is all that's
 /// known.
 #[cfg(unix)]
-pub(super) fn listen_for_signals(ui: Sender<Event>) -> io::Result<SignalThread> {
+pub(crate) fn listen_for_signals(ui: Sender<Event>) -> io::Result<SignalThread> {
     use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGXCPU};
     let signals = signal_hook::iterator::Signals::new([SIGHUP, SIGTERM, SIGINT, SIGXCPU])?;
     let handle = signals.handle();
@@ -64,11 +64,11 @@ fn watch(mut signals: signal_hook::iterator::Signals, ui: &Sender<Event>) -> boo
 /// Elsewhere nothing records yet (see [`record`](super::record)), so
 /// there's nothing to stop in order.
 #[cfg(not(unix))]
-pub(super) struct SignalThread;
+pub(crate) struct SignalThread;
 
 #[cfg(not(unix))]
 impl SignalThread {
-    pub(super) fn close(self) -> bool {
+    pub(crate) fn close(self) -> bool {
         false
     }
 }
@@ -78,7 +78,7 @@ impl SignalThread {
     clippy::unnecessary_wraps,
     reason = "the same shape as the Unix version"
 )]
-pub(super) fn listen_for_signals(_ui: Sender<Event>) -> io::Result<SignalThread> {
+pub(crate) fn listen_for_signals(_ui: Sender<Event>) -> io::Result<SignalThread> {
     Ok(SignalThread)
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "nota-tui"
-description = "nota's terminal UI, in ratatui on crossterm: for now the Recording screen, with live text, the level band, marks and notes."
+description = "nota's terminal UI, in ratatui on crossterm: the Home screen, and the Recording screen with live text, the level band, marks and notes."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -64,6 +64,8 @@ pub(super) type Recorded = (
 /// Starts everything a recording needs, in order: the signals and the
 /// terminal first (without one there's nothing to record into), then the
 /// session, the tracks, the publisher, the live thread and the recorder.
+/// The terminal is `screen` if given (the app's, already set up), else
+/// it's set up here.
 ///
 /// # Errors
 ///
@@ -73,13 +75,17 @@ pub(super) fn start<B: CaptureBackend>(
     setup: &Setup,
     backend: &B,
     clock: &Arc<dyn Clock>,
+    screen: Option<Screen>,
 ) -> Result<(Started<B>, Screening), BoxError> {
     let mut outcome = Outcome::default();
     let (ui, ui_events) = mpsc::channel::<Event>();
     let signals = listen_for_signals(ui.clone())?;
     // The terminal first: without one there's nothing to record into.
     let draws = args.latency_log.as_ref().map(|_| DrawEnds::default());
-    let screen = Screen::enter(draws.clone().map(|d| (d, Arc::clone(clock))))?;
+    let screen = match screen {
+        Some(screen) => screen,
+        None => Screen::enter(draws.clone().map(|d| (d, Arc::clone(clock))))?,
+    };
 
     let library = Library::open(&args.data)?;
     note_salvaged(&library, &mut outcome)?;
@@ -290,6 +296,38 @@ fn sources(setup: &Setup) -> [(TrackId, Source); 2] {
         (MIC, source(&setup.mic, Source::Microphone)),
         (SYSTEM, source(&setup.system, Source::SystemAudio)),
     ]
+}
+
+/// The setup the last session recorded with: its title, and each track's
+/// source, as [`source_name`] named it in the library. A track it didn't
+/// record (a stream that didn't start) follows the default. `None` if
+/// there's no last session, or the library database can't be read.
+pub(crate) fn last_setup(library: &Library) -> Option<Setup> {
+    let (session, tracks) = library
+        .db()
+        .with(|db| {
+            let Some(last) = db.sessions()?.pop() else {
+                return Ok(None);
+            };
+            let tracks = db.tracks(last.id)?;
+            Ok(Some((last, tracks)))
+        })
+        .ok()??;
+    let input = |kind: TrackKind, default: &str| {
+        let source = tracks
+            .iter()
+            .find(|t| t.kind == kind)
+            .and_then(|t| t.source.as_deref());
+        match source {
+            Some(name) if name != default => Input::Device(name.to_owned()),
+            _ => Input::Default,
+        }
+    };
+    Some(Setup {
+        title: session.title.unwrap_or_else(|| "Recording".to_owned()),
+        mic: input(TrackKind::Microphone, &source_name(&Source::Microphone)),
+        system: input(TrackKind::System, &source_name(&Source::SystemAudio)),
+    })
 }
 
 /// What a track records.

@@ -71,17 +71,21 @@ mod start;
 mod stop;
 mod summary;
 
+pub(crate) use signals::listen_for_signals;
+pub(crate) use start::last_setup;
 pub(crate) use summary::Outcome;
 use summary::show;
 
+use crate::terminal::Screen;
+
 /// Every track is recorded at the engine's rate.
-const RATE: SampleRate = SampleRate::SPEECH;
+pub(crate) const RATE: SampleRate = SampleRate::SPEECH;
 /// The microphone's track.
 pub(crate) const MIC: TrackId = TrackId::new(0);
 /// The system audio's track.
 pub(crate) const SYSTEM: TrackId = TrackId::new(1);
 
-type BoxError = Box<dyn Error + Send + Sync>;
+pub(crate) type BoxError = Box<dyn Error + Send + Sync>;
 
 /// What to record, and where.
 #[derive(Debug, Clone)]
@@ -109,6 +113,28 @@ pub(crate) struct RecordArgs {
 /// stream at all), or the screen failed; in the second case the recording
 /// was still finished first.
 pub(crate) fn record(args: &RecordArgs) -> Result<Outcome, BoxError> {
+    record_in(args, None).map(|(outcome, _)| outcome)
+}
+
+/// The app's terminal, lent to a recording, and what to draw on it while
+/// the recording stops.
+pub(crate) struct Lent<'a> {
+    pub(crate) screen: Screen,
+    pub(crate) stopping: &'a mut dyn FnMut(&mut Screen),
+}
+
+/// Records as [`record`] does. With `lent`, on the app's terminal: once
+/// the Recording screen closes, `stopping` draws on it while the recording
+/// stops, and the terminal comes back with the outcome (unless it failed).
+/// Without, the terminal is set up here and restored before the stop.
+///
+/// # Errors
+///
+/// As [`record`]'s. A lent terminal is restored, not handed back.
+pub(crate) fn record_in(
+    args: &RecordArgs,
+    lent: Option<Lent<'_>>,
+) -> Result<(Outcome, Option<Screen>), BoxError> {
     let Command::Start(setup) = &args.start else {
         return Err("a recording starts only with a start command".into());
     };
@@ -117,9 +143,9 @@ pub(crate) fn record(args: &RecordArgs) -> Result<Outcome, BoxError> {
     #[cfg(feature = "fake-capture")]
     if args.tone {
         let tone = crate::tone::Tone::new(Arc::clone(&clock));
-        let mut outcome = record_with(args, setup, &tone, &clock)?;
+        let (mut outcome, screen) = record_with(args, setup, &tone, &clock, lent)?;
         outcome.notes.extend(tone.report());
-        return Ok(outcome);
+        return Ok((outcome, screen));
     }
     if args.tone {
         return Err("--tone is only for nota's tests".into());
@@ -130,9 +156,13 @@ pub(crate) fn record(args: &RecordArgs) -> Result<Outcome, BoxError> {
         setup,
         &nota_recorder::capture::PipeWireBackend,
         &clock,
+        lent,
     );
     #[cfg(not(target_os = "linux"))]
-    Err("recording needs Linux for now".into())
+    {
+        drop(lent);
+        Err("recording needs Linux for now".into())
+    }
 }
 
 /// The window every segment is cut to.
@@ -147,8 +177,13 @@ fn record_with<B: CaptureBackend>(
     setup: &Setup,
     backend: &B,
     clock: &Arc<dyn Clock>,
-) -> Result<Outcome, BoxError> {
-    let (started, screening) = start::start(args, setup, backend, clock)?;
+    lent: Option<Lent<'_>>,
+) -> Result<(Outcome, Option<Screen>), BoxError> {
+    let (given, stopping) = match lent {
+        Some(Lent { screen, stopping }) => (Some(screen), Some(stopping)),
+        None => (None, None),
+    };
+    let (started, screening) = start::start(args, setup, backend, clock, given)?;
 
     // The screen, until it's closed.
     let shown = show(
@@ -160,8 +195,22 @@ fn record_with<B: CaptureBackend>(
         &screening.ui_events,
     );
     drop(screening.ui);
+    let (shown, screen) = match shown {
+        Ok((shown, screen)) => (Ok(shown), screen),
+        Err(e) => (Err(e), None),
+    };
+    // `nota record` restores the terminal before stopping; the app keeps
+    // it, and shows that the recording is stopping.
+    let screen = match (screen, stopping) {
+        (Some(mut screen), Some(stopping)) => {
+            stopping(&mut screen);
+            Some(screen)
+        }
+        _ => None,
+    };
 
-    stop::stop(started, shown)
+    let outcome = stop::stop(started, shown)?;
+    Ok((outcome, screen))
 }
 
 #[cfg(test)]

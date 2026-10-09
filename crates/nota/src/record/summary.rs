@@ -24,12 +24,13 @@ pub(super) struct Shown {
     pub(super) problem: Option<String>,
 }
 
-/// Shows the Recording screen on `screen` until it's closed, then restores
-/// the terminal.
+/// Shows the Recording screen on `screen` until it's closed. The terminal
+/// is handed back as it is, unless it failed: then it's restored here, and
+/// `None` comes back.
 ///
 /// # Errors
 ///
-/// Only if the input thread can't start.
+/// Only if the input thread can't start; the terminal is restored.
 pub(super) fn show(
     mut screen: Screen,
     title: &str,
@@ -37,7 +38,7 @@ pub(super) fn show(
     clock: &Arc<dyn Clock>,
     ui: &Sender<Event>,
     ui_events: &Receiver<Event>,
-) -> io::Result<Shown> {
+) -> io::Result<(Shown, Option<Screen>)> {
     let mut recording = Recording::new(
         title.to_owned(),
         listening.to_owned(),
@@ -46,10 +47,14 @@ pub(super) fn show(
     );
     let (commands, given) = mpsc::channel::<Command>();
     let input = InputThread::spawn(ui.clone(), Arc::clone(clock))?;
-    let ran = nota_tui::run(screen.terminal(), &mut recording, ui_events, &commands);
+    // A new screen (after Home, say): drawn whole, not as changes to the
+    // last one's cells.
+    let ran = screen
+        .clear()
+        .map_err(RunError::Terminal)
+        .and_then(|()| nota_tui::run(screen.terminal(), &mut recording, ui_events, &commands));
     // Keys may be gone with the terminal; nothing to do about it.
     let _ = input.stop();
-    drop(screen);
     let mut marks = marks_in(given.try_iter());
     let problem = match ran {
         Ok(Ended::Stopped | Ended::Closed) => None,
@@ -60,7 +65,8 @@ pub(super) fn show(
             None
         }
     };
-    Ok(Shown { marks, problem })
+    let screen = problem.is_none().then_some(screen);
+    Ok((Shown { marks, problem }, screen))
 }
 
 /// How many marks and notes `commands` gives. The stop the screen also

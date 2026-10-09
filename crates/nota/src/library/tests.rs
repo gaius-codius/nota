@@ -591,3 +591,140 @@ fn a_session_directory_that_cant_be_listed_is_adopted_later() {
     assert!(matches!(done[..], [Salvaged::Done(_)]), "{done:?}");
     assert!(rows.iter().all(|r| segments(&library, old.id).contains(r)));
 }
+
+/// A row of `samples` samples on `track`, from `start`.
+fn listed_row(track: u32, start: u64, samples: u64) -> SegmentRow {
+    let range =
+        nota_core::SampleRange::new(SampleIndex::new(start), SampleIndex::new(start + samples))
+            .unwrap();
+    SegmentRow::new(
+        TrackId::new(track),
+        EpochId::new(0),
+        range,
+        nota_store::Sha256Digest::new([7; 32]),
+    )
+    .unwrap()
+}
+
+/// Leaves a journal in `session`'s audio directory, as a stop that
+/// couldn't publish everything does.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test scaffolding outside the recorder's write path"
+)]
+fn leave_journal(session: &SessionPaths) {
+    let name = nota_recorder::journal::JournalId::new(1).file_name();
+    std::fs::write(session.audio().join(name), b"").unwrap();
+}
+
+#[test]
+fn listing_gives_each_session_s_title_audio_and_needs() {
+    let tmp = TestDir::new("listing");
+    let library = Library::open(&tmp.0).unwrap();
+    let rate = SampleRate::SPEECH;
+    let hz = u64::from(rate.hz());
+    let (one, two, three) = (
+        library.create().unwrap(),
+        library.create().unwrap(),
+        library.create().unwrap(),
+    );
+    library
+        .db()
+        .with(|db| {
+            for (paths, title) in [(&one, "Joinery"), (&two, "Turning")] {
+                db.create_session(&NewSession {
+                    id: paths.id,
+                    title: Some(title.into()),
+                    language: None,
+                    tracks: Vec::new(),
+                })?;
+            }
+            // The mic has 90 s in two segments, the system audio 30 s:
+            // the session is as long as its longest track.
+            db.insert_segment(one.id, &listed_row(0, 0, 60 * hz))?;
+            db.insert_segment(one.id, &listed_row(0, 60 * hz, 30 * hz))?;
+            db.insert_segment(one.id, &listed_row(1, 0, 30 * hz))?;
+            Ok(())
+        })
+        .unwrap();
+    // Two has a journal left; three isn't in the database and has one too.
+    leave_journal(&two);
+    leave_journal(&three);
+
+    let listed = library.listing(rate).unwrap();
+    let attention = |s: &str| Needs::Attention(s.to_owned());
+    let left = "audio still to save · nota tries again when it starts";
+    assert_eq!(
+        listed,
+        [
+            Listed {
+                id: one.id,
+                title: Some("Joinery".into()),
+                recorded: Some(Duration::from_secs(90)),
+                needs: Needs::Nothing,
+            },
+            Listed {
+                id: two.id,
+                title: Some("Turning".into()),
+                recorded: None,
+                needs: attention(left),
+            },
+            Listed {
+                id: three.id,
+                title: None,
+                recorded: None,
+                needs: attention(left),
+            },
+        ]
+    );
+
+    // A session another nota is recording isn't a problem.
+    let lock = SessionDir::new(two.id, StdFs, &two.audio()).lock().unwrap();
+    let listed = library.listing(rate).unwrap();
+    assert_eq!(listed[1].needs, Needs::InUse);
+    drop(lock);
+}
+
+#[test]
+fn an_empty_session_directory_isnt_listed() {
+    let tmp = TestDir::new("listing-empty");
+    let library = Library::open(&tmp.0).unwrap();
+    library.create().unwrap();
+    assert_eq!(library.listing(SampleRate::SPEECH).unwrap(), []);
+}
+
+/// With the database unreadable, every session on disk is still listed,
+/// and says why it can't be shown properly.
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test scaffolding outside the recorder's write path"
+)]
+fn a_database_that_cant_be_read_is_said_on_each_session() {
+    let tmp = TestDir::new("listing-no-db");
+    let library = Library::open(&tmp.0).unwrap();
+    // Made by hand: making it through the library would open the database.
+    let session = tmp.0.join(SESSIONS).join("1");
+    std::fs::create_dir_all(session.join(AUDIO)).unwrap();
+    std::fs::write(session.join("note"), b"x").unwrap();
+    // A directory where the database should be.
+    std::fs::create_dir(tmp.0.join(LIBRARY_DB)).unwrap();
+    let listed = library.listing(SampleRate::SPEECH).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, SessionId::new(1));
+    let Needs::Attention(why) = &listed[0].needs else {
+        panic!("{listed:?}");
+    };
+    assert!(
+        why.starts_with("the library database can't be read"),
+        "{why}"
+    );
+}
+
+#[test]
+fn the_longest_track_sets_the_length() {
+    let rate = SampleRate::SPEECH;
+    assert_eq!(longest_track(&[], rate), None);
+    let rows = [listed_row(1, 0, 16_000), listed_row(0, 0, 8_000)];
+    assert_eq!(longest_track(&rows, rate), Some(Duration::from_secs(1)));
+}

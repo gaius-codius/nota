@@ -1,0 +1,24 @@
+---
+source: crates/nota-tui/tests/home_screen.rs
+expression: terminal.backend()
+---
+"╭─ ≈ nota ─────────────────────────────────── ! 1 needs you ─╮"
+"│                                                            │"
+"│                                                            │"
+"│            ⠀⣀⣀⣀⣀⣀⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀                        │"
+"│            ⠛⠉⠉⠉⠉⠉⠉⠛⠳⠶⣤⣀⡀⠀⠀⠀⠀⠀⢀⣀⣤⡴⠶⠛                        │"
+"│            ⣤⠶⠶⠶⠶⠶⠶⣤⣄⣀⠀⠉⠙⠛⠛⠛⠛⠛⠋⠉⠀⢀⣀⣤                        │"
+"│            ⠀⣀⣀⣀⣀⣀⣀⠀⠈⠉⠛⠶⢦⣤⣤⣤⣤⣤⡴⠶⠛⠋⠉⠀     n o t a            │"
+"│            ⠛⠉⠉⠉⠉⠉⠉⠛⠳⠶⣤⣀⡀⠀⠀⠀⠀⠀⢀⣀⣤⡴⠶⠛                        │"
+"│            ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠙⠛⠛⠛⠛⠛⠋⠉⠀⠀⠀⠀                        │"
+"│                                                            │"
+"│                                                            │"
+"│ recent                                                     │"
+"│ ▸ ! Joinery · mortise and tenon                58m  2 Oct  │"
+"│     stopped early: disk full · free space to finish        │"
+"│   ✓ Woodwork workshop · hand planes         2h 42m  today  │"
+"│   ◐ Turning · bowl gouges                   1h 20m  today  │"
+"│   ✓ Finishing · oils and waxes              1h 05m  9 Sep  │"
+"│                                                            │"
+"│                                                            │"
+"╰─ R last settings  ⏎ open ─────────────────────── parakeet ─╯"

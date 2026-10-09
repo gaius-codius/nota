@@ -7,14 +7,21 @@ fn args(list: &[&str]) -> Vec<OsString> {
 fn engine(list: &[&str]) -> Result<ModelPaths, String> {
     match parse(&args(list))? {
         Command::EngineAsr(paths) => Ok(paths),
-        Command::Record(_) => Err("record".into()),
+        Command::Record(_) | Command::App(_) => Err("record".into()),
     }
 }
 
 fn record(list: &[&str]) -> Result<RecordArgs, String> {
     match parse(&args(list))? {
         Command::Record(args) => Ok(args),
-        Command::EngineAsr(_) => Err("engine".into()),
+        Command::EngineAsr(_) | Command::App(_) => Err("engine".into()),
+    }
+}
+
+fn app(list: &[&str]) -> Result<RecordArgs, String> {
+    match parse(&args(list))? {
+        Command::App(args) => Ok(args),
+        Command::EngineAsr(_) | Command::Record(_) => Err("not the app".into()),
     }
 }
 
@@ -41,8 +48,7 @@ fn parses_engine_asr() {
 #[test]
 fn refuses_bad_arguments() {
     for bad in [
-        &[][..],
-        &["engine"],
+        &["engine"][..],
         &["engine", "tts"],
         &["engine", "asr"],
         &["engine", "asr", "--vad", "v"],
@@ -72,6 +78,14 @@ fn refuses_bad_arguments() {
         &["record", "--parakeet", "p"],
         &["record", "--vad", "v"],
         &["recorder"],
+        &["--loud", "1"],
+        &["--data"],
+        // Setup's choices and the latency log are `nota record`'s.
+        &["--title", "t"],
+        &["--mic", "m"],
+        &["--system", "s"],
+        &["--data", "/d", "--latency-log", "l"],
+        &["--parakeet", "p"],
     ] {
         assert!(parse(&args(bad)).is_err(), "{bad:?}");
     }
@@ -145,4 +159,15 @@ fn a_relative_data_directory_is_made_absolute() {
             r.data.display()
         );
     }
+}
+
+#[test]
+fn no_command_opens_home() {
+    let home = app(&[]).unwrap();
+    assert!(home.data.is_absolute());
+    assert_eq!(home.models, None);
+    let home = app(&["--data", "/d", "--parakeet", "p", "--vad", "v"]).unwrap();
+    assert_eq!(home.data, PathBuf::from("/d"));
+    assert_eq!(home.models, Some((PathBuf::from("p"), PathBuf::from("v"))));
+    assert_eq!(home.latency_log, None);
 }

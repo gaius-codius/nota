@@ -15,12 +15,16 @@
 //! database doesn't have, importing its M1 per-session store
 //! (`sessions/<number>/nota.db`) if it has one, and salvages it.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use nota_core::SessionId;
+use nota_core::{SampleCount, SampleRate, SessionId, TrackId};
 use nota_recorder::fs::{Fs, StdFs};
-use nota_recorder::segment::{DurableSegment, SegmentLength, SegmentStore, needs_salvage, salvage};
+use nota_recorder::segment::{
+    DurableSegment, SegmentLength, SegmentStore, needs_salvage, read_findings, salvage,
+};
 use nota_recorder::session::{SessionDir, SessionStore};
 use nota_store::{NewSession, SegmentRow, SessionState, StoreError, Writer};
 
@@ -72,6 +76,30 @@ pub(crate) enum Salvaged {
     /// added to the library database; the journals are still there for the
     /// next start.
     Failed(SessionId, String),
+}
+
+/// A session as Home lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Listed {
+    pub(crate) id: SessionId,
+    /// Its title, if the library database has one.
+    pub(crate) title: Option<String>,
+    /// How much audio its longest track has published, if the library
+    /// database could be read.
+    pub(crate) recorded: Option<Duration>,
+    /// Whether it needs the user, and why.
+    pub(crate) needs: Needs,
+}
+
+/// Whether a session needs the user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Needs {
+    /// Nothing: its audio is published and its rows match their files.
+    Nothing,
+    /// Another nota holds it: it's being recorded.
+    InUse,
+    /// The user must act, for the reason given.
+    Attention(String),
 }
 
 impl Library {
@@ -205,6 +233,60 @@ impl Library {
         })
     }
 
+    /// Every session, as Home lists it, in number order: each one in the
+    /// library database with its title and the audio its rows hold, and
+    /// each one on disk that the database doesn't have (or every one, if
+    /// the database can't be read: that's said as each one's attention).
+    /// Audio is counted at `rate`, the rate every track records at.
+    pub(crate) fn listing(&self, rate: SampleRate) -> io::Result<Vec<Listed>> {
+        let on_disk = self.existing()?;
+        let in_db = self.db.with(|db| {
+            db.sessions()?
+                .into_iter()
+                .map(|session| Ok((session.id, session.title, db.segments(session.id)?)))
+                .collect::<Result<Vec<_>, StoreError>>()
+        });
+        let mut listed: BTreeMap<u64, Listed> = BTreeMap::new();
+        let db_error = match in_db {
+            Ok(sessions) => {
+                for (id, title, rows) in sessions {
+                    let recorded = longest_track(&rows, rate);
+                    listed.insert(
+                        id.get(),
+                        Listed {
+                            id,
+                            title,
+                            recorded,
+                            needs: Needs::Nothing,
+                        },
+                    );
+                }
+                None
+            }
+            Err(e) => Some(format!("the library database can't be read: {e}")),
+        };
+        for session in &on_disk {
+            if is_empty(session) {
+                continue;
+            }
+            let needs = match (&db_error, needs(session)) {
+                (_, needs @ (Needs::InUse | Needs::Attention(_))) => needs,
+                (Some(e), Needs::Nothing) => Needs::Attention(e.clone()),
+                (None, Needs::Nothing) => Needs::Nothing,
+            };
+            listed
+                .entry(session.id.get())
+                .and_modify(|listed| listed.needs = needs.clone())
+                .or_insert(Listed {
+                    id: session.id,
+                    title: None,
+                    recorded: None,
+                    needs,
+                });
+        }
+        Ok(listed.into_values().collect())
+    }
+
     /// Makes a new session's directories, numbered after every session on
     /// disk and, if the database can be read, every session in it.
     pub(crate) fn create(&self) -> io::Result<SessionPaths> {
@@ -242,6 +324,53 @@ impl Library {
         }
         Err(no_number())
     }
+}
+
+/// Whether `session`'s directory shows it needs the user: rows whose
+/// files didn't match them when they were last checked, or journals
+/// left unpublished. Journals another nota is still writing are a
+/// recording, not a problem.
+fn needs(session: &SessionPaths) -> Needs {
+    let dir = SessionDir::new(session.id, StdFs, &session.audio());
+    match read_findings(&dir) {
+        Ok(findings) if !findings.found().is_empty() => {
+            let n = findings.found().len();
+            let rows = if n == 1 {
+                "segment doesn't"
+            } else {
+                "segments don't"
+            };
+            return Needs::Attention(format!(
+                "{n} {rows} match the library · their audio is kept"
+            ));
+        }
+        Ok(_) => {}
+        Err(e) => return Needs::Attention(e.to_string()),
+    }
+    match needs_salvage(&dir) {
+        Ok(false) => Needs::Nothing,
+        Ok(true) => match dir.lock() {
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Needs::InUse,
+            _ => {
+                Needs::Attention("audio still to save · nota tries again when it starts".to_owned())
+            }
+        },
+        Err(e) => Needs::Attention(format!("its audio can't be checked: {e}")),
+    }
+}
+
+/// How long the longest track's audio in `rows` is, at `rate`. `None`
+/// with no rows.
+fn longest_track(rows: &[SegmentRow], rate: SampleRate) -> Option<Duration> {
+    let mut per_track: BTreeMap<TrackId, SampleCount> = BTreeMap::new();
+    for row in rows {
+        let total = per_track.entry(row.track()).or_insert(SampleCount::new(0));
+        *total = total.saturating_add(row.range().len());
+    }
+    per_track
+        .into_values()
+        .max_by_key(|count| count.get())
+        .and_then(|count| count.duration_at(rate))
 }
 
 /// Whether `session` holds nothing yet: an empty audio directory and no

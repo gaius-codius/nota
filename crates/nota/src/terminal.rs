@@ -12,7 +12,7 @@ use std::mem::ManuallyDrop;
 use std::sync::{Arc, Once};
 
 use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
+use ratatui::backend::{Backend, ClearType, CrosstermBackend};
 use ratatui::crossterm::cursor::{Hide, Show};
 use ratatui::crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use ratatui::crossterm::execute;
@@ -69,6 +69,21 @@ impl Screen {
     /// The terminal to draw on.
     pub(crate) fn terminal(&mut self) -> &mut Terminal<Output> {
         &mut self.terminal
+    }
+
+    /// Clears the terminal for a new screen, so its first draw writes every
+    /// cell rather than its changes from the last screen's. (`ratatui`'s own
+    /// `clear` reads the cursor's position from the terminal, which would
+    /// race the input thread for the reply.)
+    ///
+    /// # Errors
+    ///
+    /// Writing to the terminal failed.
+    pub(crate) fn clear(&mut self) -> io::Result<()> {
+        self.terminal.backend_mut().clear_region(ClearType::All)?;
+        // The last frame is forgotten too: the next draw is against blank.
+        self.terminal.swap_buffers();
+        Ok(())
     }
 }
 

@@ -14,6 +14,7 @@ use ratatui::Terminal;
 use ratatui::backend::Backend;
 use ratatui::crossterm::event::{self, KeyEvent};
 
+use crate::home::{Action, Home};
 use crate::screen::Recording;
 
 /// How often the screen redraws with nothing new, so the elapsed time and
@@ -194,6 +195,50 @@ pub fn run<B: Backend>(
             // queued behind it can't stop the recording unseen.
             if !was_asking && screen.is_confirming_stop() {
                 break;
+            }
+        }
+    }
+}
+
+/// Runs `home` on `terminal` until it asks for something: draws it and
+/// applies each event, redrawing at least every 250 ms. It ends with
+/// [`Action::Record`] when `R` is pressed, and with [`Action::Quit`] when
+/// it's closed from the keyboard, when a signal asks nota to stop
+/// ([`recorder::Event::Stopping`]), or once every sender of `events` is
+/// gone. The caller then stops its [`InputThread`].
+///
+/// # Errors
+///
+/// - [`RunError::Terminal`] if drawing fails.
+/// - [`RunError::InputLost`] if the input thread reports that reading the
+///   terminal failed.
+pub fn run_home<B: Backend>(
+    terminal: &mut Terminal<B>,
+    home: &mut Home,
+    events: &Receiver<Event>,
+) -> Result<Action, RunError<B::Error>> {
+    loop {
+        terminal
+            .draw(|frame| home.draw(frame))
+            .map_err(RunError::Terminal)?;
+        let first = match events.recv_timeout(REDRAW) {
+            Ok(event) => event,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => return Ok(Action::Quit),
+        };
+        let waiting = events.try_iter().take(MAX_BATCH - 1);
+        for event in std::iter::once(first).chain(waiting) {
+            match event {
+                Event::Key { key, .. } => {
+                    if let Some(action) = home.handle_key(key) {
+                        return Ok(action);
+                    }
+                }
+                Event::Recorder(recorder::Event::Stopping | recorder::Event::Stopped(_)) => {
+                    return Ok(Action::Quit);
+                }
+                Event::Recorder(_) | Event::Resize => {}
+                Event::InputLost(kind) => return Err(RunError::InputLost(kind)),
             }
         }
     }
@@ -448,6 +493,61 @@ mod tests {
         // The last draw shows the text with its mark.
         let screen_text = format!("{}", terminal.backend());
         assert!(screen_text.contains("│ ◆ loop text"), "{screen_text}");
+    }
+
+    fn home() -> Home {
+        let session = crate::home::Session {
+            id: 1,
+            title: "Loop".into(),
+            status: crate::home::Status::Ready,
+            duration: None,
+            date: None,
+            detail: None,
+        };
+        Home::new(vec![session], "parakeet", Theme::no_color())
+    }
+
+    /// Runs Home over `events`, then nothing more.
+    fn run_home_over(events: Vec<Event>) -> Result<Action, RunError<std::convert::Infallible>> {
+        let mut terminal = Terminal::new(TestBackend::new(62, 20)).unwrap();
+        let (event_tx, event_rx) = mpsc::channel();
+        for event in events {
+            event_tx.send(event).unwrap();
+        }
+        drop(event_tx);
+        run_home(&mut terminal, &mut home(), &event_rx)
+    }
+
+    #[test]
+    fn home_runs_until_it_asks_to_record() {
+        let events = vec![
+            Event::Resize,
+            key_at(KeyCode::Enter, 0),
+            key_at(KeyCode::Esc, 0),
+            key('R'),
+            key('q'),
+        ];
+        assert_eq!(run_home_over(events).unwrap(), Action::Record);
+    }
+
+    #[test]
+    fn home_quits_on_q_a_signal_or_when_the_events_end() {
+        assert_eq!(run_home_over(vec![key('q')]).unwrap(), Action::Quit);
+        let stopping = Event::Recorder(recorder::Event::Stopping);
+        assert_eq!(
+            run_home_over(vec![stopping, key('R')]).unwrap(),
+            Action::Quit
+        );
+        assert_eq!(run_home_over(Vec::new()).unwrap(), Action::Quit);
+    }
+
+    #[test]
+    fn home_stops_when_the_keyboard_is_lost() {
+        let lost = Event::InputLost(io::ErrorKind::BrokenPipe);
+        assert!(matches!(
+            run_home_over(vec![lost, key('R')]),
+            Err(RunError::InputLost(io::ErrorKind::BrokenPipe))
+        ));
     }
 
     #[test]
