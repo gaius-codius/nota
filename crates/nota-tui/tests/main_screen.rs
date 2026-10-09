@@ -198,6 +198,14 @@ fn main_wide_with_a_selection() {
         .collect();
     // The fifth of six entries: its time and its text.
     assert_eq!(lit, [13, 14]);
+    // And ▸ beside it, which shows without colour too.
+    let mut plain = main_screen_in(Theme::no_color());
+    press(&mut plain, KeyCode::Char('k'));
+    let terminal = draw(&mut plain, 100, 20);
+    let pointers: Vec<u16> = (0..20)
+        .filter(|&y| terminal.backend().buffer()[(69, y)].symbol() == "▸")
+        .collect();
+    assert_eq!(pointers, [16]);
 }
 
 #[test]

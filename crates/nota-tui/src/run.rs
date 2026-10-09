@@ -1,5 +1,5 @@
-//! The screen's loop, on threads and channels: keys and the recorder's
-//! events in, commands to the recorder out.
+//! The screen's loop, on threads and channels: keys, pastes and the
+//! recorder's events in, commands to the recorder out.
 
 use std::io;
 use std::sync::Arc;
@@ -253,7 +253,7 @@ pub fn run_home<B: Backend>(
     }
 }
 
-/// A thread that reads keys and resizes from the terminal and sends them as
+/// A thread that reads keys, pastes and resizes from the terminal and sends them as
 /// [`Event`]s, each key stamped with the session clock as it's read. Keys
 /// already waiting when it starts are discarded: they were typed before the
 /// screen was there to take them (during a slow start-up, say), and a

@@ -47,8 +47,8 @@ pub(crate) struct Live {
     meters: BTreeMap<TrackId, Meter>,
     /// Every sample captured, on every track, for the footer's size. The
     /// samples a broken journal dropped are counted too: nothing reports
-    /// how many there were, and that loss is a warning's to report, not
-    /// the size's.
+    /// how many there were. The summary after the stop says a journal
+    /// broke; the screen doesn't show warnings yet.
     recorded_samples: u64,
 }
 

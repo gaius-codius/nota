@@ -440,8 +440,15 @@ impl Recording {
                     self.theme.highlight,
                 );
             }
+            // ▸ marks the selection too, for when the highlight has no
+            // colour (`NO_COLOR`).
+            let pointer = if self.selected == Some(index) {
+                Span::styled("▸", self.theme.accent)
+            } else {
+                Span::raw(" ")
+            };
             let time = Line::from(vec![
-                Span::raw(" "),
+                pointer,
                 glyph,
                 Span::styled(format!(" {}", clock_time(annotation.at())), self.theme.text),
             ]);

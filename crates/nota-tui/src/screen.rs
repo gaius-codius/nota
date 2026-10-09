@@ -38,8 +38,8 @@ pub struct Recording {
     pub(crate) utterances: Vec<Utterance>,
     pub(crate) transcribing: bool,
     pub(crate) recorded_bytes: u64,
-    /// In session-time order, kept so as each is added: the band, the
-    /// margin and the panel find theirs by halving.
+    /// In session-time order, kept so as each is added: the margin and
+    /// the panel find theirs by halving.
     pub(crate) annotations: Vec<Annotation>,
     /// The entry of the marks-and-notes panel `j`/`k` selected, by index
     /// into `annotations`.
@@ -147,7 +147,8 @@ impl Recording {
     ///   it, `esc` drops it, and a blank note is dropped too.
     /// - `j` and `k` (or `↓` and `↑`) move through the marks-and-notes
     ///   panel, to later and earlier ones; the first press selects the
-    ///   newest. The selection stays within the list.
+    ///   newest. The selection stays within the list, and `esc` clears it,
+    ///   so the panel follows the newest again.
     /// - `s` asks whether to stop the recording, and so does Ctrl+C, even
     ///   while typing a note. `y` stops it, unless it comes within half a
     ///   second of the question opening: that's typing, not an answer. Any
@@ -234,6 +235,10 @@ impl Recording {
                 self.select(|selected, _| selected.saturating_sub(1));
                 None
             }
+            KeyCode::Esc => {
+                self.selected = None;
+                None
+            }
             KeyCode::Char('n' | 'N') => {
                 self.draft = Some(Draft {
                     at,
@@ -252,20 +257,34 @@ impl Recording {
     /// Adds pasted `text` to the note being typed, if one is and the stop
     /// question isn't open; otherwise it's dropped, so pasted letters never
     /// act as keys. A note is one line: line breaks and tabs become spaces,
-    /// other control and bidirectional formatting characters are dropped,
+    /// a run of them is one space, other control and bidirectional
+    /// formatting characters are dropped,
     /// and what passes the note's length limit is cut off.
     pub fn paste(&mut self, text: &str) {
         if self.stop != Stop::No {
             return;
         }
         let Some(draft) = &mut self.draft else { return };
-        let room = MAX_NOTE_CHARS.saturating_sub(draft.text.chars().count());
-        draft.text.extend(
-            text.chars()
-                .map(|c| if c.is_whitespace() { ' ' } else { c })
-                .filter(|&c| is_drawn(c))
-                .take(room),
-        );
+        let mut room = MAX_NOTE_CHARS.saturating_sub(draft.text.chars().count());
+        let mut space = draft.text.ends_with(' ');
+        for c in text.chars() {
+            if room == 0 {
+                break;
+            }
+            if c.is_whitespace() {
+                if space {
+                    continue;
+                }
+                space = true;
+                draft.text.push(' ');
+            } else if is_drawn(c) {
+                space = false;
+                draft.text.push(c);
+            } else {
+                continue;
+            }
+            room -= 1;
+        }
     }
 
     /// Adds `annotation` in time order, after any at the same moment, and
@@ -758,14 +777,28 @@ mod tests {
             [2, 1, 0, 0, 0, 1, 2, 2].map(Some),
             "j later, k earlier, never past either end"
         );
-        // An earlier one added keeps the same one selected.
+        // An earlier one added keeps the same one selected, one landing
+        // just before it included.
         screen.handle_key_at(press(KeyCode::Char('m')), secs(5));
         assert_eq!(screen.selected, Some(3));
         assert_eq!(screen.annotations()[3].at(), secs(30));
         assert_eq!(screen.annotations()[0].at(), secs(5));
-        // While typing, `j` and `k` are letters.
+        screen.handle_key_at(press(KeyCode::Char('m')), secs(25));
+        assert_eq!(screen.annotations()[3].at(), secs(25));
+        assert_eq!(screen.selected, Some(4));
+        assert_eq!(screen.annotations()[4].at(), secs(30));
+        // `esc` clears it; the next press selects the newest again.
+        screen.handle_key(press(KeyCode::Esc));
+        assert_eq!(screen.selected, None);
+        screen.handle_key(press(KeyCode::Char('k')));
+        assert_eq!(screen.selected, Some(4));
+        screen.handle_key(press(KeyCode::Char('k')));
+        assert_eq!(screen.selected, Some(3));
+        // While typing, `j` and `k` are letters, and `esc` drops the note.
         screen.handle_key(press(KeyCode::Char('n')));
         type_text(&mut screen, "jk");
+        screen.handle_key(press(KeyCode::Esc));
+        assert!(!screen.is_typing_note());
         assert_eq!(screen.selected, Some(3));
     }
 
@@ -778,7 +811,7 @@ mod tests {
         assert!(screen.annotations().is_empty());
         screen.handle_key(press(KeyCode::Char('n')));
         type_text(&mut screen, "a");
-        screen.paste("b\nc\td\u{202e}\u{7}e");
+        screen.paste("b\r\nc\td\u{202e}\u{7}e");
         // While the stop question is open, a paste is dropped.
         screen.handle_key(ctrl_c());
         assert!(screen.is_confirming_stop());
