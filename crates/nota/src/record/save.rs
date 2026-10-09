@@ -23,7 +23,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use nota_core::recorder::{Cause, Event as RecorderEvent, Warning, WarningState};
-use nota_core::{Clock, Utterance};
+use nota_core::{Clock, Utterance, Word};
 use nota_store::{Annotation, StoreError};
 use nota_tui::Event;
 
@@ -38,15 +38,15 @@ const MAX_PENDING: usize = 10_000;
 /// Something to store.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ToSave {
-    /// Text the engine heard, placed in session time.
-    Heard(Utterance),
+    /// Text the engine heard, and its words, placed in session time.
+    Heard(Utterance, Vec<Word>),
     /// A mark or a note.
     Annotation(Annotation),
 }
 
 impl ToSave {
     const fn is_text(&self) -> bool {
-        matches!(self, Self::Heard(_))
+        matches!(self, Self::Heard(..))
     }
 }
 

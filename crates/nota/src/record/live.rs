@@ -7,7 +7,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use nota_core::recorder;
-use nota_core::{Clock, TrackId};
+use nota_core::{Clock, TrackId, Utterance, Word};
 use nota_recorder::capture::RecorderEvent;
 use nota_recorder::engine::{EngineEvent, EngineStatus, EngineSupervisor};
 use nota_tui::Event;
@@ -95,7 +95,7 @@ pub(super) fn spawn_live(
                     }
                 }
                 if let LiveInput::Engine(event) = input {
-                    save_texts(&live.engine(event).updates, &save);
+                    save_heard(live.engine(event).heard, &save);
                 }
             }
             log.map(|(log, _)| log)
@@ -156,19 +156,17 @@ fn apply(
             engine.flush(track);
         }
     }
-    save_texts(&actions.updates, save);
+    save_heard(actions.heard, save);
     for update in actions.updates {
         let _ = ui.send(Event::Recorder(update));
     }
 }
 
-/// Hands the texts among `updates` to the saver.
-fn save_texts(updates: &[recorder::Event], save: &Sender<ToSave>) {
-    for update in updates {
-        if let recorder::Event::Text(text) = update {
-            // A saver that has stopped has said why in its report.
-            let _ = save.send(ToSave::Heard(text.clone()));
-        }
+/// Hands `heard`, if any, to the saver.
+fn save_heard(heard: Option<(Utterance, Vec<Word>)>, save: &Sender<ToSave>) {
+    if let Some((text, words)) = heard {
+        // A saver that has stopped has said why in its report.
+        let _ = save.send(ToSave::Heard(text, words));
     }
 }
 
@@ -255,7 +253,7 @@ mod tests {
         let saved: Vec<_> = saved
             .try_iter()
             .map(|s| match s {
-                ToSave::Heard(u) => (u.track(), u.start(), u.end()),
+                ToSave::Heard(u, _) => (u.track(), u.start(), u.end()),
                 ToSave::Annotation(_) => panic!("{s:?}"),
             })
             .collect();
@@ -313,7 +311,7 @@ mod tests {
         late.join().unwrap();
         let saved: Vec<_> = saved.try_iter().collect();
         assert_eq!(saved.len(), 1, "{saved:?}");
-        let ToSave::Heard(u) = &saved[0] else {
+        let ToSave::Heard(u, _) = &saved[0] else {
             panic!("{saved:?}");
         };
         assert_eq!(u.text(), "the last words");

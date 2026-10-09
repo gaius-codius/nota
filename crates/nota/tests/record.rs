@@ -1151,6 +1151,14 @@ fn assert_final_pass_covers(data: &Path, session: u64) {
         let (from, to) = (text.range.start().get(), text.range.end().get());
         assert_eq!(text.text, Some(format!("{} samples", to - from)));
         assert_eq!(text.heard_by.engine, "fake");
+        // Its words came through the engine protocol and were stored.
+        let words: Vec<(&str, u64, u64)> = text
+            .words
+            .iter()
+            .map(|w| (w.text.as_str(), w.range.start().get(), w.range.end().get()))
+            .collect();
+        let len = (to - from).to_string();
+        assert_eq!(words, [(len.as_str(), from, to), ("samples", to, to)]);
         let track = text.track.get();
         match covered.last_mut() {
             Some(last) if last.0 == track && last.2 == from => last.2 = to,

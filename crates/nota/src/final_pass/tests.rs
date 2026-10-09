@@ -133,7 +133,13 @@ fn confirmed_text_is_stored_with_its_progress() {
             total: 300
         }
     );
-    let text = Transcript::new(MIC, range(0, 80), "hello".into()).unwrap();
+    let word = |text: &str, a, b| {
+        nota_core::messages::HeardWord::new(text.to_owned(), range(a, b)).unwrap()
+    };
+    let text = Transcript::new(MIC, range(0, 80), "hello there".into())
+        .unwrap()
+        .with_words(vec![word("hello", 0, 40), word("there", 40, 80)])
+        .unwrap();
     sink.confirmed(MIC, s(100), vec![text], vec![]).unwrap();
     sink.confirmed(MIC, s(250), vec![], vec![range(200, 250)])
         .unwrap();
@@ -145,11 +151,21 @@ fn confirmed_text_is_stored_with_its_progress() {
             .map(|t| (t.track, t.range, t.text.clone()))
             .collect::<Vec<_>>(),
         [
-            (MIC, range(0, 80), Some("hello".to_owned())),
+            (MIC, range(0, 80), Some("hello there".to_owned())),
             (MIC, range(200, 250), None),
         ]
     );
     assert_eq!(stored[0].heard_by, heard_by());
+    // The words, by sample, as the engine gave them.
+    let word = |text: &str, a, b| FinalWord {
+        text: text.to_owned(),
+        range: range(a, b),
+    };
+    assert_eq!(
+        stored[0].words,
+        [word("hello", 0, 40), word("there", 40, 80)]
+    );
+    assert!(stored[1].words.is_empty());
     assert_eq!(
         db.with(|db| db.final_progress(SESSION)).unwrap()[&MIC],
         s(250)

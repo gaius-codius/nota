@@ -11,6 +11,7 @@ use super::*;
 #[derive(Debug, Default)]
 struct FakeModels {
     transcribed: Vec<usize>,
+    stray_words: bool,
 }
 
 /// Non-zero samples are speech. A run of them is reported once a zero
@@ -50,13 +51,25 @@ impl Detector for FakeDetector {
 }
 
 impl Transcriber for FakeModels {
-    fn transcribe(&mut self, audio: &[f32]) -> String {
+    /// "N loud", N the speech samples, as two words: "N" over the first
+    /// half of the audio and "loud" over the second. With `stray_words`,
+    /// the second runs a sample past the audio.
+    fn transcribe(&mut self, audio: &[f32]) -> Heard {
         self.transcribed.push(audio.len());
         let loud = audio.iter().filter(|&&s| s != 0.0).count();
         if loud == 0 {
-            String::new()
-        } else {
-            format!("{loud} loud")
+            return Heard::default();
+        }
+        let len = audio.len() as u64;
+        let at = |n: u64| SampleCount::new(n);
+        let word = |text: String, from, to| TimedWord { text, from, to };
+        let end = len + u64::from(self.stray_words);
+        Heard {
+            text: format!("{loud} loud"),
+            words: vec![
+                word(loud.to_string(), at(0), at(len / 2)),
+                word("loud".to_owned(), at(len / 2), at(end)),
+            ],
         }
     }
 }
@@ -179,6 +192,7 @@ fn transcribes_speech_and_confirms_everything_on_flush() {
 
     let mut confirmed = 1_000;
     let mut text = Vec::new();
+    let mut words = Vec::new();
     for frame in &frames[1..] {
         match frame {
             Frame::Message(FromEngine::Confirmed { track, up_to }) => {
@@ -194,6 +208,7 @@ fn transcribes_speech_and_confirms_everything_on_flush() {
                     "text starts where the last confirmed did"
                 );
                 text.push((t.range(), t.text().to_owned()));
+                words.push((t.range(), t.words().to_vec()));
             }
             Frame::Hello(_) => panic!("second hello"),
         }
@@ -202,8 +217,50 @@ fn transcribes_speech_and_confirms_everything_on_flush() {
     // One chunk holds all the speech, and only it is transcribed.
     assert_eq!(text.len(), 1, "{text:?}");
     assert_eq!(text[0].1, "16000 loud");
+    // Its words, located from the chunk's start.
+    let (range, words) = &words[0];
+    let mid = range.start().get() + range.len().get() / 2;
+    let spans: Vec<_> = words
+        .iter()
+        .map(|w| (w.text(), w.range().start().get(), w.range().end().get()))
+        .collect();
+    assert_eq!(
+        spans,
+        [
+            ("16000", range.start().get(), mid),
+            ("loud", mid, range.end().get())
+        ]
+    );
     assert!(text[0].0.contains(SampleIndex::new(1_000 + 64_000)));
     assert!(text[0].0.contains(SampleIndex::new(1_000 + 80_000 - 1)));
+}
+
+/// Words a recogniser places outside the audio are dropped, and the text
+/// is sent without them.
+#[test]
+fn words_that_dont_fit_are_dropped_and_the_text_kept() {
+    let mut input = hello();
+    input.extend(audio(0, SampleRate::SPEECH, vec![1_000; 1_600]));
+    input.extend(flush());
+    let mut output = Vec::new();
+    run(&input[..], &mut output, live(), || {
+        Ok(FakeModels {
+            stray_words: true,
+            ..FakeModels::default()
+        })
+    })
+    .unwrap();
+    let mut reader = FrameReader::new(&output[..]);
+    let mut texts = Vec::new();
+    while let Some(frame) = reader.read_frame::<FromEngine>().unwrap() {
+        if let Frame::Message(FromEngine::Transcript(t)) = frame {
+            texts.push(t);
+        }
+    }
+    assert_eq!(
+        texts,
+        [Transcript::new(TRACK, range(0, 1_600), "1600 loud".into()).unwrap()]
+    );
 }
 
 #[test]
@@ -255,7 +312,13 @@ fn stdin_closing_transcribes_what_each_track_still_holds() {
         frames[1..],
         [
             Frame::Message(FromEngine::Transcript(
-                Transcript::new(TRACK, range(0, 1_600), "1600 loud".into()).unwrap()
+                Transcript::new(TRACK, range(0, 1_600), "1600 loud".into())
+                    .unwrap()
+                    .with_words(vec![
+                        HeardWord::new("1600".into(), range(0, 800)).unwrap(),
+                        HeardWord::new("loud".into(), range(800, 1_600)).unwrap(),
+                    ])
+                    .unwrap()
             )),
             Frame::Message(FromEngine::Confirmed {
                 track: TRACK,

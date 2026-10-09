@@ -65,3 +65,19 @@ Turn the crashing input into a unit test in `crates/nota-recorder/src/journal/`
 that passes the bytes to `read_journal`, then fix the reader. Seeds are
 synthetic. Never commit an input that contains recorded audio; write the
 minimal bytes into the test by hand instead.
+
+## engine_protocol
+
+Reads arbitrary bytes as a stream of engine-protocol frames, in each
+direction, with `nota_core::protocol::FrameReader`, and asserts on every
+frame it accepts:
+
+- it re-encodes to exactly the bytes it was read from, so no two byte
+  strings mean the same message
+- a transcript covers some samples, and each of its words has text, lies
+  inside the transcript's range, and starts no earlier than the word before
+  ends
+
+Seeds are any encoded frames; the property tests in
+`crates/nota-core/src/protocol/props.rs` cover the same contract on every
+`cargo nextest` run.
