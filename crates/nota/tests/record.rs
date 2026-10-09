@@ -31,7 +31,7 @@ use nota_core::{Clock, SessionId, SystemClock};
 use nota_recorder::fs::{Fs, StdFs};
 use nota_recorder::segment::needs_salvage;
 use nota_recorder::session::SessionDir;
-use nota_store::{Annotation, SessionState, Store};
+use nota_store::{Annotation, SessionState, Store, TrackKind};
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::fs::{Mode, OFlags};
 use rustix::process::{Pid, Signal, kill_process, kill_process_group};
@@ -846,7 +846,8 @@ fn a_library_locked_mid_session_costs_nothing_once_it_is_back() {
 /// Acceptance (GAI-310): a library database that can't be written holds up
 /// nothing that records. The recording goes on and stops as usual, the
 /// summary says what wasn't saved, and the journals hold every sample, so
-/// the next start publishes all of it.
+/// the next start publishes all of it. Acceptance (GAI-335): the next start
+/// adopts it with its title and tracks.
 #[test]
 #[expect(clippy::disallowed_methods, reason = "test scaffolding")]
 fn a_library_that_cant_be_written_leaves_the_recording_whole() {
@@ -879,6 +880,28 @@ fn a_library_that_cant_be_written_leaves_the_recording_whole() {
     assert!(next.exits().expect("nota didn't stop").success());
     let (rows, left) = published(&tmp.0, 1);
     assert!(!left, "journals left: {}", next.output());
+    let store = Store::open(&db).unwrap();
+    let id = SessionId::new(1);
+    let session = store.session(id).unwrap().unwrap();
+    assert_eq!(session.title.as_deref(), Some("Workshop"));
+    assert!(session.started_at.is_some());
+    let tracks: Vec<(u32, TrackKind, Option<String>)> = store
+        .tracks(id)
+        .unwrap()
+        .into_iter()
+        .map(|t| (t.track.get(), t.kind, t.source))
+        .collect();
+    assert_eq!(
+        tracks
+            .iter()
+            .map(|(n, kind, _)| (*n, *kind))
+            .collect::<Vec<_>>(),
+        [(0, TrackKind::Microphone), (1, TrackKind::System)]
+    );
+    assert!(
+        tracks.iter().all(|(.., source)| source.is_some()),
+        "{tracks:?}"
+    );
     for (track, count) in sent {
         let mut ranges: Vec<(u64, u64)> = rows
             .iter()

@@ -399,7 +399,7 @@ fn a_session_number_the_library_holds_already_is_refused() {
     let taken = SessionId::new(5);
     library
         .db()
-        .with(|db| db.adopt_session(taken, None))
+        .with(|db| db.adopt_session(&NewSession::bare(taken), None))
         .unwrap();
     // New sessions are numbered after the database's too.
     assert_eq!(library.create().unwrap().id.get(), 6);
@@ -842,4 +842,84 @@ fn a_journal_set_aside_as_damaged_needs_you() {
             "1 damaged journal set aside · audio salvage couldn't read is kept".to_owned()
         )
     );
+}
+
+/// Acceptance (GAI-335): a session recorded with the library database
+/// down from start to stop is adopted at the next start with the title and
+/// tracks kept in its directory, and its audio published.
+#[test]
+fn a_session_recorded_without_the_database_keeps_its_title_and_tracks() {
+    let tmp = TestDir::new("kept");
+    let library = Library::open(&tmp.0).unwrap();
+    let session = library.create().unwrap();
+    drop(library);
+    break_db(&tmp.0);
+    let library = Library::open(&tmp.0).unwrap();
+    let rows = new_rows(&library, session.id);
+    let row = NewSession {
+        id: session.id,
+        title: Some("lecture 1".to_owned()),
+        language: Some("en".to_owned()),
+        started_at: WallTime::from_unix_seconds(1_760_004_000),
+        tracks: vec![Track {
+            track: MIC,
+            kind: TrackKind::Microphone,
+            source: Some("mic".to_owned()),
+        }],
+    };
+    session.keep(&row).unwrap();
+    // A session holding only its kept row is left alone, as one just made.
+    assert!(is_empty(&session));
+    let (lock, finished) = record(&session, 3_000);
+    let mut bound = SessionStore::new(lock, rows);
+    assert!(publish_journals(&mut bound, length(), &finished).is_err());
+    drop(bound);
+
+    // The next start, with the database back.
+    mend_db(&tmp.0);
+    let library = Library::open(&tmp.0).unwrap();
+    let salvaged = library.salvage_all(length()).unwrap();
+    assert!(
+        matches!(salvaged.as_slice(), [Salvaged::Done(id, aside)] if *id == session.id && aside.is_empty()),
+        "{salvaged:?}"
+    );
+    let adopted = library
+        .db()
+        .with(|db| db.session(session.id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(adopted.title.as_deref(), Some("lecture 1"));
+    assert_eq!(adopted.language.as_deref(), Some("en"));
+    assert_eq!(adopted.started_at, row.started_at);
+    assert_eq!(adopted.state, SessionState::Stopped);
+    assert_eq!(
+        library.db().with(|db| db.tracks(session.id)).unwrap(),
+        row.tracks
+    );
+    assert_eq!(covered(&segments(&library, session.id)), [(0, 3_000)]);
+}
+
+/// A kept row that doesn't parse doesn't hold up the session's audio: it's
+/// adopted with its number alone, as before nota kept one.
+#[test]
+fn a_kept_row_that_cant_be_read_is_left_out() {
+    let tmp = TestDir::new("kept-bad");
+    let library = Library::open(&tmp.0).unwrap();
+    let session = library.create().unwrap();
+    let mut file = StdFs.create(&session.dir.join("session.txt")).unwrap();
+    file.write_all(b"nota session 99\ntitle later\n").unwrap();
+    drop(file);
+    drop(record(&session, 3_000));
+    assert!(matches!(
+        library.salvage_all(length()).unwrap().as_slice(),
+        [Salvaged::Done(..)]
+    ));
+    let adopted = library
+        .db()
+        .with(|db| db.session(session.id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(adopted.title, None);
+    assert_eq!(library.db().with(|db| db.tracks(session.id)).unwrap(), []);
+    assert_eq!(covered(&segments(&library, session.id)), [(0, 3_000)]);
 }

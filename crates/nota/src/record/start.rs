@@ -142,8 +142,16 @@ pub(super) fn start<B: CaptureBackend>(
     // starts; then while recording. A full disk stops it.
     let disk = watch_disk(args, &session.audio(), captures.len(), &watch, &ui, clock)?;
 
-    // Recording never waits on the database.
-    let rows = session_rows(&library, setup, session.id, &sources, &captures);
+    // Recording never waits on the database: the session's row is kept in
+    // its directory too, so it's adopted with its title and tracks if the
+    // database never takes it.
+    let row = session_row(setup, session.id, &sources, &captures);
+    if let Err(e) = session.keep(&row) {
+        outcome.notes.push(format!(
+            "the session's title and tracks are kept only in the library: {e}"
+        ));
+    }
+    let rows = NewSessionRows::new(library.db().clone(), row);
     // The live text, marks and notes are stored as they come, on a thread
     // of their own; whichever of it and the publisher writes first adds the
     // session's row.
@@ -385,34 +393,29 @@ fn set_aside_part(aside: &[PathBuf]) -> String {
     }
 }
 
-/// The rows the publisher adds for this session: its title and the tracks
-/// that started.
-fn session_rows<S>(
-    library: &Library,
+/// This session's row: its title and the tracks that started.
+fn session_row<S>(
     setup: &Setup,
     id: SessionId,
     sources: &[(TrackId, Source); 2],
     captures: &[Capture<S>],
-) -> NewSessionRows {
-    NewSessionRows::new(
-        library.db().clone(),
-        NewSession {
-            id,
-            title: Some(setup.title.clone()),
-            language: None,
-            // When it started, for its date; read once, here.
-            started_at: wall_now(),
-            tracks: sources
-                .iter()
-                .filter(|(track, _)| captures.iter().any(|c| c.track() == *track))
-                .map(|(track, source)| Track {
-                    track: *track,
-                    kind: track_kind(*track),
-                    source: Some(source_name(source)),
-                })
-                .collect(),
-        },
-    )
+) -> NewSession {
+    NewSession {
+        id,
+        title: Some(setup.title.clone()),
+        language: None,
+        // When it started, for its date; read once, here.
+        started_at: wall_now(),
+        tracks: sources
+            .iter()
+            .filter(|(track, _)| captures.iter().any(|c| c.track() == *track))
+            .map(|(track, source)| Track {
+                track: *track,
+                kind: track_kind(*track),
+                source: Some(source_name(source)),
+            })
+            .collect(),
+    }
 }
 
 /// The engine that hears the live text, and its model: the Parakeet
