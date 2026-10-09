@@ -68,7 +68,7 @@ const TRANSCRIBING: &str = "░░░";
 
 impl Recording {
     /// Draws the screen over the whole frame: the main panel, and beside it
-    /// the marks-and-notes panel from [`WIDE_MIN_WIDTH`] columns.
+    /// the marks-and-notes panel from 100 columns.
     pub fn draw(&mut self, frame: &mut Frame<'_>) {
         let area = frame.area();
         if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
