@@ -288,7 +288,8 @@ fn without_a_ballast_the_same_full_disk_leaves_the_recording_unfinished() {
 }
 
 /// A full disk in each kind of write, crashed after every operation of the
-/// recording (making the ballast included) with three outcomes: the loss
+/// recording (making the ballast included), losing everything unsynced and
+/// keeping it all (the partial outcomes are the segment tests'): the loss
 /// bound holds up to the failure, and salvage with room ends with every
 /// durable sample in a row.
 fn crash_swept(kind: Where) {
@@ -300,11 +301,7 @@ fn crash_swept(kind: Where) {
         check_full,
     )
     .dirs([session(), db(), data()])
-    .outcomes(vec![
-        CrashOutcome::LoseUnsynced,
-        CrashOutcome::KeepAll,
-        CrashOutcome::Partial { seed: 5 },
-    ])
+    .outcomes(vec![CrashOutcome::LoseUnsynced, CrashOutcome::KeepAll])
     .run()
     .unwrap_or_else(|failure| panic!("{kind:?}: {failure}"));
     assert!(summary.scenario_ops > 100, "{summary:?}");
