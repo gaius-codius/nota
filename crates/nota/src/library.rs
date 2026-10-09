@@ -9,7 +9,8 @@
 //! after the highest on disk or in the database.
 //!
 //! **Recording never waits on the database.** A new session's row is
-//! added by the publisher, before its first segment row, so a database
+//! added by the publisher, before its first segment row (or by the saver
+//! of live text, marks and notes, if that writes first), so a database
 //! that can't be opened holds up publishing (the journals stay on disk)
 //! and never recording. The next start adds any session directory the
 //! database doesn't have, importing its M1 per-session store
@@ -18,6 +19,7 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use nota_core::{SampleCount, SampleRate, SessionId, TrackId, WallTime};
@@ -436,32 +438,41 @@ fn no_number() -> io::Error {
 
 /// A new session's rows in the library database, as the recorder's store:
 /// the session's own row is added before anything else is read or written,
-/// when the database is first there to take it.
-#[derive(Debug)]
+/// when the database is first there to take it. Clones share the row: it's
+/// added once, by whichever writes first (the publisher, or the saver of
+/// live text, marks and notes).
+#[derive(Debug, Clone)]
 pub(crate) struct NewSessionRows {
     id: SessionId,
     db: Writer,
     /// The session's row, until it's added.
-    pending: Option<NewSession>,
+    pending: Arc<Mutex<Option<NewSession>>>,
 }
 
 impl NewSessionRows {
     /// `session`'s rows in `db`. Does no I/O.
-    pub(crate) const fn new(db: Writer, session: NewSession) -> Self {
+    pub(crate) fn new(db: Writer, session: NewSession) -> Self {
         Self {
             id: session.id,
             db,
-            pending: Some(session),
+            pending: Arc::new(Mutex::new(Some(session))),
         }
+    }
+
+    /// The library database.
+    pub(crate) const fn db(&self) -> &Writer {
+        &self.db
     }
 
     /// Adds the session's row if it isn't added yet. Refuses a call for any
     /// other session.
-    fn added(&mut self, session: SessionId) -> Result<(), StoreError> {
+    pub(crate) fn added(&self, session: SessionId) -> Result<(), StoreError> {
         if session != self.id {
             return Err(StoreError::NoSession(session));
         }
-        let Some(new) = &self.pending else {
+        // Nothing panics while holding it; the row is added or it isn't.
+        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(new) = &*pending else {
             return Ok(());
         };
         self.db.with(|db| match db.create_session(new) {
@@ -473,7 +484,7 @@ impl NewSessionRows {
             },
             done => done,
         })?;
-        self.pending = None;
+        *pending = None;
         Ok(())
     }
 }

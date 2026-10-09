@@ -18,6 +18,10 @@
 //! - **Disk:** checks the free space at once and every few seconds, keeps
 //!   the ballast, and sends the screen the space left, the low-disk
 //!   warning, and a full disk (see [`nota_recorder::disk`]).
+//! - **Saver:** stores the live text, marks and notes in the library
+//!   database as they come (see `record/save.rs`). Nothing waits on it.
+//! - **Marks:** passes the screen's marks and notes to the saver as
+//!   they're made.
 //! - **Signals:** turns SIGHUP, SIGTERM and SIGINT into a request to close
 //!   the screen, and notes SIGXCPU (see below).
 //!
@@ -39,7 +43,9 @@
 //! streams stop, the
 //! recorder records what they had sent and returns, the writer finishes
 //! (a last fsync of every journal), the publisher publishes the last
-//! journals, and the engine is shut down. Further signals are ignored
+//! journals while the engine is shut down (its answer to the last flush
+//! is still saved), and the saver stores what it was given before the
+//! session is marked stopped. Further signals are ignored
 //! meanwhile: the default action would kill the process before the last
 //! segments are published. (The app listens for them too, for its whole
 //! life, and closes once the recording has stopped.) Anything left
@@ -71,6 +77,7 @@
 //! - `record/start.rs`: starts everything.
 //! - `record/live.rs`: the live thread.
 //! - `record/signals.rs`: the signal thread.
+//! - `record/save.rs`: the saver thread.
 //! - `record/stop.rs`: stops everything, in order.
 //! - `record/summary.rs`: the screen and the summary of how it went.
 
@@ -84,6 +91,7 @@ use nota_recorder::capture::CaptureBackend;
 use nota_recorder::segment::SegmentLength;
 
 mod live;
+mod save;
 mod signals;
 mod start;
 mod stop;
@@ -219,8 +227,10 @@ fn record_with<B: CaptureBackend>(
         clock,
         &screening.ui,
         &screening.ui_events,
+        &screening.save,
     );
     drop(screening.ui);
+    drop(screening.save);
     let (shown, screen) = match shown {
         Ok((shown, screen)) => (Ok(shown), screen),
         Err(e) => (Err(e), None),

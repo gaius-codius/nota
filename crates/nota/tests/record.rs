@@ -31,7 +31,7 @@ use nota_core::{Clock, SessionId, SystemClock};
 use nota_recorder::fs::{Fs, StdFs};
 use nota_recorder::segment::needs_salvage;
 use nota_recorder::session::SessionDir;
-use nota_store::{SessionState, Store};
+use nota_store::{Annotation, SessionState, Store};
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::fs::{Mode, OFlags};
 use rustix::process::{Pid, Signal, kill_process, kill_process_group};
@@ -683,6 +683,218 @@ fn a_recording_killed_outright_is_salvaged_at_the_next_start() {
     assert_everything_sent_saved(&next, &tmp.0, 2, &[0, 1], 1_450);
 }
 
+/// Makes a mark, a note and another mark, a moment apart.
+fn annotate(nota: &mut Running) {
+    nota.press("m");
+    pause(Duration::from_millis(300));
+    nota.press("nbring clamps\r");
+    pause(Duration::from_millis(300));
+    nota.press("m");
+    pause(Duration::from_millis(300));
+}
+
+/// The session's marks and notes in the library, as `(text, at_ms)`: a
+/// mark's text is `"◆"`.
+fn annotations(data: &Path, session: u64) -> Vec<(String, u64)> {
+    Store::open(&data.join("library.db"))
+        .unwrap()
+        .annotations(SessionId::new(session))
+        .unwrap()
+        .into_iter()
+        .map(|a| {
+            let at = a.at().as_nanos() / 1_000_000;
+            match a {
+                Annotation::Mark(_) => ("◆".to_owned(), at),
+                Annotation::Note(n) => (n.text().to_owned(), at),
+            }
+        })
+        .collect()
+}
+
+/// The texts of [`annotations`], checking their times rise from after the
+/// start (the screen was up 1.5 s before the first) and stay within `ms`.
+fn annotated(data: &Path, session: u64, ms: u64) -> Vec<String> {
+    let found = annotations(data, session);
+    let mut last = 1_000;
+    for (text, at) in &found {
+        assert!(*at >= last && *at < ms, "{text} at {at} ms: {found:?}");
+        last = *at;
+    }
+    found.into_iter().map(|(text, _)| text).collect()
+}
+
+/// Acceptance (GAI-200): marks and notes are stored as they're made, in
+/// session time, and read back in order after a stop by `s y`.
+#[test]
+fn marks_and_notes_are_saved_through_a_stop_by_s_y() {
+    let tmp = TestDir::new("marks-keys");
+    let mut nota = recording(&tmp.0);
+    annotate(&mut nota);
+    // Stored before the stop: each goes to the library as it's made.
+    assert!(
+        wait_until(Duration::from_secs(10), || annotations(&tmp.0, 1).len()
+            == 3),
+        "{:?}",
+        annotations(&tmp.0, 1)
+    );
+    let at = nota.len();
+    nota.press("s");
+    assert!(nota.shows_after(at, "stop recording?"));
+    pause(Duration::from_millis(600));
+    nota.press("y");
+    let status = nota.exits().expect("nota didn't stop");
+    assert!(status.success(), "{status:?}: {}", nota.output());
+    assert_eq!(annotated(&tmp.0, 1, 10_000), ["◆", "bring clamps", "◆"]);
+    let said = visible(&nota.output.lock().unwrap());
+    assert!(!said.contains("saved"), "{said}");
+    assert_everything_sent_saved(&nota, &tmp.0, 1, &[0, 1], 1_450);
+}
+
+/// Acceptance (GAI-200): the same through SIGHUP, with a note still being
+/// typed when it came: that one's kept too.
+#[test]
+fn marks_and_notes_are_saved_through_a_hangup() {
+    let tmp = TestDir::new("marks-hup");
+    let mut nota = recording(&tmp.0);
+    annotate(&mut nota);
+    nota.press("nhalf typed");
+    pause(Duration::from_millis(300));
+    nota.signal(Signal::HUP);
+    let status = nota.exits().expect("nota didn't stop");
+    assert!(status.success(), "{status:?}: {}", nota.output());
+    assert_eq!(
+        annotated(&tmp.0, 1, 10_000),
+        ["◆", "bring clamps", "◆", "half typed"]
+    );
+    assert_everything_sent_saved(&nota, &tmp.0, 1, &[0, 1], 1_450);
+}
+
+/// Acceptance (GAI-310): what was stored before nota was killed outright
+/// is there after the next start's salvage.
+#[test]
+fn marks_and_notes_stored_before_a_kill_survive_it_and_salvage() {
+    let tmp = TestDir::new("marks-killed");
+    let mut killed = recording(&tmp.0);
+    annotate(&mut killed);
+    assert!(
+        wait_until(Duration::from_secs(10), || annotations(&tmp.0, 1).len()
+            == 3),
+        "{:?}",
+        annotations(&tmp.0, 1)
+    );
+    killed.signal(Signal::KILL);
+    assert!(killed.exits().is_some());
+
+    let mut next = recording(&tmp.0);
+    next.signal(Signal::TERM);
+    assert!(next.exits().expect("nota didn't stop").success());
+    assert!(
+        next.output().contains("salvaged session 1"),
+        "{}",
+        next.output()
+    );
+    assert_eq!(annotated(&tmp.0, 1, 10_000), ["◆", "bring clamps", "◆"]);
+    assert!(annotations(&tmp.0, 2).is_empty());
+}
+
+/// Acceptance (GAI-310): the library database failing mid-session (another
+/// connection holding its write lock past the busy timeout) holds up
+/// nothing that records. The recording carries on, and once the lock goes,
+/// what was made meanwhile is saved and every sample is published.
+#[test]
+fn a_library_locked_mid_session_costs_nothing_once_it_is_back() {
+    let tmp = TestDir::new("locked-library");
+    let mut nota = recording(&tmp.0);
+    nota.press("m");
+    assert!(
+        wait_until(Duration::from_secs(10), || annotations(&tmp.0, 1).len()
+            == 1),
+        "{:?}",
+        annotations(&tmp.0, 1)
+    );
+    let lock = rusqlite::Connection::open(tmp.0.join("library.db")).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    nota.press("nmade while locked\r");
+    pause(Duration::from_millis(300));
+    nota.press("m");
+    // Past the store's 5 s busy timeout: its writes fail meanwhile.
+    pause(Duration::from_secs(7));
+    assert_eq!(annotations(&tmp.0, 1).len(), 1, "written through the lock");
+    assert_eq!(
+        nota.child.try_wait().unwrap(),
+        None,
+        "the recording stopped"
+    );
+    lock.execute_batch("COMMIT").unwrap();
+    drop(lock);
+    assert!(
+        wait_until(Duration::from_secs(10), || annotations(&tmp.0, 1).len()
+            == 3),
+        "{:?}",
+        annotations(&tmp.0, 1)
+    );
+    nota.signal(Signal::TERM);
+    let status = nota.exits().expect("nota didn't stop");
+    assert!(status.success(), "{status:?}: {}", nota.output());
+    assert_eq!(
+        annotated(&tmp.0, 1, 30_000),
+        ["◆", "made while locked", "◆"]
+    );
+    assert_everything_sent_saved(&nota, &tmp.0, 1, &[0, 1], 8_000);
+}
+
+/// Acceptance (GAI-310): a library database that can't be written holds up
+/// nothing that records. The recording goes on and stops as usual, the
+/// summary says what wasn't saved, and the journals hold every sample, so
+/// the next start publishes all of it.
+#[test]
+#[expect(clippy::disallowed_methods, reason = "test scaffolding")]
+fn a_library_that_cant_be_written_leaves_the_recording_whole() {
+    let tmp = TestDir::new("no-library");
+    let db = tmp.0.join("library.db");
+    // A directory where the database should be: nothing can open it.
+    std::fs::create_dir_all(db.join("not a database")).unwrap();
+    let mut nota = recording(&tmp.0);
+    annotate(&mut nota);
+    nota.signal(Signal::TERM);
+    let status = nota.exits().expect("nota didn't stop");
+    // It stopped as asked, saying the recording isn't published yet.
+    assert_eq!(status.code(), Some(1), "{}", nota.output());
+    wait_until(Duration::from_secs(10), || {
+        tone_sent(&visible(&nota.output.lock().unwrap())).len() == 2
+    });
+    let said = visible(&nota.output.lock().unwrap());
+    assert!(
+        said.contains("3 of 3 marks and notes weren't saved to the library"),
+        "{said}"
+    );
+    assert!(said.contains("journals weren't published"), "{said}");
+    let sent = tone_sent(&said);
+    assert_eq!(sent.len(), 2, "{said}");
+
+    // The database is back: the next start publishes every sample sent.
+    std::fs::remove_dir_all(&db).unwrap();
+    let mut next = recording(&tmp.0);
+    next.signal(Signal::TERM);
+    assert!(next.exits().expect("nota didn't stop").success());
+    let (rows, left) = published(&tmp.0, 1);
+    assert!(!left, "journals left: {}", next.output());
+    for (track, count) in sent {
+        let mut ranges: Vec<(u64, u64)> = rows
+            .iter()
+            .filter(|(t, ..)| *t == track)
+            .map(|&(_, start, len)| (start, start + len))
+            .collect();
+        ranges.sort_unstable();
+        let mut end = 0;
+        for (start, next) in ranges {
+            assert_eq!(start, end, "track {track} has a gap at {end}");
+            end = next;
+        }
+        assert_eq!(end, count, "track {track}");
+    }
+}
+
 #[test]
 fn sigint_stops_with_everything_saved_and_the_terminal_restored() {
     stops_on(Signal::INT, "int");
@@ -849,9 +1061,8 @@ fn a_hangup_to_the_group_leaves_the_engine_to_nota() {
 }
 
 /// Acceptance (GAI-202, GAI-203), end to end: nota killed outright takes
-/// the engine with it within the supervisor's 3 s shutdown grace, even if
-/// the engine is still loading its models, as it may be here: the kernel
-/// kills it when nota dies.
+/// the engine with it, even if the engine is still loading its models, as
+/// it may be here: the kernel kills it when nota dies.
 #[test]
 fn a_killed_nota_takes_its_engine_with_it() {
     let Some(models) = test_models() else {
