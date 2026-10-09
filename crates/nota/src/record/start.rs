@@ -429,8 +429,8 @@ pub(super) fn heard_by((parakeet, _): &(PathBuf, PathBuf)) -> (String, String) {
 }
 
 /// How the saver stores each item: in session `session`, adding its row
-/// first if nothing has yet. Text is stored as heard by `heard_by`'s
-/// engine and model, without word times: the engine doesn't give them yet.
+/// first if nothing has yet. Text is stored with its words, as heard by
+/// `heard_by`'s engine and model.
 fn saving(
     rows: NewSessionRows,
     session: SessionId,
@@ -439,7 +439,7 @@ fn saving(
     move |item| {
         rows.added(session)?;
         rows.db().with(|db| match item {
-            ToSave::Heard(utterance) => {
+            ToSave::Heard(utterance, words) => {
                 // Text comes only from an engine, which has models.
                 let (engine, model) = heard_by
                     .clone()
@@ -448,7 +448,7 @@ fn saving(
                     utterance: utterance.clone(),
                     engine,
                     model,
-                    words: Vec::new(),
+                    words: words.clone(),
                 };
                 db.add_utterance(session, &heard).map(drop)
             }
@@ -610,7 +610,7 @@ mod tests {
         let mut write = saving(rows, id, Some(heard_by(&models)));
         let at = SessionTime::from_nanos(2_000_000_000);
         let heard = Utterance::new(SYSTEM, at, at, "welcome".to_owned()).unwrap();
-        write(&ToSave::Heard(heard.clone())).unwrap();
+        write(&ToSave::Heard(heard.clone(), Vec::new())).unwrap();
         write(&ToSave::Annotation(Annotation::Mark(Mark { at }))).unwrap();
 
         let stored = library
@@ -633,6 +633,76 @@ mod tests {
         assert!(utterances[0].heard.words.is_empty());
         assert_eq!(annotations, [Annotation::Mark(Mark { at })]);
         assert_eq!(shown[0].text, "welcome");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A live utterance, placed by the live thread through its track's
+    /// epoch and stored by the saver's writes, reads back from the store
+    /// with its words, each in session time within the utterance's span.
+    #[test]
+    #[expect(clippy::disallowed_methods, reason = "test scaffolding")]
+    fn a_live_utterance_is_stored_with_its_words_in_session_time() {
+        use nota_core::messages::{HeardWord, Transcript};
+        use nota_core::{SampleIndex, SampleRange, SessionTime};
+        use nota_recorder::engine::EngineEvent;
+
+        let root = std::env::temp_dir().join(format!("nota-saving-words-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let library = Library::open(&root).unwrap();
+        let id = SessionId::new(4);
+        let rows = NewSessionRows::new(
+            library.db().clone(),
+            NewSession {
+                id,
+                title: None,
+                language: None,
+                started_at: None,
+                tracks: Vec::new(),
+            },
+        );
+        let models = (PathBuf::from("/models/parakeet"), PathBuf::from("/vad"));
+        let mut write = saving(rows, id, Some(heard_by(&models)));
+
+        // The system audio opened 2 s into the session, at 16 kHz.
+        let s = SessionTime::from_nanos;
+        let mut timeline = TrackTimeline::new(SYSTEM);
+        timeline
+            .open_epoch(s(2_000_000_000), SampleIndex::ZERO, RATE)
+            .unwrap();
+        let live = Live::new(&[timeline]);
+        let range = |a, b| SampleRange::new(SampleIndex::new(a), SampleIndex::new(b)).unwrap();
+        let word = |text: &str, a, b| HeardWord::new(text.to_owned(), range(a, b)).unwrap();
+        let transcript = Transcript::new(SYSTEM, range(8_000, 40_000), "hello there".into())
+            .unwrap()
+            .with_words(vec![
+                word("hello", 16_000, 24_000),
+                word("there", 24_000, 32_000),
+            ])
+            .unwrap();
+        let actions = live.engine(EngineEvent::Transcript(transcript));
+        let (utterance, words) = actions.heard.unwrap();
+        write(&ToSave::Heard(utterance, words)).unwrap();
+
+        let stored = library.db().with(|db| db.utterances(id)).unwrap();
+        assert_eq!(stored.len(), 1);
+        let heard = &stored[0].heard;
+        let u = &heard.utterance;
+        assert_eq!((u.start(), u.end()), (s(2_500_000_000), s(4_500_000_000)));
+        let words: Vec<_> = heard
+            .words
+            .iter()
+            .map(|w| (w.text(), w.start(), w.end()))
+            .collect();
+        assert_eq!(
+            words,
+            [
+                ("hello", s(3_000_000_000), s(3_500_000_000)),
+                ("there", s(3_500_000_000), s(4_000_000_000)),
+            ]
+        );
+        for w in &heard.words {
+            assert!(u.start() <= w.start() && w.end() <= u.end(), "{w:?}");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -672,7 +742,7 @@ mod tests {
         );
         let models = (PathBuf::from("/m/parakeet"), PathBuf::from("/m/vad"));
         let mut write = saving(rows, session.id, Some(heard_by(&models)));
-        write(&ToSave::Heard(crash_heard().unwrap())).unwrap();
+        write(&ToSave::Heard(crash_heard().unwrap(), Vec::new())).unwrap();
         let at = crash_heard().unwrap().start();
         write(&ToSave::Annotation(Annotation::Mark(Mark { at }))).unwrap();
         std::fs::write(root.join("stored"), b"").unwrap();

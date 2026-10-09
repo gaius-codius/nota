@@ -10,7 +10,8 @@ fn ms(ms: u64) -> SessionTime {
 }
 
 fn text(at: u64) -> ToSave {
-    ToSave::Heard(Utterance::new(TrackId::new(0), ms(at), ms(at + 1), format!("t{at}")).unwrap())
+    let heard = Utterance::new(TrackId::new(0), ms(at), ms(at + 1), format!("t{at}")).unwrap();
+    ToSave::Heard(heard, Vec::new())
 }
 
 fn mark(at: u64) -> ToSave {

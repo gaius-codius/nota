@@ -43,4 +43,4 @@ pub use clock::{Clock, ClockUnavailable, SystemClock, wall_now};
 pub use epoch::{Epoch, EpochError, Gap, OpenedEpoch, TrackTimeline};
 pub use ids::{EpochId, SessionId, TrackId};
 pub use time::{SampleCount, SampleIndex, SampleRange, SampleRate, SessionTime, WallTime};
-pub use utterance::Utterance;
+pub use utterance::{Utterance, Word};

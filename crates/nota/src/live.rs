@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use nota_core::messages::{AudioChunk, Transcript};
 use nota_core::recorder::{Event, Level};
-use nota_core::{SessionTime, TrackId, TrackTimeline, Utterance};
+use nota_core::{SessionTime, TrackId, TrackTimeline, Utterance, Word};
 use nota_recorder::capture::RecorderEvent;
 use nota_recorder::engine::EngineEvent;
 
@@ -30,6 +30,9 @@ pub(crate) struct Actions {
     pub(crate) flush: Option<TrackId>,
     /// Events for the screen.
     pub(crate) updates: Vec<Event>,
+    /// Text the engine heard, with its words, placed in session time, to
+    /// store. The screen gets the text (without the words) in `updates`.
+    pub(crate) heard: Option<(Utterance, Vec<Word>)>,
 }
 
 /// A track's level since it was last sent.
@@ -98,17 +101,18 @@ impl Live {
     pub(crate) fn engine(&self, event: EngineEvent) -> Actions {
         let mut actions = Actions::default();
         if let EngineEvent::Transcript(transcript) = event
-            && let Some(text) = self.place(transcript)
+            && let Some((text, words)) = self.place(transcript)
         {
-            actions.updates.push(Event::Text(text));
+            actions.updates.push(Event::Text(text.clone()));
+            actions.heard = Some((text, words));
         }
         actions
     }
 
-    /// `transcript` placed in session time.
-    fn place(&self, transcript: Transcript) -> Option<Utterance> {
+    /// `transcript` and its words placed in session time.
+    fn place(&self, transcript: Transcript) -> Option<(Utterance, Vec<Word>)> {
         let timeline = self.followers.get(&transcript.track())?;
-        Utterance::place(transcript, timeline)
+        Utterance::place_with_words(transcript, timeline)
     }
 
     /// The track's level, if it's due: the peak since the last one, at the

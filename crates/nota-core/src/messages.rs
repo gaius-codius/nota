@@ -15,7 +15,10 @@ pub struct ProtocolVersion(u16);
 
 impl ProtocolVersion {
     /// The version these messages are.
-    pub const CURRENT: Self = Self(0);
+    pub const CURRENT: Self = Self(1);
+
+    /// The version before transcripts carried their words' samples.
+    pub const WITHOUT_WORDS: Self = Self(0);
 
     /// The version numbered `version`, as read from the other side.
     #[must_use]
@@ -115,24 +118,78 @@ impl AudioChunk {
     }
 }
 
+/// One word the engine heard, and the samples it was said in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeardWord {
+    text: String,
+    range: SampleRange,
+}
+
+impl HeardWord {
+    /// `text`, said in `range`. `None` if `text` is empty: a word is
+    /// something heard. The range may be empty, for a word the model
+    /// placed at an instant.
+    #[must_use]
+    pub fn new(text: String, range: SampleRange) -> Option<Self> {
+        (!text.is_empty()).then_some(Self { text, range })
+    }
+
+    /// The word.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// The samples it was said in.
+    #[must_use]
+    pub const fn range(&self) -> SampleRange {
+        self.range
+    }
+}
+
 /// Text the engine heard in a run of one track's samples. The run is never
-/// empty.
+/// empty. Its words, if the engine gave them, lie inside the run, in
+/// order, and don't overlap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Transcript {
     track: TrackId,
     range: SampleRange,
     text: String,
+    words: Vec<HeardWord>,
 }
 
 impl Transcript {
-    /// `text`, heard in `range` of `track`. `None` if the range is empty:
-    /// text is always heard in some audio.
+    /// `text`, heard in `range` of `track`, without words. `None` if the
+    /// range is empty: text is always heard in some audio.
     #[must_use]
     pub fn new(track: TrackId, range: SampleRange, text: String) -> Option<Self> {
         if range.is_empty() {
             return None;
         }
-        Some(Self { track, range, text })
+        Some(Self {
+            track,
+            range,
+            text,
+            words: Vec::new(),
+        })
+    }
+
+    /// The transcript with `words` as its words, if each lies inside its
+    /// range and starts no earlier than the one before ends; otherwise
+    /// the transcript back, unchanged.
+    ///
+    /// # Errors
+    ///
+    /// The transcript as it was, if the words don't fit it.
+    pub fn with_words(self, words: Vec<HeardWord>) -> Result<Self, Self> {
+        let mut from = self.range.start();
+        for word in &words {
+            if word.range.start() < from || word.range.end() > self.range.end() {
+                return Err(self);
+            }
+            from = word.range.end();
+        }
+        Ok(Self { words, ..self })
     }
 
     /// The track the speech is from.
@@ -153,10 +210,22 @@ impl Transcript {
         &self.text
     }
 
+    /// Its words, in order; empty if the engine didn't give them.
+    #[must_use]
+    pub fn words(&self) -> &[HeardWord] {
+        &self.words
+    }
+
     /// The text, without the rest.
     #[must_use]
     pub fn into_text(self) -> String {
         self.text
+    }
+
+    /// The text and the words, without the rest.
+    #[must_use]
+    pub fn into_text_and_words(self) -> (String, Vec<HeardWord>) {
+        (self.text, self.words)
     }
 }
 
@@ -208,9 +277,37 @@ mod tests {
     }
 
     #[test]
+    fn words_lie_inside_the_transcript_in_order() {
+        let range = |a, b| SampleRange::new(SampleIndex::new(a), SampleIndex::new(b)).unwrap();
+        let word = |a, b| HeardWord::new("w".to_owned(), range(a, b)).unwrap();
+        let t = || Transcript::new(TrackId::new(1), range(10, 20), "w w".to_owned()).unwrap();
+        assert_eq!(HeardWord::new(String::new(), range(10, 12)), None);
+        assert_eq!(word(3, 4).text(), "w");
+        assert_eq!(word(3, 4).range(), range(3, 4));
+        // Touching words, the first at the start, the last at the end, and
+        // an instant between them.
+        let words = vec![word(10, 12), word(12, 12), word(12, 20)];
+        let with = t().with_words(words.clone()).unwrap();
+        assert_eq!(with.words(), words.as_slice());
+        assert_eq!(with.into_text_and_words(), ("w w".to_owned(), words));
+        assert!(t().words().is_empty());
+        assert!(t().with_words(Vec::new()).unwrap().words().is_empty());
+        // Before the start, past the end, overlapping, out of order.
+        for words in [
+            vec![word(9, 12)],
+            vec![word(18, 21)],
+            vec![word(10, 13), word(12, 14)],
+            vec![word(14, 15), word(11, 12)],
+        ] {
+            assert_eq!(t().with_words(words), Err(t()));
+        }
+    }
+
+    #[test]
     fn protocol_version() {
-        assert_eq!(ProtocolVersion::CURRENT.get(), 0);
+        assert_eq!(ProtocolVersion::CURRENT.get(), 1);
+        assert_eq!(ProtocolVersion::WITHOUT_WORDS.get(), 0);
         assert_eq!(ProtocolVersion::new(3).get(), 3);
-        assert_ne!(ProtocolVersion::new(1), ProtocolVersion::CURRENT);
+        assert_ne!(ProtocolVersion::WITHOUT_WORDS, ProtocolVersion::CURRENT);
     }
 }

@@ -596,7 +596,19 @@ fn a_wrong_version_is_refused() {
     let (_supervisor, mut events) = start(fake(&["wrong-version"]));
     let reason = events.offline(Duration::from_secs(10));
     assert!(
-        matches!(reason, OfflineReason::Version(v) if v.get() == 1),
+        matches!(reason, OfflineReason::Version(v) if v.get() == 2),
+        "{reason:?}"
+    );
+}
+
+/// An engine from before transcripts carried their words is refused, not
+/// misread.
+#[test]
+fn an_old_version_is_refused() {
+    let (_supervisor, mut events) = start(fake(&["old-version"]));
+    let reason = events.offline(Duration::from_secs(10));
+    assert!(
+        matches!(reason, OfflineReason::Version(v) if v.get() == 0),
         "{reason:?}"
     );
 }

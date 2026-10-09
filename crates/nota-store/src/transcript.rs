@@ -19,6 +19,7 @@
 
 use std::collections::BTreeMap;
 
+pub use nota_core::Word;
 use nota_core::{SessionId, SessionTime, TrackId, Utterance};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -50,41 +51,6 @@ impl RevisionNumber {
     #[must_use]
     pub const fn get(self) -> u32 {
         self.0
-    }
-}
-
-/// One word of an utterance, and when it was said.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Word {
-    text: String,
-    start: SessionTime,
-    end: SessionTime,
-}
-
-impl Word {
-    /// `text`, said from `start` to `end`. `None` if it ends before it
-    /// starts.
-    #[must_use]
-    pub fn new(text: String, start: SessionTime, end: SessionTime) -> Option<Self> {
-        (start <= end).then_some(Self { text, start, end })
-    }
-
-    /// The word.
-    #[must_use]
-    pub fn text(&self) -> &str {
-        &self.text
-    }
-
-    /// When it started.
-    #[must_use]
-    pub const fn start(&self) -> SessionTime {
-        self.start
-    }
-
-    /// When it ended.
-    #[must_use]
-    pub const fn end(&self) -> SessionTime {
-        self.end
     }
 }
 
@@ -287,7 +253,7 @@ impl Store {
         let words = heard
             .words
             .iter()
-            .map(|w| Ok((w.text(), nanos(w.start)?, nanos(w.end)?)))
+            .map(|w| Ok((w.text(), nanos(w.start())?, nanos(w.end())?)))
             .collect::<Result<Vec<_>, StoreError>>()?;
         let tx = self
             .conn

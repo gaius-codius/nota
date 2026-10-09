@@ -13,7 +13,7 @@
 //!
 //! | Mode | Behaviour |
 //! |---|---|
-//! | `echo` | A good engine: every `N` audio frames per track (`--every`, default 1) it answers the buffered audio with a transcript of its range, text `"start-end"`, then a confirmation. `Flush` answers what is buffered and ends the track's stream. Exits 3 if a track's audio isn't contiguous. |
+//! | `echo` | A good engine: every `N` audio frames per track (`--every`, default 1) it answers the buffered audio with a transcript of its range, text `"start-end"` as one word over the whole range, then a confirmation. `Flush` answers what is buffered and ends the track's stream. Exits 3 if a track's audio isn't contiguous. |
 //! | `text-only` | `echo`, but never confirms: it sends only the transcripts. |
 //! | `hang` | Sends `Hello`, then never writes again. |
 //! | `hang-after` | `echo` for `K` audio frames, then goes silent. |
@@ -23,7 +23,8 @@
 //! | `bad-transcript` | Answers the first audio frame with a confirmation far past the audio sent, then goes silent. |
 //! | `deaf` | Sends `Hello`, then never reads stdin again, so closing it doesn't stop it. |
 //! | `no-hello` | Never sends `Hello`. |
-//! | `wrong-version` | Sends a `Hello` with the wrong protocol version. |
+//! | `wrong-version` | Sends a `Hello` with a protocol version after the current one. |
+//! | `old-version` | Sends a `Hello` with version 0, from before transcripts carried words. |
 //!
 //! Every mode first requires the recorder's `Hello` (else exit 2) and exits 0
 //! when stdin ends. Bad arguments exit 2. Like the real engine, every mode
@@ -37,7 +38,7 @@ use std::io::{self, BufReader, Read, Write};
 use std::process::ExitCode;
 
 use nota_core::lifeline::{Tie, tie_to_recorder};
-use nota_core::messages::{FromEngine, ProtocolVersion, ToEngine, Transcript};
+use nota_core::messages::{FromEngine, HeardWord, ProtocolVersion, ToEngine, Transcript};
 use nota_core::protocol::{Frame, FrameReader, write_frame};
 use nota_core::{SampleCount, SampleIndex, SampleRange, TrackId};
 
@@ -63,6 +64,7 @@ enum Mode {
     NoHello,
     Deaf,
     WrongVersion,
+    OldVersion,
 }
 
 impl Mode {
@@ -79,6 +81,7 @@ impl Mode {
             "no-hello" => Self::NoHello,
             "deaf" => Self::Deaf,
             "wrong-version" => Self::WrongVersion,
+            "old-version" => Self::OldVersion,
             _ => return None,
         })
     }
@@ -161,7 +164,10 @@ struct Engine<W> {
 
 impl<W: Write> Engine<W> {
     fn new(args: Args, out: W) -> Self {
-        let silent = matches!(args.mode, Mode::Hang | Mode::NoHello | Mode::WrongVersion);
+        let silent = matches!(
+            args.mode,
+            Mode::Hang | Mode::NoHello | Mode::WrongVersion | Mode::OldVersion
+        );
         Self {
             args,
             out,
@@ -180,6 +186,7 @@ impl<W: Write> Engine<W> {
         let version = match self.args.mode {
             Mode::NoHello => return Ok(()),
             Mode::WrongVersion => ProtocolVersion::new(ProtocolVersion::CURRENT.get() + 1),
+            Mode::OldVersion => ProtocolVersion::WITHOUT_WORDS,
             _ => ProtocolVersion::CURRENT,
         };
         write_frame(&mut self.out, &Frame::<FromEngine>::Hello(version))
@@ -276,9 +283,13 @@ impl<W: Write> Engine<W> {
             slow_down(self.args.delay_ms);
         }
         let text = format!("{}-{}", start.get(), end.get());
+        let word = HeardWord::new(text.clone(), range);
         let Some(transcript) = Transcript::new(track, range, text) else {
             return Ok(());
         };
+        let transcript = transcript
+            .with_words(word.into_iter().collect())
+            .unwrap_or_else(|without| without);
         self.send(FromEngine::Transcript(transcript))?;
         if self.args.mode == Mode::TextOnly {
             return Ok(());

@@ -11,8 +11,12 @@
 //! | `0x00` | both | [`Frame::Hello`] | `b"nota"`, version `u16` |
 //! | `0x01` | to engine | [`ToEngine::Audio`] | track `u32`, first sample `u64`, rate `u32`, samples `i16`… |
 //! | `0x02` | to engine | [`ToEngine::Flush`] | track `u32` |
-//! | `0x81` | from engine | [`FromEngine::Transcript`] | track `u32`, start `u64`, end `u64`, UTF-8 text… |
+//! | `0x81` | from engine | [`FromEngine::Transcript`] | track `u32`, start `u64`, end `u64`, word count `u32`, the words, UTF-8 text… |
 //! | `0x82` | from engine | [`FromEngine::Confirmed`] | track `u32`, up to `u64` |
+//!
+//! Each word of a transcript is its first sample `u64`, its end `u64`, its
+//! text's length in bytes `u32`, then its UTF-8 text. Version 0 had no word
+//! count or words.
 //!
 //! All integers are little-endian. Each side sends `Hello` first and refuses
 //! a peer whose version isn't [`ProtocolVersion::CURRENT`]; the magic bytes
@@ -23,7 +27,7 @@
 //! Bytes from the other process are untrusted: a native crash can leave half
 //! a frame, and a library can print to the wrong stream. The decoder checks
 //! every field and builds the typed messages ([`AudioChunk`],
-//! [`Transcript`], [`SampleRange`]) through their checking constructors, so
+//! [`Transcript`], [`HeardWord`], [`SampleRange`]) through their checking constructors, so
 //! nothing past this module sees raw bytes. Every frame it accepts has exactly one encoding,
 //! and the property tests check that.
 
@@ -31,7 +35,7 @@ use std::fmt;
 use std::io::{self, Read, Write};
 
 use crate::ids::TrackId;
-use crate::messages::{AudioChunk, FromEngine, ProtocolVersion, ToEngine, Transcript};
+use crate::messages::{AudioChunk, FromEngine, HeardWord, ProtocolVersion, ToEngine, Transcript};
 use crate::time::{SampleIndex, SampleRange, SampleRate};
 
 /// The largest frame body, in bytes: 1 MiB.
@@ -41,7 +45,8 @@ pub const MAX_BODY_LEN: usize = 1 << 20;
 /// 16 kHz. Split longer audio into several chunks.
 pub const MAX_AUDIO_SAMPLES: usize = (MAX_BODY_LEN - AUDIO_FIXED_LEN) / 2;
 
-/// The longest transcript text one frame can carry, in bytes.
+/// The longest transcript text one frame can carry, in bytes, with no
+/// words. Each word takes [`WORD_FIXED_LEN`] bytes and its text's.
 pub const MAX_TEXT_LEN: usize = MAX_BODY_LEN - TRANSCRIPT_FIXED_LEN;
 
 const MAGIC: [u8; 4] = *b"nota";
@@ -54,8 +59,10 @@ const TAG_CONFIRMED: u8 = 0x82;
 
 /// Tag, track, first sample, rate; the samples follow.
 const AUDIO_FIXED_LEN: usize = 1 + 4 + 8 + 4;
-/// Tag, track, start, end; the text follows.
-const TRANSCRIPT_FIXED_LEN: usize = 1 + 4 + 8 + 8;
+/// Tag, track, start, end, word count; the words and the text follow.
+const TRANSCRIPT_FIXED_LEN: usize = 1 + 4 + 8 + 8 + 4;
+/// A word's start, end and text length; its text follows.
+pub const WORD_FIXED_LEN: usize = 8 + 8 + 4;
 
 /// One frame on the wire: the handshake, or a message of type `M`
 /// ([`ToEngine`] towards the engine, [`FromEngine`] back).
@@ -139,13 +146,32 @@ impl WireMessage for FromEngine {
     fn encode_body(&self, out: &mut Vec<u8>) -> Result<(), EncodeError> {
         match self {
             Self::Transcript(transcript) => {
-                if transcript.text().len() > MAX_TEXT_LEN {
+                let words = transcript.words();
+                let len = words.iter().fold(
+                    TRANSCRIPT_FIXED_LEN.saturating_add(transcript.text().len()),
+                    |len, word| {
+                        len.saturating_add(WORD_FIXED_LEN)
+                            .saturating_add(word.text().len())
+                    },
+                );
+                if len > MAX_BODY_LEN {
                     return Err(EncodeError::TooLarge);
                 }
+                // Within the body's limit, so these fit a u32.
+                let count = u32::try_from(words.len()).map_err(|_| EncodeError::TooLarge)?;
                 out.push(TAG_TRANSCRIPT);
                 out.extend_from_slice(&transcript.track().get().to_le_bytes());
                 out.extend_from_slice(&transcript.range().start().get().to_le_bytes());
                 out.extend_from_slice(&transcript.range().end().get().to_le_bytes());
+                out.extend_from_slice(&count.to_le_bytes());
+                for word in words {
+                    let text_len =
+                        u32::try_from(word.text().len()).map_err(|_| EncodeError::TooLarge)?;
+                    out.extend_from_slice(&word.range().start().get().to_le_bytes());
+                    out.extend_from_slice(&word.range().end().get().to_le_bytes());
+                    out.extend_from_slice(&text_len.to_le_bytes());
+                    out.extend_from_slice(word.text().as_bytes());
+                }
                 out.extend_from_slice(transcript.text().as_bytes());
             }
             Self::Confirmed { track, up_to } => {
@@ -164,11 +190,24 @@ impl WireMessage for FromEngine {
                 let start = SampleIndex::new(fields.u64()?);
                 let end = SampleIndex::new(fields.u64()?);
                 let range = SampleRange::new(start, end).ok_or(DecodeError::InvertedRange)?;
-                let text = std::str::from_utf8(fields.rest())
-                    .map_err(|_| DecodeError::NotUtf8)?
-                    .to_owned();
+                let count = fields.u32()?;
+                // Grown word by word, not reserved: the count is untrusted,
+                // and each word needs bytes the body must hold.
+                let mut words = Vec::new();
+                for _ in 0..count {
+                    let start = SampleIndex::new(fields.u64()?);
+                    let end = SampleIndex::new(fields.u64()?);
+                    let len = usize::try_from(fields.u32()?).map_err(|_| DecodeError::Short)?;
+                    let text = utf8(fields.bytes(len)?)?;
+                    let range = SampleRange::new(start, end).ok_or(DecodeError::BadWord)?;
+                    words.push(HeardWord::new(text, range).ok_or(DecodeError::BadWord)?);
+                }
+                let text = utf8(fields.rest())?;
                 let transcript =
                     Transcript::new(track, range, text).ok_or(DecodeError::EmptyRange)?;
+                let transcript = transcript
+                    .with_words(words)
+                    .map_err(|_| DecodeError::BadWord)?;
                 Ok(Self::Transcript(transcript))
             }
             TAG_CONFIRMED => {
@@ -180,6 +219,13 @@ impl WireMessage for FromEngine {
             other => Err(DecodeError::UnknownTag(other)),
         }
     }
+}
+
+/// `bytes` as text.
+fn utf8(bytes: &[u8]) -> Result<String, DecodeError> {
+    std::str::from_utf8(bytes)
+        .map(str::to_owned)
+        .map_err(|_| DecodeError::NotUtf8)
 }
 
 /// The fields of a frame body after its tag, read front to back.
@@ -208,6 +254,16 @@ impl<'a> Fields<'a> {
 
     fn u64(&mut self) -> Result<u64, DecodeError> {
         self.take().map(u64::from_le_bytes)
+    }
+
+    /// The next `len` bytes.
+    fn bytes(&mut self, len: usize) -> Result<&'a [u8], DecodeError> {
+        if len > self.bytes.len() {
+            return Err(DecodeError::Short);
+        }
+        let (head, tail) = self.bytes.split_at(len);
+        self.bytes = tail;
+        Ok(head)
     }
 
     /// Everything left.
@@ -397,8 +453,11 @@ pub enum DecodeError {
     InvertedRange,
     /// A transcript range with no samples in it.
     EmptyRange,
-    /// Transcript text that isn't UTF-8.
+    /// Transcript or word text that isn't UTF-8.
     NotUtf8,
+    /// A word with no text, a range that ends before it starts, or one
+    /// outside its transcript's or overlapping the word before.
+    BadWord,
 }
 
 impl fmt::Display for DecodeError {
@@ -415,6 +474,7 @@ impl fmt::Display for DecodeError {
             Self::InvertedRange => write!(f, "transcript range ends before it starts"),
             Self::EmptyRange => write!(f, "transcript range holds no samples"),
             Self::NotUtf8 => write!(f, "transcript text isn't UTF-8"),
+            Self::BadWord => write!(f, "a word without text, or out of its place"),
         }
     }
 }
@@ -478,7 +538,7 @@ mod tests {
     #[test]
     fn hello_layout() {
         let bytes = encode::<ToEngine>(&Frame::Hello(ProtocolVersion::CURRENT)).unwrap();
-        assert_eq!(bytes, [7, 0, 0, 0, 0x00, b'n', b'o', b't', b'a', 0, 0]);
+        assert_eq!(bytes, [7, 0, 0, 0, 0x00, b'n', b'o', b't', b'a', 1, 0]);
     }
 
     #[test]
@@ -491,6 +551,98 @@ mod tests {
         want.extend_from_slice(&[1, 0, 0xfe, 0xff]);
         assert_eq!(bytes, want);
         assert_eq!(decode_body::<ToEngine>(&bytes[4..]), Ok(frame));
+    }
+
+    fn range(a: u64, b: u64) -> SampleRange {
+        SampleRange::new(SampleIndex::new(a), SampleIndex::new(b)).unwrap()
+    }
+
+    #[test]
+    fn transcript_layout() {
+        let word = |text: &str, a, b| HeardWord::new(text.to_owned(), range(a, b)).unwrap();
+        let transcript = Transcript::new(TrackId::new(1), range(10, 30), "hé there".into())
+            .unwrap()
+            .with_words(vec![word("hé", 10, 14), word("there", 15, 30)])
+            .unwrap();
+        let frame = Frame::Message(FromEngine::Transcript(transcript));
+        let bytes = encode(&frame).unwrap();
+        let mut want = vec![0x81, 1, 0, 0, 0];
+        want.extend_from_slice(&10_u64.to_le_bytes());
+        want.extend_from_slice(&30_u64.to_le_bytes());
+        want.extend_from_slice(&2_u32.to_le_bytes());
+        want.extend_from_slice(&10_u64.to_le_bytes());
+        want.extend_from_slice(&14_u64.to_le_bytes());
+        want.extend_from_slice(&3_u32.to_le_bytes());
+        want.extend_from_slice("hé".as_bytes());
+        want.extend_from_slice(&15_u64.to_le_bytes());
+        want.extend_from_slice(&30_u64.to_le_bytes());
+        want.extend_from_slice(&5_u32.to_le_bytes());
+        want.extend_from_slice(b"there");
+        want.extend_from_slice("hé there".as_bytes());
+        assert_eq!(
+            &bytes[..4],
+            &u32::try_from(want.len()).unwrap().to_le_bytes()
+        );
+        assert_eq!(&bytes[4..], want.as_slice());
+        assert_eq!(decode_body::<FromEngine>(&bytes[4..]), Ok(frame));
+    }
+
+    /// A transcript body over `0..20` with `words` (start, end, text bytes)
+    /// and the text "x".
+    fn transcript_body(count: u32, words: &[(u64, u64, &[u8])]) -> Vec<u8> {
+        let mut body = vec![0x81, 0, 0, 0, 0];
+        body.extend_from_slice(&0_u64.to_le_bytes());
+        body.extend_from_slice(&20_u64.to_le_bytes());
+        body.extend_from_slice(&count.to_le_bytes());
+        for &(start, end, text) in words {
+            body.extend_from_slice(&start.to_le_bytes());
+            body.extend_from_slice(&end.to_le_bytes());
+            body.extend_from_slice(&u32::try_from(text.len()).unwrap().to_le_bytes());
+            body.extend_from_slice(text);
+        }
+        body.push(b'x');
+        body
+    }
+
+    #[test]
+    fn bad_words_are_refused() {
+        let decode = |body: Vec<u8>| decode_body::<FromEngine>(&body);
+        assert!(decode(transcript_body(2, &[(0, 5, b"a"), (5, 20, b"b")])).is_ok());
+        // Inverted, empty text, outside, overlapping, out of order.
+        for words in [
+            [(5, 4, &b"a"[..])].as_slice(),
+            &[(0, 5, b"")],
+            &[(0, 21, b"a")],
+            &[(0, 6, b"a"), (5, 9, b"b")],
+            &[(9, 10, b"a"), (0, 1, b"b")],
+        ] {
+            let count = u32::try_from(words.len()).unwrap();
+            assert_eq!(
+                decode(transcript_body(count, words)),
+                Err(DecodeError::BadWord),
+                "{words:?}"
+            );
+        }
+        assert_eq!(
+            decode(transcript_body(1, &[(0, 5, &[0xff])])),
+            Err(DecodeError::NotUtf8)
+        );
+        // A count the body can't hold, and a word's text running past the
+        // end: neither is read past the body.
+        assert_eq!(
+            decode(transcript_body(u32::MAX, &[(0, 5, b"a")])),
+            Err(DecodeError::Short)
+        );
+        let mut long = transcript_body(1, &[(0, 5, b"a")]);
+        let at = 1 + 4 + 8 + 8 + 4 + 8 + 8;
+        long[at..at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(decode(long), Err(DecodeError::Short));
+        // A version-0 transcript, with no word count, isn't misread as one.
+        let mut old = vec![0x81, 0, 0, 0, 0];
+        old.extend_from_slice(&0_u64.to_le_bytes());
+        old.extend_from_slice(&20_u64.to_le_bytes());
+        old.extend_from_slice(b"hi");
+        assert_eq!(decode(old), Err(DecodeError::Short));
     }
 
     #[test]
@@ -569,6 +721,7 @@ mod tests {
         let mut transcript = vec![0x81, 0, 0, 0, 0];
         transcript.extend_from_slice(&5_u64.to_le_bytes());
         transcript.extend_from_slice(&4_u64.to_le_bytes());
+        transcript.extend_from_slice(&0_u32.to_le_bytes());
         assert_eq!(
             decode_body::<FromEngine>(&transcript),
             Err(DecodeError::InvertedRange)
@@ -577,6 +730,7 @@ mod tests {
         let mut empty = vec![0x81, 0, 0, 0, 0];
         empty.extend_from_slice(&4_u64.to_le_bytes());
         empty.extend_from_slice(&4_u64.to_le_bytes());
+        empty.extend_from_slice(&0_u32.to_le_bytes());
         empty.extend_from_slice(b"hi");
         assert_eq!(
             decode_body::<FromEngine>(&empty),
@@ -589,6 +743,7 @@ mod tests {
         let mut not_text = vec![0x81, 0, 0, 0, 0];
         not_text.extend_from_slice(&4_u64.to_le_bytes());
         not_text.extend_from_slice(&5_u64.to_le_bytes());
+        not_text.extend_from_slice(&0_u32.to_le_bytes());
         not_text.push(0xff);
         assert_eq!(
             decode_body::<FromEngine>(&not_text),
@@ -616,12 +771,23 @@ mod tests {
             encode(&Frame::Message(FromEngine::Transcript(text))),
             Err(EncodeError::TooLarge)
         );
+        // Text that fits alone, but not with its word.
+        let word = HeardWord::new("x".into(), range(0, 1)).unwrap();
+        let text = Transcript::new(TrackId::new(0), range(0, 1), "x".repeat(MAX_TEXT_LEN))
+            .unwrap()
+            .with_words(vec![word])
+            .unwrap();
+        assert_eq!(
+            encode(&Frame::Message(FromEngine::Transcript(text))),
+            Err(EncodeError::TooLarge)
+        );
     }
 
     #[test]
     fn limits_fill_a_frame_exactly() {
         assert_eq!(MAX_AUDIO_SAMPLES, 524_279);
-        assert_eq!(MAX_TEXT_LEN, MAX_BODY_LEN - 21);
+        assert_eq!(MAX_TEXT_LEN, MAX_BODY_LEN - 25);
+        assert_eq!(WORD_FIXED_LEN, 20);
         // The longest text fills the body to the byte; audio to within one
         // (an odd byte can't hold a sample).
         let text = Transcript::new(
@@ -689,6 +855,7 @@ mod tests {
             DecodeError::InvertedRange,
             DecodeError::EmptyRange,
             DecodeError::NotUtf8,
+            DecodeError::BadWord,
         ] {
             assert!(!err.to_string().is_empty());
         }

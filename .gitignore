@@ -27,3 +27,5 @@ lcov.info
 /fuzz/target/
 /fuzz/in/
 /fuzz/out/
+/fuzz/in-protocol/
+/fuzz/out-protocol/
