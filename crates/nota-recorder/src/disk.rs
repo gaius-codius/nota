@@ -186,12 +186,11 @@ impl Ballast {
     /// written: nota records without one.
     ///
     /// It's made under a lock on `dir`, so two processes never write one at
-    /// once. It's written as a temp file, fsynced every
-    /// [few megabytes](BALLAST_SYNC_EVERY), renamed and its directory
-    /// synced, so the name only ever holds a whole ballast. Leftovers are
-    /// removed first: temp files an interrupted run left, and ballasts of
-    /// other sizes. If writing fails, the temp file is removed again, best
-    /// effort.
+    /// once. It's written as a temp file, fsynced every 8 MiB, renamed and
+    /// its directory synced, so the name only ever holds a whole ballast.
+    /// Leftovers are removed first: temp files an interrupted run left, and
+    /// ballasts of other sizes. If writing fails, the temp file is removed
+    /// again, best effort.
     ///
     /// # Errors
     ///
