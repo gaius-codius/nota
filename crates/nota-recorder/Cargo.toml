@@ -19,6 +19,11 @@ fake-engine = []
 name = "nota-fake-engine"
 required-features = ["fake-engine"]
 
+# The crash checker has assertions that must run in the workspace gates.
+[[example]]
+name = "lazyfs_crash"
+test = true
+
 [[test]]
 name = "supervisor"
 required-features = ["fake-engine"]

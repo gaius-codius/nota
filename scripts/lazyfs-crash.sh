@@ -78,6 +78,17 @@
 #   LAZYFS   the LazyFS binary
 #            (default ~/.local/share/nota/lazyfs/lazyfs/build/lazyfs)
 #   Repair points need a LazyFS build that supports RENAME_NOREPLACE.
+#   Upstream fa7d32ee9710d55a7e529ac3c375f6616563c78b rejects rename flags.
+#   From the repo root, make a compatible copy of that installed source:
+#     copy=$(mktemp -d)
+#     cp -a "$HOME/.local/share/nota/lazyfs/." "$copy/"
+#     patch -d "$copy" -p1 < scripts/lazyfs-no-replace.patch
+#     cmake -S "$copy/lazyfs" -B "$copy/lazyfs/repair-build" -DLAZYFS_BUILD_TESTS=OFF
+#     cmake --build "$copy/lazyfs/repair-build" -j2
+#     LAZYFS="$copy/lazyfs/repair-build/lazyfs" scripts/lazyfs-crash.sh
+#   The patch uses the kernel's atomic no-replace rename for regular files;
+#   the original binary and its source are left alone. Keep the copy while
+#   running, since the binary links its copied cache library.
 #   --only KIND    run only the ops, sqlite, torn, reorder, salvage or repair
 #            points (default: all)
 #   --step K run every Kth crash point (default 1: all of them)
@@ -328,7 +339,8 @@ prepare_repairs() {
   for scenario in missing mismatched; do
     mkdir -p "$WORK/repair-$scenario-base/rec" "$WORK/repair-$scenario-ref/root"
     "$BIN" prepare-repair "$WORK/repair-$scenario-base/rec" \
-      "$WORK/repair-$scenario-base/promises" "$scenario" > /dev/null
+      "$WORK/repair-$scenario-base/promises" "$scenario" > /dev/null ||
+      die "preparing the $scenario repair failed (see $WORK/repair-$scenario-base)"
     ref=$WORK/repair-$scenario-ref
     cp -a "$WORK/repair-$scenario-base/rec" "$ref/root/rec"
     mount_lazyfs "$ref" 1
@@ -386,9 +398,9 @@ if [[ -z $ONLY || $ONLY == repair ]]; then
     awk -v scenario="$scenario" '$2 != "library.db-shm" {
       for (k = 1; k <= $3; k++) print "repair", scenario, $1, $2, k
     }' "$WORK/repair-$scenario-counts" >> "$POINTS"
-    grep -q '^write session/seg-.*\.flac.tmp ' "$WORK/repair-$scenario-counts" ||
+    grep -q '^write session/seg-.*\.flac\.tmp ' "$WORK/repair-$scenario-counts" ||
       die "no segment writes in $scenario repair (see $WORK/repair-$scenario-counts)"
-    grep -q '^fsync session/seg-.*\.flac.tmp ' "$WORK/repair-$scenario-counts" ||
+    grep -q '^fsync session/seg-.*\.flac\.tmp ' "$WORK/repair-$scenario-counts" ||
       die "no segment syncs in $scenario repair (see $WORK/repair-$scenario-counts)"
   done
 fi
@@ -713,7 +725,7 @@ for ((n = FROM; n <= TO; n += STEP)); do
 done
 
 RAN=$((PASS + ${#FAILED[@]}))
-echo "Ran $RAN crash points in $((SECONDS - START))s: $PASS passed, ${#FAILED[@]} failed, $UNREACHED unreached."
+echo "Ran $RAN crash points in $((SECONDS - START))s: $PASS passed, ${#FAILED[@]} failed, $UNREACHED ops unreached."
 if [[ -z $ONLY || $ONLY == repair ]]; then
   for scenario in missing mismatched; do
     available=$(awk -v s="$scenario" '$1 == "repair" && $2 == s { n++ } END { print n+0 }' "$POINTS")
@@ -722,7 +734,7 @@ if [[ -z $ONLY || $ONLY == repair ]]; then
     selected=${REPAIR_SELECTED[scenario_index]}
     reached=${REPAIR_REACHED[scenario_index]}
     passed=${REPAIR_PASSED[scenario_index]}
-    echo "Repair $scenario: $available available, $selected selected, $reached reached, $passed passed, $((selected - passed)) failed, $((selected - reached)) unreached."
+    echo "Repair $scenario: $available available, $selected selected, $reached reached, $passed passed, $((reached - passed)) failed after reaching, $((selected - reached)) unreached (failed)."
   done
 fi
 if [[ ${#FAILED[@]} -gt 0 ]]; then

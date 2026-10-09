@@ -1,0 +1,40 @@
+--- a/lazyfs/src/lazyfs.cpp
++++ b/lazyfs/src/lazyfs.cpp
+@@ -7,6 +7,8 @@
+  *
+  */
+ 
++#include <fcntl.h>
++#include <stdio.h>
+ #include <chrono>
+ #include <cmath>
+ #include <ctime>
+@@ -1688,14 +1690,26 @@
+ 
+     int res;
+ 
+-    if (flags)
++    if (flags & ~RENAME_NOREPLACE)
+         return -EINVAL;
+ 
+     string last_owner (from);
+     string inode = this_ ()->FSCache->get_original_inode (last_owner);
+     string new_owner (to);
+ 
+-    if (inode.empty ()) {
++    if (flags == RENAME_NOREPLACE) {
++        struct stat source;
++        if (lstat (from, &source) == -1)
++            return -errno;
++        if (!S_ISREG (source.st_mode))
++            return -EOPNOTSUPP;
++        if (renameat2 (AT_FDCWD, from, AT_FDCWD, to, flags) == -1)
++            return -errno;
++        if (!inode.empty ())
++            this_ ()->FSCache->rename_item (last_owner, new_owner);
++        res = 0;
++
++    } else if (inode.empty ()) {
+ 
+         // from: is a dir, because getattr does not cache dirs
+ 

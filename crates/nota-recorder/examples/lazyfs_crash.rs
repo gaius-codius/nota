@@ -22,8 +22,8 @@
 //! - `probe-rename <dir>` checks that the filesystem supports no-replace
 //!   renames and refuses to overwrite an occupied name.
 //! - `check <dir> <promises> [--recovered] [--end <file>] [--repair]
-//!   [--expect-repair] [--stop-after N]` checks the
-//!   invariants the in-memory crash tests check (`src/segment/tests.rs`): before salvage,
+//!   [--expect-repair] [--stop-after N]` checks the invariants the in-memory
+//!   crash tests check (`src/segment/tests.rs`): before salvage,
 //!   every row has its file and every promised sample is in a row or a
 //!   journal; after salvage, only segments and rows are left, holding every
 //!   promised sample and every promised row; a second salvage changes
@@ -1059,34 +1059,72 @@ fn report_check(promised: &Promised, after: &Observed, first: &Published) -> Res
 mod tests {
     use super::*;
 
+    /// Removes a test's scratch files even if its assertions fail.
+    #[derive(Debug)]
+    struct Fixture {
+        /// The scratch directory owned by this test.
+        root: PathBuf,
+        /// The recording directory passed to the checker.
+        rec: PathBuf,
+        /// The independent promises log.
+        promises: PathBuf,
+    }
+
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test scaffolding removes only its synthetic fixtures"
+    )]
+    fn remove_scratch(root: &Path) -> io::Result<()> {
+        std::fs::remove_dir_all(root)
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = remove_scratch(&self.root);
+        }
+    }
+
     /// Each test gets its own fixture; both harnesses can run tests in parallel.
-    fn fixture(scenario: RepairScenario, test: &str) -> Res<(PathBuf, PathBuf)> {
+    fn fixture(scenario: RepairScenario, test: &str) -> Res<Fixture> {
         let root =
             std::env::temp_dir().join(format!("nota-lazyfs-repair-{test}-{}", std::process::id()));
         if root.exists() {
-            std::fs::remove_dir_all(&root)?;
+            remove_scratch(&root)?;
         }
         StdFs.create_dir(&root)?;
         let rec = root.join("rec");
-        StdFs.create_dir(&rec)?;
         let promises = root.join("promises");
+        let fixture = Fixture {
+            root,
+            rec,
+            promises,
+        };
+        StdFs.create_dir(&fixture.rec)?;
         write_command(&[
-            rec.to_string_lossy().into_owned(),
-            promises.to_string_lossy().into_owned(),
+            fixture.rec.to_string_lossy().into_owned(),
+            fixture.promises.to_string_lossy().into_owned(),
             "--no-publish".to_owned(),
         ])?;
-        prepare_repair(&rec, &promises, scenario)?;
-        Ok((rec, promises))
+        prepare_repair(&fixture.rec, &fixture.promises, scenario)?;
+        Ok(fixture)
     }
 
     /// A planted fault must really require repair, then stay fixed on reopening.
     fn recovery(scenario: RepairScenario, test: &str) -> Res<()> {
-        let (rec, promises) = fixture(scenario, test)?;
+        let fixture = fixture(scenario, test)?;
+        let (rec, promises) = (&fixture.rec, &fixture.promises);
         // The ordinary check rejects the broken row, so this is a repair case.
-        assert!(check(&rec, &promises, &CheckOptions::default()).is_err());
+        let error = check(rec, promises, &CheckOptions::default())
+            .unwrap_err()
+            .to_string();
+        let expected = match scenario {
+            RepairScenario::Missing => "before salvage: a row without its file",
+            RepairScenario::Mismatched => "doesn't match its row's hash",
+        };
+        assert!(error.contains(expected), "wrong fixture failure: {error}");
         check(
-            &rec,
-            &promises,
+            rec,
+            promises,
             &CheckOptions {
                 repair: true,
                 expect_repair: true,
@@ -1095,16 +1133,13 @@ mod tests {
         )?;
         // Reopening must find the row proved and nothing left to salvage.
         check(
-            &rec,
-            &promises,
+            rec,
+            promises,
             &CheckOptions {
                 recovered: true,
                 ..CheckOptions::default()
             },
         )?;
-        if let Some(root) = rec.parent() {
-            std::fs::remove_dir_all(root)?;
-        }
         Ok(())
     }
 
@@ -1123,10 +1158,11 @@ mod tests {
     /// Independent hashes must reject replacement of either occupied aside name.
     #[test]
     fn preservation_promises_detect_replacement() -> Res<()> {
-        let (rec, promises) = fixture(RepairScenario::Mismatched, "replacement")?;
+        let fixture = fixture(RepairScenario::Mismatched, "replacement")?;
+        let rec = &fixture.rec;
         let session = rec.join("session");
-        let promised = read_promises(&promises)?;
-        let seen = observe(&session, &open_library(&rec)?)?;
+        let promised = read_promises(&fixture.promises)?;
+        let seen = observe(&session, &open_library(rec)?)?;
         check_kept(&session, &promised, &seen, false)?;
         for (name, _) in &promised.kept {
             // Replace each name separately so either overwritten file fails.
@@ -1136,19 +1172,17 @@ mod tests {
                 .insert(session.join(name), b"replacement".to_vec());
             assert!(check_kept(&session, &promised, &replaced, false).is_err());
         }
-        if let Some(root) = rec.parent() {
-            std::fs::remove_dir_all(root)?;
-        }
         Ok(())
     }
 
     /// The old mismatched audio must survive the move to its aside name.
     #[test]
     fn preservation_promises_detect_lost_mismatched_audio() -> Res<()> {
-        let (rec, promises) = fixture(RepairScenario::Mismatched, "lost")?;
+        let fixture = fixture(RepairScenario::Mismatched, "lost")?;
+        let rec = &fixture.rec;
         let session = rec.join("session");
-        let promised = read_promises(&promises)?;
-        let mut seen = observe(&session, &open_library(&rec)?)?;
+        let promised = read_promises(&fixture.promises)?;
+        let mut seen = observe(&session, &open_library(rec)?)?;
         check_kept(&session, &promised, &seen, false)?;
         let (name, _) = promised
             .displaced
@@ -1157,9 +1191,6 @@ mod tests {
         // Removing the only copy must fail even before repair runs.
         seen.files.remove(&session.join(name));
         assert!(check_kept(&session, &promised, &seen, false).is_err());
-        if let Some(root) = rec.parent() {
-            std::fs::remove_dir_all(root)?;
-        }
         Ok(())
     }
 }
