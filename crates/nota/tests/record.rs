@@ -31,7 +31,7 @@ use nota_core::{Clock, SessionId, SystemClock};
 use nota_recorder::fs::{Fs, StdFs};
 use nota_recorder::segment::needs_salvage;
 use nota_recorder::session::SessionDir;
-use nota_store::{Annotation, SessionState, Store, TrackKind};
+use nota_store::{Annotation, JobState, SessionState, Store, TrackKind};
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::fs::{Mode, OFlags};
 use rustix::process::{Pid, Signal, kill_process, kill_process_group};
@@ -1100,4 +1100,119 @@ fn a_killed_nota_takes_its_engine_with_it() {
         "the engine outlived nota"
     );
     assert!(nota.exits().is_some());
+}
+
+/// Stops a recording with `s`, then `y`, and waits for nota to exit.
+fn stop_with_keys(nota: &mut Running) {
+    let at = nota.len();
+    nota.press("s");
+    assert!(nota.shows_after(at, "stop recording?"), "{}", nota.output());
+    // Past the guard that takes a quick `y` for typing.
+    pause(Duration::from_millis(700));
+    nota.press("y");
+    let status = nota.exits().expect("nota didn't stop");
+    assert!(status.success(), "{status:?}: {}", nota.output());
+}
+
+/// Each session's jobs and their states, in queue order.
+fn jobs(data: &Path) -> Vec<(u64, JobState)> {
+    Store::open(&data.join("library.db"))
+        .unwrap()
+        .jobs()
+        .unwrap()
+        .into_iter()
+        .map(|job| (job.session.get(), job.state))
+        .collect()
+}
+
+/// The session's final-pass text covers each of its published samples
+/// once, on every track, and says how many samples each chunk held (the
+/// stand-in engine's text).
+fn assert_final_pass_covers(data: &Path, session: u64) {
+    let store = Store::open(&data.join("library.db")).unwrap();
+    let id = SessionId::new(session);
+    let mut published: Vec<(u32, u64, u64)> = store
+        .segments(id)
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r.track().get(),
+                r.range().start().get(),
+                r.range().end().get(),
+            )
+        })
+        .collect();
+    published.sort_unstable();
+    assert!(!published.is_empty());
+    let texts = store.final_texts(id).unwrap();
+    let mut covered: Vec<(u32, u64, u64)> = Vec::new();
+    for text in &texts {
+        let (from, to) = (text.range.start().get(), text.range.end().get());
+        assert_eq!(text.text, Some(format!("{} samples", to - from)));
+        assert_eq!(text.heard_by.engine, "fake");
+        let track = text.track.get();
+        match covered.last_mut() {
+            Some(last) if last.0 == track && last.2 == from => last.2 = to,
+            _ => covered.push((track, from, to)),
+        }
+    }
+    let mut runs: Vec<(u32, u64, u64)> = Vec::new();
+    for (track, from, to) in published {
+        match runs.last_mut() {
+            Some(last) if last.0 == track && last.2 == from => last.2 = to,
+            _ => runs.push((track, from, to)),
+        }
+    }
+    assert_eq!(covered, runs, "session {session}");
+    for &(track, _, end) in &runs {
+        assert_eq!(
+            store.final_progress(id).unwrap()[&nota_core::TrackId::new(track)].get(),
+            end
+        );
+    }
+}
+
+/// Acceptance (GAI-316, GAI-317), end to end with the tone and the
+/// stand-in engine: a stop queues the session's final pass; Home runs it,
+/// but not while a recording is going (here, in another nota); once that
+/// stops, both sessions' passes run, in order, and each covers every
+/// published sample once on both tracks.
+#[test]
+fn the_final_pass_runs_after_the_stop_and_never_during_a_recording() {
+    let tmp = TestDir::new("final-pass");
+    // `nota record` queues the jobs at its stop, and runs none itself.
+    let mut first = recording(&tmp.0);
+    stop_with_keys(&mut first);
+    assert_eq!(jobs(&tmp.0), [(1, JobState::Waiting(None))]);
+
+    let mut second = recording(&tmp.0);
+    let home_dir = tmp.0.to_str().unwrap();
+    let mut home = Running::start_command(
+        &["--tone", "yes", "--fake-engine", "yes"],
+        &tmp.0,
+        &[],
+        false,
+        &[("HOME", home_dir)],
+    );
+    assert!(home.shows_after(0, "R last settings"), "{}", home.output());
+    // Capture first: nothing runs while the other nota records.
+    pause(Duration::from_secs(3));
+    assert_eq!(jobs(&tmp.0), [(1, JobState::Waiting(None))]);
+    let store = Store::open(&tmp.0.join("library.db")).unwrap();
+    assert!(store.final_texts(SessionId::new(1)).unwrap().is_empty());
+
+    stop_with_keys(&mut second);
+    let done = [(1, JobState::Done), (2, JobState::Done)];
+    assert!(
+        wait_until(Duration::from_secs(60), || jobs(&tmp.0) == done),
+        "{:?}",
+        jobs(&tmp.0)
+    );
+    assert_final_pass_covers(&tmp.0, 1);
+    assert_final_pass_covers(&tmp.0, 2);
+
+    home.press("q");
+    let status = home.exits().expect("nota didn't close");
+    assert!(status.success(), "{status:?}");
 }

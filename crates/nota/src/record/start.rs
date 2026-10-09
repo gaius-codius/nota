@@ -420,7 +420,7 @@ fn session_row<S>(
 
 /// The engine that hears the live text, and its model: the Parakeet
 /// directory's name.
-fn heard_by((parakeet, _): &(PathBuf, PathBuf)) -> (String, String) {
+pub(super) fn heard_by((parakeet, _): &(PathBuf, PathBuf)) -> (String, String) {
     let model = parakeet.file_name().map_or_else(
         || "parakeet".to_owned(),
         |n| n.to_string_lossy().into_owned(),

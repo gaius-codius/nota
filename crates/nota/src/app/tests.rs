@@ -257,6 +257,7 @@ fn the_engines_are_named_when_there_are_any() {
         models: None,
         tone: false,
         latency_log: None,
+        fake_engine: false,
     };
     assert_eq!(engines(&args), "no live text");
     args.models = Some((PathBuf::from("p"), PathBuf::from("v")));

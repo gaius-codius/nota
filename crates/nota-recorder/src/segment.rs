@@ -65,6 +65,7 @@ mod flac;
 mod plan;
 mod publish;
 mod publisher;
+mod read;
 mod salvage;
 mod store;
 
@@ -84,6 +85,7 @@ pub use findings::{
 pub use flac::FlacError;
 pub use publish::DurableSegment;
 pub use publisher::{PublishQueue, PublishReport, Publisher, PublisherPanicked, Stopped};
+pub use read::{ReadSegmentError, read_segment};
 pub use salvage::{PublishError, Published, needs_salvage, publish_journals, salvage};
 #[cfg(any(test, feature = "fake-fs"))]
 pub use store::FakeStore;

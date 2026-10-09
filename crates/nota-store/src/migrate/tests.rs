@@ -37,7 +37,7 @@ fn a_new_file_gets_the_current_schema() {
     let dir = TestDir::new("fresh");
     let store = Store::open(&dir.db()).unwrap();
     assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
-    assert_eq!(STEPS.len(), 3);
+    assert_eq!(STEPS.len(), 4);
     assert_eq!(STEPS.len(), usize::try_from(VERSION - FIRST + 1).unwrap());
     // Opening again changes nothing.
     drop(store);
@@ -387,7 +387,7 @@ fn version_3_upgrades_to_4_and_its_heard_text_becomes_append_only() {
         .unwrap();
     }
     let store = Store::open(&dir.db()).unwrap();
-    assert_eq!(store.pragma_text("user_version"), "4");
+    assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
     let heard = store.utterances(SessionId::new(1)).unwrap();
     assert_eq!(heard[0].heard.utterance.text(), "still changeable at 3");
     drop(store);
@@ -396,4 +396,32 @@ fn version_3_upgrades_to_4_and_its_heard_text_becomes_append_only() {
             .execute("UPDATE utterance SET text = 'changed' WHERE id = 1", [])
             .is_err()
     );
+}
+
+/// A version 4 library gains the job queue's columns and the final pass's
+/// tables, keeping the jobs it had.
+#[test]
+fn version_4_upgrades_to_5_keeping_its_jobs() {
+    let dir = TestDir::new("v4");
+    {
+        let conn = raw(&dir.db());
+        conn.execute_batch(schema::V2).unwrap();
+        conn.execute_batch(schema::V3).unwrap();
+        conn.execute_batch(schema::V4).unwrap();
+        conn.pragma_update(None, "user_version", 4).unwrap();
+        conn.execute_batch(
+            "INSERT INTO session (id, state) VALUES (1, 'stopped');
+             INSERT INTO job (id, session_id, kind, state) VALUES (1, 1, 'final-pass', 'waiting');",
+        )
+        .unwrap();
+    }
+    let mut store = Store::open(&dir.db()).unwrap();
+    assert_eq!(store.pragma_text("user_version"), "5");
+    let jobs = store.jobs().unwrap();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].state, crate::JobState::Waiting(None));
+    assert_eq!(jobs[0].progress, crate::Progress::default());
+    store.finish_recording(SessionId::new(1), None).unwrap();
+    assert_eq!(store.jobs().unwrap().len(), 1);
+    assert!(store.final_texts(SessionId::new(1)).unwrap().is_empty());
 }
