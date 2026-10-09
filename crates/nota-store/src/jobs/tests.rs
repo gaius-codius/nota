@@ -176,3 +176,23 @@ fn a_bad_job_row_is_corrupt() {
         store.conn.execute("DELETE FROM job", []).unwrap();
     }
 }
+
+/// A session adopted from disk stopped while the library couldn't take
+/// it, so its stop queued nothing: adopting it queues its jobs.
+#[test]
+fn an_adopted_session_gets_its_jobs() {
+    let (_dir, mut store) = store("adopt");
+    let found = SessionId::new(7);
+    assert_eq!(
+        store
+            .adopt_session(&crate::NewSession::bare(found), None)
+            .unwrap(),
+        crate::Adopted::Added
+    );
+    assert_eq!(states(&store), [(found, JobState::Waiting(None))]);
+    // Adopting it again changes nothing.
+    store
+        .adopt_session(&crate::NewSession::bare(found), None)
+        .unwrap();
+    assert_eq!(store.jobs().unwrap().len(), 1);
+}

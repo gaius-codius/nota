@@ -2,8 +2,9 @@
 //!
 //! Only the live pass runs while recording. Everything else is a job,
 //! queued when the recording stops, in the same transaction that marks the
-//! session stopped, so a stopped session always has its jobs. A session
-//! has at most one job of each [`JobKind`].
+//! session stopped (by its stop, by salvage of one that never finished, or
+//! by adopting one found on disk), so a stopped session always has its
+//! jobs. A session has at most one job of each [`JobKind`].
 //!
 //! A job is [`JobState::Waiting`] until a runner takes it, then
 //! [`JobState::Running`], with its progress, until it ends

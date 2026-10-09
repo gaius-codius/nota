@@ -145,8 +145,9 @@ impl Store {
     /// Adds `session`, found on disk, if it isn't in the library: its row,
     /// in [`SessionState::Stopped`], with whatever the disk kept of it
     /// (title, language, start time, tracks: [`NewSession::bare`] if
-    /// nothing), and the segment rows of its per-session store at
-    /// `per_session`, if it had one, in one transaction. A session already
+    /// nothing), the segment rows of its per-session store at
+    /// `per_session`, if it had one, and the jobs a stop queues
+    /// ([`Store::finish_recording`]), in one transaction. A session already
     /// in the library is left as it is, and its per-session store isn't
     /// read.
     ///
@@ -194,6 +195,8 @@ impl Store {
         for row in rows.iter().flatten() {
             segments::insert(&tx, id, row)?;
         }
+        // Its stop never queued them: it wasn't in the library then.
+        crate::jobs::queue(&tx, key, None)?;
         tx.commit()?;
         Ok(match rows {
             Some(rows) => Adopted::Imported(rows.len()),
