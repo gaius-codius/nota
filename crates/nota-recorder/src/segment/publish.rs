@@ -48,9 +48,10 @@ impl<F: FsFile> TempSegment<F> {
     ///
     /// # Errors
     ///
-    /// [`StepError::Name`] if the temp name can't be removed (for any reason
-    /// but that nothing's there) or created at; [`StepError::Io`] for a
-    /// failed write, and for an empty range (`InvalidInput`).
+    /// [`StepError::Name`] if the temp name can't be removed or created at
+    /// for a reason of that name's own ([`StepError::of`]); otherwise
+    /// [`StepError::Io`], as for a failed write and an empty range
+    /// (`InvalidInput`).
     pub(super) fn write<S: Fs<File = F>>(
         fs: &S,
         dir: &Path,
@@ -70,12 +71,11 @@ impl<F: FsFile> TempSegment<F> {
         match fs.remove(&temp) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(StepError::Name(temp, e)),
+            Err(e) => return Err(StepError::of(temp, e)),
         }
-        let mut file = match fs.create(&temp) {
-            Ok(file) => file,
-            Err(e) => return Err(StepError::Name(temp, e)),
-        };
+        let mut file = fs
+            .create(&temp)
+            .map_err(|e| StepError::of(temp.clone(), e))?;
         file.write_all(flac).map_err(StepError::Io)?;
         Ok(Self {
             segment: Segment {
@@ -115,15 +115,16 @@ impl SyncedSegment {
     ///
     /// # Errors
     ///
-    /// [`StepError::Name`], with the segment's name, for any error: a
-    /// directory under that name, for one. The temp file is removed then,
-    /// if it can be.
+    /// [`StepError::Name`], with the segment's name, for a reason of that
+    /// name's own (a directory under it, for one; see [`StepError::of`]),
+    /// else [`StepError::Io`]. Either way the temp file is removed, if it
+    /// can be.
     pub(super) fn rename<S: Fs>(self, fs: &S) -> Result<RenamedSegment, StepError> {
         if let Err(e) = fs.rename(&self.segment.temp, &self.segment.path) {
             // Best effort: the temp file is never the only copy of anything,
             // and salvage removes it if it's left.
             let _gone = fs.remove(&self.segment.temp);
-            return Err(StepError::Name(self.segment.path, e));
+            return Err(StepError::of(self.segment.path, e));
         }
         Ok(RenamedSegment {
             segment: self.segment,
@@ -273,9 +274,27 @@ pub(super) fn delete_journals<S: Fs>(
 pub(super) enum StepError {
     /// A name the segment needs, its temp name or its own, can't be used:
     /// something there can't be removed or replaced (a directory, an
-    /// immutable file), or the file can't be created. Nothing durable
-    /// changed, so the run can go on without this segment.
+    /// immutable file). Nothing durable changed, so the run can go on
+    /// without this segment.
     Name(PathBuf, io::Error),
-    /// Writing the temp file failed.
+    /// Anything else: writing the temp file failed, or the filesystem as a
+    /// whole did (`ENOSPC`, `EIO`, `EROFS`), so the run stops and says why.
     Io(io::Error),
+}
+
+impl StepError {
+    /// `e`, from removing, creating or renaming onto `path`: a
+    /// [`Self::Name`] if it's about what's under that one name (a directory
+    /// or something else in the way, or no permission there), else an
+    /// [`Self::Io`].
+    pub(super) fn of(path: PathBuf, e: io::Error) -> Self {
+        match e.kind() {
+            io::ErrorKind::IsADirectory
+            | io::ErrorKind::NotADirectory
+            | io::ErrorKind::DirectoryNotEmpty
+            | io::ErrorKind::AlreadyExists
+            | io::ErrorKind::PermissionDenied => Self::Name(path, e),
+            _ => Self::Io(e),
+        }
+    }
 }

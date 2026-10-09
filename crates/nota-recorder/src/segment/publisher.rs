@@ -16,9 +16,10 @@ use crate::session::{FinishedJournal, SessionError, SessionStore, SessionWriter}
 /// A thread that publishes each batch of finished journals sent to it, in
 /// order, as [`publish_journals`] does.
 ///
-/// A journal still on disk after a publish run (the run failed, the
-/// journal couldn't be read, or a committed segment that doesn't match its
-/// file holds it back) is kept and tried again with the next batch, and
+/// A journal still on disk under its name after a publish run (the run
+/// failed; the journal couldn't be read, deleted or set aside; a name its
+/// segment needs couldn't be used; or a committed segment that doesn't match
+/// its file holds it back) is kept and tried again with the next batch, and
 /// once more when the publisher finishes; what still fails is left on disk for
 /// the next start's salvage, which loses nothing (see the
 /// [`segment`](super) module). Recording never waits for it: sending a
@@ -250,6 +251,12 @@ fn publish_pending<S: Fs, T: SegmentStore>(
         Ok(published) => {
             report.rows.extend_from_slice(published.segments());
             report.set_aside.extend_from_slice(published.quarantined());
+            if let Some(kind) = published.set_aside_unsynced() {
+                report.errors.push(PublishError::Io(io::Error::new(
+                    kind,
+                    "syncing the directory after setting journals aside failed",
+                )));
+            }
         }
         Err(error) => report.errors.push(error),
     }

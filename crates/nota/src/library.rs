@@ -64,7 +64,8 @@ pub(crate) enum Salvaged {
     /// it set aside as damaged, under their new names (kept, not deleted).
     Done(SessionId, Vec<PathBuf>),
     /// Salvage ran, but left journals it couldn't publish yet (unreadable,
-    /// or held back by a segment that doesn't match its row); the next
+    /// undeletable, or not set aside; held back by a name their segment
+    /// can't use, or by a segment that doesn't match its row); the next
     /// start tries again. Also the journals it set aside as damaged, as in
     /// `Done`.
     Left(SessionId, Vec<PathBuf>),

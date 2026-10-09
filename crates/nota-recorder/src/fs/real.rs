@@ -430,6 +430,7 @@ mod tests {
         assert_eq!(StdFs.read(&path).unwrap(), b"before after");
     }
 
+    #[cfg(unix)]
     #[expect(
         clippy::disallowed_methods,
         reason = "a test plants a symlink in its own scratch directory"
@@ -440,6 +441,7 @@ mod tests {
 
     /// A FIFO with no writer, a symlink and a directory under names nota
     /// reads are refused at once: never waited on, never followed.
+    #[cfg(unix)]
     #[test]
     fn read_refuses_what_isnt_a_regular_file_without_blocking() {
         let dir = TestDir::new("not-regular");

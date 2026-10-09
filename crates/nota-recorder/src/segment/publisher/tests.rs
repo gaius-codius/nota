@@ -324,3 +324,74 @@ fn a_journal_corrupt_in_the_middle_is_set_aside_and_the_report_incomplete() {
     assert!(!report.is_complete());
     assert_eq!(fs.read(&aside).unwrap(), bytes);
 }
+
+/// Wherever a publish run fails after it sets a journal aside (the
+/// directory sync after the rename, for one), the report names it and isn't
+/// complete.
+#[test]
+fn a_set_aside_is_reported_whatever_fails_after_it() {
+    use crate::journal::format::{FRAME_HEADER_LEN, HEADER_LEN};
+
+    let fs = FakeFs::with_dirs([session(), db()]);
+    let lock = SessionDir::new(SessionId::new(1), fs.clone(), &session())
+        .lock()
+        .unwrap();
+    let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let mut writer = SessionWriter::open(&lock, rate(), length(), clock).unwrap();
+    writer
+        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .unwrap();
+    for k in 0..20_i16 {
+        let audio: Vec<i16> = (0..50).map(|i| k * 50 + i).collect();
+        writer.append(MIC, &audio).unwrap();
+    }
+    let journals = writer.finish().unwrap();
+    drop(lock);
+    let path = session().join(journals[0].id().file_name());
+    let mut bytes = fs.read(&path).unwrap();
+    bytes[HEADER_LEN + 2 * (FRAME_HEADER_LEN + 100) + FRAME_HEADER_LEN + 7] ^= 0x40;
+    fs.remove(&path).unwrap();
+    let mut file = fs.create(&path).unwrap();
+    file.write_all(&bytes).unwrap();
+    let aside = session().join("journal-000000.unreadable");
+
+    let run = |fail_at: Option<usize>| {
+        let disk = fs.copy_disk();
+        let lock = SessionDir::new(SessionId::new(1), disk.clone(), &session())
+            .lock()
+            .unwrap();
+        let start = disk.attempted();
+        if let Some(at) = fail_at {
+            disk.fail_after(at, io::ErrorKind::Other);
+        }
+        let publisher = publisher(&lock, FakeStore::new(&disk, &db()));
+        let batch = journals
+            .iter()
+            .map(|j| FinishedJournal::new(j.session(), j.id()))
+            .collect();
+        assert!(publisher.queue().send(batch));
+        let report = publisher.finish().unwrap();
+        (
+            report,
+            disk.paths().contains(&aside),
+            disk.attempted() - start,
+        )
+    };
+    let (_, renamed, ops) = run(None);
+    assert!(renamed);
+    let mut failed_after_rename = 0;
+    for at in 0..ops {
+        let (report, renamed, _) = run(Some(at));
+        assert_eq!(
+            report.set_aside() == std::slice::from_ref(&aside),
+            renamed,
+            "failing op {at}"
+        );
+        assert!(!report.is_complete(), "failing op {at}");
+        if renamed && !report.errors().is_empty() {
+            failed_after_rename += 1;
+        }
+    }
+    // The directory sync after the rename, and the store read at the end.
+    assert!(failed_after_rename >= 1, "{failed_after_rename}");
+}

@@ -2580,9 +2580,10 @@ fn findings_survive_any_later_failure_and_their_own_never_stops_publishing() {
             None => assert!(on_disk.found().is_empty(), "failing op {at}"),
             Some(_) => {
                 assert!(present, "failing op {at} lost the findings");
-                // A journal's unlink, or a segment's temp or rename, that
-                // fails is reported and the run goes on; anything else
-                // stops it.
+                // A journal's unlink that fails is reported and the run
+                // goes on; anything else here stops it (`Other` isn't about
+                // one name, so a segment's temp or rename failing with it
+                // stops the run too).
                 let reported = result.as_ref().is_ok_and(|done| {
                     let kinds = done.not_deleted().iter().map(|&(_, k)| k);
                     let kinds = kinds.chain(done.blocked().iter().map(|&(_, k)| k));
@@ -2617,9 +2618,8 @@ fn findings_survive_any_later_failure_and_their_own_never_stops_publishing() {
     // Publishing comes after the findings, so failures there were tried.
     assert!(ops - durable_from > 20, "{durable_from} of {ops}");
     assert!(unsaved >= 4, "{unsaved}");
-    // Each segment's temp remove, create and rename, and each journal's
-    // unlink.
-    assert!(carried_on >= 8, "{carried_on}");
+    // Each journal's unlink.
+    assert!(carried_on >= 4, "{carried_on}");
     assert_eq!(row_reads, 1);
     let journals = fs.paths().into_iter().filter(|p| is_journal(p)).count();
     assert!(journals >= 4, "{journals}");
@@ -4015,7 +4015,7 @@ fn a_segment_whose_temp_cant_be_created_blocks_only_itself_live() {
     let fs = disk.copy_disk();
     let row = rows[1];
     let temp = temp_path(&session(), row.track(), row.range());
-    fs.fail_on(&temp, Fault::Create, io::ErrorKind::Other);
+    fs.fail_on(&temp, Fault::Create, io::ErrorKind::PermissionDenied);
     let ids: Vec<FinishedJournal> = fs
         .paths()
         .iter()
@@ -4024,8 +4024,62 @@ fn a_segment_whose_temp_cant_be_created_blocks_only_itself_live() {
         .collect();
 
     let done = publish_journals(&mut session_store(&fs), length(), &ids).unwrap();
-    assert_eq!(done.blocked(), [(temp, io::ErrorKind::Other)]);
+    assert_eq!(
+        done.blocked(),
+        [(temp.clone(), io::ErrorKind::PermissionDenied)]
+    );
     let others: Vec<_> = rows.iter().filter(|r| **r != row).copied().collect();
     assert_eq!(done.segments(), others);
-    assert!(done.deleted().len() < ids.len());
+    // The blocked segment's samples are all still in journals.
+    let held = journal_samples(&observe(&fs)).unwrap();
+    let r = row.range();
+    assert_eq!(
+        held.first_missing(row.track(), r.start().get(), r.end().get()),
+        None
+    );
+
+    // A failure of the whole disk isn't one name's: it stops the run, and
+    // says why.
+    let full = disk.copy_disk();
+    full.fail_on(&temp, Fault::Create, io::ErrorKind::StorageFull);
+    let stopped = publish_journals(&mut session_store(&full), length(), &ids).unwrap_err();
+    assert!(
+        matches!(&stopped, PublishError::Io(e) if e.kind() == io::ErrorKind::StorageFull),
+        "{stopped}"
+    );
+}
+
+/// A journal set aside whose directory sync then fails is still reported as
+/// set aside: wherever a failure lands, a run that returns names every
+/// journal it renamed aside.
+#[test]
+fn a_set_aside_is_reported_whatever_fails_after_it() {
+    let disk = FakeFs::with_dirs([session(), db()]);
+    let damaged = session().join(JournalId::new(90).file_name());
+    plant_file(&disk, &damaged, &journal_damaged_before(1_000));
+    let aside = session().join(format!("{}.unreadable", JournalId::new(90).file_name()));
+    let probe = disk.copy_disk();
+    salvage(&mut session_store(&probe), length()).unwrap();
+    let ops = probe.attempted();
+
+    let mut unsynced = 0;
+    for at in 0..ops {
+        let run = disk.copy_disk();
+        run.fail_after(at, io::ErrorKind::Other);
+        let Ok(done) = salvage(&mut session_store(&run), length()) else {
+            continue;
+        };
+        let renamed = run.paths().contains(&aside);
+        assert_eq!(
+            done.quarantined() == std::slice::from_ref(&aside),
+            renamed,
+            "failing op {at}"
+        );
+        if done.set_aside_unsynced().is_some() {
+            assert_eq!(done.set_aside_unsynced(), Some(io::ErrorKind::Other));
+            assert!(renamed, "failing op {at}");
+            unsynced += 1;
+        }
+    }
+    assert_eq!(unsynced, 1);
 }

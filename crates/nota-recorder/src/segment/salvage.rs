@@ -41,6 +41,7 @@ pub struct Published {
     unread: Vec<(FinishedJournal, io::ErrorKind)>,
     findings: Vec<Finding>,
     findings_unsaved: Option<io::ErrorKind>,
+    set_aside_unsynced: Option<io::ErrorKind>,
 }
 
 impl Published {
@@ -107,6 +108,16 @@ impl Published {
     #[must_use]
     pub fn temps_kept(&self) -> &[(PathBuf, io::ErrorKind)] {
         &self.temps_kept
+    }
+
+    /// Why the directory couldn't be synced after journals were set aside,
+    /// if it couldn't. They're under their aside names
+    /// ([`Self::quarantined`]) all the same, but not durably: after a crash
+    /// one may be back under its own name, and the next run sets it aside
+    /// again.
+    #[must_use]
+    pub const fn set_aside_unsynced(&self) -> Option<io::ErrorKind> {
+        self.set_aside_unsynced
     }
 
     /// The journals that are there but couldn't be read (`EIO`, `EACCES`, a
@@ -480,7 +491,7 @@ fn publish<S: Fs, T: SegmentStore>(
     }
 
     let unreadable = settled(unreadable, &plan.needs, &committed);
-    quarantine(fs, dir, &unreadable, &mut published)?;
+    quarantine(fs, dir, &unreadable, &mut published);
     Ok(published)
 }
 
@@ -627,19 +638,13 @@ fn settled(
 /// Renames unreadable journals aside, keeping their bytes. One whose aside
 /// name is taken, by anything, keeps its own name: a rename would replace a
 /// file there, which may be another journal set aside. It, and one whose
-/// rename fails, are reported in [`Published::not_set_aside`].
-///
-/// # Errors
-///
-/// Only syncing the directory after a rename.
-fn quarantine<S: Fs>(
-    fs: &S,
-    dir: &Path,
-    paths: &[PathBuf],
-    published: &mut Published,
-) -> io::Result<()> {
+/// rename fails, are reported in [`Published::not_set_aside`]. Nothing here
+/// stops the run: what it published stays reported, renames that worked
+/// with it, even if the directory can't be synced after them
+/// ([`Published::set_aside_unsynced`]).
+fn quarantine<S: Fs>(fs: &S, dir: &Path, paths: &[PathBuf], published: &mut Published) {
     if paths.is_empty() {
-        return Ok(());
+        return;
     }
     let there = match fs.list(dir) {
         Ok(there) => there,
@@ -648,7 +653,7 @@ fn quarantine<S: Fs>(
             published
                 .not_set_aside
                 .extend(paths.iter().map(|p| (p.clone(), kind)));
-            return Ok(());
+            return;
         }
     };
     let mut renamed = false;
@@ -668,10 +673,9 @@ fn quarantine<S: Fs>(
             Err(e) => published.not_set_aside.push((path.clone(), e.kind())),
         }
     }
-    if renamed {
-        fs.sync_dir(dir)?;
+    if renamed && let Err(e) = fs.sync_dir(dir) {
+        published.set_aside_unsynced = Some(e.kind());
     }
-    Ok(())
 }
 
 /// Where a journal at `path` is set aside: its name with
