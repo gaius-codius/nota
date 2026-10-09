@@ -16,19 +16,26 @@ if [[ $# -lt 1 || $# -gt 2 ]]; then
   exit 2
 fi
 base=$1 head=${2:-HEAD}
+# Every diff below runs where `set -e` can't see git fail, so a missing merge
+# base (a shallow clone, unrelated histories) must stop the script here, or
+# it would report nothing found.
+if ! mb=$(git merge-base "$base" "$head"); then
+  echo "check-weakened: no merge base of $base and $head (a shallow clone?)" >&2
+  exit 2
+fi
 findings=()
 
 # Config that defines the checks.
 while IFS= read -r f; do
   [[ -n $f ]] && findings+=("check config changed: $f")
-done < <(git diff --name-only "$base...$head" -- \
+done < <(git diff --name-only "$mb" "$head" -- \
   rust-toolchain.toml rustfmt.toml clippy.toml typos.toml deny.toml \
   .config/nextest.toml .cargo/config.toml .cargo/mutants.toml lefthook.yml \
   .github/workflows 'scripts/check-*' \
   | sort -u)
 
 # Lint table edits in any Cargo.toml.
-if git diff -U0 "$base...$head" -- '*Cargo.toml' \
+if git diff -U0 "$mb" "$head" -- '*Cargo.toml' \
   | grep -E '^[-+][^-+]' \
   | grep -qE '\[(workspace\.)?lints|"(allow|warn|deny|forbid)"'; then
   findings+=("lint levels changed in a Cargo.toml")
@@ -37,14 +44,14 @@ fi
 # Added lines in Rust code that silence a lint or skip a test.
 while IFS= read -r line; do
   [[ -n $line ]] && findings+=("added: $line")
-done < <(git diff -U0 "$base...$head" -- '*.rs' \
+done < <(git diff -U0 "$mb" "$head" -- '*.rs' \
   | grep -E '^\+[^+]' \
   | grep -E '#!?\[(allow|expect)\(|#\[ignore|cfg_attr\([^)]*(allow|expect|ignore)|no_mangle|\bunsafe\b' \
   | sed 's/^+[[:space:]]*//' || true)
 
 # Tests removed: more #[test] attributes deleted than added.
-removed=$(git diff -U0 "$base...$head" -- '*.rs' | grep -cE '^-[[:space:]]*#\[(test|proptest|rstest)' || true)
-added=$(git diff -U0 "$base...$head" -- '*.rs' | grep -cE '^\+[[:space:]]*#\[(test|proptest|rstest)' || true)
+removed=$(git diff -U0 "$mb" "$head" -- '*.rs' | grep -cE '^-[[:space:]]*#\[(test|proptest|rstest)' || true)
+added=$(git diff -U0 "$mb" "$head" -- '*.rs' | grep -cE '^\+[[:space:]]*#\[(test|proptest|rstest)' || true)
 if (( removed > added )); then
   findings+=("tests removed: $removed test attributes deleted, $added added")
 fi
@@ -52,7 +59,7 @@ fi
 # Snapshot files changed (accepted with cargo insta).
 while IFS= read -r f; do
   [[ -n $f ]] && findings+=("snapshot changed: $f")
-done < <(git diff --name-only --diff-filter=MD "$base...$head" -- '*.snap')
+done < <(git diff --name-only --diff-filter=MD "$mb" "$head" -- '*.snap')
 
 if (( ${#findings[@]} == 0 )); then
   echo "check-weakened: nothing found"

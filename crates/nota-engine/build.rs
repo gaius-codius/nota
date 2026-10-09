@@ -7,14 +7,15 @@
 //! would link the unchecked download. This stops that build before anything
 //! links it.
 //!
-//! It can't stop the download itself. Cargo runs a crate's build script only
-//! after its dependencies are built, so by the time this one fails,
-//! sherpa-onnx-sys's build script has already fetched and unpacked its
-//! archive into that target directory. Those bytes are never linked: this
-//! build fails, and a build from inside the repo sets the variable, which
-//! makes the sys crate's build script run again and use the checked
-//! libraries instead. So an unchecked archive can sit in `target/`, unused;
-//! `cargo clean` removes it.
+//! It can't reliably stop the download itself. Cargo doesn't order this
+//! build script after sherpa-onnx-sys's (a transitive dependency), so the
+//! sys crate's can run first, or alongside, and fetch and unpack its
+//! archive into that target directory; with `--keep-going`, or a target
+//! directory where this one already failed, it will. Those bytes are never
+//! linked: this build fails, and a build from inside the repo sets the
+//! variable, which makes the sys crate's build script run again and use the
+//! checked libraries instead. So an unchecked archive can sit in `target/`,
+//! unused; `cargo clean` removes it.
 
 use std::env;
 

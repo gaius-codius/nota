@@ -21,9 +21,10 @@
 # Cargo bundles the libraries into sherpa-onnx-sys's rlib and reruns its
 # build script only when SHERPA_ONNX_LIB_DIR changes, in each target
 # directory separately. So the library directory's name carries the pins
-# (DIR/sherpa-onnx-lib-PIN, PIN a hash of the version and every platform's
-# checksum): a new pin is a new path, and every target directory rebuilds
-# the crate the next time it builds, not just the one this script can see.
+# (DIR/sherpa-onnx-lib-PIN, PIN a hash of the version, every platform's
+# checksum and the layout below): a new pin is a new path, and every target
+# directory rebuilds the crate the next time it builds, not just the one
+# this script can see.
 # .cargo/config.toml names the directory too, and this script fails until
 # it names the current one. After a failed check the script also cleans the
 # crate's build output from the current target directory.
@@ -126,17 +127,22 @@ sha256_of() {
   fi
 }
 
-# Every platform's pins, so .cargo/config.toml can name one directory on all
-# of them.
-pin=$(printf '%s\n' "$version" "$sha256_linux_x64" "$sha256_osx_arm64" "$sha256_osx_x64" \
+# What this script does to an archive once unpacked (the no-TTS stand-ins
+# below): bump it whenever that changes, so the directory's name changes and
+# builds pick the new libraries up, as they would a new pin.
+layout=1
+
+# Every platform's pins and the layout, so .cargo/config.toml can name one
+# directory on all of them.
+pin=$(printf '%s\n' "$version" "$layout" "$sha256_linux_x64" "$sha256_osx_arm64" "$sha256_osx_x64" \
   "$sha256_win_x64" | sha256_of | cut -c1-16)
 lib_name=sherpa-onnx-lib-$pin
 
 if [[ -z $dest ]]; then
   # The default directory is the one .cargo/config.toml points builds at.
   config=$repo/.cargo/config.toml
-  if [[ -f $config ]] && ! grep -q "^SHERPA_ONNX_LIB_DIR = .*\"target/sherpa-onnx/$lib_name\"" "$config"; then
-    die "$config must set SHERPA_ONNX_LIB_DIR to \"target/sherpa-onnx/$lib_name\" (the pins changed)"
+  if [[ -f $config ]] && ! grep -q "^SHERPA_ONNX_LIB_DIR *=.*\"target/sherpa-onnx/$lib_name\"" "$config"; then
+    die "$config must set SHERPA_ONNX_LIB_DIR to \"target/sherpa-onnx/$lib_name\" (the pins or the layout changed)"
   fi
 fi
 

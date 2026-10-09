@@ -47,12 +47,19 @@ for layout in debug release x86_64-unknown-linux-gnu/debug; do
     "$out/deps/libsherpa_onnx-0123456789abcdef.rlib"
 done
 echo "not the pinned archive" >"$dir/$name"
+# And what scripts before the pinned directory name left: an unpinned
+# directory and its checksum stamp.
+mkdir "$dir/sherpa-onnx-lib"
+touch "$dir/sherpa-onnx-lib/libsherpa-onnx-c-api.a"
+echo 0000 >"$dir/sherpa-onnx-lib.sha256"
 
 if out=$("$script" "$dir" 2>"$dir/err"); then
   fail "accepted a tampered archive (printed $out)"
 fi
 grep -q 'checksum mismatch' "$dir/err" || fail "expected a checksum mismatch, got: $(cat "$dir/err")"
 [[ ! -e $dir/sherpa-onnx-lib-0123456789abcdef ]] || fail "left the earlier libraries for a build to link"
+[[ ! -e $dir/sherpa-onnx-lib && ! -e $dir/sherpa-onnx-lib.sha256 ]] ||
+  fail "left the unpinned libraries or their stamp from an older script"
 [[ ! -e $dir/$name ]] || fail "kept the tampered archive"
 left=$(find -H "$CARGO_TARGET_DIR" -name '*sherpa*onnx*sys*')
 [[ -z $left ]] || fail "left sherpa-onnx-sys's build output, which bundles the earlier libraries: $left"

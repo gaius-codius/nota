@@ -19,4 +19,4 @@ rustflags = ["-C", "target-feature=+crt-static"]
 # cargo rebuilds sherpa-onnx-sys in every target directory; the script
 # fails until this line names its directory.
 [env]
-SHERPA_ONNX_LIB_DIR = { value = "target/sherpa-onnx/sherpa-onnx-lib-31666b6e566ce903", relative = true }
+SHERPA_ONNX_LIB_DIR = { value = "target/sherpa-onnx/sherpa-onnx-lib-797585040d4a4016", relative = true }
