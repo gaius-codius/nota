@@ -63,11 +63,11 @@
 //! load neither is a failure, since a single fsync can then take seconds
 //! that nota can't control (GAI-350). The lag is also measured against
 //! the wall clock since the first frame was written (which slightly
-//! undercounts the queue at the start), as a cross-check. Each is measured
-//! per track, just before each of its fsyncs completes, when it's greatest;
-//! with several tracks, the result shows the worst track, and each track's
-//! lag behind the audio delivered, overall and at the fsyncs that end a
-//! journal at a window boundary. Fsync times only mean something on a real
+//! undercounts the queue at the start) until capture is stopped, as a
+//! cross-check. Each is measured per track, just before each of its
+//! fsyncs completes, when it's greatest; with several tracks, the result
+//! shows the worst track, and each track's lag behind the audio delivered,
+//! overall and at the fsyncs that end a journal at a window boundary. Fsync times only mean something on a real
 //! disk: tmpfs makes every fsync free.
 
 #[cfg(target_os = "linux")]
@@ -291,11 +291,13 @@ mod linux {
     ///   late <op> <kind> <class>
     ///   stop <track> <op> <kind> <class> <t ns> <captured> <durable> <delivered>
     ///   end <track> <t ns> <captured> <durable> <delivered>
+    ///   stopped <t ns>
     ///
     /// A sync's captured is the journal's end when its fsync started: what
     /// the fsync covers. Its time and delivered are read when it completed,
     /// and `began` when it started.
-    /// `stop` and `end` have a line for each track.
+    /// `stop` and `end` have a line for each track. `stopped` is when the
+    /// recording's time was up and capture was stopped.
     #[derive(Debug)]
     struct Log(StdFile);
 
@@ -833,6 +835,7 @@ mod linux {
         };
         wait(Duration::from_secs(seconds));
         drop(captures);
+        fs.0.note("stopped")?;
         let (writer, notices, failures, result, unlogged) = recorder
             .join()
             .map_err(|_| "the recorder thread panicked")?;
@@ -1069,6 +1072,8 @@ mod linux {
         /// (kind:class, t, took ns), slowest first after reading.
         slow: Vec<(String, u64, u64)>,
         late: usize,
+        /// When capture was stopped, if the run got that far.
+        stopped: Option<u64>,
     }
 
     fn read_log(path: &Path) -> Res<Promised> {
@@ -1114,6 +1119,7 @@ mod linux {
                 Some("overrun") => p.overruns += 1,
                 Some("slow") => p.slow.push((format!("{}:{}", s(1)?, s(2)?), n(3)?, n(4)?)),
                 Some("late") => p.late += 1,
+                Some("stopped") => p.stopped = Some(n(1)?),
                 Some("journal-failed") => p.journal_failures += 1,
                 _ => return Err(format!("bad log line {line:?}").into()),
             }
@@ -1407,7 +1413,7 @@ mod linux {
         let mut recovered_min = u64::MAX;
         let mut durable_min = u64::MAX;
         for (&track, log) in &promised.tracks {
-            let lag = Lag::of(log, length);
+            let lag = Lag::of(log, length, promised.stopped);
             let over =
                 lag.max > max_journal_lag || lag.delivered_max > MAX_LAG || lag.wall_max > MAX_LAG;
             if over && !checks.under_load {
@@ -1596,7 +1602,8 @@ mod linux {
         /// Behind the audio delivered, at the fsyncs that ended a journal
         /// at a window boundary.
         rotation_max: u64,
-        /// Behind the wall clock since the first frame.
+        /// Behind the wall clock since the first frame, up to when capture
+        /// was stopped.
         wall_max: u64,
         /// The fsyncs, and the stop, at which durable was more than the
         /// bounded-loss rule behind the audio delivered.
@@ -1606,7 +1613,7 @@ mod linux {
     }
 
     impl Lag {
-        fn of(log: &TrackLog, length: SegmentLength) -> Self {
+        fn of(log: &TrackLog, length: SegmentLength, stopped: Option<u64>) -> Self {
             let mut points: Vec<(u64, u64, u64, u64)> = log
                 .syncs
                 .iter()
@@ -1639,6 +1646,10 @@ mod linux {
                 points
                     .iter()
                     .map(|&(t, _, durable, _)| {
+                        // No audio is captured after the stop, so the wall
+                        // clock stops there too: the queue it leaves is
+                        // drained, not lost.
+                        let t = stopped.map_or(t, |s| t.min(s));
                         let since = t.saturating_sub(t0);
                         let wall = end0 + since * u64::from(RATE.hz()) / 1_000_000_000;
                         wall.saturating_sub(durable)
