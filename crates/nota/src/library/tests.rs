@@ -868,8 +868,18 @@ fn a_session_recorded_without_the_database_keeps_its_title_and_tracks() {
         }],
     };
     session.keep(&row).unwrap();
-    // A session holding only its kept row is left alone, as one just made.
+    // A session holding only its kept row, or one partly written, is left
+    // alone, as one just made.
     assert!(is_empty(&session));
+    drop(
+        StdFs
+            .create(&session.dir.join("session.txt.partial"))
+            .unwrap(),
+    );
+    assert!(is_empty(&session));
+    StdFs
+        .remove(&session.dir.join("session.txt.partial"))
+        .unwrap();
     let (lock, finished) = record(&session, 3_000);
     let mut bound = SessionStore::new(lock, rows);
     assert!(publish_journals(&mut bound, length(), &finished).is_err());
@@ -922,4 +932,52 @@ fn a_kept_row_that_cant_be_read_is_left_out() {
     assert_eq!(adopted.title, None);
     assert_eq!(library.db().with(|db| db.tracks(session.id)).unwrap(), []);
     assert_eq!(covered(&segments(&library, session.id)), [(0, 3_000)]);
+}
+
+/// A kept row that's there but can't be read yet holds the session back
+/// for the next start, rather than adopting it without its title for good.
+#[cfg(unix)]
+#[test]
+fn a_kept_row_that_cant_be_read_yet_is_read_at_a_later_start() {
+    use std::os::unix::fs::PermissionsExt as _;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test scaffolding: a kept row that can't be read"
+    )]
+    fn set_mode(file: &Path, mode: u32) {
+        std::fs::set_permissions(file, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+    let tmp = TestDir::new("kept-unreadable");
+    let library = Library::open(&tmp.0).unwrap();
+    let session = library.create().unwrap();
+    let row = NewSession {
+        title: Some("lecture 1".to_owned()),
+        ..NewSession::bare(session.id)
+    };
+    session.keep(&row).unwrap();
+    drop(record(&session, 3_000));
+    let file = session.dir.join("session.txt");
+    set_mode(&file, 0o000);
+    if StdFs.read(&file).is_ok() {
+        // Run as root: permissions don't stop it.
+        return;
+    }
+    let done = library.salvage_all(length()).unwrap();
+    set_mode(&file, 0o600);
+    assert!(
+        matches!(&done[..], [Salvaged::Failed(id, why)] if *id == session.id && why.contains("title and tracks")),
+        "{done:?}"
+    );
+    assert_eq!(
+        library.db().with(|db| db.session(session.id)).unwrap(),
+        None
+    );
+    let done = library.salvage_all(length()).unwrap();
+    assert!(matches!(done[..], [Salvaged::Done(..)]), "{done:?}");
+    let adopted = library
+        .db()
+        .with(|db| db.session(session.id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(adopted.title.as_deref(), Some("lecture 1"));
 }

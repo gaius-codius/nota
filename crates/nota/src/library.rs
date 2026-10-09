@@ -64,7 +64,7 @@ impl SessionPaths {
     /// Keeps `session`, this session's row, in its directory, so it can be
     /// adopted with it if the library database never takes it.
     pub(crate) fn keep(&self, session: &NewSession) -> io::Result<()> {
-        kept::write(&self.dir, session)
+        kept::write(&StdFs, &self.dir, session)
     }
 
     /// Where an M1 session kept its own store.
@@ -168,19 +168,27 @@ impl Library {
 
     /// Adds `session` to the library database if it isn't there, with the
     /// row kept in its directory and its per-session store's rows if it has
-    /// them. A session directory that can't be listed isn't added, so the
-    /// next start can still import its store. A kept row that can't be read
-    /// is left out (the session is added with its number alone) rather than
-    /// holding up the session's audio.
+    /// them. A session directory that can't be listed, or whose kept row is
+    /// there but can't be read, isn't added, so the next start can still
+    /// import them. A kept row that doesn't parse never will: the session is
+    /// added with its number alone rather than holding up its audio.
     fn adopt(&self, session: &SessionPaths) -> Result<(), String> {
+        // Known already: nothing on disk is read again.
+        if self
+            .db
+            .with(|db| db.session(session.id))
+            .map_err(|e| e.to_string())?
+            .is_some()
+        {
+            return Ok(());
+        }
         let store = session.per_session_store();
         let there = StdFs
             .list(&session.dir)
             .map_err(|e| format!("listing {}: {e}", session.dir.display()))?;
         let per_session = there.contains(&store).then_some(store.as_path());
-        let row = kept::read(&session.dir, session.id)
-            .ok()
-            .flatten()
+        let row = kept::read(&StdFs, &session.dir, session.id)
+            .map_err(|e| format!("reading its title and tracks: {e}"))?
             .unwrap_or_else(|| NewSession::bare(session.id));
         self.db
             .with(|db| db.adopt_session(&row, per_session))

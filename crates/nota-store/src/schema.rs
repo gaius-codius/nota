@@ -14,7 +14,7 @@
 //! | Table | Holds | Filled by |
 //! |---|---|---|
 //! | `session` | number, title, language, state, when it started (V3) | `nota record`, and adopting a session found on disk |
-//! | `track` | each track's kind and source | `nota record` |
+//! | `track` | each track's kind and source | `nota record`, and adopting a session found on disk with its row kept |
 //! | `segment` | each published segment: its track, epoch, samples, SHA-256 | the recorder's publish step and salvage |
 //! | `epoch` | each epoch's first sample, rate and session-time anchor | the epochs package |
 //! | `utterance`, `word` | the heard text, as the engine confirmed it, with word times; never changed (V4's triggers) | `nota record`'s live text ([`crate::transcript`]) |
@@ -192,8 +192,8 @@ CREATE INDEX event_by_time ON event (session_id, at_ns);
 
 /// Version 3: when each session started, as UTC seconds since 1970
 /// ([`WallTime`](nota_core::WallTime)), for showing its date. Null for a
-/// session from before version 3, and for one adopted from disk: nothing
-/// says when those started.
+/// session from before version 3, and for one adopted from disk without its
+/// row kept there: nothing says when those started.
 pub(crate) const V3: &str = "
 ALTER TABLE session ADD COLUMN started_at INTEGER CHECK (started_at >= 0);
 ";

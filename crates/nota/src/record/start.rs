@@ -148,7 +148,7 @@ pub(super) fn start<B: CaptureBackend>(
     let row = session_row(setup, session.id, &sources, &captures);
     if let Err(e) = session.keep(&row) {
         outcome.notes.push(format!(
-            "the session's title and tracks are kept only in the library: {e}"
+            "the session's title and tracks weren't kept with its audio: {e}"
         ));
     }
     let rows = NewSessionRows::new(library.db().clone(), row);

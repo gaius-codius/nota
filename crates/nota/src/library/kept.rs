@@ -17,13 +17,14 @@
 //! A line that's missing is a value not known, and a track line without a
 //! source is a track with none. In values, `\` is written `\\`, a line
 //! break `\n` and a carriage return `\r`. Lines with a name this version
-//! doesn't know are skipped, so a later version can add some.
+//! doesn't know, with a value or without, are skipped, so a later version
+//! can add some.
 
 use std::io;
 use std::path::Path;
 
 use nota_core::{SessionId, TrackId, WallTime};
-use nota_recorder::fs::{Fs, FsFile as _, StdFs};
+use nota_recorder::fs::{Fs, FsFile as _};
 use nota_store::{NewSession, Track, TrackKind};
 
 /// The file's name in the session's directory, and the name it's written
@@ -34,30 +35,35 @@ pub(super) const KEPT_PARTIAL: &str = "session.txt.partial";
 /// The first line.
 const HEADER: &str = "nota session 1";
 
-/// Writes `session`'s row into `dir`, its directory: written under another
-/// name, synced, renamed into place and the directory synced, so a crash
-/// leaves the whole file or none.
-pub(crate) fn write(dir: &Path, session: &NewSession) -> io::Result<()> {
+/// Writes `session`'s row into `dir`, its directory, on `fs`: written under
+/// another name, synced, renamed into place and the directory synced, so a
+/// crash leaves the whole file or none.
+pub(crate) fn write<F: Fs>(fs: &F, dir: &Path, session: &NewSession) -> io::Result<()> {
     let partial = dir.join(KEPT_PARTIAL);
-    let mut file = StdFs.create(&partial)?;
+    let mut file = fs.create(&partial)?;
     file.write_all(encode(session).as_bytes())?;
     file.sync()?;
     drop(file);
-    StdFs.rename(&partial, &dir.join(KEPT))?;
-    StdFs.sync_dir(dir)
+    fs.rename(&partial, &dir.join(KEPT))?;
+    fs.sync_dir(dir)
 }
 
-/// The row kept in `dir`, the directory of session `id`. `Ok(None)` if
-/// there's none, as for a session from before nota kept one.
+/// The longest file read: a kept row is a few hundred bytes.
+const MAX_LEN: usize = 64 * 1024;
+
+/// The row kept in `dir` on `fs`, the directory of session `id`. `Ok(None)`
+/// if there's none, as for a session from before nota kept one, or if it
+/// doesn't parse or is longer than any row nota writes: it never will.
 ///
 /// # Errors
 ///
-/// If the file can't be read, or doesn't parse.
-pub(crate) fn read(dir: &Path, id: SessionId) -> Result<Option<NewSession>, String> {
-    match StdFs.read(&dir.join(KEPT)) {
-        Ok(bytes) => decode(id, &bytes).map(Some),
+/// If the file is there but can't be read, which may pass.
+pub(crate) fn read<F: Fs>(fs: &F, dir: &Path, id: SessionId) -> io::Result<Option<NewSession>> {
+    match fs.read(&dir.join(KEPT)) {
+        Ok(bytes) if bytes.len() > MAX_LEN => Ok(None),
+        Ok(bytes) => Ok(decode(id, &bytes).ok()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.to_string()),
+        Err(e) => Err(e),
     }
 }
 
@@ -100,9 +106,11 @@ fn decode(id: SessionId, bytes: &[u8]) -> Result<NewSession, String> {
     }
     let mut session = NewSession::bare(id);
     for line in lines {
-        let (name, value) = line
-            .split_once(' ')
-            .ok_or_else(|| format!("a line without a value: {line:?}"))?;
+        let (name, value) = line.split_once(' ').unwrap_or((line, ""));
+        let known = ["title", "language", "started_at", "track"];
+        if known.contains(&name) && !line.contains(' ') {
+            return Err(format!("a line without a value: {line:?}"));
+        }
         match name {
             "title" => set_once(&mut session.title, unescape(value)?, name)?,
             "language" => set_once(&mut session.language, unescape(value)?, name)?,
@@ -194,6 +202,8 @@ fn unescape(value: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    use nota_recorder::fs::crash::{CrashCase, CrashTest};
+    use nota_recorder::fs::fake::{FakeFs, Fault};
     use proptest::prelude::*;
 
     use super::*;
@@ -259,7 +269,8 @@ mod tests {
                     started_at 1760004000\n\
                     track 0 microphone Built-in microphone\n\
                     track 1 system\n\
-                    later something a later version adds\n";
+                    later something a later version adds\n\
+                    flag\n";
         let session = decode(SessionId::new(4), text.as_bytes()).unwrap();
         assert_eq!(
             session,
@@ -289,12 +300,98 @@ mod tests {
         );
     }
 
+    const DIR: &str = "/sessions/1";
+
+    fn dir() -> &'static Path {
+        Path::new(DIR)
+    }
+
+    #[test]
+    fn a_file_longer_than_any_row_is_taken_as_none() {
+        let fs = FakeFs::with_dirs([DIR]);
+        let mut file = fs.create(&dir().join(KEPT)).unwrap();
+        let mut text = format!("{HEADER}\ntitle ");
+        text.push_str(&"a".repeat(MAX_LEN));
+        file.write_all(text.as_bytes()).unwrap();
+        drop(file);
+        assert_eq!(read(&fs, dir(), SessionId::new(1)).unwrap(), None);
+        // None there is none, and one that can't be read is an error.
+        let fs = FakeFs::with_dirs([DIR]);
+        assert_eq!(read(&fs, dir(), SessionId::new(1)).unwrap(), None);
+        write(&fs, dir(), &NewSession::bare(SessionId::new(1))).unwrap();
+        fs.fail_on(
+            &dir().join(KEPT),
+            Fault::Read,
+            io::ErrorKind::PermissionDenied,
+        );
+        assert!(read(&fs, dir(), SessionId::new(1)).is_err());
+    }
+
+    /// A crash anywhere in the write leaves the whole row or none.
+    #[test]
+    fn a_crash_while_writing_leaves_the_whole_row_or_none() {
+        let row = NewSession {
+            title: Some("Week 3".to_owned()),
+            tracks: vec![Track {
+                track: TrackId::new(0),
+                kind: TrackKind::Microphone,
+                source: Some("mic".to_owned()),
+            }],
+            ..NewSession::bare(SessionId::new(1))
+        };
+        let summary = CrashTest::new(
+            |fs: &FakeFs| write(fs, dir(), &row).is_ok(),
+            |fs: &FakeFs| read(fs, dir(), row.id),
+            |_: &CrashCase, written: &bool, read: &io::Result<Option<NewSession>>| match read {
+                Ok(Some(got)) if *got == row => Ok(()),
+                Ok(None) if !written => Ok(()),
+                other => Err(format!("written: {written}, read: {other:?}")),
+            },
+        )
+        .dirs([DIR])
+        .run()
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        assert!(summary.scenario_ops >= 5, "{summary:?}");
+    }
+
+    /// The crash test can tell: without the directory sync, a row reported
+    /// written can be lost.
+    #[test]
+    fn a_write_without_its_directory_sync_fails_the_crash_test() {
+        let row = NewSession::bare(SessionId::new(1));
+        let without_dir_sync = |fs: &FakeFs| {
+            let run = || -> io::Result<()> {
+                let partial = dir().join(KEPT_PARTIAL);
+                let mut file = fs.create(&partial)?;
+                file.write_all(encode(&row).as_bytes())?;
+                file.sync()?;
+                drop(file);
+                fs.rename(&partial, &dir().join(KEPT))
+            };
+            run().is_ok()
+        };
+        let failure = CrashTest::new(
+            without_dir_sync,
+            |fs: &FakeFs| read(fs, dir(), row.id),
+            |_: &CrashCase, written: &bool, read: &io::Result<Option<NewSession>>| match read {
+                Ok(Some(_)) => Ok(()),
+                Ok(None) if !written => Ok(()),
+                other => Err(format!("lost: written {written}, read {other:?}")),
+            },
+        )
+        .dirs([DIR])
+        .run()
+        .unwrap_err();
+        assert!(failure.message.contains("lost"), "{failure}");
+    }
+
     #[test]
     fn a_file_that_doesnt_parse_is_refused() {
         for bad in [
             "",
             "nota session 2\n",
             "nota session 1\ntitle\n",
+            "nota session 1\ntrack\n",
             "nota session 1\ntitle a\ntitle b\n",
             "nota session 1\nstarted_at -1\n",
             "nota session 1\nstarted_at soon\n",
