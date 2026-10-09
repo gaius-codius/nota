@@ -9,10 +9,10 @@
 //!
 //! A row holds two proofs of what its file holds. The file's SHA-256 proves
 //! the file is the one published, byte for byte. The digest of its decoded
-//! audio ([`AudioDigest`], since version 5) proves the audio is, however
+//! audio ([`AudioDigest`], since version 6) proves the audio is, however
 //! the file was encoded: FLAC allows many encodings of the same samples, so
 //! a file re-encoded by another encoder, or other settings, has another
-//! SHA-256 but the same audio digest. Rows from before version 5 have no
+//! SHA-256 but the same audio digest. Rows from before version 6 have no
 //! audio digest; only their SHA-256 proves their file.
 
 use nota_core::{EpochId, SampleIndex, SampleRange, SessionId, TrackId};
@@ -137,7 +137,7 @@ impl SegmentRow {
     }
 
     /// The digest of the segment's decoded audio, if the row has one: every
-    /// row committed since version 5 does.
+    /// row committed since version 6 does.
     #[must_use]
     pub const fn audio(&self) -> Option<AudioDigest> {
         self.audio
