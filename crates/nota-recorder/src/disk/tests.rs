@@ -925,3 +925,28 @@ fn exactly_the_floor_free_counts_as_room() {
     }
     monitor.stop().unwrap();
 }
+
+#[test]
+fn the_monitor_waits_its_interval_between_checks_before_and_after_a_full_disk() {
+    let fs = FakeFs::with_dirs(["/data/s"]);
+    let watch = DiskWatch::new(fs);
+    // Ten seconds between checks: none comes within the next moment.
+    let (monitor, reports) = spawn_monitor(&watch, config(small(1), 100, WAIT));
+    assert_eq!(until_ballast(&reports).1, Ok(true));
+    let quiet = Duration::from_millis(300);
+    assert_eq!(
+        reports.recv_timeout(quiet),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    );
+    // A full disk is reported at once, and then the checks wait again.
+    watch.note_full(None);
+    assert!(matches!(
+        reports.recv_timeout(WAIT).unwrap(),
+        DiskReport::Full(_)
+    ));
+    assert_eq!(
+        reports.recv_timeout(quiet),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    );
+    monitor.stop().unwrap();
+}
