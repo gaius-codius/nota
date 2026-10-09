@@ -1758,6 +1758,7 @@ fn a_row_without_its_file_here_claims_nothing() {
         EpochId::new(0),
         SampleRange::new(SampleIndex::ZERO, SampleIndex::new(1_000)).unwrap(),
         b"not this session's",
+        nota_store::AudioDigest::new([0; 32]),
     )
     .unwrap()
     .sync()
@@ -2180,14 +2181,22 @@ fn plant_row(
     hashed: &[u8],
     file: &[u8],
 ) -> SegmentRow {
-    let durable = TempSegment::write(fs, &session(), track, EpochId::new(0), range, hashed)
-        .unwrap()
-        .sync()
-        .unwrap()
-        .rename(fs)
-        .unwrap()
-        .sync_dir(fs)
-        .unwrap();
+    let durable = TempSegment::write(
+        fs,
+        &session(),
+        track,
+        EpochId::new(0),
+        range,
+        hashed,
+        nota_store::AudioDigest::new([0; 32]),
+    )
+    .unwrap()
+    .sync()
+    .unwrap()
+    .rename(fs)
+    .unwrap()
+    .sync_dir(fs)
+    .unwrap();
     let row = *durable.row();
     FakeStore::new(fs, &db()).insert(SESSION, &durable).unwrap();
     if file != hashed {
@@ -2802,7 +2811,7 @@ fn an_unreadable_segment_file_claims_nothing_until_it_reads_and_matches() {
         // The read fails: the row claims nothing and is recorded, and
         // every segment outside its window is published.
         let done = salvage(&mut session_store(&run), length()).unwrap();
-        let expected = [(row, Problem::Unreadable(ReadFailure::of(kind)))];
+        let expected = [(row, Problem::Unreadable(findings::read_failure(kind)))];
         assert_eq!(as_found(done.findings()), expected, "{kind:?}");
         assert_eq!(done.findings_unsaved(), None);
         for track in [MIC, SYSTEM] {

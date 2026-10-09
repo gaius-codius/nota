@@ -209,6 +209,10 @@ impl Fs for CountingFs {
         self.counted(|| StdFs.remove(path))
     }
 
+    fn sync_file(&self, path: &Path) -> io::Result<()> {
+        self.counted(|| StdFs.sync_file(path))
+    }
+
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         StdFs.read(path)
     }

@@ -87,6 +87,11 @@ impl Fs for StdFs {
         read_at_most(path, MAX_READ_LEN)
     }
 
+    fn sync_file(&self, path: &Path) -> io::Result<()> {
+        valid_path(path)?;
+        sync_file(path)
+    }
+
     fn list(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
         valid_dir(dir)?;
         let mut entries = std::fs::read_dir(dir)?
@@ -266,6 +271,29 @@ fn sync_dir(dir: &Path) -> io::Result<()> {
         ));
     }
     handle.sync_all()
+}
+
+/// Fsyncs the regular file at `path`, opened read-only as [`open_to_read`]
+/// opens it: Linux syncs a file's data through any descriptor. (Windows
+/// needs write access to flush; there this fails, and nothing that needs
+/// it runs.)
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the durable-write layer is the one place that fsyncs"
+)]
+fn sync_file(path: &Path) -> io::Result<()> {
+    let file = open_to_read(path)?;
+    let meta = file.metadata()?;
+    if meta.is_dir() {
+        return Err(is_a_directory());
+    }
+    if !meta.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    file.sync_all()
 }
 
 /// Windows can't open a directory as a `File`, and NTFS journals its

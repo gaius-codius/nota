@@ -107,7 +107,8 @@ pub enum Op {
         /// How many bytes were written.
         len: usize,
     },
-    /// [`FsFile::sync`] of the file created at the path.
+    /// [`FsFile::sync`] of the file created at the path, or
+    /// [`Fs::sync_file`] of the file at the path.
     Sync(PathBuf),
     /// [`Fs::rename`].
     Rename {
@@ -869,6 +870,21 @@ impl Fs for FakeFs {
         let data = state.inode(id)?.data.clone();
         state.log.push(Op::Read(path.to_path_buf()));
         Ok(data)
+    }
+
+    fn sync_file(&self, path: &Path) -> io::Result<()> {
+        valid_path(path)?;
+        let id = {
+            let state = self.lock();
+            if state.crashed {
+                return Err(crashed());
+            }
+            if state.names.dirs.contains(path) {
+                return Err(is_a_directory());
+            }
+            *state.names.files.get(path).ok_or_else(not_found)?
+        };
+        sync_file(&self.state, id, path).map(|_| ())
     }
 
     fn list(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {

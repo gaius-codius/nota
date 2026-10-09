@@ -15,7 +15,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use nota_core::{EpochId, SampleRange, TrackId};
-use nota_store::{SegmentRow, Sha256Digest};
+use nota_store::{AudioDigest, SegmentRow, Sha256Digest};
 use sha2::{Digest, Sha256};
 
 use super::plan::SegmentKey;
@@ -43,7 +43,8 @@ pub(super) struct TempSegment<F> {
 
 impl<F: FsFile> TempSegment<F> {
     /// Writes `flac`, the encoded segment holding `range` of `track` from
-    /// `epoch`, to its temp file in `dir`. A temp file left by an earlier
+    /// `epoch`, whose decoded audio has the digest `audio`, to its temp file
+    /// in `dir`. A temp file left by an earlier
     /// attempt is removed first: it's never the only copy of anything.
     ///
     /// # Errors
@@ -59,14 +60,17 @@ impl<F: FsFile> TempSegment<F> {
         epoch: EpochId,
         range: SampleRange,
         flac: &[u8],
+        audio: AudioDigest,
     ) -> Result<Self, StepError> {
         let sha256 = Sha256Digest::new(Sha256::digest(flac).into());
-        let row = SegmentRow::new(track, epoch, range, sha256).ok_or_else(|| {
-            StepError::Io(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "a segment needs samples",
-            ))
-        })?;
+        let row = SegmentRow::new(track, epoch, range, sha256)
+            .ok_or_else(|| {
+                StepError::Io(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "a segment needs samples",
+                ))
+            })?
+            .with_audio(audio);
         let temp = temp_path(dir, track, range);
         match fs.remove(&temp) {
             Ok(()) => {}

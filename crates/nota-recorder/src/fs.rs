@@ -106,6 +106,26 @@ pub trait Fs: Send + Sync + fmt::Debug {
     /// Any I/O error.
     fn sync_dir(&self, dir: &Path) -> io::Result<()>;
 
+    /// Fsyncs the file already at `path`, so what it holds now is durable:
+    /// for keeping a file nota didn't write, before renaming it. Not
+    /// through a symlink, and only a regular file.
+    ///
+    /// The default says the filesystem can't: a wrapper that doesn't pass
+    /// it on refuses rather than claim a sync it didn't do.
+    ///
+    /// # Errors
+    ///
+    /// Any I/O error, including [`io::ErrorKind::NotFound`];
+    /// [`io::ErrorKind::IsADirectory`] for a directory;
+    /// [`io::ErrorKind::Unsupported`] by default.
+    fn sync_file(&self, path: &Path) -> io::Result<()> {
+        let _ = path;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "this filesystem can't fsync a file by name",
+        ))
+    }
+
     /// Removes the file at `path`. Durable only after [`Fs::sync_dir`] on
     /// its directory.
     ///

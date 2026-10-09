@@ -5,6 +5,26 @@
 //! guarantees runs next to the capture path. The samples come in as the journal's frames (slices
 //! of mono 16-bit PCM) and are fed to the encoder one block at a time, so the audio is never
 //! copied into one buffer.
+//!
+//! # The audio digest
+//!
+//! A FLAC file's bytes depend on the encoder and its settings, so its
+//! SHA-256 proves a file only while those stay the same. A segment row also
+//! keeps a digest of the audio itself ([`AudioDigest`]): the SHA-256 of its
+//! canonical PCM, which is, in order, all integers little-endian:
+//!
+//! | Bytes | Field |
+//! |---|---|
+//! | 16 | the tag `nota audio pcm 1` |
+//! | 4 | the sample rate, in Hz |
+//! | 4 | the track |
+//! | 8 | the first sample |
+//! | 8 | the sample after the last |
+//! | 2 × each sample | the samples, mono 16-bit signed |
+//!
+//! A file proves a row with a digest if it decodes (claxon, pure Rust too)
+//! to mono 16-bit audio whose canonical PCM, at the file's rate and the
+//! row's track and range, has the row's digest.
 
 use std::fmt;
 
@@ -13,7 +33,9 @@ use flacenc::component::BitRepr;
 use flacenc::config::Encoder;
 use flacenc::error::{SourceError, Verify};
 use flacenc::source::{Fill, Source};
-use nota_core::SampleRate;
+use nota_core::{SampleRange, SampleRate, TrackId};
+use nota_store::AudioDigest;
+use sha2::{Digest, Sha256};
 
 /// Samples per FLAC block. Fixed, so the output depends only on the audio and the rate.
 const BLOCK_SIZE: usize = 4096;
@@ -139,6 +161,73 @@ pub(super) fn encode(rate: SampleRate, pieces: &[&[i16]]) -> Result<Vec<u8>, Fla
         .write(&mut sink)
         .map_err(|e| FlacError::Encode(e.to_string()))?;
     Ok(sink.as_slice().to_vec())
+}
+
+/// The canonical PCM's tag (see the module docs).
+const PCM_TAG: &[u8; 16] = b"nota audio pcm 1";
+
+/// Hashes canonical PCM, a run of samples at a time.
+struct Pcm(Sha256);
+
+impl Pcm {
+    fn new(rate: u32, track: TrackId, range: SampleRange) -> Self {
+        let mut sha = Sha256::new();
+        sha.update(PCM_TAG);
+        sha.update(rate.to_le_bytes());
+        sha.update(track.get().to_le_bytes());
+        sha.update(range.start().get().to_le_bytes());
+        sha.update(range.end().get().to_le_bytes());
+        Self(sha)
+    }
+
+    fn add(&mut self, sample: i16) {
+        self.0.update(sample.to_le_bytes());
+    }
+
+    fn finish(self) -> AudioDigest {
+        AudioDigest::new(self.0.finalize().into())
+    }
+}
+
+/// The digest of `range` of `track`'s audio at `rate`: `pieces`, its
+/// samples in order (see the module docs).
+pub(super) fn audio_digest(
+    rate: SampleRate,
+    track: TrackId,
+    range: SampleRange,
+    pieces: &[&[i16]],
+) -> AudioDigest {
+    let mut pcm = Pcm::new(rate.hz(), track, range);
+    for &sample in pieces.iter().copied().flatten() {
+        pcm.add(sample);
+    }
+    pcm.finish()
+}
+
+/// The digest of the audio the FLAC file `bytes` decodes to, as `range` of
+/// `track`: `None` if it doesn't decode, isn't mono 16-bit, or doesn't hold
+/// exactly `range`'s number of samples.
+pub(super) fn decoded_audio_digest(
+    bytes: &[u8],
+    track: TrackId,
+    range: SampleRange,
+) -> Option<AudioDigest> {
+    let mut reader = claxon::FlacReader::new(std::io::Cursor::new(bytes)).ok()?;
+    let info = reader.streaminfo();
+    if info.channels != 1 || info.bits_per_sample != 16 {
+        return None;
+    }
+    let mut pcm = Pcm::new(info.sample_rate, track, range);
+    let mut count = 0_u64;
+    let want = range.len().get();
+    for sample in reader.samples() {
+        count += 1;
+        if count > want {
+            return None;
+        }
+        pcm.add(i16::try_from(sample.ok()?).ok()?);
+    }
+    (count == want).then(|| pcm.finish())
 }
 
 /// The number of samples a FLAC file declares in its STREAMINFO block, which

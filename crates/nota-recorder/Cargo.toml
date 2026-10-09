@@ -28,6 +28,9 @@ name = "hangup"
 required-features = ["fake-engine"]
 
 [dependencies]
+# Decodes a segment's FLAC to prove its audio against its row's digest,
+# whatever encoder wrote it. Pure Rust, like the encoder.
+claxon.workspace = true
 crc32fast.workspace = true
 flacenc.workspace = true
 nota-core = { path = "../nota-core" }
@@ -48,7 +51,6 @@ thread-priority.workspace = true
 rustix = { workspace = true, features = ["fs"] }
 
 [dev-dependencies]
-claxon.workspace = true
 # Turns on `fake-engine` for test builds only, so the supervisor's tests
 # always have the test double and release builds never do.
 nota-recorder = { path = ".", features = ["fake-engine"] }

@@ -131,6 +131,52 @@ pub(super) fn plan(
     Plan { segments, needs }
 }
 
+/// The segment holding exactly `row`'s samples, from `journals`, to rebuild
+/// its file: `None` unless they hold every one of its samples in its epoch.
+/// As in [`plan`], the newest journal wins a sample several hold; if the
+/// winner of any sample is of another epoch or rate than the rest, there's
+/// no segment either. Whether its audio is the row's is for the caller to
+/// prove.
+pub(super) fn cover(row: &SegmentRow, journals: &[JournalSummary]) -> Option<PlannedSegment> {
+    let want = row.range();
+    let mut mine: Vec<_> = journals.iter().filter(|j| j.track == row.track()).collect();
+    mine.sort_by_key(|j| std::cmp::Reverse(j.id));
+    let mut claimed = Claimed::default();
+    let mut parts: BTreeMap<SampleIndex, Part> = BTreeMap::new();
+    let mut rate = None;
+    for journal in mine {
+        let Some(range) = journal.range else {
+            continue;
+        };
+        let Some(inside) =
+            SampleRange::new(range.start().max(want.start()), range.end().min(want.end()))
+                .filter(|r| !r.is_empty())
+        else {
+            continue;
+        };
+        for piece in claimed.subtract(inside) {
+            if journal.epoch != row.epoch() || *rate.get_or_insert(journal.rate) != journal.rate {
+                return None;
+            }
+            parts.insert(
+                piece.start(),
+                Part {
+                    journal: journal.id,
+                    range: piece,
+                },
+            );
+        }
+        claimed.add(inside);
+    }
+    let mut runs = continuous_runs(parts.into_values());
+    let run = runs.pop()?;
+    if !runs.is_empty() {
+        return None;
+    }
+    let segment = segment_of(row.track(), row.epoch(), rate?, run)?;
+    (segment.range == want).then_some(segment)
+}
+
 /// Splits parts, in sample order, wherever one doesn't start where the last
 /// ended.
 fn continuous_runs(parts: impl Iterator<Item = Part>) -> Vec<Vec<Part>> {

@@ -543,6 +543,10 @@ impl<S: Fs + Clone + 'static> Fs for WatchedFs<S> {
         seen(&self.watch, path, self.inner.remove(path))
     }
 
+    fn sync_file(&self, path: &Path) -> io::Result<()> {
+        seen(&self.watch, path, self.inner.sync_file(path))
+    }
+
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         self.inner.read(path)
     }
@@ -883,6 +887,10 @@ impl<T: SegmentStore, S: Fs + Clone> SegmentStore for WatchedStore<T, S> {
 
     fn is_disk_full(error: &T::Error) -> bool {
         T::is_disk_full(error)
+    }
+
+    fn unparsable_row(error: &T::Error) -> Option<nota_store::RowKey> {
+        T::unparsable_row(error)
     }
 }
 
