@@ -9,16 +9,18 @@ use std::thread::{self, JoinHandle};
 use nota_core::recorder::{self, Input, Setup};
 use nota_core::{Clock, EpochId, SessionId, TrackId, TrackTimeline, wall_now};
 use nota_recorder::capture::{
-    Capture, CaptureBackend, RecordError, RecorderEvent, Source, record_tracks, start_tracks,
+    Capture, CaptureBackend, CaptureReceiver, RecordError, RecorderEvent, Source, record_tracks,
+    start_tracks,
 };
 use nota_recorder::engine::{EngineCommand, EngineConfig, EngineSupervisor};
 use nota_recorder::fs::StdFs;
-use nota_recorder::segment::Publisher;
+use nota_recorder::segment::{PublishQueue, Publisher};
 use nota_recorder::session::{SessionDir, SessionLock, SessionStore, SessionWriter, Syncing};
-use nota_store::{NewSession, Track, TrackKind};
+use nota_store::{Heard, NewSession, Track, TrackKind};
 use nota_tui::Event;
 
 use super::live::{LiveInput, spawn_live};
+use super::save::{Saver, ToSave};
 use super::signals::{SignalThread, listen_for_signals};
 use super::summary::{Outcome, file_names, track_name};
 use super::{BoxError, MIC, RATE, RecordArgs, SYSTEM, segment_length};
@@ -36,6 +38,8 @@ pub(super) struct Screening {
     pub(super) ui_events: Receiver<Event>,
     /// The footer: the sources recording.
     pub(super) listening: String,
+    /// Where the screen's marks and notes go to be stored.
+    pub(super) save: Sender<ToSave>,
 }
 
 /// What stopping needs of what was started.
@@ -50,6 +54,7 @@ pub(super) struct Started<B: CaptureBackend> {
     pub(super) publisher: Publisher,
     pub(super) live_inputs: Sender<LiveInput>,
     pub(super) live: JoinHandle<Option<LatencyLog>>,
+    pub(super) saver: Saver,
     pub(super) recorder: JoinHandle<Recorded>,
 }
 
@@ -119,11 +124,19 @@ pub(super) fn start<B: CaptureBackend>(
     }
     // Each track's first epoch starts when its own stream did: a stream
     // opened later doesn't push the first one's audio later.
-    let mut timelines = open_timelines(&mut writer, &captures)?;
+    let timelines = open_timelines(&mut writer, &captures)?;
 
     // The session's row is added by the publisher, before its first
     // segment's: recording never waits on the database.
     let rows = session_rows(&library, setup, session.id, &sources, &captures);
+    // The live text, marks and notes are stored as they come, on a thread
+    // of their own; whichever of it and the publisher writes first adds the
+    // session's row.
+    let saver = Saver::spawn(
+        saving(rows.clone(), session.id, args.models.as_ref().map(heard_by)),
+        ui.clone(),
+        Arc::clone(clock),
+    )?;
     let publisher = Publisher::spawn(SessionStore::new(lock.clone(), rows), segment_length())?;
     let (live_inputs, live_received) = mpsc::channel::<LiveInput>();
     let engine = match &args.models {
@@ -136,43 +149,19 @@ pub(super) fn start<B: CaptureBackend>(
         engine,
         live_received,
         ui.clone(),
+        saver.sender(),
         log.map(|log| (log, Arc::clone(clock))),
     )?;
-    let recorder = {
-        let queue = publisher.queue();
-        let live_inputs = live_inputs.clone();
-        let ui = ui.clone();
-        thread::Builder::new()
-            .name("nota-recorder".into())
-            .spawn(move || -> Recorded {
-                let mut failures = 0;
-                let mut lost = Vec::new();
-                let result =
-                    record_tracks(&mut writer, &mut timelines, &events, &mut |track, e| {
-                        match e {
-                            RecorderEvent::Finished(journals) => {
-                                // A refused batch stays on disk for salvage.
-                                let _sent = queue.send(journals);
-                            }
-                            e => {
-                                match &e {
-                                    RecorderEvent::JournalFailed(_) => failures += 1,
-                                    RecorderEvent::CaptureFailed(error) => {
-                                        lost.push(format!("{}: {error}", track_name(track)));
-                                    }
-                                    _ => {}
-                                }
-                                let _ = live_inputs.send(LiveInput::Recorder(track, e));
-                            }
-                        }
-                    });
-                // Every stream has ended, or recording failed: the screen
-                // has nothing more to show, so close it and stop.
-                let _ = ui.send(Event::Recorder(recorder::Event::Stopping));
-                (writer, result, failures, lost)
-            })?
-    };
+    let recorder = spawn_recorder(
+        writer,
+        timelines,
+        events,
+        publisher.queue(),
+        live_inputs.clone(),
+        ui.clone(),
+    )?;
 
+    let started_save = saver.sender();
     let started = Started {
         outcome,
         signals,
@@ -185,14 +174,58 @@ pub(super) fn start<B: CaptureBackend>(
         live_inputs,
         live,
         recorder,
+        saver,
     };
     let screening = Screening {
         screen,
         ui,
         ui_events,
         listening: listening.join(" + "),
+        save: started_save,
     };
     Ok((started, screening))
+}
+
+/// The recorder thread: records every track into `writer` until every
+/// stream has ended (or recording fails), handing finished journals to the
+/// publisher's `queue` and everything else to the live thread, and never
+/// waiting on either. Then it closes the screen.
+fn spawn_recorder(
+    mut writer: SessionWriter<StdFs>,
+    mut timelines: Vec<TrackTimeline>,
+    events: CaptureReceiver,
+    queue: PublishQueue,
+    live_inputs: Sender<LiveInput>,
+    ui: Sender<Event>,
+) -> std::io::Result<JoinHandle<Recorded>> {
+    thread::Builder::new()
+        .name("nota-recorder".into())
+        .spawn(move || -> Recorded {
+            let mut failures = 0;
+            let mut lost = Vec::new();
+            let result = record_tracks(&mut writer, &mut timelines, &events, &mut |track, e| {
+                match e {
+                    RecorderEvent::Finished(journals) => {
+                        // A refused batch stays on disk for salvage.
+                        let _sent = queue.send(journals);
+                    }
+                    e => {
+                        match &e {
+                            RecorderEvent::JournalFailed(_) => failures += 1,
+                            RecorderEvent::CaptureFailed(error) => {
+                                lost.push(format!("{}: {error}", track_name(track)));
+                            }
+                            _ => {}
+                        }
+                        let _ = live_inputs.send(LiveInput::Recorder(track, e));
+                    }
+                }
+            });
+            // Every stream has ended, or recording failed: the screen has
+            // nothing more to show, so close it and stop.
+            let _ = ui.send(Event::Recorder(recorder::Event::Stopping));
+            (writer, result, failures, lost)
+        })
 }
 
 /// Starts each track in the writer and opens its timeline's first epoch.
@@ -281,6 +314,45 @@ fn session_rows<S>(
                 .collect(),
         },
     )
+}
+
+/// The engine that hears the live text, and its model: the Parakeet
+/// directory's name.
+fn heard_by((parakeet, _): &(PathBuf, PathBuf)) -> (String, String) {
+    let model = parakeet.file_name().map_or_else(
+        || "parakeet".to_owned(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    ("sherpa-onnx".to_owned(), model)
+}
+
+/// How the saver stores each item: in session `session`, adding its row
+/// first if nothing has yet. Text is stored as heard by `heard_by`'s
+/// engine and model, without word times: the engine doesn't give them yet.
+fn saving(
+    rows: NewSessionRows,
+    session: SessionId,
+    heard_by: Option<(String, String)>,
+) -> impl FnMut(&ToSave) -> Result<(), nota_store::StoreError> + Send + 'static {
+    move |item| {
+        rows.added(session)?;
+        rows.db().with(|db| match item {
+            ToSave::Heard(utterance) => {
+                // Text comes only from an engine, which has models.
+                let (engine, model) = heard_by
+                    .clone()
+                    .unwrap_or_else(|| ("unknown".to_owned(), "unknown".to_owned()));
+                let heard = Heard {
+                    utterance: utterance.clone(),
+                    engine,
+                    model,
+                    words: Vec::new(),
+                };
+                db.add_utterance(session, &heard).map(drop)
+            }
+            ToSave::Annotation(annotation) => db.add_annotation(session, annotation),
+        })
+    }
 }
 
 /// Starts the engine, with its events passed to the live thread.
@@ -403,6 +475,163 @@ mod tests {
                 (SYSTEM, Source::Device("speakers.monitor".to_owned()))
             ]
         );
+    }
+
+    /// The saver's writes add the session's row if nothing has yet, then
+    /// store text as heard by the engine and model the models name, and
+    /// marks and notes, in the session.
+    #[test]
+    #[expect(clippy::disallowed_methods, reason = "test scaffolding")]
+    fn the_saver_stores_text_and_annotations_in_the_session() {
+        use nota_core::recorder::Mark;
+        use nota_core::{SessionTime, Utterance};
+        use nota_store::{Annotation, RevisionNumber};
+
+        let root = std::env::temp_dir().join(format!("nota-saving-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let library = Library::open(&root).unwrap();
+        let id = SessionId::new(3);
+        let rows = NewSessionRows::new(
+            library.db().clone(),
+            NewSession {
+                id,
+                title: Some("Workshop".to_owned()),
+                language: None,
+                started_at: None,
+                tracks: Vec::new(),
+            },
+        );
+        let models = (
+            PathBuf::from("/models/parakeet-tdt-0.6b-v3-int8"),
+            PathBuf::from("/models/silero_vad.onnx"),
+        );
+        let mut write = saving(rows, id, Some(heard_by(&models)));
+        let at = SessionTime::from_nanos(2_000_000_000);
+        let heard = Utterance::new(SYSTEM, at, at, "welcome".to_owned()).unwrap();
+        write(&ToSave::Heard(heard.clone())).unwrap();
+        write(&ToSave::Annotation(Annotation::Mark(Mark { at }))).unwrap();
+
+        let stored = library
+            .db()
+            .with(|db| {
+                Ok((
+                    db.session(id)?,
+                    db.utterances(id)?,
+                    db.annotations(id)?,
+                    db.revision(id, RevisionNumber::HEARD)?,
+                ))
+            })
+            .unwrap();
+        let (session, utterances, annotations, shown) = stored;
+        assert_eq!(session.unwrap().title.as_deref(), Some("Workshop"));
+        assert_eq!(utterances.len(), 1);
+        assert_eq!(utterances[0].heard.utterance, heard);
+        assert_eq!(utterances[0].heard.engine, "sherpa-onnx");
+        assert_eq!(utterances[0].heard.model, "parakeet-tdt-0.6b-v3-int8");
+        assert!(utterances[0].heard.words.is_empty());
+        assert_eq!(annotations, [Annotation::Mark(Mark { at })]);
+        assert_eq!(shown[0].text, "welcome");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Where [`saving_crash_child`] works, when it's run as the child.
+    const CRASH_DIR: &str = "NOTA_SAVING_CRASH_DIR";
+
+    /// What the crash child stores.
+    fn crash_heard() -> Option<nota_core::Utterance> {
+        let at = nota_core::SessionTime::from_nanos(3_000_000_000);
+        nota_core::Utterance::new(MIC, at, at, "said before the kill".to_owned())
+    }
+
+    /// The child of [`text_stored_before_a_kill_is_there_after_salvage`]:
+    /// starts a session, stores text and a mark through the saver's
+    /// writes, says so, and waits to be killed. Does nothing unless run
+    /// as that child.
+    #[test]
+    #[expect(clippy::disallowed_methods, reason = "test scaffolding")]
+    fn saving_crash_child() {
+        use nota_core::recorder::Mark;
+        use nota_store::Annotation;
+
+        let Some(root) = std::env::var_os(CRASH_DIR).map(PathBuf::from) else {
+            return;
+        };
+        let library = Library::open(&root).unwrap();
+        let session = library.create().unwrap();
+        let rows = NewSessionRows::new(
+            library.db().clone(),
+            NewSession {
+                id: session.id,
+                title: Some("Workshop".to_owned()),
+                language: None,
+                started_at: None,
+                tracks: Vec::new(),
+            },
+        );
+        let models = (PathBuf::from("/m/parakeet"), PathBuf::from("/m/vad"));
+        let mut write = saving(rows, session.id, Some(heard_by(&models)));
+        write(&ToSave::Heard(crash_heard().unwrap())).unwrap();
+        let at = crash_heard().unwrap().start();
+        write(&ToSave::Annotation(Annotation::Mark(Mark { at }))).unwrap();
+        std::fs::write(root.join("stored"), b"").unwrap();
+        let (_keep, never) = mpsc::channel::<()>();
+        let _ = never.recv_timeout(std::time::Duration::from_secs(60));
+    }
+
+    /// Acceptance (GAI-310): text the saver committed before nota was
+    /// killed outright is there after the next start's salvage. (Salvage
+    /// leaves this session's state alone: it has no audio yet, as a session
+    /// another nota has just made.)
+    #[test]
+    #[expect(clippy::disallowed_methods, reason = "test scaffolding")]
+    fn text_stored_before_a_kill_is_there_after_salvage() {
+        use nota_core::recorder::Mark;
+        use nota_store::Annotation;
+
+        let root = std::env::temp_dir().join(format!("nota-saving-kill-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "record::start::tests::saving_crash_child",
+                "--nocapture",
+            ])
+            .env(CRASH_DIR, &root)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let stored = root.join("stored");
+        let (_keep, never) = mpsc::channel::<()>();
+        for _ in 0..1_000 {
+            if stored.exists() {
+                break;
+            }
+            let _ = never.recv_timeout(std::time::Duration::from_millis(20));
+        }
+        assert!(stored.exists(), "the child never stored its text");
+        child.kill().unwrap();
+        let status = child.wait().unwrap();
+        assert!(!status.success(), "{status:?}");
+
+        let library = Library::open(&root).unwrap();
+        library.salvage_all(segment_length()).unwrap();
+        let id = SessionId::new(1);
+        let (session, utterances, annotations) = library
+            .db()
+            .with(|db| Ok((db.session(id)?, db.utterances(id)?, db.annotations(id)?)))
+            .unwrap();
+        assert_eq!(session.unwrap().title.as_deref(), Some("Workshop"));
+        assert_eq!(utterances.len(), 1);
+        assert_eq!(utterances[0].heard.utterance, crash_heard().unwrap());
+        assert_eq!(
+            annotations,
+            [Annotation::Mark(Mark {
+                at: crash_heard().unwrap().start()
+            })]
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

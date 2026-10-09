@@ -37,7 +37,7 @@ fn a_new_file_gets_the_current_schema() {
     let dir = TestDir::new("fresh");
     let store = Store::open(&dir.db()).unwrap();
     assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
-    assert_eq!(STEPS.len(), 2);
+    assert_eq!(STEPS.len(), 3);
     assert_eq!(STEPS.len(), usize::try_from(VERSION - FIRST + 1).unwrap());
     // Opening again changes nothing.
     drop(store);
@@ -47,7 +47,7 @@ fn a_new_file_gets_the_current_schema() {
 
 #[test]
 fn unknown_versions_are_refused_and_left_alone() {
-    for version in [4, 7, -1] {
+    for version in [VERSION + 1, 7, -1] {
         let dir = TestDir::new(&format!("version{version}"));
         raw(&dir.db())
             .pragma_update(None, "user_version", version)
@@ -240,7 +240,7 @@ fn version_2_upgrades_to_3_keeping_its_sessions() {
     let dir = TestDir::new("v2");
     version_2(&dir.db());
     let mut store = Store::open(&dir.db()).unwrap();
-    assert_eq!(store.pragma_text("user_version"), "3");
+    assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
     let old = store.session(SessionId::new(1)).unwrap().unwrap();
     assert_eq!(old.title.as_deref(), Some("old"));
     assert_eq!(old.state, SessionState::Stopped);
@@ -318,4 +318,34 @@ fn a_start_before_1970_is_refused() {
         store.session(SessionId::new(1)),
         Err(StoreError::Corrupt(_))
     ));
+}
+
+/// A version 3 library gains the triggers that keep heard text
+/// append-only, and keeps the text it had.
+#[test]
+fn version_3_upgrades_to_4_and_its_heard_text_becomes_append_only() {
+    let dir = TestDir::new("v3");
+    {
+        let conn = raw(&dir.db());
+        conn.execute_batch(schema::V2).unwrap();
+        conn.execute_batch(schema::V3).unwrap();
+        conn.pragma_update(None, "user_version", 3).unwrap();
+        conn.execute_batch(
+            "INSERT INTO session (id, state) VALUES (1, 'stopped');
+             INSERT INTO utterance (id, session_id, track, start_ns, end_ns, text, engine, model)
+             VALUES (1, 1, 0, 0, 10, 'heard before', 'e', 'm');
+             UPDATE utterance SET text = 'still changeable at 3' WHERE id = 1;",
+        )
+        .unwrap();
+    }
+    let store = Store::open(&dir.db()).unwrap();
+    assert_eq!(store.pragma_text("user_version"), "4");
+    let heard = store.utterances(SessionId::new(1)).unwrap();
+    assert_eq!(heard[0].heard.utterance.text(), "still changeable at 3");
+    drop(store);
+    assert!(
+        raw(&dir.db())
+            .execute("UPDATE utterance SET text = 'changed' WHERE id = 1", [])
+            .is_err()
+    );
 }

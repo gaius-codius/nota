@@ -2,8 +2,9 @@
 //!
 //! One SQLite database in the data directory holds every session: its
 //! title, tracks and state, the rows for the audio segments the recorder
-//! has published, and the tables later work fills (the transcript, marks
-//! and notes, jobs, the timeline). The tables are in [`schema`]; versions
+//! has published, the heard text and its revisions ([`transcript`]), the
+//! marks and notes made while recording ([`annotations`]), and the tables
+//! later work fills (jobs, the timeline). The tables are in [`schema`]; versions
 //! and the import of the per-session stores that came before are in
 //! [`migrate`].
 //!
@@ -35,15 +36,19 @@ use std::time::Duration;
 use nota_core::SessionId;
 use rusqlite::{Connection, OpenFlags};
 
+pub mod annotations;
 pub mod migrate;
 pub mod schema;
 mod segments;
 mod sessions;
+pub mod transcript;
 mod writer;
 
+pub use annotations::Annotation;
 pub use migrate::Adopted;
 pub use segments::{Inserted, SegmentRow, Sha256Digest};
 pub use sessions::{NewSession, Session, SessionState, Track, TrackKind};
+pub use transcript::{Heard, Line, RevisionNumber, StoredUtterance, UtteranceId, Word};
 pub use writer::Writer;
 
 /// How long a write waits for another process's write to finish.
@@ -81,6 +86,10 @@ pub enum StoreError {
     NoSession(SessionId),
     /// The session is in the `session` table already.
     SessionExists(SessionId),
+    /// The session has no revision with this number.
+    NoRevision(SessionId, u32),
+    /// The session has no utterance with this number.
+    NoUtterance(SessionId, i64),
     /// A stored row doesn't parse: a negative or inverted range, a
     /// wrong-length hash, a number out of its type's range, an unknown
     /// state or kind.
@@ -109,6 +118,12 @@ impl fmt::Display for StoreError {
             Self::NoSession(id) => write!(f, "session {} is not in the library", id.get()),
             Self::SessionExists(id) => {
                 write!(f, "session {} is in the library already", id.get())
+            }
+            Self::NoRevision(id, n) => {
+                write!(f, "session {} has no revision {n}", id.get())
+            }
+            Self::NoUtterance(id, n) => {
+                write!(f, "session {} has no utterance {n}", id.get())
             }
             Self::Corrupt(why) => write!(f, "corrupt row: {why}"),
         }

@@ -43,6 +43,21 @@ impl Utterance {
         })
     }
 
+    /// `text`, heard on `track` from `start` to `end`, as stored once
+    /// placed. `None` if it ends before it starts.
+    #[must_use]
+    pub fn new(track: TrackId, start: SessionTime, end: SessionTime, text: String) -> Option<Self> {
+        if end < start {
+            return None;
+        }
+        Some(Self {
+            start,
+            end,
+            track,
+            text,
+        })
+    }
+
     /// When the speech started.
     #[must_use]
     pub const fn start(&self) -> SessionTime {

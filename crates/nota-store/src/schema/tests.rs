@@ -192,9 +192,10 @@ fn utterances_and_their_words_keep_their_track() {
     );
 
     let columns = "utterance_id, position, text, start_ns, end_ns";
+    // The newest utterance's: its words go in with it (V4).
     let words = [
-        vec![int(1), int(0), text("good"), int(100), int(400)],
-        vec![int(1), int(1), text("morning"), int(450), int(900)],
+        vec![int(2), int(0), text("hello"), int(150), int(400)],
+        vec![int(2), int(1), text("there"), int(450), int(700)],
     ];
     for word in &words {
         write(&store, "word", columns, word);
