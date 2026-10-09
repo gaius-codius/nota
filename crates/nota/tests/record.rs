@@ -511,25 +511,17 @@ fn home_records_opens_processing_and_returns_home() {
     // One word: a draw skips cells that are blank already, such as the
     // spaces between words in the default theme.
     assert!(nota.shows_after(at, "finishing"), "{}", nota.output());
-    assert!(
-        nota.shows_after(at, "Final transcript"),
-        "{}",
-        nota.output()
-    );
+    assert!(nota.shows_after(at, "transcript"), "{}", nota.output());
     assert!(nota.shows_after(at, "tab view"), "{}", nota.output());
     let at = nota.len();
     nota.press("\u{1b}");
-    assert!(nota.shows_after(at, "◐ Recording"), "{}", nota.output());
+    assert!(nota.shows_after(at, "Recording"), "{}", nota.output());
     assert!(nota.shows_after(at, "⏎ open"), "{}", nota.output());
     assert!(!nota.terminal_restored());
 
     let at = nota.len();
     nota.press("\r");
-    assert!(
-        nota.shows_after(at, "Final transcript"),
-        "{}",
-        nota.output()
-    );
+    assert!(nota.shows_after(at, "transcript"), "{}", nota.output());
     assert!(nota.shows_after(at, "tab view"), "{}", nota.output());
 
     // The session is saved and stopped, with the setup's title.
