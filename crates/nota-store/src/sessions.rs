@@ -90,6 +90,21 @@ pub struct NewSession {
     pub tracks: Vec<Track>,
 }
 
+impl NewSession {
+    /// Session `id` with nothing known about it but its number: no title,
+    /// language, start time or tracks.
+    #[must_use]
+    pub const fn bare(id: SessionId) -> Self {
+        Self {
+            id,
+            title: None,
+            language: None,
+            started_at: None,
+            tracks: Vec::new(),
+        }
+    }
+}
+
 /// A session in the library.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
@@ -102,7 +117,7 @@ pub struct Session {
     /// Where it is in its life.
     pub state: SessionState,
     /// When it started, if that's known: not for a session from before
-    /// schema version 3, nor one adopted from disk.
+    /// schema version 3, nor one adopted from disk without it.
     pub started_at: Option<WallTime>,
 }
 
@@ -167,6 +182,27 @@ pub(crate) fn insert_session(
     Ok(())
 }
 
+/// Adds session `id`'s `tracks`, inside the caller's transaction.
+pub(crate) fn insert_tracks(
+    conn: &rusqlite::Connection,
+    id: SessionId,
+    tracks: &[Track],
+) -> Result<(), StoreError> {
+    let key = session_key(id)?;
+    for track in tracks {
+        conn.execute(
+            "INSERT INTO track (session_id, track, kind, source) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                key,
+                i64::from(track.track.get()),
+                track.kind.as_str(),
+                track.source.as_deref()
+            ],
+        )?;
+    }
+    Ok(())
+}
+
 impl Store {
     /// Adds a session and its tracks, in [`SessionState::Recording`], in
     /// one transaction committed before returning.
@@ -189,18 +225,7 @@ impl Store {
             new.started_at,
             SessionState::Recording,
         )?;
-        let key = session_key(new.id)?;
-        for track in &new.tracks {
-            tx.execute(
-                "INSERT INTO track (session_id, track, kind, source) VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    key,
-                    i64::from(track.track.get()),
-                    track.kind.as_str(),
-                    track.source.as_deref()
-                ],
-            )?;
-        }
+        insert_tracks(&tx, new.id, &new.tracks)?;
         tx.commit()?;
         Ok(())
     }

@@ -84,6 +84,32 @@ fn levels_are_sent_every_100_ms_with_the_peak_between() {
 }
 
 #[test]
+fn the_size_counts_what_was_captured_through_a_broken_journal() {
+    let mut live = Live::new(&[opened(MIC, 0)]);
+    let recorded = |actions: Actions| {
+        actions
+            .updates
+            .into_iter()
+            .filter_map(|u| match u {
+                Event::Recorded(bytes) => Some(bytes),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let first = live.recorder(Some(MIC), RecorderEvent::Audio(chunk(MIC, 0, vec![1; 100])));
+    assert_eq!(recorded(first), [200]);
+    let broken = nota_recorder::session::SessionError::Marks(std::io::ErrorKind::Other.into());
+    let failed = live.recorder(Some(MIC), RecorderEvent::JournalFailed(broken));
+    assert_eq!(failed, Actions::default());
+    // Captured, not on disk: the stretch the journal dropped still counts.
+    let next = live.recorder(
+        Some(MIC),
+        RecorderEvent::Audio(chunk(MIC, 100, vec![1; 100])),
+    );
+    assert_eq!(recorded(next), [400]);
+}
+
+#[test]
 fn each_track_keeps_its_own_meter() {
     let mut live = Live::new(&[opened(MIC, 0), opened(SYSTEM, 0)]);
     let a = live.recorder(Some(MIC), RecorderEvent::Audio(chunk(MIC, 0, vec![5; 10])));

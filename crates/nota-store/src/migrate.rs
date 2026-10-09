@@ -26,12 +26,11 @@
 
 use std::path::Path;
 
-use nota_core::SessionId;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
 use crate::schema;
 use crate::segments::{self, parse_row, raw_from_row, session_exists};
-use crate::sessions::{SessionState, insert_session};
+use crate::sessions::{NewSession, SessionState, insert_session, insert_tracks};
 use crate::{Store, StoreError, session_key};
 
 /// The schema version this code writes and understands.
@@ -142,11 +141,13 @@ fn read_per_session(path: &Path) -> Result<Vec<crate::SegmentRow>, StoreError> {
 }
 
 impl Store {
-    /// Adds session `id`, found on disk, if it isn't in the library: its
-    /// row, in [`SessionState::Stopped`] with no title, and the segment
-    /// rows of its per-session store at `per_session`, if it had one, in
-    /// one transaction. A session already in the library is left as it is,
-    /// and its per-session store isn't read.
+    /// Adds `session`, found on disk, if it isn't in the library: its row,
+    /// in [`SessionState::Stopped`], with whatever the disk kept of it
+    /// (title, language, start time, tracks: [`NewSession::bare`] if
+    /// nothing), and the segment rows of its per-session store at
+    /// `per_session`, if it had one, in one transaction. A session already
+    /// in the library is left as it is, and its per-session store isn't
+    /// read.
     ///
     /// The per-session store is opened but not changed, except that SQLite
     /// recovers a write-ahead log a crash left in it.
@@ -157,13 +158,14 @@ impl Store {
     /// isn't 1, [`StoreError::Corrupt`] if one of its rows doesn't parse,
     /// [`StoreError::Conflict`] if two of its rows overlap,
     /// [`StoreError::OutOfRange`] if the session's number doesn't fit
-    /// SQLite's integer, and [`StoreError::Sqlite`] for any SQLite failure.
-    /// Nothing is added then.
+    /// SQLite's integer, and [`StoreError::Sqlite`] for any SQLite failure,
+    /// including two tracks with one number. Nothing is added then.
     pub fn adopt_session(
         &mut self,
-        id: SessionId,
+        session: &NewSession,
         per_session: Option<&Path>,
     ) -> Result<Adopted, StoreError> {
+        let id = session.id;
         let key = session_key(id)?;
         if session_exists(&self.conn, key)? {
             return Ok(Adopted::Known);
@@ -179,7 +181,15 @@ impl Store {
         if session_exists(&tx, key)? {
             return Ok(Adopted::Known);
         }
-        insert_session(&tx, id, None, None, None, SessionState::Stopped)?;
+        insert_session(
+            &tx,
+            id,
+            session.title.as_deref(),
+            session.language.as_deref(),
+            session.started_at,
+            SessionState::Stopped,
+        )?;
+        insert_tracks(&tx, id, &session.tracks)?;
         for row in rows.iter().flatten() {
             segments::insert(&tx, id, row)?;
         }

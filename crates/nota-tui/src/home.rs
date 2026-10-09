@@ -18,8 +18,9 @@
 //! rest follow newest first. The selected session's detail (what it needs,
 //! or how it was recovered) shows on the line below it.
 //!
-//! A problem (a recording that couldn't start) shows on the line above
-//! `recent` until the next key.
+//! A problem (a recording that couldn't start, the sessions not listed)
+//! shows on the line above `recent` until a key is pressed once it has been
+//! drawn there.
 //!
 //! The footer offers only keys that work: `r` joins it with Setup, `/`
 //! with search and `?` with the keys overlay. `⏎` opens a session; until
@@ -98,6 +99,10 @@ pub struct Home {
     busy: Option<String>,
     /// Something that went wrong, shown above the list until dismissed.
     notice: Option<String>,
+    /// Whether the notice has been drawn, so a key can dismiss it: one
+    /// pressed on a session's page, or in a terminal too small to show it,
+    /// doesn't.
+    notice_drawn: bool,
 }
 
 impl Home {
@@ -106,16 +111,9 @@ impl Home {
     /// newest first. Control and bidirectional formatting characters in the
     /// text are dropped, so they can't reorder or break a row.
     #[must_use]
-    pub fn new(mut sessions: Vec<Session>, engines: &str, theme: Theme) -> Self {
-        let drawn = |text: &str| text.chars().filter(|&c| is_drawn(c)).collect::<String>();
-        for session in &mut sessions {
-            session.title = drawn(&session.title);
-            session.date = session.date.as_deref().map(drawn);
-            session.detail = session.detail.as_deref().map(drawn);
-        }
-        sessions.sort_by_key(|s| (s.status != Status::NeedsYou, std::cmp::Reverse(s.id)));
+    pub fn new(sessions: Vec<Session>, engines: &str, theme: Theme) -> Self {
         Self {
-            sessions,
+            sessions: listed(sessions),
             selected: 0,
             scroll: 0,
             engines: drawn(engines),
@@ -123,7 +121,23 @@ impl Home {
             opened: None,
             busy: None,
             notice: None,
+            notice_drawn: false,
         }
+    }
+
+    /// Lists `sessions` instead, in the order [`Home::new`] gives them. The
+    /// selection stays on the same session, and so does an open page; if
+    /// that session has gone, the selection stays at the same place in the
+    /// list (or the last row) and its page closes.
+    pub fn set_sessions(&mut self, sessions: Vec<Session>) {
+        let selected = self.selected();
+        let opened = self.opened.and_then(|i| self.sessions.get(i)).map(|s| s.id);
+        self.sessions = listed(sessions);
+        let at = |id| self.sessions.iter().position(|s| s.id == id);
+        self.selected = selected
+            .and_then(at)
+            .unwrap_or_else(|| self.selected.min(self.sessions.len().saturating_sub(1)));
+        self.opened = opened.and_then(at);
     }
 
     /// The sessions in the order they're listed.
@@ -149,9 +163,17 @@ impl Home {
         self.busy = what;
     }
 
-    /// Shows `problem` above the list, until the next key, or nothing.
+    /// Shows `problem` above the list, until a key is pressed once it has
+    /// been drawn, or nothing.
     pub fn set_notice(&mut self, problem: Option<String>) {
-        self.notice = problem.map(|text| text.chars().filter(|&c| is_drawn(c)).collect());
+        self.notice = problem.map(|text| drawn(&text));
+        self.notice_drawn = false;
+    }
+
+    /// The problem shown above the list, if any, as it's drawn.
+    #[must_use]
+    pub fn notice(&self) -> Option<&str> {
+        self.notice.as_deref()
     }
 
     /// Handles a key press. Returns what Home asks for, if anything.
@@ -164,8 +186,12 @@ impl Home {
         if key.kind == KeyEventKind::Release {
             return None;
         }
-        // Any key dismisses the notice; it has been seen.
-        self.notice = None;
+        // Any key dismisses the notice, once it has been drawn: it has been
+        // seen.
+        if self.notice_drawn {
+            self.notice = None;
+            self.notice_drawn = false;
+        }
         let ctrl_c = key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('c' | 'C'));
         if ctrl_c {
@@ -293,6 +319,7 @@ impl Home {
         );
         let label_y = logo_top + logo::HEIGHT + LOGO_GAP;
         if let Some(notice) = &self.notice {
+            self.notice_drawn = true;
             let room = usize::from(inside.width.saturating_sub(5));
             let mut spans = vec![Span::styled("! ", self.theme.gold)];
             spans.extend(truncate(
@@ -472,6 +499,24 @@ impl Home {
             buf,
         );
     }
+}
+
+/// `sessions` as Home lists them: those that need the user first, then
+/// the rest, each group newest first, with control and bidirectional
+/// formatting characters dropped from their text.
+fn listed(mut sessions: Vec<Session>) -> Vec<Session> {
+    for session in &mut sessions {
+        session.title = drawn(&session.title);
+        session.date = session.date.as_deref().map(drawn);
+        session.detail = session.detail.as_deref().map(drawn);
+    }
+    sessions.sort_by_key(|s| (s.status != Status::NeedsYou, std::cmp::Reverse(s.id)));
+    sessions
+}
+
+/// `text` without the characters that would reorder or break a row.
+fn drawn(text: &str) -> String {
+    text.chars().filter(|&c| is_drawn(c)).collect()
 }
 
 /// A session's length as Home shows it: `58m`, `2h 42m`, `1h 05m`; under a

@@ -9,6 +9,8 @@
 //!   elapsed time, the timeline band (marks and notes above a level
 //!   waveform of the whole session), the live transcript, and the keys `m`
 //!   (mark), `n` (note) and `s` (stop, which asks first) in the footer.
+//!   From 100 columns (`MainWide`) a panel beside it lists the marks and
+//!   notes, and `j`/`k` move through them.
 //!
 //! Both draw in the [`Theme`] [`Theme::load`] reads from the Omarchy theme,
 //! or with no colour at all under `NO_COLOR`.

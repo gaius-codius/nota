@@ -1648,6 +1648,7 @@ dependencies = [
  "nota-recorder",
  "nota-store",
  "nota-tui",
+ "proptest",
  "ratatui",
  "rusqlite",
  "rustix",
@@ -1684,6 +1685,7 @@ dependencies = [
  "nota-recorder",
  "nota-store",
  "proptest",
+ "rusqlite",
  "rustix",
  "sha2",
  "signal-hook",
@@ -1709,7 +1711,6 @@ dependencies = [
  "rustix",
  "toml",
  "unicode-segmentation",
- "unicode-width",
 ]
 
 [[package]]

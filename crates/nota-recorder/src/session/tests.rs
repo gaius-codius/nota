@@ -219,6 +219,20 @@ impl Fs for NoCreates {
     }
 }
 
+/// A filesystem that doesn't say how much space it has says it can't
+/// tell, rather than a figure.
+#[test]
+fn free_space_by_default_says_the_filesystem_cant_tell() {
+    let fs = NoCreates {
+        inner: FakeFs::with_dirs([dir()]),
+        refuse: Arc::new(AtomicBool::new(false)),
+    };
+    assert_eq!(
+        fs.free_space(&dir()).unwrap_err().kind(),
+        io::ErrorKind::Unsupported
+    );
+}
+
 #[test]
 fn when_the_replacement_fails_too_the_samples_are_a_gap_and_recording_goes_on() {
     let inner = FakeFs::with_dirs([dir(), PathBuf::from("/db")]);
@@ -254,9 +268,9 @@ fn when_the_replacement_fails_too_the_samples_are_a_gap_and_recording_goes_on() 
     fs.refuse.store(false, Ordering::SeqCst);
     w.append(MIC, &samples(700, 600)).unwrap();
     let ended = w.finish().unwrap();
-    // Id 1 went to the journal that couldn't be created: ids are in order,
-    // not dense.
-    assert_eq!(ended, finished(&[0, 2, 3]));
+    // Ids 1 and 2 went to the journal that couldn't be created, tried twice
+    // for want of space: ids are in order, not dense.
+    assert_eq!(ended, finished(&[0, 3, 4]));
     // 300..500 was written but never synced: kept by salvage if it
     // survives, lost if the crash drops it.
     let kept = inner.copy_disk();

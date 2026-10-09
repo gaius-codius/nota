@@ -6,11 +6,15 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
-use nota_core::recorder::{self, Input, Setup};
+use nota_core::recorder::{self, Cause, Input, Setup, Warning, WarningState};
 use nota_core::{Clock, EpochId, SessionId, TrackId, TrackTimeline, wall_now};
 use nota_recorder::capture::{
     Capture, CaptureBackend, CaptureReceiver, RecordError, RecorderEvent, Source, record_tracks,
     start_tracks,
+};
+use nota_recorder::disk::{
+    BALLAST_LEN, CHECK_INTERVAL, DiskMonitor, DiskReport, DiskWatch, MonitorConfig, Usage,
+    WatchedFs, WatchedStore,
 };
 use nota_recorder::engine::{EngineCommand, EngineConfig, EngineSupervisor};
 use nota_recorder::fs::StdFs;
@@ -42,6 +46,15 @@ pub(super) struct Screening {
     pub(super) save: Sender<ToSave>,
 }
 
+/// The filesystem a recording writes through: the real one, watched for a
+/// full disk (see [`nota_recorder::disk`]).
+pub(super) type RecordFs = WatchedFs<StdFs>;
+
+/// The ballast a tone recording keeps: nota's tests record many short
+/// sessions, each into a data directory of its own, and needn't write
+/// 256 MB for each.
+const TONE_BALLAST_LEN: u64 = 1024 * 1024;
+
 /// What stopping needs of what was started.
 pub(super) struct Started<B: CaptureBackend> {
     pub(super) outcome: Outcome,
@@ -49,8 +62,11 @@ pub(super) struct Started<B: CaptureBackend> {
     pub(super) draws: Option<DrawEnds>,
     pub(super) library: Library,
     pub(super) session: SessionId,
-    pub(super) lock: SessionLock<StdFs>,
+    pub(super) lock: SessionLock<RecordFs>,
     pub(super) captures: Vec<Capture<B::Stream>>,
+    /// Checks the disk and keeps the ballast; stopped after publishing, so
+    /// a full disk then is still in the summary.
+    pub(super) disk: DiskMonitor<StdFs>,
     pub(super) publisher: Publisher,
     pub(super) live_inputs: Sender<LiveInput>,
     pub(super) live: JoinHandle<Option<LatencyLog>>,
@@ -61,7 +77,7 @@ pub(super) struct Started<B: CaptureBackend> {
 /// The recorder thread's result: the writer, how recording ended, how
 /// many journal failures it reported, and the streams that failed.
 pub(super) type Recorded = (
-    SessionWriter<StdFs>,
+    SessionWriter<RecordFs>,
     Result<(), RecordError>,
     usize,
     Vec<String>,
@@ -100,11 +116,7 @@ pub(super) fn start<B: CaptureBackend>(
     note_salvaged(&library, &mut outcome)?;
     let session = library.create()?;
     outcome.session.clone_from(&session.dir);
-    let lock = SessionDir::new(session.id, StdFs, &session.audio()).lock()?;
-    // A track's fsyncs on a thread of its own: neither track's audio waits
-    // for the other's disk.
-    let mut writer = SessionWriter::open(&lock, RATE, segment_length(), Arc::clone(clock))?
-        .with_syncing(Syncing::Threads);
+    let Opened(watch, lock, mut writer) = open_session(session.id, &session.audio(), clock)?;
 
     let sources = sources(setup);
     let (started, events) = start_tracks(backend, &sources, RATE, clock);
@@ -126,9 +138,20 @@ pub(super) fn start<B: CaptureBackend>(
     // opened later doesn't push the first one's audio later.
     let timelines = open_timelines(&mut writer, &captures)?;
 
-    // The session's row is added by the publisher, before its first
-    // segment's: recording never waits on the database.
-    let rows = session_rows(&library, setup, session.id, &sources, &captures);
+    // Checked, and a ballast already there held, before the recorder
+    // starts; then while recording. A full disk stops it.
+    let disk = watch_disk(args, &session.audio(), captures.len(), &watch, &ui, clock)?;
+
+    // Recording never waits on the database: the session's row is kept in
+    // its directory too, so it's adopted with its title and tracks if the
+    // database never takes it.
+    let row = session_row(setup, session.id, &sources, &captures);
+    if let Err(e) = session.keep(&row) {
+        outcome.notes.push(format!(
+            "the session's title and tracks weren't kept with its audio: {e}"
+        ));
+    }
+    let rows = NewSessionRows::new(library.db().clone(), row);
     // The live text, marks and notes are stored as they come, on a thread
     // of their own; whichever of it and the publisher writes first adds the
     // session's row.
@@ -137,6 +160,9 @@ pub(super) fn start<B: CaptureBackend>(
         ui.clone(),
         Arc::clone(clock),
     )?;
+    // SQLite writes the database itself, so the segment rows' commits are
+    // watched for a full disk too.
+    let rows = WatchedStore::new(rows, watch, &library.db_path());
     let publisher = Publisher::spawn(SessionStore::new(lock.clone(), rows), segment_length())?;
     let (live_inputs, live_received) = mpsc::channel::<LiveInput>();
     let engine = match &args.models {
@@ -170,6 +196,7 @@ pub(super) fn start<B: CaptureBackend>(
         session: session.id,
         lock,
         captures,
+        disk,
         publisher,
         live_inputs,
         live,
@@ -186,12 +213,92 @@ pub(super) fn start<B: CaptureBackend>(
     Ok((started, screening))
 }
 
+/// The new session's audio directory, owned through a watched
+/// filesystem, and its writer, with the watch.
+struct Opened(
+    Arc<DiskWatch<StdFs>>,
+    SessionLock<RecordFs>,
+    SessionWriter<RecordFs>,
+);
+
+/// Opens the new session's audio directory through a watched filesystem.
+fn open_session(
+    id: SessionId,
+    audio: &std::path::Path,
+    clock: &Arc<dyn Clock>,
+) -> Result<Opened, BoxError> {
+    // Every write of the recording, the publisher's too, goes through the
+    // watch: the first to meet a full disk frees the ballast.
+    let watch = DiskWatch::new(StdFs);
+    let lock = SessionDir::new(id, watch.fs(), audio).lock()?;
+    // A track's fsyncs on a thread of its own: neither track's audio waits
+    // for the other's disk.
+    let writer = SessionWriter::open(&lock, RATE, segment_length(), Arc::clone(clock))?
+        .with_syncing(Syncing::Threads);
+    Ok(Opened(watch, lock, writer))
+}
+
+/// Starts the disk monitor for a recording of `tracks` tracks into
+/// `audio`, with the ballast in the data directory.
+fn watch_disk(
+    args: &RecordArgs,
+    audio: &std::path::Path,
+    tracks: usize,
+    watch: &Arc<DiskWatch<StdFs>>,
+    ui: &Sender<Event>,
+    clock: &Arc<dyn Clock>,
+) -> std::io::Result<DiskMonitor<StdFs>> {
+    let config = MonitorConfig {
+        data_dir: args.data.clone(),
+        audio_dir: audio.to_path_buf(),
+        usage: Usage::new(tracks, RATE, segment_length()),
+        ballast_len: if args.tone {
+            TONE_BALLAST_LEN
+        } else {
+            BALLAST_LEN
+        },
+        interval: CHECK_INTERVAL,
+    };
+    let reports = disk_reports(ui.clone(), Arc::clone(clock));
+    DiskMonitor::spawn(Arc::clone(watch), config, reports)
+}
+
+/// Turns what the disk monitor reports into the screens' events: the
+/// space, the low-disk warning, and on a full disk its warning and the
+/// stop.
+fn disk_reports(ui: Sender<Event>, clock: Arc<dyn Clock>) -> impl FnMut(DiskReport) + Send {
+    move |report| {
+        let warning = |cause, state| {
+            recorder::Event::Warning(Warning {
+                cause,
+                track: None,
+                at: clock.now(),
+                state,
+            })
+        };
+        let events = match report {
+            DiskReport::Space(disk) => vec![recorder::Event::Disk(disk)],
+            DiskReport::Low(state) => vec![warning(Cause::DiskLow, state)],
+            DiskReport::Full(_) => vec![
+                warning(Cause::DiskFull, WarningState::Raised),
+                recorder::Event::Stopping,
+            ],
+            // In the summary.
+            DiskReport::Unchecked(_) | DiskReport::Ballast(_) => Vec::new(),
+        };
+        for event in events {
+            // The screen may have closed already.
+            let _ = ui.send(Event::Recorder(event));
+        }
+    }
+}
+
 /// The recorder thread: records every track into `writer` until every
 /// stream has ended (or recording fails), handing finished journals to the
 /// publisher's `queue` and everything else to the live thread, and never
 /// waiting on either. Then it closes the screen.
 fn spawn_recorder(
-    mut writer: SessionWriter<StdFs>,
+    mut writer: SessionWriter<RecordFs>,
     mut timelines: Vec<TrackTimeline>,
     events: CaptureReceiver,
     queue: PublishQueue,
@@ -230,7 +337,7 @@ fn spawn_recorder(
 
 /// Starts each track in the writer and opens its timeline's first epoch.
 fn open_timelines<S>(
-    writer: &mut SessionWriter<StdFs>,
+    writer: &mut SessionWriter<RecordFs>,
     captures: &[Capture<S>],
 ) -> Result<Vec<TrackTimeline>, BoxError> {
     let mut timelines = Vec::new();
@@ -286,34 +393,29 @@ fn set_aside_part(aside: &[PathBuf]) -> String {
     }
 }
 
-/// The rows the publisher adds for this session: its title and the tracks
-/// that started.
-fn session_rows<S>(
-    library: &Library,
+/// This session's row: its title and the tracks that started.
+fn session_row<S>(
     setup: &Setup,
     id: SessionId,
     sources: &[(TrackId, Source); 2],
     captures: &[Capture<S>],
-) -> NewSessionRows {
-    NewSessionRows::new(
-        library.db().clone(),
-        NewSession {
-            id,
-            title: Some(setup.title.clone()),
-            language: None,
-            // When it started, for its date; read once, here.
-            started_at: wall_now(),
-            tracks: sources
-                .iter()
-                .filter(|(track, _)| captures.iter().any(|c| c.track() == *track))
-                .map(|(track, source)| Track {
-                    track: *track,
-                    kind: track_kind(*track),
-                    source: Some(source_name(source)),
-                })
-                .collect(),
-        },
-    )
+) -> NewSession {
+    NewSession {
+        id,
+        title: Some(setup.title.clone()),
+        language: None,
+        // When it started, for its date; read once, here.
+        started_at: wall_now(),
+        tracks: sources
+            .iter()
+            .filter(|(track, _)| captures.iter().any(|c| c.track() == *track))
+            .map(|(track, source)| Track {
+                track: *track,
+                kind: track_kind(*track),
+                source: Some(source_name(source)),
+            })
+            .collect(),
+    }
 }
 
 /// The engine that hears the live text, and its model: the Parakeet

@@ -55,6 +55,18 @@
 //!   [`CrashOutcome::LoseUnsynced`] zeroes them, [`CrashOutcome::KeepAll`]
 //!   keeps them, and [`CrashOutcome::Partial`] picks for each failed sync.
 //!
+//! # A full disk
+//!
+//! [`FakeFs::set_capacity`] gives the disk a size: a write that would take
+//! the files past it appends what fits, as a short write would, and fails
+//! with [`io::ErrorKind::StorageFull`] (`ENOSPC`). Only file data counts:
+//! names, directories and fsyncs take no room, and a file's room is freed
+//! as soon as its last name is removed (on Linux, once it's closed too;
+//! nota removes only files it has closed). [`Fs::free_space`] reports what's
+//! left. Like [`Fs::lock_dir`], it isn't an operation on the disk: it
+//! isn't logged and doesn't count towards [`FakeFs::crash_after`]. The size
+//! is the disk's, so it survives a crash.
+//!
 //! # Stalling
 //!
 //! [`FakeFs::stall_syncs`] holds back every fsync of one file, from its
@@ -399,6 +411,8 @@ struct State {
     /// Files whose fsyncs are held back, by the name they were created
     /// under.
     stalls: Vec<(PathBuf, Arc<Gate>)>,
+    /// The disk's size in bytes of file data, if it has one.
+    capacity: Option<u64>,
 }
 
 impl State {
@@ -417,7 +431,24 @@ impl State {
             crashed: false,
             locked: BTreeSet::new(),
             stalls: Vec::new(),
+            capacity: None,
         }
+    }
+
+    /// The bytes of file data the names the running system sees hold.
+    fn used(&self) -> u64 {
+        let named: BTreeSet<InodeId> = self.names.files.values().copied().collect();
+        named
+            .iter()
+            .filter_map(|id| self.inodes.get(id))
+            .map(|inode| inode.data.len() as u64)
+            .sum()
+    }
+
+    /// The bytes a write may still append, if the disk has a size.
+    fn room(&self) -> Option<u64> {
+        self.capacity
+            .map(|capacity| capacity.saturating_sub(self.used()))
     }
 
     /// Admits one operation, or fails it: if the process has crashed, if its
@@ -631,6 +662,12 @@ impl FakeFs {
         self.lock().faults.push((path.to_path_buf(), op, kind));
     }
 
+    /// Gives the disk a size of `bytes` of file data, or none (see the
+    /// module docs). Files already past it stay; only later writes fail.
+    pub fn set_capacity(&self, bytes: Option<u64>) {
+        self.lock().capacity = bytes;
+    }
+
     /// Holds back every fsync of the file created at `path`, from now until
     /// the returned [`Stall`] is released or dropped (see the module docs).
     /// A held fsync isn't attempted yet: it counts towards
@@ -677,7 +714,9 @@ impl FakeFs {
     pub fn crash(&self, outcome: CrashOutcome) -> Self {
         let mut state = self.lock();
         state.crashed = true;
-        Self::from_state(state.survivor(outcome))
+        let mut survivor = state.survivor(outcome);
+        survivor.capacity = state.capacity;
+        Self::from_state(survivor)
     }
 
     /// A separate copy of this filesystem as the running system sees it,
@@ -703,7 +742,9 @@ impl FakeFs {
                 (id, Inode { data, synced, lost })
             })
             .collect();
-        Self::from_state(State::new(inodes, state.next_inode, state.names.clone()))
+        let mut copy = State::new(inodes, state.next_inode, state.names.clone());
+        copy.capacity = state.capacity;
+        Self::from_state(copy)
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -858,6 +899,16 @@ impl Fs for FakeFs {
             dir: dir.to_path_buf(),
         })
     }
+
+    fn free_space(&self, dir: &Path) -> io::Result<u64> {
+        valid_dir(dir)?;
+        let state = self.lock();
+        if state.crashed {
+            return Err(crashed());
+        }
+        state.dir_exists(dir)?;
+        Ok(state.room().unwrap_or(u64::MAX))
+    }
 }
 
 impl FsFile for FakeFile {
@@ -872,6 +923,18 @@ impl FsFile for FakeFile {
                 state.inode(self.inode)?.data.extend_from_slice(half);
             }
             return Err(e);
+        }
+        if let Some(room) = state.room()
+            && room < bytes.len() as u64
+        {
+            // What fits, then ENOSPC, as a write that meets a full disk.
+            let fits = usize::try_from(room).unwrap_or(usize::MAX).min(bytes.len());
+            let fitting = &bytes[..fits];
+            state.inode(self.inode)?.data.extend_from_slice(fitting);
+            return Err(io::Error::new(
+                io::ErrorKind::StorageFull,
+                "no space left on the fake disk",
+            ));
         }
         state.inode(self.inode)?.data.extend_from_slice(bytes);
         state.log.push(Op::Write {
@@ -1693,6 +1756,71 @@ mod tests {
         assert!(stall.wait_for_held(1, WAIT));
         drop(stall);
         assert!(done.recv_timeout(WAIT).unwrap().is_ok());
+    }
+
+    #[test]
+    fn a_full_disk_takes_what_fits_then_refuses_with_enospc() {
+        let fs = FakeFs::with_dirs(["/s"]);
+        assert_eq!(fs.free_space(&p("/s")).unwrap(), u64::MAX);
+        fs.set_capacity(Some(10));
+        let mut f = fs.create(&p("/s/f")).unwrap();
+        f.write_all(b"abcdef").unwrap();
+        assert_eq!(fs.free_space(&p("/s")).unwrap(), 4);
+        let err = f.write_all(b"ghijkl").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::StorageFull);
+        assert!(crate::fs::is_disk_full(&err));
+        assert_eq!(fs.read(&p("/s/f")).unwrap(), b"abcdefghij");
+        assert_eq!(fs.free_space(&p("/s")).unwrap(), 0);
+        // Names and fsyncs take no room.
+        let mut g = fs.create(&p("/s/g")).unwrap();
+        g.sync().unwrap();
+        fs.sync_dir(&p("/s")).unwrap();
+        assert_eq!(
+            g.write_all(b"x").unwrap_err().kind(),
+            io::ErrorKind::StorageFull
+        );
+    }
+
+    #[test]
+    fn removing_a_file_frees_its_room_and_a_rename_keeps_it() {
+        let fs = FakeFs::with_dirs(["/s"]);
+        fs.set_capacity(Some(8));
+        let mut f = fs.create(&p("/s/f")).unwrap();
+        f.write_all(b"12345678").unwrap();
+        fs.rename(&p("/s/f"), &p("/s/g")).unwrap();
+        assert_eq!(fs.free_space(&p("/s")).unwrap(), 0);
+        fs.remove(&p("/s/g")).unwrap();
+        assert_eq!(fs.free_space(&p("/s")).unwrap(), 8);
+        let mut h = fs.create(&p("/s/h")).unwrap();
+        h.write_all(b"abc").unwrap();
+        assert_eq!(fs.free_space(&p("/s")).unwrap(), 5);
+    }
+
+    #[test]
+    fn the_disk_s_size_survives_a_crash_and_free_space_is_no_operation() {
+        let fs = FakeFs::with_dirs(["/s"]);
+        fs.set_capacity(Some(6));
+        let mut f = fs.create(&p("/s/f")).unwrap();
+        f.write_all(b"abcd").unwrap();
+        f.sync().unwrap();
+        fs.sync_dir(&p("/s")).unwrap();
+        let before = fs.attempted();
+        assert_eq!(fs.free_space(&p("/s")).unwrap(), 2);
+        assert_eq!(fs.attempted(), before);
+        assert_eq!(fs.ops().len(), before);
+        assert_eq!(
+            fs.free_space(&p("/nowhere")).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        let survivor = fs.crash(CrashOutcome::KeepAll);
+        assert!(
+            fs.free_space(&p("/s")).is_err(),
+            "the crashed process can't ask"
+        );
+        assert_eq!(survivor.free_space(&p("/s")).unwrap(), 2);
+        assert_eq!(survivor.copy_disk().free_space(&p("/s")).unwrap(), 2);
+        survivor.set_capacity(None);
+        assert_eq!(survivor.free_space(&p("/s")).unwrap(), u64::MAX);
     }
 
     /// Long enough for any thread here, short of a hang.

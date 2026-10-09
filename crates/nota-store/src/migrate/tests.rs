@@ -106,7 +106,9 @@ fn adopting_imports_a_per_session_store_once() {
     let mut store = Store::open(&dir.db()).unwrap();
     let three = SessionId::new(3);
     assert_eq!(
-        store.adopt_session(three, Some(&old)).unwrap(),
+        store
+            .adopt_session(&NewSession::bare(three), Some(&old))
+            .unwrap(),
         Adopted::Imported(3)
     );
     assert_eq!(store.segments(three).unwrap(), rows);
@@ -117,7 +119,9 @@ fn adopting_imports_a_per_session_store_once() {
     // Adopted once: a later change to the old store isn't read.
     raw(&old).execute("DELETE FROM segment", []).unwrap();
     assert_eq!(
-        store.adopt_session(three, Some(&old)).unwrap(),
+        store
+            .adopt_session(&NewSession::bare(three), Some(&old))
+            .unwrap(),
         Adopted::Known
     );
     assert_eq!(store.segments(three).unwrap(), rows);
@@ -128,17 +132,55 @@ fn adopting_a_session_without_a_store_adds_it_empty() {
     let dir = TestDir::new("nostore");
     let mut store = Store::open(&dir.db()).unwrap();
     let id = SessionId::new(4);
-    assert_eq!(store.adopt_session(id, None).unwrap(), Adopted::Added);
+    assert_eq!(
+        store.adopt_session(&NewSession::bare(id), None).unwrap(),
+        Adopted::Added
+    );
     assert_eq!(store.segments(id).unwrap(), vec![]);
-    assert_eq!(store.adopt_session(id, None).unwrap(), Adopted::Known);
+    assert_eq!(
+        store.adopt_session(&NewSession::bare(id), None).unwrap(),
+        Adopted::Known
+    );
     // A session made by `nota record` is known too.
     store
         .create_session(&new_session(SessionId::new(5)))
         .unwrap();
     assert_eq!(
-        store.adopt_session(SessionId::new(5), None).unwrap(),
+        store
+            .adopt_session(&NewSession::bare(SessionId::new(5)), None)
+            .unwrap(),
         Adopted::Known
     );
+}
+
+#[test]
+fn adopting_keeps_what_the_disk_kept_of_the_session() {
+    let dir = TestDir::new("kept");
+    let old = dir.0.join("nota.db");
+    let rows = [row(0, 0, 0, 480, 1)];
+    per_session_store(&old, &rows);
+    let mut store = Store::open(&dir.db()).unwrap();
+    let kept = new_session(SessionId::new(7));
+    assert_eq!(
+        store.adopt_session(&kept, Some(&old)).unwrap(),
+        Adopted::Imported(1)
+    );
+    let session = store.session(kept.id).unwrap().unwrap();
+    assert_eq!(session.title, kept.title);
+    assert_eq!(session.language, kept.language);
+    assert_eq!(session.started_at, kept.started_at);
+    assert_eq!(session.state, SessionState::Stopped);
+    assert_eq!(store.tracks(kept.id).unwrap(), kept.tracks);
+    assert_eq!(store.segments(kept.id).unwrap(), rows);
+
+    // Two tracks with one number add nothing.
+    let mut twice = new_session(SessionId::new(8));
+    twice.tracks[1].track = twice.tracks[0].track;
+    assert!(matches!(
+        store.adopt_session(&twice, None),
+        Err(StoreError::Sqlite(_))
+    ));
+    assert_eq!(store.session(twice.id).unwrap(), None);
 }
 
 #[test]
@@ -148,7 +190,9 @@ fn a_store_created_but_never_given_its_schema_imports_nothing() {
     drop(raw(&old));
     let mut store = Store::open(&dir.db()).unwrap();
     assert_eq!(
-        store.adopt_session(SessionId::new(1), Some(&old)).unwrap(),
+        store
+            .adopt_session(&NewSession::bare(SessionId::new(1)), Some(&old))
+            .unwrap(),
         Adopted::Imported(0)
     );
 }
@@ -165,7 +209,7 @@ fn a_bad_per_session_store_adopts_nothing() {
         .pragma_update(None, "user_version", 2)
         .unwrap();
     assert!(matches!(
-        store.adopt_session(id, Some(&wrong_version)),
+        store.adopt_session(&NewSession::bare(id), Some(&wrong_version)),
         Err(StoreError::UnknownSchema(2))
     ));
 
@@ -175,7 +219,7 @@ fn a_bad_per_session_store_adopts_nothing() {
         .execute("UPDATE segment SET epoch = -3", [])
         .unwrap();
     assert!(matches!(
-        store.adopt_session(id, Some(&corrupt)),
+        store.adopt_session(&NewSession::bare(id), Some(&corrupt)),
         Err(StoreError::Corrupt(m)) if m.contains("epoch")
     ));
 
@@ -188,14 +232,14 @@ fn a_bad_per_session_store_adopts_nothing() {
         )]
         std::os::unix::fs::symlink(&wrong_version, &link).unwrap();
         assert!(matches!(
-            store.adopt_session(id, Some(&link)),
+            store.adopt_session(&NewSession::bare(id), Some(&link)),
             Err(StoreError::Sqlite(_))
         ));
     }
 
     let missing = dir.0.join("missing.db");
     assert!(matches!(
-        store.adopt_session(id, Some(&missing)),
+        store.adopt_session(&NewSession::bare(id), Some(&missing)),
         Err(StoreError::Sqlite(_))
     ));
     // Opening it didn't create it.
@@ -215,8 +259,12 @@ fn imported_sessions_with_the_same_coordinates_coexist() {
     per_session_store(&a, &rows);
     per_session_store(&b, &other);
     let mut store = Store::open(&dir.db()).unwrap();
-    store.adopt_session(SessionId::new(1), Some(&a)).unwrap();
-    store.adopt_session(SessionId::new(2), Some(&b)).unwrap();
+    store
+        .adopt_session(&NewSession::bare(SessionId::new(1)), Some(&a))
+        .unwrap();
+    store
+        .adopt_session(&NewSession::bare(SessionId::new(2)), Some(&b))
+        .unwrap();
     assert_eq!(store.segments(SessionId::new(1)).unwrap(), rows);
     assert_eq!(store.segments(SessionId::new(2)).unwrap(), other);
 }

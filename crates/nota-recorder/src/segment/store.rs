@@ -36,6 +36,29 @@ pub trait SegmentStore {
     /// whose samples overlap this one's, and a session the store doesn't
     /// hold.
     fn insert(&mut self, session: SessionId, segment: &DurableSegment) -> Result<(), Self::Error>;
+
+    /// Whether `error` says the disk is full (see
+    /// [`is_disk_full`](crate::fs::is_disk_full)). By default, whether it,
+    /// or an error it was caused by, is an [`io::Error`](std::io::Error)
+    /// that does.
+    fn is_disk_full(error: &Self::Error) -> bool {
+        caused_by_a_full_disk(error)
+    }
+}
+
+/// Whether `error`, or any error in its chain of sources, is an I/O error
+/// for want of space.
+fn caused_by_a_full_disk(error: &(dyn Error + 'static)) -> bool {
+    let mut next = Some(error);
+    while let Some(e) = next {
+        if e.downcast_ref::<std::io::Error>()
+            .is_some_and(crate::fs::is_disk_full)
+        {
+            return true;
+        }
+        next = e.source();
+    }
+    false
 }
 
 impl SegmentStore for nota_store::Store {
@@ -47,6 +70,10 @@ impl SegmentStore for nota_store::Store {
 
     fn insert(&mut self, session: SessionId, segment: &DurableSegment) -> Result<(), Self::Error> {
         self.insert_segment(session, segment.row()).map(|_| ())
+    }
+
+    fn is_disk_full(error: &Self::Error) -> bool {
+        error.is_disk_full()
     }
 }
 
@@ -62,6 +89,10 @@ impl SegmentStore for nota_store::Writer {
         self.with(|store| store.insert_segment(session, segment.row()))
             .map(|_| ())
     }
+
+    fn is_disk_full(error: &Self::Error) -> bool {
+        error.is_disk_full()
+    }
 }
 
 /// A store lent to a [`SessionStore`](crate::session::SessionStore), so the
@@ -75,6 +106,10 @@ impl<T: SegmentStore + ?Sized> SegmentStore for &mut T {
 
     fn insert(&mut self, session: SessionId, segment: &DurableSegment) -> Result<(), Self::Error> {
         (**self).insert(session, segment)
+    }
+
+    fn is_disk_full(error: &Self::Error) -> bool {
+        T::is_disk_full(error)
     }
 }
 
@@ -102,23 +137,29 @@ mod fake {
     /// `synchronous=FULL`, and that a simulated crash can interrupt. Like
     /// SQLite, it keeps rows by session, and refuses a row whose samples
     /// overlap another row of the same session and track.
+    ///
+    /// It writes through any [`Fs`], a [`FakeFs`] by default: through one
+    /// that wraps a fake (a [`WatchedFs`](crate::disk::WatchedFs), say),
+    /// its commits meet what the wrapper does.
     #[derive(Debug, Clone)]
-    pub struct FakeStore {
-        fs: FakeFs,
+    pub struct FakeStore<S = FakeFs> {
+        fs: S,
         dir: PathBuf,
     }
 
-    impl FakeStore {
+    impl<S: Fs + Clone> FakeStore<S> {
         /// A store keeping its rows in `dir` on `fs`. The directory must
         /// exist.
         #[must_use]
-        pub fn new(fs: &FakeFs, dir: &Path) -> Self {
+        pub fn new(fs: &S, dir: &Path) -> Self {
             Self {
                 fs: fs.clone(),
                 dir: dir.to_path_buf(),
             }
         }
+    }
 
+    impl<S> FakeStore<S> {
         fn row_path(&self, session: SessionId, row: &SegmentRow) -> PathBuf {
             self.dir.join(format!(
                 "s{}-t{}-{:020}.row",
@@ -169,7 +210,7 @@ mod fake {
         )
     }
 
-    impl SegmentStore for FakeStore {
+    impl<S: Fs> SegmentStore for FakeStore<S> {
         type Error = io::Error;
 
         fn rows(&mut self, session: SessionId) -> io::Result<Vec<SegmentRow>> {
@@ -467,5 +508,60 @@ mod tests {
         round_trip(&mut writer);
         // Through a clone, the same rows.
         assert_eq!(writer.clone().rows(SessionId::new(1)).unwrap().len(), 1);
+    }
+
+    /// Each store tells a full disk from its other errors.
+    #[test]
+    fn stores_tell_a_full_disk_from_other_errors() {
+        use std::io;
+
+        use nota_store::StoreError;
+
+        use crate::segment::FakeStore;
+
+        let sqlite = |code| {
+            StoreError::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                None,
+            ))
+        };
+        let (full, busy) = (
+            sqlite(rusqlite::ffi::SQLITE_FULL),
+            sqlite(rusqlite::ffi::SQLITE_BUSY),
+        );
+        assert!(<Store as SegmentStore>::is_disk_full(&full));
+        assert!(!<Store as SegmentStore>::is_disk_full(&busy));
+        assert!(<Writer as SegmentStore>::is_disk_full(&full));
+        assert!(!<Writer as SegmentStore>::is_disk_full(&busy));
+        assert!(<&mut Store as SegmentStore>::is_disk_full(&full));
+        assert!(!<&mut Store as SegmentStore>::is_disk_full(&busy));
+        // The default: an I/O error for want of space, itself or as a cause.
+        let enospc = io::Error::new(io::ErrorKind::StorageFull, "full");
+        let other = io::Error::other("broken");
+        assert!(<FakeStore as SegmentStore>::is_disk_full(&enospc));
+        assert!(!<FakeStore as SegmentStore>::is_disk_full(&other));
+        let quota = io::Error::new(io::ErrorKind::QuotaExceeded, "quota");
+        assert!(<FakeStore as SegmentStore>::is_disk_full(
+            &io::Error::other(Wrapped(quota))
+        ));
+        assert!(!<FakeStore as SegmentStore>::is_disk_full(
+            &io::Error::other(Wrapped(io::Error::other("deep")))
+        ));
+    }
+
+    /// An error caused by another.
+    #[derive(Debug)]
+    struct Wrapped(std::io::Error);
+
+    impl std::fmt::Display for Wrapped {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("wrapped")
+        }
+    }
+
+    impl std::error::Error for Wrapped {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
     }
 }

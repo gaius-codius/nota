@@ -37,6 +37,15 @@
 # --measure-only runs just the uncrashed recording and its check: the lag
 # measurement, without the crash points.
 #
+# The lag must stay within the bounded-loss rule, 2 s behind the audio
+# delivered, which holds on a quiet disk. Under disk contention a single
+# fsync can take seconds, which nota can't control, so --disk-load measures
+# instead of checking: it loads the scratch disk itself (dd writing and
+# fsyncing 512 MiB at a time, over and over) during a --measure-only run,
+# and reports the worst lag and each fsync that ended past 2 s, with how
+# long that fsync and the track's one before it took, without failing on
+# them. Every other check still holds. Not on tmpfs.
+#
 # Run it on a real disk: on tmpfs every fsync is free, so the lag measures
 # nothing. The default scratch directory is under ~/.cache, and tmpfs is
 # refused unless --allow-tmpfs.
@@ -49,12 +58,14 @@
 #
 # Usage: scripts/real-capture-crash.sh [--mode kill|power|both] [--seconds S]
 #          [--segment-seconds K] [--tracks T] [--step K] [--from N] [--to N]
-#          [--measure-only] [--scratch DIR] [--allow-tmpfs] [--keep]
+#          [--measure-only] [--disk-load] [--scratch DIR] [--allow-tmpfs]
+#          [--keep]
 #   --mode             which crashes (default both)
 #   --seconds S        recording length per point (default 8)
 #   --tracks T         tracks recorded at once (default 1)
 #   --segment-seconds  segment window, short so publishing runs (default 2)
 #   --step K           every Kth crash point (default 1: all of them)
+#   --disk-load        load the disk and report the lag (implies --measure-only)
 #   NOTA_TEST_MODELS   the test models (default ~/.local/share/nota/test-models)
 #   LAZYFS             the LazyFS binary
 #
@@ -70,6 +81,7 @@ SECONDS_PER_POINT=8
 SEGMENT=2
 TRACKS=1
 MEASURE_ONLY=0
+DISK_LOAD=0
 STEP=1
 FROM=1
 TO=
@@ -86,6 +98,7 @@ while [[ $# -gt 0 ]]; do
     --segment-seconds) SEGMENT=$2; shift 2 ;;
     --tracks) TRACKS=$2; shift 2 ;;
     --measure-only) MEASURE_ONLY=1; shift ;;
+    --disk-load) DISK_LOAD=1; MEASURE_ONLY=1; shift ;;
     --step) STEP=$2; shift 2 ;;
     --from) FROM=$2; shift 2 ;;
     --to) TO=$2; shift 2 ;;
@@ -121,6 +134,9 @@ BIN=${CARGO_TARGET_DIR:-$REPO/target}/release/examples/real_capture
 [[ -x $BIN ]] || die "built, but no binary at $BIN"
 
 mkdir -p "$SCRATCH"
+if [[ $(findmnt -n -o FSTYPE --target "$SCRATCH") == tmpfs && $DISK_LOAD -eq 1 ]]; then
+  die "$SCRATCH is on tmpfs: --disk-load needs a real disk to load"
+fi
 if [[ $(findmnt -n -o FSTYPE --target "$SCRATCH") == tmpfs && $ALLOW_TMPFS -eq 0 ]]; then
   die "$SCRATCH is on tmpfs, where fsync is free (use --scratch on a real disk, or --allow-tmpfs)"
 fi
@@ -132,6 +148,7 @@ MODULE=
 PLAYER=
 LZ_PID=
 WRITER_PID=
+LOAD_PID=
 MNT=
 DONE_FD=
 
@@ -171,8 +188,30 @@ kill_writer() {
   WRITER_PID=
 }
 
+# Writes and fsyncs 512 MiB in the work directory, over and over. Run in
+# the background; on TERM it ends the dd it started, by its PID, and exits.
+disk_load() {
+  local child=
+  trap '[[ -z $child ]] || kill "$child" 2> /dev/null; exit 0' TERM
+  while :; do
+    dd if=/dev/zero of="$WORK/load" bs=1M count=512 conv=fsync status=none &
+    child=$!
+    wait "$child" || true
+  done
+}
+
+stop_load() {
+  if [[ -n $LOAD_PID ]]; then
+    kill "$LOAD_PID" 2> /dev/null || true
+    wait "$LOAD_PID" 2> /dev/null || true
+    rm -f "$WORK/load"
+    LOAD_PID=
+  fi
+}
+
 cleanup() {
   kill_writer
+  stop_load
   unmount
   [[ -n $PLAYER ]] && kill "$PLAYER" 2> /dev/null || true
   [[ -n $MODULE ]] && pactl unload-module "$MODULE" || true
@@ -241,14 +280,23 @@ PLAYER=$!
 # a function, so a background job's PID is the recorder's.
 WRITE_OPTS=(--source "$SINK" --seconds "$SECONDS_PER_POINT" --segment-seconds "$SEGMENT"
   --tracks "$TRACKS")
-check() { "$BIN" check "$@" --segment-seconds "$SEGMENT"; }
+CHECK_OPTS=(--segment-seconds "$SEGMENT")
+[[ $DISK_LOAD -eq 0 ]] || CHECK_OPTS+=(--under-load yes)
+check() { "$BIN" check "$@" "${CHECK_OPTS[@]}"; }
 
 # How many operations an uncrashed run makes, on the plain disk.
 mkdir -p "$WORK/count/rec"
+if [[ $DISK_LOAD -eq 1 ]]; then
+  disk_load &
+  LOAD_PID=$!
+  load_started() { [[ -s $WORK/load ]]; }
+  wait_for 30 load_started || die "the disk load didn't start writing"
+fi
 TOTAL=$("$BIN" write "$WORK/count/rec" "$WORK/count/log" "$WORK/count/ref" "${WRITE_OPTS[@]}" | sed -n 's/^ops \([0-9]*\).*/\1/p')
 [[ $TOTAL =~ ^[0-9]+$ ]] || die "the write workload didn't report its operation count"
 check "$WORK/count/rec" "$WORK/count/log" "$WORK/count/ref" > "$WORK/count/check.out" ||
   die "an uncrashed run fails its own check: $(cat "$WORK/count/check.out")"
+stop_load
 echo "uncrashed: $(sed 's/^result //' "$WORK/count/check.out")"
 # The baseline must have recorded something worth crashing: nearly all of
 # its seconds, published as segments.
@@ -256,6 +304,14 @@ base_recovered=$(sed -n 's/.* recovered=\([0-9]*\) .*/\1/p' "$WORK/count/check.o
 base_rows=$(sed -n 's/.* rows=\([0-9]*\) .*/\1/p' "$WORK/count/check.out")
 [[ ${base_recovered:-0} -ge $(((SECONDS_PER_POINT - 1) * 16000)) && ${base_rows:-0} -ge 2 ]] ||
   die "the uncrashed run recorded too little (recovered ${base_recovered:-0} samples, ${base_rows:-0} rows)"
+if [[ $DISK_LOAD -eq 1 ]]; then
+  field() { sed -n "s/.* $1=\([^ ]*\).*/\1/p" "$WORK/count/check.out"; }
+  echo "under disk load: worst $(field delivered_lag_max_ms) ms behind the audio delivered" \
+    "($(field rotation_lag_max_ms) ms at window rotations, $(field lag_max_ms) ms behind the" \
+    "journal); $(field past_bound) fsyncs past 2 s, reported, not failed"
+  field past_bound_fsyncs | tr ',' '\n' | grep -v '^none$' |
+    sed 's/^\([0-9]*\)@\([^:]*\):\([^/]*\)\/fsync\([^/]*\)\/before\(.*\)$/  track \1 at \2: \3 behind; its fsync took \4, the one before \5/' || true
+fi
 if [[ $MEASURE_ONLY -eq 1 ]]; then
   slow=$(grep -c '^slow ' "$WORK/count/log" || true)
   echo "slow disk operations (over 100 ms): $slow"

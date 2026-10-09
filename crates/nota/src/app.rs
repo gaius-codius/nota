@@ -19,13 +19,16 @@
 //! from before the terminal is set up until it's restored
 //! ([`QuitSignals`]).
 
+use std::io;
 use std::sync::Arc;
 use std::sync::mpsc;
+use std::time::Duration;
 
 use jiff::Timestamp;
+use jiff::civil::Date;
 use jiff::tz::TimeZone;
 use nota_core::recorder::{Command, Input, Setup};
-use nota_core::{Clock, SessionId, SystemClock, WallTime, wall_now};
+use nota_core::{Clock, SessionId, SessionTime, SystemClock, WallTime, wall_now};
 use nota_tui::{Action, Home, InputThread, RunError, Session, Status, Theme};
 
 use crate::library::{Library, Listed, Needs, Salvaged};
@@ -36,6 +39,12 @@ use crate::terminal::Screen;
 
 /// What Home shows while a recording stops.
 const STOPPING: &str = "finishing the recording";
+
+/// How often Home lists the sessions again while it's open, so a status
+/// another nota changes (a recording stopping, a salvage finishing) shows.
+/// Listing reads the library database and each session's directory, so
+/// it isn't done at every draw.
+const RELIST: Duration = Duration::from_secs(5);
 
 /// Runs Home until it's closed, recording each time `R` is pressed.
 /// `args` says where the library is and how to record; its start command
@@ -66,6 +75,15 @@ fn run_app(args: &RecordArgs, said: &mut Vec<String>) -> Result<(), BoxError> {
         Arc::new(SystemClock::start().map_err(|_| "the system clock can't be read")?);
     let theme = Theme::load();
     let engines = engines(args);
+    let mut listing = Listing {
+        library: &library,
+        salvaged: &salvaged,
+        zone: TimeZone::system,
+        clock: Arc::clone(&clock),
+        wall: Box::new(wall_now),
+        listed_at: None,
+        said: None,
+    };
     let mut screen: Option<Screen> = None;
     let mut notice = None;
     while !quit.asked() {
@@ -73,18 +91,9 @@ fn run_app(args: &RecordArgs, said: &mut Vec<String>) -> Result<(), BoxError> {
             Some(screen) => screen,
             None => Screen::enter(None)?,
         };
-        let dates = Dates {
-            now: wall_now(),
-            zone: TimeZone::system(),
-        };
-        let sessions = library
-            .listing(RATE)?
-            .into_iter()
-            .map(|listed| session(listed, &salvaged, &dates))
-            .collect();
-        let mut home = Home::new(sessions, engines, theme);
+        let mut home = Home::new(listing.sessions()?, engines, theme);
         home.set_notice(notice.take());
-        match show_home(&mut current, &mut home, &clock, &quit)? {
+        match show_home(&mut current, &mut home, &mut listing, &quit)? {
             Action::Quit => return Ok(()),
             Action::Record => {}
         }
@@ -152,7 +161,7 @@ fn record_from(
 fn show_home(
     screen: &mut Screen,
     home: &mut Home,
-    clock: &Arc<dyn Clock>,
+    listing: &mut Listing<'_>,
     quit: &QuitSignals,
 ) -> Result<Action, BoxError> {
     let (ui, ui_events) = mpsc::channel();
@@ -162,13 +171,14 @@ fn show_home(
         quit.show_home(None);
         return Ok(Action::Quit);
     }
-    let input = InputThread::spawn(ui, Arc::clone(clock));
+    let input = InputThread::spawn(ui, Arc::clone(&listing.clock));
     let ran = input.map_err(BoxError::from).and_then(|input| {
         // A new screen: drawn whole, not as changes to the last one's cells.
-        let ran = screen
-            .clear()
-            .map_err(RunError::Terminal)
-            .and_then(|()| nota_tui::run_home(screen.terminal(), home, &ui_events));
+        let ran = screen.clear().map_err(RunError::Terminal).and_then(|()| {
+            nota_tui::run_home(screen.terminal(), home, &ui_events, &mut |home| {
+                listing.refresh(home);
+            })
+        });
         let _ = input.stop();
         match ran {
             Ok(action) => Ok(action),
@@ -200,6 +210,106 @@ const fn engines(args: &RecordArgs) -> &'static str {
     }
 }
 
+/// Home's list of the sessions, and when it was last read, so it can be
+/// read again while Home stays open: every [`RELIST`], and as soon as the
+/// local date changes, so `today` moves on at midnight.
+struct Listing<'a> {
+    library: &'a Library,
+    /// What salvage did at start.
+    salvaged: &'a [Salvaged],
+    /// The local time zone, read at each use so a change to it is seen.
+    zone: fn() -> TimeZone,
+    /// Times the interval between listings.
+    clock: Arc<dyn Clock>,
+    /// The calendar's time, which says what day it is.
+    wall: Box<dyn Fn() -> Option<WallTime>>,
+    /// When the sessions were last listed, or a listing last failed, by
+    /// `clock`, and the local date then, if the calendar's time could be
+    /// read.
+    listed_at: Option<(SessionTime, Option<Date>)>,
+    /// While listing fails, the notice that said so on Home, once: it isn't
+    /// said again at every try, and it's taken back once a listing works.
+    said: Option<String>,
+}
+
+impl Listing<'_> {
+    /// The sessions as Home shows them, now.
+    ///
+    /// # Errors
+    ///
+    /// If the library can't be listed.
+    fn sessions(&mut self) -> io::Result<Vec<Session>> {
+        let dates = self.dates();
+        // Taken before listing, so time spent listing counts towards the
+        // next one.
+        let at = self.clock.now();
+        let sessions = self
+            .library
+            .listing(RATE)?
+            .into_iter()
+            .map(|listed| session(listed, self.salvaged, &dates))
+            .collect();
+        self.listed_at = Some((at, dates.today()));
+        Ok(sessions)
+    }
+
+    /// Gives `home` the sessions again if a listing is due: [`RELIST`] has
+    /// passed since the last, or the local date has changed. If listing
+    /// fails, Home keeps the list it has and says why, once until a
+    /// listing works again, without replacing another problem it shows.
+    fn refresh(&mut self, home: &mut Home) {
+        if !self.due() {
+            return;
+        }
+        match self.sessions() {
+            Ok(sessions) => {
+                if self
+                    .said
+                    .take()
+                    .is_some_and(|said| home.notice() == Some(&said))
+                {
+                    home.set_notice(None);
+                }
+                home.set_sessions(sessions);
+            }
+            Err(e) => {
+                // Not listed: wait the interval before trying again, even
+                // if the date has changed since the last listing.
+                self.listed_at = Some((self.clock.now(), self.today()));
+                if self.said.is_none() && home.notice().is_none() {
+                    home.set_notice(Some(format!("the sessions couldn't be listed: {e}")));
+                    self.said = home.notice().map(str::to_owned);
+                }
+            }
+        }
+    }
+
+    /// Now, and the local time zone.
+    fn dates(&self) -> Dates {
+        Dates {
+            now: (self.wall)(),
+            zone: (self.zone)(),
+        }
+    }
+
+    /// Today's local date, if the calendar's time can be read.
+    fn today(&self) -> Option<Date> {
+        self.dates().today()
+    }
+
+    fn due(&self) -> bool {
+        let Some((at, day)) = self.listed_at else {
+            return true;
+        };
+        self.clock
+            .now()
+            .checked_duration_since(at)
+            .unwrap_or_default()
+            >= RELIST
+            || self.today() != day
+    }
+}
+
 /// How Home words a session's date: `today`, `2 Oct` this year, `Oct 2025`
 /// before it, in the local time zone.
 struct Dates {
@@ -210,6 +320,12 @@ struct Dates {
 }
 
 impl Dates {
+    /// Today's local date, if now is known.
+    fn today(&self) -> Option<Date> {
+        let now = Timestamp::from_second(self.now?.unix_seconds()).ok()?;
+        Some(now.to_zoned(self.zone.clone()).date())
+    }
+
     /// The local date of `at`, in words.
     fn label(&self, at: WallTime) -> Option<String> {
         let date = Timestamp::from_second(at.unix_seconds())

@@ -516,3 +516,17 @@ fn a_fresh_file_opened_twice_at_once_gets_one_schema() {
     );
     assert_eq!(store.sessions().unwrap(), vec![]);
 }
+
+#[test]
+fn a_full_disk_is_told_from_other_sqlite_errors() {
+    let failure = |code| {
+        StoreError::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(code),
+            None,
+        ))
+    };
+    assert!(failure(rusqlite::ffi::SQLITE_FULL).is_disk_full());
+    assert!(!failure(rusqlite::ffi::SQLITE_IOERR).is_disk_full());
+    assert!(!failure(rusqlite::ffi::SQLITE_BUSY).is_disk_full());
+    assert!(!StoreError::OutOfRange.is_disk_full());
+}
