@@ -317,7 +317,11 @@ impl Library {
                 .map(|session| {
                     // A session with a row that doesn't parse is listed
                     // without its length; its findings file names the row.
-                    let rows = db.segments(session.id).ok();
+                    let rows = match db.segments(session.id) {
+                        Ok(rows) => Some(rows),
+                        Err(StoreError::CorruptRow { .. }) => None,
+                        Err(e) => return Err(e),
+                    };
                     Ok((session.id, session.title, session.started_at, rows))
                 })
                 .collect::<Result<Vec<_>, StoreError>>()

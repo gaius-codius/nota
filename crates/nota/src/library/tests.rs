@@ -1104,3 +1104,35 @@ fn a_session_whose_files_are_all_gone_needs_you() {
         Needs::Attention("1 segment missing or changed · only its file brings it back".into())
     );
 }
+
+/// One session's row that doesn't parse doesn't stop the listing: that
+/// session is listed without its length, and every other as usual.
+#[test]
+fn a_row_that_doesnt_parse_is_one_sessions_problem_in_the_listing() {
+    let tmp = TestDir::new("unparsable-listing");
+    let library = Library::open(&tmp.0).unwrap();
+    let (one, two) = (library.create().unwrap(), library.create().unwrap());
+    let hz = u64::from(SampleRate::SPEECH.hz());
+    library
+        .db()
+        .with(|db| {
+            db.create_session(&NewSession::bare(one.id))?;
+            db.create_session(&NewSession::bare(two.id))?;
+            db.insert_segment(two.id, &listed_row(0, 0, 60 * hz))
+        })
+        .unwrap();
+    let raw = rusqlite::Connection::open(library.db_path()).unwrap();
+    raw.execute_batch("PRAGMA ignore_check_constraints = ON")
+        .unwrap();
+    raw.execute(
+        "INSERT INTO segment (session_id, track, epoch, start_sample, end_sample, sha256) \
+         VALUES (?1, 0, 0, 0, 10, zeroblob(3))",
+        [i64::try_from(one.id.get()).unwrap()],
+    )
+    .unwrap();
+    let listed = library.listing(SampleRate::SPEECH).unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[0].recorded, None);
+    assert_eq!(listed[1].recorded, Some(Duration::from_secs(60)));
+    assert_eq!(listed[1].needs, Needs::Nothing);
+}
