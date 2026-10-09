@@ -198,15 +198,21 @@ fn each_session_shows_what_salvage_found() {
     let other = SessionId::new(5);
     assert_eq!(shown(Needs::Nothing, &[]), (Status::Ready, None));
     assert_eq!(
-        shown(Needs::Nothing, &[Salvaged::Done(id)]),
+        shown(Needs::Nothing, &[Salvaged::Done(id, Vec::new())]),
         (
             Status::Ready,
             Some("recovered after a crash · nothing lost".into())
         )
     );
+    // A journal set aside as damaged: recovered, but not "nothing lost".
+    let aside = vec![PathBuf::from("journal-000003.unreadable")];
+    assert_eq!(
+        shown(Needs::Nothing, &[Salvaged::Left(id, aside)]),
+        (Status::Ready, Some("recovered after a crash".into()))
+    );
     // Another session's salvage says nothing about this one.
     assert_eq!(
-        shown(Needs::Nothing, &[Salvaged::Done(other)]),
+        shown(Needs::Nothing, &[Salvaged::Done(other, Vec::new())]),
         (Status::Ready, None)
     );
     // Salvage at start failed, and its journals are still there: its
@@ -225,7 +231,10 @@ fn each_session_shows_what_salvage_found() {
         (Status::Ready, None)
     );
     assert_eq!(
-        shown(Needs::Attention("why".into()), &[Salvaged::Done(id)]),
+        shown(
+            Needs::Attention("why".into()),
+            &[Salvaged::Done(id, Vec::new())]
+        ),
         (Status::NeedsYou, Some("why".into()))
     );
     assert_eq!(

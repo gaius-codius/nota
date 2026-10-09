@@ -244,12 +244,17 @@ fn session(listed: Listed, salvaged: &[Salvaged], dates: &Dates) -> Session {
         (Needs::Nothing, Some(Salvaged::Failed(..) | Salvaged::InUse(_)) | None) => {
             (Status::Ready, None)
         }
-        // Journals salvage left show as attention above; once none are
-        // left, it's recovered.
-        (Needs::Nothing, Some(Salvaged::Done(_) | Salvaged::Left(_))) => (
-            Status::Ready,
-            Some("recovered after a crash · nothing lost".to_owned()),
-        ),
+        // Journals salvage left, or set aside as damaged, show as attention
+        // above while they're there; once none are left, it's recovered.
+        // "Nothing lost" only if salvage set nothing aside.
+        (Needs::Nothing, Some(Salvaged::Done(_, aside) | Salvaged::Left(_, aside))) => {
+            let recovered = if aside.is_empty() {
+                "recovered after a crash · nothing lost"
+            } else {
+                "recovered after a crash"
+            };
+            (Status::Ready, Some(recovered.to_owned()))
+        }
     };
     Session {
         id: id.get(),
@@ -265,9 +270,10 @@ fn session(listed: Listed, salvaged: &[Salvaged], dates: &Dates) -> Session {
 
 const fn salvaged_id(salvaged: &Salvaged) -> SessionId {
     match salvaged {
-        Salvaged::Done(id) | Salvaged::Left(id) | Salvaged::InUse(id) | Salvaged::Failed(id, _) => {
-            *id
-        }
+        Salvaged::Done(id, _)
+        | Salvaged::Left(id, _)
+        | Salvaged::InUse(id)
+        | Salvaged::Failed(id, _) => *id,
     }
 }
 
