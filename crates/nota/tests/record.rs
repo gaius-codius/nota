@@ -138,9 +138,12 @@ impl Running {
         Self::start_command(&record, data, extra, own_group, env)
     }
 
-    /// `nota` with no command: Home, recording a tone when asked to.
+    /// `nota` with no command: Home, recording a tone when asked to. Its
+    /// home directory is `data`, so the screen draws in the default theme
+    /// whatever the machine's Omarchy theme is.
     fn start_home(data: &Path) -> Self {
-        Self::start_command(&["--tone", "yes"], data, &[], false, &[])
+        let home = data.to_str().unwrap();
+        Self::start_command(&["--tone", "yes"], data, &[], false, &[("HOME", home)])
     }
 
     /// Starts nota with `words`, then `--data` and `extra`.
@@ -505,11 +508,9 @@ fn home_records_and_comes_back_after_the_stop() {
     pause(Duration::from_millis(700));
     let at = nota.len();
     nota.press("y");
-    assert!(
-        nota.shows_after(at, "finishing the recording"),
-        "{}",
-        nota.output()
-    );
+    // One word: a draw skips cells that are blank already, such as the
+    // spaces between words in the default theme.
+    assert!(nota.shows_after(at, "finishing"), "{}", nota.output());
     assert!(nota.shows_after(at, "✓ ready"), "{}", nota.output());
     assert!(nota.shows_after(at, "✓ Recording"), "{}", nota.output());
     assert!(nota.shows_after(at, "⏎ open"), "{}", nota.output());
