@@ -161,10 +161,11 @@ impl Published {
         &self.repaired
     }
 
-    /// Rows whose repair, proven, couldn't go ahead, with the error's kind:
-    /// the file under the row's name couldn't be kept aside, or the name
-    /// couldn't be checked. Each stays a finding, as it was; the next run
-    /// tries again.
+    /// Rows whose repair couldn't go ahead, with the error's kind: rebuilding
+    /// its audio failed (a journal that changed or couldn't be read again:
+    /// `InvalidData`, or the read's kind), the file under the row's name
+    /// couldn't be kept aside, or the name couldn't be checked. Each stays a
+    /// finding; the next run tries again.
     #[must_use]
     pub fn not_repaired(&self) -> &[(SegmentRow, io::ErrorKind)] {
         &self.not_repaired
@@ -376,7 +377,8 @@ impl Integrity {
 /// nothing else, and publishes nothing.
 ///
 /// At [`Depth::Names`] a row whose file is there is read only if it has an
-/// unresolved finding; at [`Depth::Contents`] every row's file is.
+/// unresolved finding (or if the findings file can't be read); at
+/// [`Depth::Contents`] every row's file is.
 ///
 /// It needs the session to itself, as [`salvage`] does.
 ///
@@ -399,24 +401,22 @@ pub fn scan<S: Fs, T: SegmentStore>(
     let (fs, dir) = (session.fs(), session.dir());
     let rows = read_rows(fs, dir, &mut store)?;
     let listed = fs.list(dir)?;
-    // Rows with an unresolved finding: read even at `Depth::Names`.
-    let open: Vec<SegmentRow> = findings::read(fs, dir)
-        .map(|f| {
-            f.found()
-                .iter()
-                .filter(|f| f.status() == Status::Unresolved)
-                .map(|f| *f.row())
-                .collect()
-        })
-        .unwrap_or_default();
-    let summaries = journal_summaries(fs, &listed);
+    // Rows with an unresolved finding: read even at `Depth::Names`. If the
+    // findings can't be read, which they were isn't known: read every row.
+    let open: Option<Vec<SegmentRow>> = findings::read(fs, dir).ok().map(|f| {
+        f.found()
+            .iter()
+            .filter(|f| f.status() == Status::Unresolved)
+            .map(|f| *f.row())
+            .collect()
+    });
     let mut found = Vec::new();
     let mut proven = Vec::new();
     for row in rows {
         let path = dir.join(segment_file_name(row.track(), row.range()));
         let result = if !listed.contains(&path) {
             Err(Problem::Missing)
-        } else if depth == Depth::Contents || open.contains(&row) {
+        } else if depth == Depth::Contents || open.as_ref().is_none_or(|open| open.contains(&row)) {
             check_row(fs, dir, &row)
         } else {
             continue;
@@ -426,19 +426,23 @@ pub fn scan<S: Fs, T: SegmentStore>(
             Err(problem) => found.push(Finding::new(row, problem)),
         }
     }
-    let (repaired, verified) = split_repaired(fs, dir, &proven);
     let findings_unsaved = findings::record(
         fs,
         dir,
         &Run {
             found: &found,
-            verified: &verified,
-            repaired: &repaired,
+            verified: &proven,
             ..Run::default()
         },
     )
     .err()
     .map(|e| e.kind());
+    // Journals are read only if there's something to sort.
+    let summaries = if found.is_empty() {
+        Vec::new()
+    } else {
+        journal_summaries(fs, &listed)
+    };
     let (needs_publishing, needs_attention) = found.into_iter().partition(|f| {
         summaries.iter().any(|j| {
             j.track == f.row().track() && j.range.is_some_and(|r| overlap(r, f.row().range()))
@@ -721,8 +725,7 @@ fn read_rows<S: Fs, T: SegmentStore>(
 /// samples: those whose file proves them. Those whose file is missing,
 /// unreadable or doesn't prove them go to `published.findings`. What it
 /// found is recorded in the findings file before anything is changed: the
-/// findings, the rows verified, and those a repair a crash cut short of
-/// recording put back (a file is kept aside under their name).
+/// findings, and the rows verified.
 fn check<S: Fs>(
     fs: &S,
     dir: &Path,
@@ -743,44 +746,19 @@ fn check<S: Fs>(
             Err(problem) => published.findings.push(Finding::new(row, problem)),
         }
     }
-    let (repaired, verified) = split_repaired(fs, dir, &claiming);
     let found = published.findings.clone();
     published.findings_unsaved = findings::record(
         fs,
         dir,
         &Run {
             found: &found,
-            verified: &verified,
-            repaired: &repaired,
+            verified: &claiming,
             ..Run::default()
         },
     )
     .err()
     .map(|e| e.kind());
     claiming
-}
-
-/// Splits rows whose file proves them into those with a file kept aside
-/// under their name by a repair, and the rest. If the directory can't be
-/// listed, they're all the rest.
-fn split_repaired<S: Fs>(
-    fs: &S,
-    dir: &Path,
-    rows: &[SegmentRow],
-) -> (Vec<SegmentRow>, Vec<SegmentRow>) {
-    let listed = if rows.is_empty() {
-        Vec::new()
-    } else {
-        fs.list(dir).unwrap_or_default()
-    };
-    rows.iter().partition(|row| {
-        let name = segment_file_name(row.track(), row.range());
-        listed.iter().any(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with(&name) && repair::is_kept_aside(n))
-        })
-    })
 }
 
 /// Whether `row`'s file in `dir` proves it, and if not, why.
@@ -793,24 +771,22 @@ fn check_row<S: Fs>(fs: &S, dir: &Path, row: &SegmentRow) -> Result<(), Problem>
     }
 }
 
-/// Whether the file `bytes` proves `row`: it's the file published (the
-/// row's SHA-256, and its FLAC header declares the row's length), or the
-/// row has an audio digest and the file decodes to exactly that audio.
+/// Whether the file `bytes` proves `row`. A row with an audio digest is
+/// proven only by audio: the file decodes to exactly the row's audio at its
+/// track and range, and declares its length (a re-encoded file does too).
+/// A row from before audio digests is proven by the file published: the
+/// row's SHA-256, and a FLAC header declaring the row's length.
 fn verify(bytes: &[u8], row: &SegmentRow) -> Result<(), Problem> {
     let same_file = Sha256::digest(bytes).as_slice() == row.sha256().as_bytes();
-    if same_file && flac::stream_len(bytes) == Some(row.range().len().get()) {
-        return Ok(());
+    let proven = match row.audio() {
+        Some(audio) => flac::decoded_audio_digest(bytes, row.track(), row.range()) == Some(audio),
+        None => same_file && flac::stream_len(bytes) == Some(row.range().len().get()),
+    };
+    match (proven, same_file) {
+        (true, _) => Ok(()),
+        (false, true) => Err(Problem::LengthMismatch),
+        (false, false) => Err(Problem::HashMismatch),
     }
-    if let Some(audio) = row.audio()
-        && flac::decoded_audio_digest(bytes, row.track(), row.range()) == Some(audio)
-    {
-        return Ok(());
-    }
-    Err(if same_file {
-        Problem::LengthMismatch
-    } else {
-        Problem::HashMismatch
-    })
 }
 
 /// Repairs what of `published.findings` it can (see [`repair_row`]): each
@@ -855,13 +831,17 @@ fn repair_all<S: Fs>(
 
 /// Repairs `finding`'s row from the journals in `summaries`, if they hold
 /// its audio, provably (see `repair`). `None` if they don't, or the problem
-/// isn't one to repair, or a step that changes nothing durable failed (in
-/// `published.not_repaired` or `published.blocked`).
+/// isn't one to repair, or a step failed: rebuilding the audio (a journal
+/// that changed or can't be read again) or keeping the file aside, in
+/// `published.not_repaired`, or the rebuilt file's name, in
+/// `published.blocked` (the row's file may then be kept aside already,
+/// and its name empty: the next run finds it missing and repairs it). The
+/// row stays a finding, and its window is left alone.
 ///
 /// # Errors
 ///
-/// As publishing a segment: a journal that changed, or a filesystem error
-/// while the rebuilt file is written.
+/// A filesystem error while the rebuilt file is written, as publishing a
+/// segment stops on one.
 fn repair_row<S: Fs>(
     fs: &S,
     dir: &Path,
@@ -879,7 +859,17 @@ fn repair_row<S: Fs>(
     let Some(segment) = plan::cover(row, summaries) else {
         return Ok(None);
     };
-    let (flac, audio) = encode(fs, dir, &segment)?;
+    let (flac, audio) = match encode(fs, dir, &segment) {
+        Ok(rebuilt) => rebuilt,
+        Err(e) => {
+            let kind = match &e {
+                PublishError::Io(e) => e.kind(),
+                _ => io::ErrorKind::InvalidData,
+            };
+            published.not_repaired.push((*row, kind));
+            return Ok(None);
+        }
+    };
     let Some(proven) = repair::prove(row, &segment, flac, audio) else {
         return Ok(None);
     };

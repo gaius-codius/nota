@@ -25,8 +25,10 @@ pub enum Problem {
     /// row has an audio digest, its decoded audio isn't the row's either
     /// (or doesn't decode).
     HashMismatch,
-    /// The file's SHA-256 is the row's, but its FLAC header doesn't declare
-    /// the row's number of samples.
+    /// The file's SHA-256 is the row's, yet it doesn't prove the row: its
+    /// FLAC header doesn't declare the row's number of samples, or, for a
+    /// row with an audio digest, its audio isn't the digest's (the row was
+    /// changed, not the file).
     LengthMismatch,
     /// There's something under the row's name, but reading it failed. The
     /// error may be transient.
@@ -52,8 +54,9 @@ pub enum Status {
     /// and its samples stay in journals.
     Unresolved,
     /// A later check found the row proven by its file (or, for a row that
-    /// didn't parse, found it parsing) without nota changing anything: the
-    /// error was transient, or someone put the file back.
+    /// didn't parse, found it parsing), and the run that checked didn't
+    /// repair it: the error was transient, someone put the file back, or a
+    /// repair whose record a crash cut short had put it back.
     SinceVerified,
     /// nota rebuilt the row's file from its journals, with proof that they
     /// hold exactly the row's audio. A file that was there and didn't match
@@ -279,8 +282,8 @@ impl Store {
         raws.into_iter().map(parse_finding).collect()
     }
 
-    /// How many unresolved findings each session has in the index, for
-    /// those with any.
+    /// How many rows with an unresolved finding each session has in the
+    /// index, for those with any: a row with several counts once.
     ///
     /// # Errors
     ///
@@ -288,7 +291,9 @@ impl Store {
     /// [`StoreError::Sqlite`] for any SQLite failure.
     pub fn unresolved_findings(&self) -> Result<BTreeMap<SessionId, usize>, StoreError> {
         let mut stmt = self.conn.prepare(
-            "SELECT session_id, count(*) FROM finding WHERE status = ?1 GROUP BY session_id",
+            "SELECT session_id, count(*) FROM \
+             (SELECT DISTINCT session_id, track, start_sample FROM finding WHERE status = ?1) \
+             GROUP BY session_id",
         )?;
         let raws = stmt
             .query_map([status_text(Status::Unresolved)], |r| {

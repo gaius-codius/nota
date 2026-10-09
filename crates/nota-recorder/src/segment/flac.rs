@@ -206,7 +206,9 @@ pub(super) fn audio_digest(
 
 /// The digest of the audio the FLAC file `bytes` decodes to, as `range` of
 /// `track`: `None` if it doesn't decode, isn't mono 16-bit, or doesn't hold
-/// exactly `range`'s number of samples.
+/// exactly `range`'s number of samples, both decoded and as its STREAMINFO
+/// declares them (a resumed track starts after the length its newest
+/// segment declares, so a file that proves a row must declare the row's).
 pub(super) fn decoded_audio_digest(
     bytes: &[u8],
     track: TrackId,
@@ -214,12 +216,12 @@ pub(super) fn decoded_audio_digest(
 ) -> Option<AudioDigest> {
     let mut reader = claxon::FlacReader::new(std::io::Cursor::new(bytes)).ok()?;
     let info = reader.streaminfo();
-    if info.channels != 1 || info.bits_per_sample != 16 {
+    let want = range.len().get();
+    if info.channels != 1 || info.bits_per_sample != 16 || info.samples != Some(want) {
         return None;
     }
     let mut pcm = Pcm::new(info.sample_rate, track, range);
     let mut count = 0_u64;
-    let want = range.len().get();
     for sample in reader.samples() {
         count += 1;
         if count > want {
@@ -474,6 +476,12 @@ mod tests {
         assert_eq!(decoded_audio_digest(&ours, track, short), None);
         assert_eq!(decoded_audio_digest(&ours, track, long), None);
         assert_eq!(decoded_audio_digest(b"not flac", track, range), None);
+        // The right audio, but STREAMINFO declaring another length (bytes
+        // 21 to 25 hold its low 36 bits): it doesn't prove the row.
+        let mut declared = ours.clone();
+        declared[25] ^= 0x01;
+        assert_eq!(stream_len(&declared), Some(10_001));
+        assert_eq!(decoded_audio_digest(&declared, track, range), None);
         assert_eq!(
             decoded_audio_digest(&ours[..ours.len() / 2], track, range),
             None

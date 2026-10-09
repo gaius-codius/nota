@@ -22,9 +22,10 @@
 //! **Findings.** Each start also checks every row of every session by name
 //! (the recorder's integrity scan), so a row whose file is gone is found
 //! even with no journals left, and copies each session's findings file
-//! into the database's findings index, which Home reads. The file, in the
-//! session's audio directory, is the record; the index is as of the last
-//! start.
+//! into the database's findings index. The file, in the session's audio
+//! directory, is the record, and what Home reads, so findings recorded
+//! since the start show; the index is as of the last start, for queries
+//! across the library.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -240,7 +241,9 @@ impl Library {
     /// The session is locked first, so a session another nota is
     /// recording is never adopted or marked stopped under it.
     fn salvage_one(&self, session: &SessionPaths, length: SegmentLength) -> Option<Salvaged> {
-        if is_empty(session) {
+        // Nothing in it yet, as `create` leaves it, unless the database
+        // holds rows for it: then its files are gone, and the scan says so.
+        if is_empty(session) && !self.has_rows(session.id) {
             return None;
         }
         let dir = SessionDir::new(session.id, StdFs, &session.audio());
@@ -291,6 +294,16 @@ impl Library {
         salvaged
     }
 
+    /// Whether the library database holds segment rows for `id`, or can't
+    /// say (a row that doesn't parse).
+    fn has_rows(&self, id: SessionId) -> bool {
+        match self.db.with(|db| db.segments(id)) {
+            Ok(rows) => !rows.is_empty(),
+            Err(StoreError::CorruptRow { .. }) => true,
+            Err(_) => false,
+        }
+    }
+
     /// Every session, as Home lists it, in number order: each one in the
     /// library database with its title and the audio its rows hold, and
     /// each one on disk that the database doesn't have (or every one, if
@@ -299,23 +312,21 @@ impl Library {
     pub(crate) fn listing(&self, rate: SampleRate) -> io::Result<Vec<Listed>> {
         let on_disk = self.existing()?;
         let in_db = self.db.with(|db| {
-            let sessions = db
-                .sessions()?
+            db.sessions()?
                 .into_iter()
                 .map(|session| {
-                    let rows = db.segments(session.id)?;
+                    // A session with a row that doesn't parse is listed
+                    // without its length; its findings file names the row.
+                    let rows = db.segments(session.id).ok();
                     Ok((session.id, session.title, session.started_at, rows))
                 })
-                .collect::<Result<Vec<_>, StoreError>>()?;
-            Ok((sessions, db.unresolved_findings()?))
+                .collect::<Result<Vec<_>, StoreError>>()
         });
         let mut listed: BTreeMap<u64, Listed> = BTreeMap::new();
-        let mut indexed = None;
         let db_error = match in_db {
-            Ok((sessions, unresolved)) => {
-                indexed = Some(unresolved);
+            Ok(sessions) => {
                 for (id, title, started_at, rows) in sessions {
-                    let recorded = longest_track(&rows, rate);
+                    let recorded = rows.as_deref().and_then(|rows| longest_track(rows, rate));
                     listed.insert(
                         id.get(),
                         Listed {
@@ -332,17 +343,11 @@ impl Library {
             Err(e) => Some(format!("the library database can't be read: {e}")),
         };
         for session in &on_disk {
-            if is_empty(session) {
+            // One the database holds is listed whatever its directory has.
+            if is_empty(session) && !listed.contains_key(&session.id.get()) {
                 continue;
             }
-            // The index, for a session the database holds; otherwise the
-            // session's own findings file.
-            let unresolved = indexed.as_ref().and_then(|counts| {
-                listed
-                    .contains_key(&session.id.get())
-                    .then(|| counts.get(&session.id).copied().unwrap_or(0))
-            });
-            let needs = match (&db_error, needs(session, unresolved)) {
+            let needs = match (&db_error, needs(session)) {
                 (_, needs @ (Needs::InUse | Needs::Attention(_))) => needs,
                 (Some(e), Needs::Nothing) => Needs::Attention(e.clone()),
                 (None, Needs::Nothing) => Needs::Nothing,
@@ -400,27 +405,27 @@ impl Library {
     }
 }
 
-/// Whether `session` needs the user: rows whose files didn't prove them
-/// (or that didn't parse) when they were last checked, still unresolved,
-/// or journals left unpublished. Journals another nota is still writing
-/// are a recording, not a problem. `unresolved` is how many unresolved
-/// findings the database's index has for it, if it has the session;
-/// otherwise its findings file is read.
-fn needs(session: &SessionPaths, unresolved: Option<usize>) -> Needs {
+/// Whether `session`'s directory shows it needs the user: rows whose files
+/// didn't prove them (or that didn't parse) when they were last checked,
+/// still unresolved, or journals left unpublished. Journals another nota is
+/// still writing are a recording, not a problem.
+fn needs(session: &SessionPaths) -> Needs {
     let dir = SessionDir::new(session.id, StdFs, &session.audio());
-    let unresolved = match unresolved {
-        Some(n) => Ok(n),
-        None => read_findings(&dir).map(|f| f.unresolved()),
-    };
-    match unresolved {
+    match read_findings(&dir).map(|f| f.unresolved()) {
         Ok(0) => {}
         Ok(n) => {
-            let rows = if n == 1 {
-                "segment doesn't"
+            let (rows, verb, files) = if n == 1 {
+                ("segment", "doesn't", "its file brings it")
             } else {
-                "segments don't"
+                ("segments", "don't", "their files bring them")
             };
-            return Needs::Attention(format!("{n} {rows} match the library · nothing is deleted"));
+            // With journals left, salvage keeps their audio and repairs what
+            // they hold; with none, only the user can bring the files back.
+            return Needs::Attention(if needs_salvage(&dir).unwrap_or(true) {
+                format!("{n} {rows} {verb} match the library · nothing is deleted")
+            } else {
+                format!("{n} {rows} missing or changed · only {files} back")
+            });
         }
         Err(e) => return Needs::Attention(e.to_string()),
     }

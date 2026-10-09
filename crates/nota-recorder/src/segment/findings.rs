@@ -10,14 +10,17 @@
 //! and is a finding too, by where it is ([`UnparsableRow`]).
 //!
 //! A finding is never dropped. Its [`Status`] says what became of it:
-//! [`Status::Unresolved`] while it stands, [`Status::SinceVerified`] once a
-//! later run finds the row proven by its file (or parsing) with nothing
-//! changed by nota, [`Status::Repaired`] once publishing rebuilt the row's
-//! file from its journals. A row found failing again is unresolved again.
+//! [`Status::Unresolved`] while it stands, [`Status::Repaired`] once
+//! publishing rebuilt the row's file from its journals, and
+//! [`Status::SinceVerified`] once a later run finds the row proven by its
+//! file (or parsing) without repairing it in that run (a repair whose
+//! record a crash cut short is found this way). A row found failing again
+//! is unresolved again. Publishing and the integrity scan (`scan`) both
+//! record here.
 //!
 //! The findings live in one file, `salvage-findings`, written like a
 //! segment: temp file, fsync, rename, directory fsync. So a crash leaves the
-//! old findings or the new ones, never a torn file. Each publish run merges
+//! old findings or the new ones, never a torn file. Each run merges
 //! what it found into what's there, and the file is rewritten only when
 //! that changes it. The library database keeps an index of it
 //! ([`nota_store::Store::index_findings`]); the file is the record.
@@ -265,16 +268,29 @@ impl Findings {
         &self.unparsable
     }
 
-    /// How many findings, of either kind, are [`Status::Unresolved`].
+    /// How many rows have an unresolved finding: rows whose file didn't
+    /// prove them and rows that didn't parse, each counted once however
+    /// many of its findings are unresolved.
     #[must_use]
     pub fn unresolved(&self) -> usize {
-        let open = |s: Status| usize::from(s == Status::Unresolved);
-        self.found.iter().map(|f| open(f.status)).sum::<usize>()
-            + self
-                .unparsable
-                .iter()
-                .map(|u| open(u.status))
-                .sum::<usize>()
+        let mut rows: Vec<(i64, i64)> = self
+            .found
+            .iter()
+            .filter(|f| f.status == Status::Unresolved)
+            .map(|f| {
+                let start = i64::try_from(f.row.range().start().get()).unwrap_or(i64::MAX);
+                (i64::from(f.row.track().get()), start)
+            })
+            .chain(
+                self.unparsable
+                    .iter()
+                    .filter(|u| u.status == Status::Unresolved)
+                    .map(|u| (u.key.track, u.key.start)),
+            )
+            .collect();
+        rows.sort_unstable();
+        rows.dedup();
+        rows.len()
     }
 
     /// Whether the last run could check the rows.

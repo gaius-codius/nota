@@ -1026,7 +1026,7 @@ fn a_row_whose_file_is_gone_needs_you_until_it_is_back() {
     assert!(library.salvage_all(length()).unwrap().is_empty());
     assert_eq!(
         needs(&library),
-        Needs::Attention("1 segment doesn't match the library · nothing is deleted".into())
+        Needs::Attention("1 segment missing or changed · only its file brings it back".into())
     );
     let indexed = |library: &Library| library.db().with(|db| db.findings(session.id)).unwrap();
     assert_eq!(
@@ -1072,5 +1072,35 @@ fn new_rows_name_a_row_that_doesnt_parse() {
     assert_eq!(
         <NewSessionRows as SegmentStore>::unparsable_row(&StoreError::OutOfRange),
         None
+    );
+}
+
+/// A session whose audio directory was emptied (every file lost) is still
+/// checked at start: the database holds its rows.
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test scaffolding outside the recorder's write path"
+)]
+fn a_session_whose_files_are_all_gone_needs_you() {
+    let tmp = TestDir::new("all-gone");
+    let library = Library::open(&tmp.0).unwrap();
+    let session = library.create().unwrap();
+    leave_a_journal(&session);
+    library.salvage_all(length()).unwrap();
+    assert_eq!(segments(&library, session.id).len(), 1);
+    for path in StdFs.list(&session.audio()).unwrap() {
+        std::fs::remove_file(path).unwrap();
+    }
+    for path in StdFs.list(&session.dir).unwrap() {
+        if path != session.audio() {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+    library.salvage_all(length()).unwrap();
+    let listed = library.listing(SampleRate::SPEECH).unwrap();
+    assert_eq!(
+        listed[0].needs,
+        Needs::Attention("1 segment missing or changed · only its file brings it back".into())
     );
 }

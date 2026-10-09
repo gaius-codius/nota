@@ -213,6 +213,10 @@ impl Fs for CountingFs {
         self.counted(|| StdFs.sync_file(path))
     }
 
+    fn rename_new(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.counted(|| StdFs.rename_new(from, to))
+    }
+
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         StdFs.read(path)
     }

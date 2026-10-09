@@ -547,6 +547,10 @@ impl<S: Fs + Clone + 'static> Fs for WatchedFs<S> {
         seen(&self.watch, path, self.inner.sync_file(path))
     }
 
+    fn rename_new(&self, from: &Path, to: &Path) -> io::Result<()> {
+        seen(&self.watch, to, self.inner.rename_new(from, to))
+    }
+
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         self.inner.read(path)
     }

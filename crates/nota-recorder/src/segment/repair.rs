@@ -108,21 +108,39 @@ pub(super) fn confirm_absent<S: Fs>(
     Ok((!fs.list(dir)?.contains(&path)).then_some(Cleared::Absent))
 }
 
+/// How many names [`preserve`] tries before giving up: each is taken only
+/// if something appears under it between the listing and the rename.
+const ASIDE_TRIES: usize = 16;
+
 /// Keeps the file under `row`'s name in `dir`: fsyncs it, renames it to
 /// the first of `<name>.mismatched`, `<name>.mismatched.1`, … that nothing
-/// in `dir` has, and fsyncs the directory. Nothing is deleted or replaced.
+/// in `dir` has, with a rename that never replaces ([`Fs::rename_new`]),
+/// and fsyncs the directory. Nothing is deleted or replaced.
 ///
 /// # Errors
 ///
-/// Any I/O error; the file is then under its own name or the new one,
+/// Any I/O error; [`io::ErrorKind::AlreadyExists`] if every name it tried
+/// was taken meanwhile. The file is then under its own name or the new one,
 /// never lost.
 pub(super) fn preserve<S: Fs>(fs: &S, dir: &Path, row: &SegmentRow) -> io::Result<Cleared> {
     let path = path_of(dir, row);
     fs.sync_file(&path)?;
-    let aside = free_aside(&path, &fs.list(dir)?);
-    fs.rename(&path, &aside)?;
-    fs.sync_dir(dir)?;
-    Ok(Cleared::Preserved(aside))
+    for _ in 0..ASIDE_TRIES {
+        let aside = free_aside(&path, &fs.list(dir)?);
+        match fs.rename_new(&path, &aside) {
+            Ok(()) => {
+                fs.sync_dir(dir)?;
+                return Ok(Cleared::Preserved(aside));
+            }
+            // Taken since the listing: list again.
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "every name tried for keeping the file aside was taken",
+    ))
 }
 
 /// The first of `<path>.mismatched`, `<path>.mismatched.1`, … not in
@@ -142,19 +160,6 @@ fn free_aside(path: &Path, taken: &[PathBuf]) -> PathBuf {
         aside = PathBuf::from(name);
     }
     aside
-}
-
-/// Whether `name` is a file kept aside by [`preserve`]: a segment's file
-/// name with [`MISMATCHED`] after it, and maybe `.N`.
-pub(super) fn is_kept_aside(name: &str) -> bool {
-    let Some((segment, rest)) = name.split_once(MISMATCHED) else {
-        return false;
-    };
-    let numbered = match rest.strip_prefix('.') {
-        None => rest.is_empty(),
-        Some(n) => n.parse::<u64>().is_ok_and(|v| v.to_string() == n),
-    };
-    numbered && super::segment_in_file_name(std::ffi::OsStr::new(segment)).is_some()
 }
 
 /// A row whose file a repair has put back. Only [`install`] makes one.
@@ -213,7 +218,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn aside_names_are_free_and_recognised() {
+    fn aside_names_are_the_first_free_ones() {
         let path = Path::new("/s/seg-t0-000000000000.flac");
         assert_eq!(
             free_aside(path, &[]),
@@ -225,21 +230,5 @@ mod tests {
         ];
         let next = free_aside(path, &taken);
         assert_eq!(next, Path::new("/s/seg-t0-000000000000.flac.mismatched.2"));
-        for name in [
-            "seg-t0-000000000000.flac.mismatched",
-            "seg-t0-000000000000.flac.mismatched.2",
-        ] {
-            assert!(is_kept_aside(name), "{name}");
-        }
-        for name in [
-            "seg-t0-000000000000.flac",
-            "seg-t0-000000000000.flac.mismatched.",
-            "seg-t0-000000000000.flac.mismatched.02",
-            "seg-t0-000000000000.flac.mismatched.x",
-            "seg-t0-0.flac.mismatched",
-            "other.mismatched",
-        ] {
-            assert!(!is_kept_aside(name), "{name}");
-        }
     }
 }

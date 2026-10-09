@@ -69,6 +69,14 @@ impl Fs for StdFs {
         std::fs::rename(from, to)
     }
 
+    fn rename_new(&self, from: &Path, to: &Path) -> io::Result<()> {
+        same_directory(from, to)?;
+        if std::fs::symlink_metadata(from)?.is_dir() {
+            return Err(is_a_directory());
+        }
+        rename_new(from, to)
+    }
+
     fn sync_dir(&self, dir: &Path) -> io::Result<()> {
         valid_dir(dir)?;
         sync_dir(dir)
@@ -273,6 +281,27 @@ fn sync_dir(dir: &Path) -> io::Result<()> {
     handle.sync_all()
 }
 
+/// Renames `from` to `to` unless something is at `to`, atomically:
+/// `renameat2(RENAME_NOREPLACE)`, which fails with `EEXIST` then.
+#[cfg(target_os = "linux")]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the durable-write layer is the one place that renames files"
+)]
+fn rename_new(from: &Path, to: &Path) -> io::Result<()> {
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+    Ok(renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE)?)
+}
+
+/// Elsewhere nota has no atomic way not to replace: it refuses.
+#[cfg(not(target_os = "linux"))]
+fn rename_new(_from: &Path, _to: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "renaming without replacing needs Linux",
+    ))
+}
+
 /// Fsyncs the regular file at `path`, opened read-only as [`open_to_read`]
 /// opens it: Linux syncs a file's data through any descriptor. (Windows
 /// needs write access to flush; there this fails, and nothing that needs
@@ -363,6 +392,55 @@ mod tests {
         assert_eq!(
             fs.create(&path).unwrap_err().kind(),
             io::ErrorKind::AlreadyExists
+        );
+    }
+
+    #[test]
+    fn a_file_syncs_by_name_but_nothing_else_does() {
+        let dir = TestDir::new("sync-file");
+        let fs = StdFs;
+        let path = dir.0.join("kept");
+        let mut file = fs.create(&path).unwrap();
+        file.write_all(b"abc").unwrap();
+        fs.sync_file(&path).unwrap();
+        assert_eq!(fs.read(&path).unwrap(), b"abc");
+        assert_eq!(
+            fs.sync_file(&dir.0).unwrap_err().kind(),
+            io::ErrorKind::IsADirectory
+        );
+        assert_eq!(
+            fs.sync_file(&dir.0.join("none")).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn renaming_without_replacing_keeps_what_is_there() {
+        let dir = TestDir::new("rename-new");
+        let fs = StdFs;
+        let (a, b, c) = (dir.0.join("a"), dir.0.join("b"), dir.0.join("c"));
+        for (path, body) in [(&a, b"a"), (&b, b"b")] {
+            fs.create(path).unwrap().write_all(body).unwrap();
+        }
+        assert_eq!(
+            fs.rename_new(&a, &b).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(fs.read(&a).unwrap(), b"a");
+        assert_eq!(fs.read(&b).unwrap(), b"b");
+        fs.rename_new(&a, &c).unwrap();
+        assert_eq!(fs.read(&c).unwrap(), b"a");
+        assert_eq!(fs.read(&a).unwrap_err().kind(), io::ErrorKind::NotFound);
+        let sub = dir.0.join("sub");
+        fs.create_dir(&sub).unwrap();
+        assert_eq!(
+            fs.rename_new(&c, &sub.join("c")).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            fs.rename_new(&sub, &dir.0.join("d")).unwrap_err().kind(),
+            io::ErrorKind::IsADirectory
         );
     }
 

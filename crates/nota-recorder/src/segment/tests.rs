@@ -2084,7 +2084,8 @@ fn a_corrupt_journal_in_a_bad_window_keeps_its_name_until_it_publishes() {
     file.write_all(&bytes).unwrap();
     file.sync().unwrap();
     let range = SampleRange::new(SampleIndex::new(100), SampleIndex::new(200)).unwrap();
-    let flac = flac_of(MIC, 100, 100);
+    // Audio the journal doesn't hold, so the row can't be repaired from it.
+    let flac = flac_of(SYSTEM, 100, 100);
     let missing = plant_row(&fs, MIC, range, &flac, &flac);
     let row_path = durable_path(MIC, range);
     fs.remove(&row_path).unwrap();
@@ -2173,7 +2174,8 @@ fn a_journal_break_while_publishing_live_loses_nothing_at_any_crash() {
 }
 
 /// Plants a committed row on `fs` for `range` of `track`, hashed over
-/// `hashed`, and leaves `file` (durably) under the row's name.
+/// `hashed` (with the digest of the audio it decodes to, if it does), and
+/// leaves `file` (durably) under the row's name.
 fn plant_row(
     fs: &FakeFs,
     track: TrackId,
@@ -2188,7 +2190,8 @@ fn plant_row(
         EpochId::new(0),
         range,
         hashed,
-        nota_store::AudioDigest::new([0; 32]),
+        flac::decoded_audio_digest(hashed, track, range)
+            .unwrap_or(nota_store::AudioDigest::new([0; 32])),
     )
     .unwrap()
     .sync()
@@ -2247,11 +2250,13 @@ fn rows_that_claim_nothing_never_let_a_journal_go_at_any_crash() {
         // A wrong hash: the file under the row's name holds other audio
         // (another session's, or a store restored out of step). It ends
         // where the next window's segment starts.
+        // The row's audio isn't what the journals hold either (other
+        // samples), so it can't be repaired from them.
         let wrong_hash = plant_row(
             &disk,
             MIC,
             range(0, 1_500),
-            &flac_of(MIC, 0, 1_500),
+            &flac_of(SYSTEM, 0, 1_500),
             &flac::encode(rate(), &[&[0; 1_500]]).unwrap(),
         );
         // The same name with a different range: the file's hash is the
@@ -2591,12 +2596,14 @@ fn findings_survive_any_later_failure_and_their_own_never_stops_publishing() {
             Some(_) => {
                 assert!(present, "failing op {at} lost the findings");
                 // A journal's unlink that fails is reported and the run
-                // goes on; anything else here stops it (`Other` isn't about
-                // one name, so a segment's temp or rename failing with it
-                // stops the run too).
+                // goes on, and so is a journal read failing while a row's
+                // repair rebuilds its audio; anything else here stops it
+                // (`Other` isn't about one name, so a segment's temp or
+                // rename failing with it stops the run too).
                 let reported = result.as_ref().is_ok_and(|done| {
                     let kinds = done.not_deleted().iter().map(|&(_, k)| k);
                     let kinds = kinds.chain(done.blocked().iter().map(|&(_, k)| k));
+                    let kinds = kinds.chain(done.not_repaired().iter().map(|&(_, k)| k));
                     kinds
                         .inspect(|&k| assert_eq!(k, io::ErrorKind::Other))
                         .count()

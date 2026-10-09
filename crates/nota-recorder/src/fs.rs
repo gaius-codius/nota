@@ -99,6 +99,28 @@ pub trait Fs: Send + Sync + fmt::Debug {
     /// I/O error, including a missing `from`.
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;
 
+    /// Renames the file `from` to `to` as [`Fs::rename`] does, but never
+    /// replaces anything: if something is at `to`, fails with
+    /// [`io::ErrorKind::AlreadyExists`] and changes nothing, atomically
+    /// (`renameat2` with `RENAME_NOREPLACE` on Linux). For keeping a file
+    /// aside under a name nothing else may take meanwhile.
+    ///
+    /// The default says the filesystem can't: a wrapper that doesn't pass
+    /// it on refuses rather than rename over something.
+    ///
+    /// # Errors
+    ///
+    /// As [`Fs::rename`], and [`io::ErrorKind::AlreadyExists`];
+    /// [`io::ErrorKind::Unsupported`] by default, and where the platform
+    /// can't.
+    fn rename_new(&self, from: &Path, to: &Path) -> io::Result<()> {
+        let _ = (from, to);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "this filesystem can't rename without replacing",
+        ))
+    }
+
     /// Makes every create, rename and remove in `dir` so far durable.
     ///
     /// # Errors

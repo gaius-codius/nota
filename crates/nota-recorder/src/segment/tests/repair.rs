@@ -264,20 +264,15 @@ fn sweep_repair(disk: &FakeFs, promised: &Promised, row: &SegmentRow, junk: Opti
                 .map(|(_, s)| s)
                 .collect();
             // Repaired, unless a crash came after the repair and before it
-            // was recorded, with no file kept aside to show it: then the
-            // next run finds the row proven, since verified. A crash after
-            // the file was kept aside leaves the row's file missing, which
-            // the next run finds and repairs too: two findings, both
-            // repaired. None at all if the crash came before the first
-            // was recorded and the repair after it.
+            // was recorded: then the next run finds the row proven by its
+            // file, since verified. A crash after the file was kept aside
+            // leaves the row's file missing, which the next run finds and
+            // repairs too: two findings. None at all if the crash came
+            // before the first was recorded and the repair after it.
             if statuses.contains(&Status::Repaired) {
                 repaired += 1;
             }
-            let fine = statuses.iter().all(|s| match s {
-                Status::Repaired => true,
-                Status::SinceVerified => junk.is_none(),
-                Status::Unresolved => false,
-            });
+            let fine = !statuses.contains(&Status::Unresolved);
             assert!(fine, "{case}: {statuses:?}");
         }
     }
@@ -482,4 +477,89 @@ fn an_unparsable_row_stops_its_session_and_is_named() {
     let findings = read_findings(&session_dir(&fs)).unwrap();
     assert_eq!(findings.unparsable()[0].status(), Status::SinceVerified);
     assert_eq!(findings.unresolved(), 0);
+}
+
+#[test]
+fn a_findings_file_that_doesnt_parse_makes_the_scan_read_every_row() {
+    let (disk, _, rows) = unsalvaged();
+    salvage(&mut session_store(&disk), length()).unwrap();
+    let swapped = rows[1];
+    let path = durable_path(swapped.track(), swapped.range());
+    disk.remove(&path).unwrap();
+    plant_file(&disk, &path, &junk());
+    let found = scan(&mut session_store(&disk), Depth::Contents).unwrap();
+    assert_eq!(
+        as_found(found.needs_attention()),
+        [(swapped, Problem::HashMismatch)]
+    );
+    // The findings file damaged: which rows had findings isn't known, so
+    // a scan by names reads every row, and finds the mismatch again.
+    let findings = session().join(FINDINGS_FILE_NAME);
+    disk.remove(&findings).unwrap();
+    plant_file(&disk, &findings, b"not findings");
+    let names = scan(&mut session_store(&disk), Depth::Names).unwrap();
+    assert_eq!(
+        as_found(names.needs_attention()),
+        [(swapped, Problem::HashMismatch)]
+    );
+    let recorded = read_findings(&session_dir(&disk)).unwrap();
+    assert_eq!(recorded.unresolved(), 1);
+    // The damaged file is kept aside.
+    assert!(
+        disk.paths()
+            .iter()
+            .any(|p| disk.read(p).is_ok_and(|b| b == b"not findings"))
+    );
+}
+
+#[test]
+fn a_journal_that_cant_be_read_again_for_a_repair_stops_only_that_repair() {
+    let (disk, _, rows, row, _) = with_a_committed_row(1);
+    // Fail each operation in turn until one fails the repair's re-read of
+    // the row's journals (after the first pass read them).
+    let ops = {
+        let probe = disk.copy_disk();
+        salvage(&mut session_store(&probe), length()).unwrap();
+        probe.attempted()
+    };
+    let (run, done) = (0..ops)
+        .find_map(|at| {
+            let run = disk.copy_disk();
+            run.fail_after(at, io::ErrorKind::Other);
+            let done = salvage(&mut session_store(&run), length()).ok()?;
+            (!done.not_repaired().is_empty()).then_some((run, done))
+        })
+        .expect("no failing operation stopped only the repair");
+    assert_eq!(done.not_repaired(), [(row, io::ErrorKind::Other)]);
+    assert!(done.repaired().is_empty());
+    assert_eq!(as_found(done.findings()), [(row, Problem::Missing)]);
+    // Every other row's segment was published.
+    assert_eq!(done.segments().len(), rows.len() - 1);
+    // The next run repairs it.
+    let again = salvage(&mut session_store(&run), length()).unwrap();
+    assert_eq!(again.repaired(), [(row, None)]);
+    assert_eq!(journals_left(&run), 0);
+}
+
+#[test]
+fn a_row_with_two_findings_counts_once() {
+    let (disk, _, rows) = unsalvaged();
+    salvage(&mut session_store(&disk), length()).unwrap();
+    let row = rows[1];
+    let path = durable_path(row.track(), row.range());
+    disk.remove(&path).unwrap();
+    plant_file(&disk, &path, &junk());
+    scan(&mut session_store(&disk), Depth::Contents).unwrap();
+    disk.remove(&path).unwrap();
+    disk.sync_dir(&session()).unwrap();
+    scan(&mut session_store(&disk), Depth::Names).unwrap();
+    let recorded = read_findings(&session_dir(&disk)).unwrap();
+    assert_eq!(
+        findings_of(&disk, &row),
+        [
+            (Problem::Missing, Status::Unresolved),
+            (Problem::HashMismatch, Status::Unresolved)
+        ]
+    );
+    assert_eq!(recorded.unresolved(), 1);
 }
