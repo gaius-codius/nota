@@ -456,7 +456,7 @@ mod tests {
             decoded_audio_digest(&encode(rate(8_000), &[&data]).unwrap(), track, range),
             Some(digest)
         );
-        let mut changed = data;
+        let mut changed = data.clone();
         changed[9_999] ^= 1;
         assert_ne!(
             decoded_audio_digest(&encode(rate(16_000), &[&changed]).unwrap(), track, range),
@@ -476,6 +476,26 @@ mod tests {
         assert_eq!(decoded_audio_digest(&ours, track, short), None);
         assert_eq!(decoded_audio_digest(&ours, track, long), None);
         assert_eq!(decoded_audio_digest(b"not flac", track, range), None);
+        // The right number of samples, but not mono, or not 16-bit.
+        for (channels, bits) in [(2, 16), (1, 24)] {
+            let interleaved: Vec<i32> = data
+                .iter()
+                .flat_map(|&s| std::iter::repeat_n(i32::from(s), channels))
+                .collect();
+            let source =
+                flacenc::source::MemSource::from_samples(&interleaved, channels, bits, 16_000);
+            let config = Encoder::default().into_verified().unwrap();
+            let stream = flacenc::encode_with_fixed_block_size(&config, source, 4_096).unwrap();
+            let mut sink = ByteSink::new();
+            stream.write(&mut sink).unwrap();
+            let other = sink.as_slice().to_vec();
+            assert_eq!(stream_len(&other), Some(10_000), "{channels} {bits}");
+            assert_eq!(
+                decoded_audio_digest(&other, track, range),
+                None,
+                "{channels} {bits}"
+            );
+        }
         // The right audio, but STREAMINFO declaring another length (bytes
         // 21 to 25 hold its low 36 bits): it doesn't prove the row.
         let mut declared = ours.clone();

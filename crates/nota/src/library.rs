@@ -40,7 +40,7 @@ use nota_recorder::segment::{
     Depth, DurableSegment, SegmentLength, SegmentStore, needs_salvage, read_findings, salvage, scan,
 };
 use nota_recorder::session::{SessionDir, SessionStore};
-use nota_store::{NewSession, RowKey, SegmentRow, SessionState, StoreError, Writer};
+use nota_store::{NewSession, SegmentRow, SessionState, StoreError, Writer};
 
 /// Names under the data directory, and in a session's directory.
 const SESSIONS: &str = "sessions";
@@ -570,10 +570,6 @@ impl SegmentStore for NewSessionRows {
 
     fn is_disk_full(error: &StoreError) -> bool {
         error.is_disk_full()
-    }
-
-    fn unparsable_row(error: &StoreError) -> Option<RowKey> {
-        Writer::unparsable_row(error)
     }
 }
 

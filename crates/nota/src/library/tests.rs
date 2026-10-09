@@ -1056,7 +1056,7 @@ fn a_row_whose_file_is_gone_needs_you_until_it_is_back() {
 
 #[test]
 fn new_rows_name_a_row_that_doesnt_parse() {
-    let key = RowKey {
+    let key = nota_store::RowKey {
         track: 2,
         start: -1,
     };

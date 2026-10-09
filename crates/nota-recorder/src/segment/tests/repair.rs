@@ -563,3 +563,55 @@ fn a_row_with_two_findings_counts_once() {
     );
     assert_eq!(recorded.unresolved(), 1);
 }
+
+#[test]
+fn the_scan_says_publishing_only_for_a_journal_of_the_rows_own_track_and_samples() {
+    let (disk, promised, _) = unsalvaged();
+    let (mic, system) = (
+        promised.durable[&MIC].get(),
+        promised.durable[&SYSTEM].get(),
+    );
+    assert!(system > mic + 10, "{mic} {system}");
+    // On the mic, past its journals but where the system's go on.
+    let rate_row = |start: u64| {
+        SegmentRow::new(
+            MIC,
+            EpochId::new(0),
+            SampleRange::new(SampleIndex::new(start), SampleIndex::new(start + 10)).unwrap(),
+            nota_store::Sha256Digest::new([9; 32]),
+        )
+        .unwrap()
+    };
+    let past = rate_row(mic);
+    let inside = rate_row(0);
+    plant(&disk, &past);
+    plant(&disk, &inside);
+    let found = scan(&mut session_store(&disk), Depth::Names).unwrap();
+    assert_eq!(
+        as_found(found.needs_publishing()),
+        [(inside, Problem::Missing)]
+    );
+    assert_eq!(
+        as_found(found.needs_attention()),
+        [(past, Problem::Missing)]
+    );
+}
+
+#[test]
+fn a_scan_whose_findings_cant_be_saved_says_so() {
+    let (disk, _, _, row, _) = with_a_committed_row(1);
+    disk.fail_on(
+        &session().join("salvage-findings.tmp"),
+        Fault::Create,
+        io::ErrorKind::PermissionDenied,
+    );
+    let found = scan(&mut session_store(&disk), Depth::Names).unwrap();
+    assert_eq!(
+        found.findings_unsaved(),
+        Some(io::ErrorKind::PermissionDenied)
+    );
+    assert_eq!(
+        as_found(found.needs_publishing()),
+        [(row, Problem::Missing)]
+    );
+}

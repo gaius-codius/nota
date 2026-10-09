@@ -388,6 +388,35 @@ fn well_formed_but_invalid_fields_are_refused() {
     assert_eq!(audio[ENTRY + 57..ENTRY + 89], [7; 32]);
 }
 
+/// A file with the same finding, or the same unparsable row, twice isn't
+/// one the writer makes: refused.
+#[test]
+fn duplicate_entries_are_refused() {
+    let finding = Finding::new(row(0, 0, 10, 1), Problem::Missing);
+    let unparsable = UnparsableRow {
+        key: RowKey { track: 0, start: 1 },
+        status: Status::Unresolved,
+    };
+    let unique = Findings {
+        found: vec![finding],
+        unparsable: vec![unparsable],
+        verification: Verification::Done,
+    };
+    assert_eq!(Findings::decode(&unique.encode()), Some(unique.clone()));
+    for twice in [
+        Findings {
+            found: vec![finding, finding],
+            ..unique.clone()
+        },
+        Findings {
+            unparsable: vec![unparsable, unparsable],
+            ..unique
+        },
+    ] {
+        assert_eq!(Findings::decode(&twice.encode()), None, "{twice:?}");
+    }
+}
+
 /// A version 1 file, as M1 wrote it, still reads: no audio digests, every
 /// finding unresolved, and no unparsable rows. It's rewritten as version 2
 /// when it changes.

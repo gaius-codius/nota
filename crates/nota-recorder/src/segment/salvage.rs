@@ -1122,3 +1122,53 @@ fn encode<S: Fs>(
     let flac = flac::encode(segment.rate, &pieces).map_err(PublishError::Flac)?;
     Ok((flac, audio))
 }
+
+#[cfg(test)]
+mod tests {
+    use nota_core::{EpochId, SampleIndex, TrackId};
+    use nota_store::{AudioDigest, Sha256Digest};
+
+    use super::*;
+
+    #[test]
+    fn a_row_is_proven_by_its_audio_or_before_audio_digests_by_its_file() {
+        let samples = [7_i16; 300];
+        let flac = flac::encode(SampleRate::SPEECH, &[&samples]).unwrap();
+        let hash = Sha256Digest::new(Sha256::digest(&flac).into());
+        let at =
+            |start, end| SampleRange::new(SampleIndex::new(start), SampleIndex::new(end)).unwrap();
+        let legacy = |r, h| SegmentRow::new(TrackId::new(0), EpochId::new(0), r, h).unwrap();
+        // Before audio digests: the file published, by hash and length.
+        assert_eq!(verify(&flac, &legacy(at(0, 300), hash)), Ok(()));
+        assert_eq!(
+            verify(&flac, &legacy(at(0, 301), hash)),
+            Err(Problem::LengthMismatch)
+        );
+        assert_eq!(
+            verify(&flac, &legacy(at(0, 300), Sha256Digest::new([0; 32]))),
+            Err(Problem::HashMismatch)
+        );
+        // With one: the audio, whatever the hash.
+        let audio =
+            flac::audio_digest(SampleRate::SPEECH, TrackId::new(0), at(0, 300), &[&samples]);
+        let other = Sha256Digest::new([0; 32]);
+        assert_eq!(
+            verify(&flac, &legacy(at(0, 300), other).with_audio(audio)),
+            Ok(())
+        );
+        assert_eq!(
+            verify(
+                &flac,
+                &legacy(at(0, 300), hash).with_audio(AudioDigest::new([1; 32]))
+            ),
+            Err(Problem::LengthMismatch)
+        );
+        assert_eq!(
+            verify(
+                &flac,
+                &legacy(at(0, 300), other).with_audio(AudioDigest::new([1; 32]))
+            ),
+            Err(Problem::HashMismatch)
+        );
+    }
+}

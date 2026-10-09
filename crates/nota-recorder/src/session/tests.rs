@@ -233,6 +233,29 @@ fn free_space_by_default_says_the_filesystem_cant_tell() {
     );
 }
 
+/// A filesystem that doesn't pass on fsyncing a file by name, or renaming
+/// without replacing, refuses both, and changes nothing.
+#[test]
+fn syncing_by_name_and_renaming_without_replacing_by_default_refuse() {
+    let inner = FakeFs::with_dirs([dir()]);
+    inner.create(&dir().join("a")).unwrap();
+    let fs = NoCreates {
+        inner: inner.clone(),
+        refuse: Arc::new(AtomicBool::new(false)),
+    };
+    assert_eq!(
+        fs.sync_file(&dir().join("a")).unwrap_err().kind(),
+        io::ErrorKind::Unsupported
+    );
+    assert_eq!(
+        fs.rename_new(&dir().join("a"), &dir().join("b"))
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::Unsupported
+    );
+    assert_eq!(inner.paths(), [dir().join("a")]);
+}
+
 #[test]
 fn when_the_replacement_fails_too_the_samples_are_a_gap_and_recording_goes_on() {
     let inner = FakeFs::with_dirs([dir(), PathBuf::from("/db")]);

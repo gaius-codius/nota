@@ -215,7 +215,93 @@ pub(super) fn install<S: Fs>(
 
 #[cfg(test)]
 mod tests {
+    use nota_core::{EpochId, SampleIndex, SampleRange, SampleRate, TrackId};
+    use nota_store::Sha256Digest;
+
     use super::*;
+    use crate::fs::FsFile as _;
+    use crate::fs::fake::{FakeFs, Fault};
+
+    fn range(start: u64, end: u64) -> SampleRange {
+        SampleRange::new(SampleIndex::new(start), SampleIndex::new(end)).unwrap()
+    }
+
+    fn segment(track: u32, epoch: u32, r: SampleRange) -> PlannedSegment {
+        PlannedSegment {
+            track: TrackId::new(track),
+            epoch: EpochId::new(epoch),
+            rate: SampleRate::SPEECH,
+            range: r,
+            parts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_repair_is_proven_only_at_the_rows_place_with_its_audio() {
+        let flac = b"rebuilt".to_vec();
+        let hash = Sha256Digest::new(Sha256::digest(&flac).into());
+        let audio = AudioDigest::new([4; 32]);
+        let legacy =
+            SegmentRow::new(TrackId::new(1), EpochId::new(2), range(10, 20), hash).unwrap();
+        let row = legacy.with_audio(audio);
+        let here = segment(1, 2, range(10, 20));
+        assert!(prove(&row, &here, flac.clone(), audio).is_some());
+        // Elsewhere: another track, epoch or range.
+        for elsewhere in [
+            segment(0, 2, range(10, 20)),
+            segment(1, 3, range(10, 20)),
+            segment(1, 2, range(10, 21)),
+        ] {
+            assert!(prove(&row, &elsewhere, flac.clone(), audio).is_none());
+            assert!(prove(&legacy, &elsewhere, flac.clone(), audio).is_none());
+        }
+        // Other audio: no, even with the row's file hash.
+        assert!(prove(&row, &here, flac.clone(), AudioDigest::new([5; 32])).is_none());
+        // A row without an audio digest is proven by its file's hash.
+        assert!(prove(&legacy, &here, flac, AudioDigest::new([5; 32])).is_some());
+        assert!(prove(&legacy, &here, b"other".to_vec(), audio).is_none());
+    }
+
+    #[test]
+    fn keeping_aside_never_replaces_and_gives_up_when_every_name_is_taken() {
+        let dir = Path::new("/s");
+        let fs = FakeFs::with_dirs([dir]);
+        let row = SegmentRow::new(
+            TrackId::new(0),
+            EpochId::new(0),
+            range(0, 10),
+            Sha256Digest::new([0; 32]),
+        )
+        .unwrap();
+        let path = path_of(dir, &row);
+        let mut file = fs.create(&path).unwrap();
+        file.write_all(b"theirs").unwrap();
+        // Something else takes the free name between each listing and rename.
+        let first = free_aside(&path, &[]);
+        fs.fail_on(&first, Fault::Rename, io::ErrorKind::AlreadyExists);
+        let err = preserve(&fs, dir, &row).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert!(err.to_string().contains("every name"), "{err}");
+        assert_eq!(fs.read(&path).unwrap(), b"theirs");
+        // Another error is the error.
+        let fs = FakeFs::with_dirs([dir]);
+        fs.create(&path).unwrap().write_all(b"theirs").unwrap();
+        fs.fail_on(&first, Fault::Rename, io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            preserve(&fs, dir, &row).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        // Free: kept aside, durably.
+        let fs = FakeFs::with_dirs([dir]);
+        fs.create(&path).unwrap().write_all(b"theirs").unwrap();
+        let Cleared::Preserved(aside) = preserve(&fs, dir, &row).unwrap() else {
+            panic!("kept aside expected");
+        };
+        assert_eq!(aside, first);
+        let survived = fs.crash(crate::fs::fake::CrashOutcome::LoseUnsynced);
+        assert_eq!(survived.read(&aside).unwrap(), b"theirs");
+        assert!(survived.read(&path).is_err());
+    }
 
     #[test]
     fn aside_names_are_the_first_free_ones() {

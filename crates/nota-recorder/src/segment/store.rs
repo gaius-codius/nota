@@ -46,19 +46,27 @@ pub trait SegmentStore {
     }
 
     /// The row `error` says doesn't parse, if it says that: publishing
-    /// names it in the findings file. By default none.
+    /// names it in the findings file. By default, the row of the first
+    /// [`StoreError::CorruptRow`](nota_store::StoreError::CorruptRow) in
+    /// its chain of sources, itself included.
     fn unparsable_row(error: &Self::Error) -> Option<RowKey> {
-        let _ = error;
-        None
+        corrupt_row(error)
     }
 }
 
-/// The row a store error says doesn't parse.
-const fn corrupt_row(error: &nota_store::StoreError) -> Option<RowKey> {
-    match error {
-        nota_store::StoreError::CorruptRow { key, .. } => Some(*key),
-        _ => None,
+/// The row of the first `CorruptRow` store error in `error`'s chain of
+/// sources, itself included.
+fn corrupt_row(error: &(dyn Error + 'static)) -> Option<RowKey> {
+    let mut next = Some(error);
+    while let Some(e) = next {
+        if let Some(nota_store::StoreError::CorruptRow { key, .. }) =
+            e.downcast_ref::<nota_store::StoreError>()
+        {
+            return Some(*key);
+        }
+        next = e.source();
     }
+    None
 }
 
 /// Whether `error`, or any error in its chain of sources, is an I/O error
@@ -90,10 +98,6 @@ impl SegmentStore for nota_store::Store {
     fn is_disk_full(error: &Self::Error) -> bool {
         error.is_disk_full()
     }
-
-    fn unparsable_row(error: &Self::Error) -> Option<RowKey> {
-        corrupt_row(error)
-    }
 }
 
 /// A shared handle on the library database, opened on first use.
@@ -111,10 +115,6 @@ impl SegmentStore for nota_store::Writer {
 
     fn is_disk_full(error: &Self::Error) -> bool {
         error.is_disk_full()
-    }
-
-    fn unparsable_row(error: &Self::Error) -> Option<RowKey> {
-        corrupt_row(error)
     }
 }
 
@@ -617,6 +617,66 @@ mod tests {
         assert!(!<FakeStore as SegmentStore>::is_disk_full(
             &io::Error::other(Wrapped(io::Error::other("deep")))
         ));
+    }
+
+    /// Each store names a row that doesn't parse from its error, or from an
+    /// error that caused it.
+    #[test]
+    fn stores_name_a_row_that_doesnt_parse() {
+        use std::io;
+
+        use nota_store::{RowKey, StoreError};
+
+        use crate::segment::FakeStore;
+
+        let key = RowKey {
+            track: 3,
+            start: -2,
+        };
+        let corrupt = || StoreError::CorruptRow {
+            session: SessionId::new(1),
+            key,
+            why: "odd".into(),
+        };
+        assert_eq!(
+            <Store as SegmentStore>::unparsable_row(&corrupt()),
+            Some(key)
+        );
+        assert_eq!(
+            <Writer as SegmentStore>::unparsable_row(&corrupt()),
+            Some(key)
+        );
+        assert_eq!(
+            <&mut Store as SegmentStore>::unparsable_row(&corrupt()),
+            Some(key)
+        );
+        for other in [StoreError::OutOfRange, StoreError::Corrupt("x".into())] {
+            assert_eq!(<Store as SegmentStore>::unparsable_row(&other), None);
+        }
+        // Any store whose error was caused by one.
+        let caused = io::Error::other(WrappedStore(corrupt()));
+        assert_eq!(
+            <FakeStore as SegmentStore>::unparsable_row(&caused),
+            Some(key)
+        );
+        let plain = io::Error::other("broken");
+        assert_eq!(<FakeStore as SegmentStore>::unparsable_row(&plain), None);
+    }
+
+    /// A store error, as the cause of another.
+    #[derive(Debug)]
+    struct WrappedStore(nota_store::StoreError);
+
+    impl std::fmt::Display for WrappedStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("wrapped store error")
+        }
+    }
+
+    impl std::error::Error for WrappedStore {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
     }
 
     /// An error caused by another.

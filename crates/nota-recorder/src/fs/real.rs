@@ -283,23 +283,28 @@ fn sync_dir(dir: &Path) -> io::Result<()> {
 
 /// Renames `from` to `to` unless something is at `to`, atomically:
 /// `renameat2(RENAME_NOREPLACE)`, which fails with `EEXIST` then.
-#[cfg(target_os = "linux")]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the durable-write layer is the one place that renames files"
+/// Elsewhere than Linux nota has no atomic way not to replace: it refuses.
+#[cfg_attr(
+    target_os = "linux",
+    expect(
+        clippy::disallowed_methods,
+        reason = "the durable-write layer is the one place that renames files"
+    )
 )]
 fn rename_new(from: &Path, to: &Path) -> io::Result<()> {
-    use rustix::fs::{CWD, RenameFlags, renameat_with};
-    Ok(renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE)?)
-}
-
-/// Elsewhere nota has no atomic way not to replace: it refuses.
-#[cfg(not(target_os = "linux"))]
-fn rename_new(_from: &Path, _to: &Path) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "renaming without replacing needs Linux",
-    ))
+    #[cfg(target_os = "linux")]
+    {
+        use rustix::fs::{CWD, RenameFlags, renameat_with};
+        Ok(renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE)?)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (from, to);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "renaming without replacing needs Linux",
+        ))
+    }
 }
 
 /// Fsyncs the regular file at `path`, opened read-only as [`open_to_read`]
