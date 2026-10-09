@@ -62,7 +62,8 @@ impl Published {
     /// after their valid frames than a crash can leave: too many unreadable
     /// bytes, or a frame of fsync'd audio past the damage (corruption; what
     /// did read was published). One whose window has a bad row stays under
-    /// its name until that window publishes.
+    /// its name until that window publishes, and one whose aside name is
+    /// taken stays under its name too (see [`Self::not_set_aside`]).
     #[must_use]
     pub fn quarantined(&self) -> &[PathBuf] {
         &self.quarantined

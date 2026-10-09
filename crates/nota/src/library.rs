@@ -60,12 +60,14 @@ impl SessionPaths {
 /// What salvage did to one session at start.
 #[derive(Debug)]
 pub(crate) enum Salvaged {
-    /// It had journals left, and salvage published them.
-    Done(SessionId),
+    /// It had journals left, and salvage published them. Also the journals
+    /// it set aside as damaged, under their new names (kept, not deleted).
+    Done(SessionId, Vec<PathBuf>),
     /// Salvage ran, but left journals it couldn't publish yet (unreadable,
     /// or held back by a segment that doesn't match its row); the next
-    /// start tries again.
-    Left(SessionId),
+    /// start tries again. Also the journals it set aside as damaged, as in
+    /// `Done`.
+    Left(SessionId, Vec<PathBuf>),
     /// Another nota is using it; it's left alone.
     InUse(SessionId),
     /// Salvage failed, or couldn't start because the session couldn't be
@@ -199,8 +201,14 @@ impl Library {
         }
         let mut bound = SessionStore::new(lock, self.db.clone());
         Some(match salvage(&mut bound, length) {
-            Ok(_) if needs_salvage(&dir).unwrap_or(true) => Salvaged::Left(session.id),
-            Ok(_) => Salvaged::Done(session.id),
+            Ok(published) => {
+                let aside = published.quarantined().to_vec();
+                if needs_salvage(&dir).unwrap_or(true) {
+                    Salvaged::Left(session.id, aside)
+                } else {
+                    Salvaged::Done(session.id, aside)
+                }
+            }
             Err(e) => Salvaged::Failed(session.id, e.to_string()),
         })
     }

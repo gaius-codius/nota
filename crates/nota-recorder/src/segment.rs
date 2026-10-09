@@ -46,6 +46,11 @@
 //!   the rest as further segments of that window. Both copies of an overlap
 //!   hold the same samples (the replacement replays them), so nothing is
 //!   lost either way.
+//! - A name a run can't use (a directory or an immutable file under a
+//!   segment's temp or own name, a journal that can't be unlinked, a
+//!   journal's aside name already taken) is left as it is and reported in
+//!   [`Published`]; it holds up only what needs that name, and the run goes
+//!   on.
 //!
 //! Publishing and salvage take a [`SessionStore`], which binds a session's
 //! directory to the store holding its rows, so neither can be given a store
