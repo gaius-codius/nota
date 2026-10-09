@@ -68,7 +68,8 @@
 //! most [`SYNC_INTERVAL`](crate::journal::SYNC_INTERVAL) (850 ms), the
 //! stream's buffering (about 40 ms) and its own journal's fsync, so the
 //! bounded-loss rule, about 2 s on a quiet disk, holds while that fsync
-//! stays under about 1.1 s. That holds for each track whatever the others
+//! stays under about 1.1 s (and under about 1.95 s together with the one
+//! before it, which held it back if it overran the interval). That holds for each track whatever the others
 //! do only when the writer's fsyncs run on a thread per track
 //! ([`Syncing::Threads`](crate::session::Syncing::Threads)), as recording
 //! should: the recorder thread then never waits on an fsync, and a track
@@ -77,7 +78,7 @@
 //! the fsyncs run one after another on the recorder thread, so a track's
 //! audio also waits in the channel while the other tracks' journals are
 //! fsync'd: the rule then holds only while all their fsyncs together stay
-//! under about 1.1 s. Creating a journal, at each window boundary, still
+//! under about 1.1 s, with the same allowance for the round before. Creating a journal, at each window boundary, still
 //! fsyncs the new file and its directory on the recorder thread, once per
 //! track per segment window (five minutes by default).
 //!

@@ -43,8 +43,8 @@
 # instead of checking: it loads the scratch disk itself (dd writing and
 # fsyncing 512 MiB at a time, over and over) during a --measure-only run,
 # and reports the worst lag and each fsync that ended past 2 s, with how
-# long that fsync took, without failing on them. Every other check still
-# holds.
+# long that fsync and the track's one before it took, without failing on
+# them. Every other check still holds. Not on tmpfs.
 #
 # Run it on a real disk: on tmpfs every fsync is free, so the lag measures
 # nothing. The default scratch directory is under ~/.cache, and tmpfs is
@@ -134,6 +134,9 @@ BIN=${CARGO_TARGET_DIR:-$REPO/target}/release/examples/real_capture
 [[ -x $BIN ]] || die "built, but no binary at $BIN"
 
 mkdir -p "$SCRATCH"
+if [[ $(findmnt -n -o FSTYPE --target "$SCRATCH") == tmpfs && $DISK_LOAD -eq 1 ]]; then
+  die "$SCRATCH is on tmpfs: --disk-load needs a real disk to load"
+fi
 if [[ $(findmnt -n -o FSTYPE --target "$SCRATCH") == tmpfs && $ALLOW_TMPFS -eq 0 ]]; then
   die "$SCRATCH is on tmpfs, where fsync is free (use --scratch on a real disk, or --allow-tmpfs)"
 fi
@@ -185,13 +188,15 @@ kill_writer() {
   WRITER_PID=
 }
 
-# Writes and fsyncs 512 MiB in the work directory, over and over, each dd's
-# PID in load.pid so stop_load can end the one running.
+# Writes and fsyncs 512 MiB in the work directory, over and over. Run in
+# the background; on TERM it ends the dd it started, by its PID, and exits.
 disk_load() {
+  local child=
+  trap '[[ -z $child ]] || kill "$child" 2> /dev/null; exit 0' TERM
   while :; do
     dd if=/dev/zero of="$WORK/load" bs=1M count=512 conv=fsync status=none &
-    echo $! > "$WORK/load.pid"
-    wait $! || true
+    child=$!
+    wait "$child" || true
   done
 }
 
@@ -199,8 +204,7 @@ stop_load() {
   if [[ -n $LOAD_PID ]]; then
     kill "$LOAD_PID" 2> /dev/null || true
     wait "$LOAD_PID" 2> /dev/null || true
-    [[ -s $WORK/load.pid ]] && kill "$(cat "$WORK/load.pid")" 2> /dev/null || true
-    rm -f "$WORK/load" "$WORK/load.pid"
+    rm -f "$WORK/load"
     LOAD_PID=
   fi
 }
@@ -285,7 +289,8 @@ mkdir -p "$WORK/count/rec"
 if [[ $DISK_LOAD -eq 1 ]]; then
   disk_load &
   LOAD_PID=$!
-  sleep 2
+  load_started() { [[ -s $WORK/load ]]; }
+  wait_for 30 load_started || die "the disk load didn't start writing"
 fi
 TOTAL=$("$BIN" write "$WORK/count/rec" "$WORK/count/log" "$WORK/count/ref" "${WRITE_OPTS[@]}" | sed -n 's/^ops \([0-9]*\).*/\1/p')
 [[ $TOTAL =~ ^[0-9]+$ ]] || die "the write workload didn't report its operation count"
@@ -305,7 +310,7 @@ if [[ $DISK_LOAD -eq 1 ]]; then
     "($(field rotation_lag_max_ms) ms at window rotations, $(field lag_max_ms) ms behind the" \
     "journal); $(field past_bound) fsyncs past 2 s, reported, not failed"
   field past_bound_fsyncs | tr ',' '\n' | grep -v '^none$' |
-    sed 's/^\([0-9]*\)@\([^:]*\):\([^/]*\)\/fsync\(.*\)$/  track \1 at \2: \3 behind, its fsync took \4/' || true
+    sed 's/^\([0-9]*\)@\([^:]*\):\([^/]*\)\/fsync\([^/]*\)\/before\(.*\)$/  track \1 at \2: \3 behind; its fsync took \4, the one before \5/' || true
 fi
 if [[ $MEASURE_ONLY -eq 1 ]]; then
   slow=$(grep -c '^slow ' "$WORK/count/log" || true)

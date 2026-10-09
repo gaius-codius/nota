@@ -25,10 +25,9 @@
 //! - `salvage <dir> --segment-seconds K [--stop-after N]` runs salvage,
 //!   counting its operations and stopping after the Nth as `write` does.
 //! - `check <dir> <log> <ref> --segment-seconds K [--recovered yes]
-//!   [--under-load yes]` checks
-//!   the bounded-loss
-//!   criteria, for each track: before salvage, every row has its file and every sample
-//!   fsync'd is in a row or a journal; after it, only segments and rows are
+//!   [--under-load yes]` checks the bounded-loss criteria, for each track:
+//!   before salvage, every row has its file and every sample fsync'd is in
+//!   a row or a journal; after it, only segments and rows are
 //!   left, in order and without gaps from the first sample, holding at least
 //!   everything fsync'd and exactly the audio captured, and every committed
 //!   row; a second salvage changes nothing; the durable position was never
@@ -41,7 +40,8 @@
 //!   `--under-load yes`, for a run with something else loading the disk,
 //!   the lag is reported but not checked: the result names each fsync
 //!   that ended past 2 s behind the audio delivered, with how long that
-//!   fsync itself took.
+//!   fsync and the track's one before it took (a slow fsync also holds
+//!   back the next, which starts only once it completes).
 //! - `engine <dir> --source NODE --seconds S --engine PROGRAM --parakeet DIR
 //!   --vad FILE --said TEXT --kill-after-ms MS --ready PATH` captures from
 //!   `NODE` into journals and feeds every frame written to the real engine
@@ -1447,16 +1447,18 @@ mod linux {
                 ms(lag.rotation_max)
             ));
             worst = worst.max(&lag);
+            let mut previous = 0;
             for &(t, _, durable, delivered, began) in &log.syncs {
+                let took = t.saturating_sub(began) / 1_000_000;
                 let behind = delivered.saturating_sub(durable);
                 if behind > MAX_LAG {
                     past.push(format!(
-                        "{track}@{:.3}s:{:.0}ms/fsync{}ms",
+                        "{track}@{:.3}s:{:.0}ms/fsync{took}ms/before{previous}ms",
                         ms(samples_since(t0, t)) / 1_000.0,
                         ms(behind),
-                        t.saturating_sub(began) / 1_000_000
                     ));
                 }
+                previous = took;
             }
         }
         if promised.overruns > 0 || promised.journal_failures > 0 {
