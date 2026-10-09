@@ -499,9 +499,13 @@ fn an_m1b_session_directory_is_adopted_and_salvaged() {
         matches!(done[..], [Salvaged::Done(id, _)] if id == old.id),
         "{done:?}"
     );
-    // Its rows came over, and salvage published the rest after them.
+    // Its rows came over (an M1 store kept no audio digests), and salvage
+    // published the rest after them.
     let after = segments(&library, old.id);
-    assert!(rows.iter().all(|r| after.contains(r)), "{after:?}");
+    assert!(
+        as_m1_kept(&rows).iter().all(|r| after.contains(r)),
+        "{after:?}"
+    );
     assert_eq!(covered(&after), [(0, 5_500)]);
     let row = library.db().with(|db| db.session(old.id)).unwrap().unwrap();
     assert_eq!(row.state, SessionState::Stopped);
@@ -671,7 +675,15 @@ fn a_session_directory_that_cant_be_listed_is_adopted_later() {
     // Listed again, the old store's rows come over.
     let done = library.salvage_all(length()).unwrap();
     assert!(matches!(done[..], [Salvaged::Done(..)]), "{done:?}");
-    assert!(rows.iter().all(|r| segments(&library, old.id).contains(r)));
+    let after = segments(&library, old.id);
+    assert!(as_m1_kept(&rows).iter().all(|r| after.contains(r)));
+}
+
+/// `rows` as an M1 per-session store keeps them: without audio digests.
+fn as_m1_kept(rows: &[SegmentRow]) -> Vec<SegmentRow> {
+    rows.iter()
+        .map(|r| SegmentRow::new(r.track(), r.epoch(), r.range(), r.sha256()).unwrap())
+        .collect()
 }
 
 /// A row of `samples` samples on `track`, from `start`.
@@ -980,4 +992,85 @@ fn a_kept_row_that_cant_be_read_yet_is_read_at_a_later_start() {
         .unwrap()
         .unwrap();
     assert_eq!(adopted.title.as_deref(), Some("lecture 1"));
+}
+
+/// A row whose file goes, with no journals left to rebuild it, is found by
+/// the next start's scan and shown until the file is back.
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test scaffolding outside the recorder's write path"
+)]
+fn a_row_whose_file_is_gone_needs_you_until_it_is_back() {
+    use nota_recorder::segment::segment_file_name;
+    use nota_store::{IndexedFinding, Problem, Status};
+
+    let tmp = TestDir::new("gone");
+    let library = Library::open(&tmp.0).unwrap();
+    let session = library.create().unwrap();
+    leave_a_journal(&session);
+    library.salvage_all(length()).unwrap();
+    let [row] = segments(&library, session.id)[..] else {
+        panic!("one row expected");
+    };
+    let rate = SampleRate::SPEECH;
+    let needs = |library: &Library| library.listing(rate).unwrap()[0].needs.clone();
+    assert_eq!(needs(&library), Needs::Nothing);
+
+    let path = session
+        .audio()
+        .join(segment_file_name(row.track(), row.range()));
+    let bytes = std::fs::read(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    // Nothing to salvage: the scan finds it.
+    assert!(library.salvage_all(length()).unwrap().is_empty());
+    assert_eq!(
+        needs(&library),
+        Needs::Attention("1 segment doesn't match the library · nothing is deleted".into())
+    );
+    let indexed = |library: &Library| library.db().with(|db| db.findings(session.id)).unwrap();
+    assert_eq!(
+        indexed(&library),
+        [IndexedFinding::Row {
+            row,
+            problem: Problem::Missing,
+            status: Status::Unresolved
+        }]
+    );
+    // Found again at the next start: still one.
+    library.salvage_all(length()).unwrap();
+    assert_eq!(indexed(&library).len(), 1);
+
+    std::fs::write(&path, bytes).unwrap();
+    library.salvage_all(length()).unwrap();
+    assert_eq!(needs(&library), Needs::Nothing);
+    assert_eq!(
+        indexed(&library),
+        [IndexedFinding::Row {
+            row,
+            problem: Problem::Missing,
+            status: Status::SinceVerified
+        }]
+    );
+}
+
+#[test]
+fn new_rows_name_a_row_that_doesnt_parse() {
+    let key = RowKey {
+        track: 2,
+        start: -1,
+    };
+    let corrupt = StoreError::CorruptRow {
+        session: SessionId::new(1),
+        key,
+        why: "odd".into(),
+    };
+    assert_eq!(
+        <NewSessionRows as SegmentStore>::unparsable_row(&corrupt),
+        Some(key)
+    );
+    assert_eq!(
+        <NewSessionRows as SegmentStore>::unparsable_row(&StoreError::OutOfRange),
+        None
+    );
 }

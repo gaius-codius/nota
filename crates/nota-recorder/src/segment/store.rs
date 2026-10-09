@@ -188,6 +188,20 @@ mod fake {
         }
     }
 
+    #[cfg(test)]
+    impl<S: Fs> FakeStore<S> {
+        /// Commits `row` for `session` as it is, with no file behind it:
+        /// for tests that plant a row a store could hold (a restored one,
+        /// one from before audio digests).
+        pub(crate) fn plant(&self, session: SessionId, row: &SegmentRow) {
+            let path = self.row_path(session, row);
+            let mut file = self.fs.create(&path).unwrap();
+            file.write_all(&encode(session, row)).unwrap();
+            file.sync().unwrap();
+            self.fs.sync_dir(&self.dir).unwrap();
+        }
+    }
+
     impl<S> FakeStore<S> {
         fn row_path(&self, session: SessionId, row: &SegmentRow) -> PathBuf {
             self.dir.join(format!(

@@ -251,6 +251,24 @@ pub(super) fn stream_len(bytes: &[u8]) -> Option<u64> {
     }
 }
 
+/// `samples` at `rate` encoded otherwise than [`encode`] does: blocks of
+/// `block` samples. The same audio in other bytes, as another encoder or
+/// its settings would write it.
+#[cfg(test)]
+pub(super) fn encode_otherwise(rate: SampleRate, samples: &[i16], block: usize) -> Vec<u8> {
+    let config = Encoder::default().into_verified().unwrap();
+    let source = flacenc::source::MemSource::from_samples(
+        &samples.iter().map(|&s| i32::from(s)).collect::<Vec<_>>(),
+        1,
+        16,
+        usize::try_from(rate.hz()).unwrap(),
+    );
+    let stream = flacenc::encode_with_fixed_block_size(&config, source, block).unwrap();
+    let mut sink = ByteSink::new();
+    stream.write(&mut sink).unwrap();
+    sink.as_slice().to_vec()
+}
+
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
@@ -391,7 +409,91 @@ mod tests {
         assert_eq!(stream_len(&unknown), None);
     }
 
+    #[test]
+    fn the_audio_digest_is_the_canonical_pcms_and_any_encoding_decodes_to_it() {
+        let data = samples(10_000);
+        let track = TrackId::new(1);
+        let range = SampleRange::new(
+            nota_core::SampleIndex::new(500),
+            nota_core::SampleIndex::new(10_500),
+        )
+        .unwrap();
+        let digest = audio_digest(rate(16_000), track, range, &[&data[..3], &data[3..]]);
+        // As the module docs give it.
+        let mut canonical = b"nota audio pcm 1".to_vec();
+        canonical.extend_from_slice(&16_000_u32.to_le_bytes());
+        canonical.extend_from_slice(&1_u32.to_le_bytes());
+        canonical.extend_from_slice(&500_u64.to_le_bytes());
+        canonical.extend_from_slice(&10_500_u64.to_le_bytes());
+        for s in &data {
+            canonical.extend_from_slice(&s.to_le_bytes());
+        }
+        assert_eq!(
+            digest.as_bytes(),
+            &<[u8; 32]>::from(Sha256::digest(&canonical))
+        );
+
+        let ours = encode(rate(16_000), &[&data]).unwrap();
+        let other = encode_otherwise(rate(16_000), &data, 1_152);
+        assert_ne!(ours, other);
+        for bytes in [&ours, &other] {
+            assert_eq!(decoded_audio_digest(bytes, track, range), Some(digest));
+        }
+        // Another track, range, rate or sample is another digest.
+        let moved = SampleRange::new(
+            nota_core::SampleIndex::new(501),
+            nota_core::SampleIndex::new(10_501),
+        )
+        .unwrap();
+        assert_ne!(
+            decoded_audio_digest(&ours, TrackId::new(0), range),
+            Some(digest)
+        );
+        assert_ne!(decoded_audio_digest(&ours, track, moved), Some(digest));
+        assert_ne!(
+            decoded_audio_digest(&encode(rate(8_000), &[&data]).unwrap(), track, range),
+            Some(digest)
+        );
+        let mut changed = data;
+        changed[9_999] ^= 1;
+        assert_ne!(
+            decoded_audio_digest(&encode(rate(16_000), &[&changed]).unwrap(), track, range),
+            Some(digest)
+        );
+        // More or fewer samples than the range, or no FLAC at all: none.
+        let short = SampleRange::new(
+            nota_core::SampleIndex::new(500),
+            nota_core::SampleIndex::new(10_499),
+        )
+        .unwrap();
+        let long = SampleRange::new(
+            nota_core::SampleIndex::new(500),
+            nota_core::SampleIndex::new(10_501),
+        )
+        .unwrap();
+        assert_eq!(decoded_audio_digest(&ours, track, short), None);
+        assert_eq!(decoded_audio_digest(&ours, track, long), None);
+        assert_eq!(decoded_audio_digest(b"not flac", track, range), None);
+        assert_eq!(
+            decoded_audio_digest(&ours[..ours.len() / 2], track, range),
+            None
+        );
+    }
+
     proptest! {
+        #[test]
+        fn decoding_any_bytes_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..200)) {
+            let range = SampleRange::new(
+                nota_core::SampleIndex::new(0),
+                nota_core::SampleIndex::new(10),
+            )
+            .unwrap();
+            let mut flac = b"fLaC".to_vec();
+            flac.extend_from_slice(&bytes);
+            let _ = decoded_audio_digest(&flac, TrackId::new(0), range);
+            let _ = decoded_audio_digest(&bytes, TrackId::new(0), range);
+        }
+
         #[test]
         fn stream_len_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..64)) {
             let _ = stream_len(&bytes);

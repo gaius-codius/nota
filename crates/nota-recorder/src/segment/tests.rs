@@ -4095,3 +4095,4 @@ fn a_set_aside_is_reported_whatever_fails_after_it() {
 }
 
 mod disk_full;
+mod repair;
