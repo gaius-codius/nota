@@ -1634,8 +1634,10 @@ version = "0.0.0"
 dependencies = [
  "insta",
  "nota-core",
+ "proptest",
  "ratatui",
  "rustix",
+ "toml",
  "unicode-segmentation",
  "unicode-width",
 ]

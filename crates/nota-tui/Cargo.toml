@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 nota-core = { path = "../nota-core" }
 ratatui.workspace = true
+toml.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
 
@@ -20,6 +21,7 @@ rustix = { workspace = true, features = ["termios"] }
 
 [dev-dependencies]
 insta.workspace = true
+proptest.workspace = true
 nota-core = { path = "../nota-core", features = ["fake-clock"] }
 
 [lints]

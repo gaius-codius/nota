@@ -38,16 +38,11 @@ pub(super) fn show(
     ui: &Sender<Event>,
     ui_events: &Receiver<Event>,
 ) -> io::Result<Shown> {
-    let theme = if std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()) {
-        Theme::no_color()
-    } else {
-        Theme::default()
-    };
     let mut recording = Recording::new(
         title.to_owned(),
         listening.to_owned(),
         Arc::clone(clock),
-        theme,
+        Theme::load(),
     );
     let (commands, given) = mpsc::channel::<Command>();
     let input = InputThread::spawn(ui.clone(), Arc::clone(clock))?;

@@ -52,6 +52,11 @@ impl Recording {
             return;
         }
         let buf = frame.buffer_mut();
+        // The wax panel, inside the frame.
+        buf.set_style(
+            Rect::new(area.x + 1, area.y + 1, area.width - 2, area.height - 2),
+            self.theme.panel,
+        );
         self.draw_top(area, buf);
         // Inside the frame, with a column of padding on each side.
         let inner = Rect::new(area.x + 2, area.y + 1, area.width - 4, area.height - 2);
