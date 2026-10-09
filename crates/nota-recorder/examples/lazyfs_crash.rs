@@ -2,7 +2,8 @@
 //! the recorder's crash checks on a real filesystem through `LazyFS`.
 //!
 //! - `write <dir> <promises> [--stop-after N]` records two tracks with live
-//!   publishing into `<dir>/session`, with the store at `<dir>/nota.db`.
+//!   publishing into `<dir>/session`, with the library database at
+//!   `<dir>/library.db`.
 //!   Every recorder filesystem operation that changes the disk (create,
 //!   mkdir, write, fsync, rename, directory fsync, remove) is counted. The
 //!   journals are fsync'd on a thread per track, as `nota record` does it,
@@ -44,7 +45,7 @@ use nota_recorder::segment::{
     Published, SegmentLength, publish_journals, salvage, segment_file_name,
 };
 use nota_recorder::session::{MARKS_FILE_NAME, SessionDir, SessionStore, SessionWriter, Syncing};
-use nota_store::{SegmentRow, Store};
+use nota_store::{NewSession, SegmentRow, Store, StoreError};
 use sha2::{Digest, Sha256};
 
 type Res<T> = Result<T, Box<dyn Error>>;
@@ -389,7 +390,7 @@ fn write_command(args: &[String]) -> Res<()> {
     let session = dir.join("session");
     StdFs.create_dir(&session)?;
     StdFs.sync_dir(&dir)?;
-    let mut store = Store::open(&dir.join("nota.db"))?;
+    let mut store = open_library(&dir)?;
     let mut log = PromiseLog::create(&promises)?;
     if let Some(parent) = promises.parent() {
         StdFs.sync_dir(parent)?;
@@ -467,6 +468,21 @@ struct Observed {
     rows: Vec<SegmentRow>,
 }
 
+/// Opens the library database in `dir`, with the example's session in it.
+/// A rerun finds the session already there, which is fine.
+fn open_library(dir: &Path) -> Res<Store> {
+    let mut store = Store::open(&dir.join("library.db"))?;
+    match store.create_session(&NewSession {
+        id: SESSION,
+        title: None,
+        language: None,
+        tracks: vec![],
+    }) {
+        Ok(()) | Err(StoreError::SessionExists(_)) => Ok(store),
+        Err(e) => Err(e.into()),
+    }
+}
+
 fn observe(session: &Path, store: &Store) -> Res<Observed> {
     let mut files = BTreeMap::new();
     for path in StdFs.list(session)? {
@@ -475,7 +491,7 @@ fn observe(session: &Path, store: &Store) -> Res<Observed> {
     }
     Ok(Observed {
         files,
-        rows: store.segments()?,
+        rows: store.segments(SESSION)?,
     })
 }
 
@@ -620,7 +636,7 @@ fn check_command(args: &[String]) -> Res<()> {
     let session = dir.join("session");
     let promised = read_promises(Path::new(promises_path))?;
     let length = length()?;
-    let mut store = Store::open(&dir.join("nota.db"))?;
+    let mut store = open_library(&dir)?;
 
     let before = observe(&session, &store)?;
     let in_rows = row_samples(&session, &before).map_err(|e| format!("before salvage: {e}"))?;

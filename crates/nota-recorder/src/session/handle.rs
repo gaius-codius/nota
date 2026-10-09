@@ -30,11 +30,12 @@
 //!
 //! The session's id is checked against the finished journals handed to
 //! publishing, which name their session, so one session's journals can't be
-//! published, and deleted, through another's handle. Rows carry no session
-//! column yet, so the binding can't be checked against the rows themselves,
-//! and nothing checks that the store given to [`SessionStore::new`] is this
-//! session's; that comes with the library schema. Until then a row's claim
-//! is checked against its file's hash (see
+//! published, and deleted, through another's handle. Rows are scoped by
+//! session in the library database, and every store call made through a
+//! [`SessionStore`] names the lock's session (see `Rows`), so it reads and
+//! writes only its own session's rows. The database's foreign key refuses a
+//! row for a session not in its sessions table. A row's claim is also
+//! checked against its file's hash (see
 //! [`publish_journals`](crate::segment::publish_journals)), which is what
 //! keeps a wrong row from letting a journal go.
 
@@ -43,9 +44,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use nota_core::SessionId;
+use nota_store::SegmentRow;
 
 use crate::fs::Fs;
-use crate::segment::SegmentStore;
+use crate::segment::{DurableSegment, SegmentStore};
 
 /// One session's identity and directory, on one filesystem. Making it does
 /// no I/O.
@@ -313,14 +315,39 @@ impl<S: Fs, T: SegmentStore> SessionStore<S, T> {
         &self.session
     }
 
-    /// The directory and the store, to work with both at once.
-    pub(crate) const fn parts(&mut self) -> (&SessionDir<S>, &mut T) {
-        (self.session.session(), &mut self.store)
+    /// The directory and the store's rows of this session, to work with
+    /// both at once.
+    pub(crate) fn parts(&mut self) -> (&SessionDir<S>, Rows<'_, T>) {
+        let session = self.session.session();
+        let rows = Rows {
+            id: session.id(),
+            store: &mut self.store,
+        };
+        (session, rows)
     }
 
     /// Unbinds the store, giving back both parts.
     #[must_use]
     pub fn into_parts(self) -> (SessionLock<S>, T) {
         (self.session, self.store)
+    }
+}
+
+/// A store seen through one session: every call names that session, so
+/// nothing that works with it can reach another session's rows.
+pub(crate) struct Rows<'a, T> {
+    id: SessionId,
+    store: &'a mut T,
+}
+
+impl<T: SegmentStore> Rows<'_, T> {
+    /// Every committed row of the session.
+    pub(crate) fn rows(&mut self) -> Result<Vec<SegmentRow>, T::Error> {
+        self.store.rows(self.id)
+    }
+
+    /// Commits `segment`'s row for the session.
+    pub(crate) fn insert(&mut self, segment: &DurableSegment) -> Result<(), T::Error> {
+        self.store.insert(self.id, segment)
     }
 }

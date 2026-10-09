@@ -6,7 +6,7 @@
 //!   [--tracks T] [--stop-after N]` captures `T` tracks (default 1), each
 //!   its own stream from the `PipeWire` node `NODE`, at 16 kHz for `S`
 //!   seconds into `<dir>/session`, with the store at
-//!   `<dir>/nota.db`, publishing each finished journal on a publisher
+//!   `<dir>/library.db`, publishing each finished journal on a publisher
 //!   thread as it goes, in `K`-second segment windows. Every recorder
 //!   operation that changes the disk, and every row commit, is counted.
 //!   After the Nth, every thread stops before its next operation,
@@ -107,7 +107,7 @@ mod linux {
         FinishedJournal, MARKS_FILE_NAME, SessionDir, SessionLock, SessionStore, SessionWriter,
         Syncing,
     };
-    use nota_store::{SegmentRow, Store};
+    use nota_store::{NewSession, SegmentRow, Store, StoreError};
     use sha2::{Digest, Sha256};
 
     type Res<T> = Result<T, Box<dyn Error + Send + Sync>>;
@@ -712,21 +712,40 @@ mod linux {
 
     impl Error for CommitError {}
 
+    /// Opens the library database in `dir`, with the example's session in
+    /// it. A rerun finds the session already there, which is fine.
+    fn open_library(dir: &Path) -> Res<Store> {
+        let mut store = Store::open(&dir.join("library.db"))?;
+        match store.create_session(&NewSession {
+            id: SESSION,
+            title: None,
+            language: None,
+            tracks: vec![],
+        }) {
+            Ok(()) | Err(StoreError::SessionExists(_)) => Ok(store),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     impl SegmentStore for CountedStore<'_> {
         type Error = CommitError;
 
-        fn rows(&mut self) -> Result<Vec<SegmentRow>, CommitError> {
+        fn rows(&mut self, session: SessionId) -> Result<Vec<SegmentRow>, CommitError> {
             self.store
-                .segments()
+                .segments(session)
                 .map_err(|e| CommitError(e.to_string()))
         }
 
-        fn insert(&mut self, segment: &DurableSegment) -> Result<(), CommitError> {
+        fn insert(
+            &mut self,
+            session: SessionId,
+            segment: &DurableSegment,
+        ) -> Result<(), CommitError> {
             let store = &mut *self.store;
             self.fs
                 .counted("commit", segment.path(), || {
                     store
-                        .insert_segment(segment.row())
+                        .insert_segment(session, segment.row())
                         .map(|_| ())
                         .map_err(io::Error::other)
                 })
@@ -760,7 +779,7 @@ mod linux {
         StdFs.create_dir(&session_path)?;
         StdFs.sync_dir(&dir)?;
         StdFs.create_dir(&ref_dir)?;
-        let store = Store::open(&dir.join("nota.db"))?;
+        let store = open_library(&dir)?;
         let log = Log(StdFs.create(&log_path)?);
         if let Some(parent) = log_path.parent() {
             StdFs.sync_dir(parent)?;
@@ -983,7 +1002,7 @@ mod linux {
             tap.marker = Some(PathBuf::from(marker));
         }
         let fs = TapFs(Arc::new(tap));
-        let mut store = Store::open(&dir.join("nota.db"))?;
+        let mut store = open_library(&dir)?;
         let session = SessionDir::new(SESSION, fs.clone(), &dir.join("session")).lock()?;
         let counted = CountedStore {
             store: &mut store,
@@ -1139,7 +1158,7 @@ mod linux {
             }
             Ok(Self {
                 files,
-                rows: store.segments()?,
+                rows: store.segments(SESSION)?,
             })
         }
 
@@ -1264,7 +1283,7 @@ mod linux {
         let length = args.length()?;
         let session = dir.join("session");
         let recovered = args.flags.get("recovered").is_some_and(|v| v == "yes");
-        let mut store = Store::open(&dir.join("nota.db"))?;
+        let mut store = open_library(&dir)?;
         match run_checks(&session, &mut store, length, &promised, &audio, recovered) {
             Ok(line) => {
                 writeln!(io::stdout(), "result ok {line}")?;

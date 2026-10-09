@@ -23,6 +23,7 @@ use super::store::SegmentStore;
 use super::{segment_file_name, temp_path};
 use crate::fs::{Fs, FsFile, Synced};
 use crate::journal::JournalId;
+use crate::session::Rows;
 
 /// What every step carries: where the segment goes, and its row.
 #[derive(Debug)]
@@ -163,7 +164,7 @@ impl DurableSegment {
     /// The store's error.
     pub(super) fn commit<T: SegmentStore>(
         self,
-        store: &mut T,
+        store: &mut Rows<'_, T>,
     ) -> Result<CommittedSegment, T::Error> {
         store.insert(&self)?;
         Ok(CommittedSegment {

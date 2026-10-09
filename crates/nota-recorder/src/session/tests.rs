@@ -67,7 +67,7 @@ fn salvaged(fs: &FakeFs) -> Vec<(u64, u64)> {
         length(),
     )
     .unwrap();
-    let rows = store.rows().unwrap();
+    let rows = store.rows(SESSION).unwrap();
     let mut out = Vec::new();
     for row in rows {
         let bytes = fs

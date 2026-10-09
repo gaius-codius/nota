@@ -41,6 +41,8 @@ signal-hook.workspace = true
 nota = { path = ".", features = ["fake-capture", "latency-log"] }
 nota-core = { path = "../nota-core", features = ["fake-clock"] }
 nota-recorder = { path = "../nota-recorder" }
+# To make an M1 per-session store in the migration test.
+rusqlite.workspace = true
 
 # A pseudo-terminal for the end-to-end test, and signals to send.
 [target.'cfg(target_os = "linux")'.dev-dependencies]

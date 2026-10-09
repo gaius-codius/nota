@@ -257,7 +257,9 @@ fn observe(fs: &FakeFs) -> Observed {
         .into_iter()
         .filter_map(|p| fs.read(&p).ok().map(|bytes| (p, bytes)))
         .collect();
-    let rows = FakeStore::new(fs, &db()).rows().map_err(|e| e.to_string());
+    let rows = FakeStore::new(fs, &db())
+        .rows(SESSION)
+        .map_err(|e| e.to_string());
     Observed { files, rows }
 }
 
@@ -1630,9 +1632,17 @@ fn salvage_on_the_real_filesystem_with_sqlite() {
     // Stop without finishing, as a crash would.
     drop(writer);
 
-    let mut store = nota_store::Store::open(&dir.0.join("nota.db")).unwrap();
+    let mut store = nota_store::Store::open(&dir.0.join("library.db")).unwrap();
+    store
+        .create_session(&nota_store::NewSession {
+            id: SESSION,
+            title: None,
+            language: None,
+            tracks: vec![],
+        })
+        .unwrap();
     let done = salvage(&mut SessionStore::new(owner.clone(), &mut store), length()).unwrap();
-    let rows = store.segments().unwrap();
+    let rows = store.segments(SESSION).unwrap();
     assert_eq!(rows, done.segments());
     let ranges: Vec<_> = rows
         .iter()
@@ -1659,8 +1669,8 @@ fn salvage_on_the_real_filesystem_with_sqlite() {
     assert!(!needs_salvage(&ours).unwrap());
     // Reopened, the rows are still there, and salvage has nothing to do.
     drop(store);
-    let mut store = nota_store::Store::open(&dir.0.join("nota.db")).unwrap();
-    assert_eq!(store.segments().unwrap(), rows);
+    let mut store = nota_store::Store::open(&dir.0.join("library.db")).unwrap();
+    assert_eq!(store.segments(SESSION).unwrap(), rows);
     assert_eq!(
         salvage(&mut SessionStore::new(owner, &mut store), length()).unwrap(),
         Published::default()
@@ -1755,20 +1765,20 @@ fn a_row_without_its_file_here_claims_nothing() {
     .unwrap()
     .sync_dir(&elsewhere)
     .unwrap();
-    durable.commit(&mut foreign).unwrap();
-    let row = foreign.rows().unwrap();
+    foreign.insert(SESSION, &durable).unwrap();
+    let row = foreign.rows(SESSION).unwrap();
 
     // The same row in this session's store.
     let mut file = fs
-        .create(&db().join("t0-00000000000000000000.row"))
+        .create(&db().join("s1-t0-00000000000000000000.row"))
         .unwrap();
     file.write_all(
         &elsewhere
-            .read(&db().join("t0-00000000000000000000.row"))
+            .read(&db().join("s1-t0-00000000000000000000.row"))
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(FakeStore::new(&fs, &db()).rows().unwrap(), row);
+    assert_eq!(FakeStore::new(&fs, &db()).rows(SESSION).unwrap(), row);
     let mut store = session_store(&fs);
     // Salvage publishes nothing over the row's samples (the store would
     // refuse it anyway), keeps the journal holding them, records the row,
@@ -1871,7 +1881,7 @@ fn a_row_whose_commit_failed_isnt_reported() {
         },
     );
     assert!(promised.rows.is_empty());
-    assert!(FakeStore::new(&fs, &db()).rows().unwrap().is_empty());
+    assert!(FakeStore::new(&fs, &db()).rows(SESSION).unwrap().is_empty());
     // Salvage on the running system, then a crash that drops what wasn't
     // made durable: nothing promised is lost.
     let mut store = session_store(&fs);
@@ -2178,7 +2188,7 @@ fn plant_row(
         .sync_dir(fs)
         .unwrap();
     let row = *durable.row();
-    durable.commit(&mut FakeStore::new(fs, &db())).unwrap();
+    FakeStore::new(fs, &db()).insert(SESSION, &durable).unwrap();
     if file != hashed {
         let path = durable_path(track, range);
         fs.remove(&path).unwrap();
@@ -3465,7 +3475,7 @@ fn a_stale_finished_journal_never_touches_a_resumed_sessions_journal() {
     assert!(created.len() > 2, "{created:?}");
     // The resumed rows are in a new epoch.
     let epochs: BTreeSet<u32> = FakeStore::new(&fs, &db())
-        .rows()
+        .rows(SESSION)
         .unwrap()
         .iter()
         .map(|r| r.epoch().get())
@@ -3499,6 +3509,39 @@ fn a_resumed_session_crashed_anywhere_loses_nothing_and_never_reuses_an_id() {
         }
     }
     assert!(cases > 100, "{cases}");
+}
+
+/// Journal ids come from the session directory's marks file, never from the
+/// database, so a new journal takes an id above every journal the session
+/// ever created whatever state the database is in, and here, with every
+/// journal published and deleted, there is nothing in the directory to count
+/// from. The crash sweep above covers crashes around the mark.
+#[test]
+fn after_every_journal_is_published_and_deleted_new_ids_are_higher() {
+    let fs = FakeFs::with_dirs([session(), db()]);
+    first_recording(&fs);
+    let used = created_journals(&fs);
+    assert!(!used.is_empty());
+    let left: Vec<_> = fs.paths().into_iter().filter(|p| is_journal(p)).collect();
+    assert!(left.is_empty(), "{left:?}");
+
+    let (clock, dyn_clock) = fake_clock();
+    let lock = owned(&fs);
+    let mut writer = SessionWriter::open(&lock, rate(), length(), dyn_clock).unwrap();
+    let from = writer.first_free_sample(MIC);
+    assert_eq!(from, SampleIndex::new(1_200));
+    writer.start_track(MIC, EpochId::new(1), from).unwrap();
+    writer.append(MIC, &samples(MIC, from.get(), 200)).unwrap();
+    clock.advance(SampleCount::new(200).duration_at(rate()).unwrap());
+    writer.sync_if_due().unwrap();
+    let next = writer.durable(MIC).unwrap().journal();
+    let highest = used.last().unwrap();
+    assert!(
+        next > *highest,
+        "a new journal took id {}, but {} was used",
+        next.get(),
+        highest.get()
+    );
 }
 
 #[test]
