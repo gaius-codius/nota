@@ -23,8 +23,12 @@
 //!   nothing. With `--recovered`, it also requires that nothing is left to
 //!   salvage, for a run after a crash that followed a completed salvage.
 //!
-//! SQLite's own I/O isn't counted: crash points fall between the
-//! recorder's operations, and the store commits in between them.
+//! SQLite's own I/O isn't counted: `--stop-after` crash points fall between
+//! the recorder's operations, and the store commits in between them. The
+//! script reaches inside SQLite's commits, and tears the recorder's writes,
+//! by having `LazyFS` inject the fault and crash itself while `write` runs
+//! without `--stop-after`; the writer's calls then fail, and the script
+//! kills it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -386,15 +390,17 @@ fn write_command(args: &[String]) -> Res<()> {
     let mut marker = promises.clone().into_os_string();
     marker.push(".stopped");
 
-    // Set-up, not counted: the session directory and the store.
-    let session = dir.join("session");
-    StdFs.create_dir(&session)?;
-    StdFs.sync_dir(&dir)?;
-    let mut store = open_library(&dir)?;
+    // Set-up, not counted: the promises, the session directory and the
+    // store. The promises come first, so a crash inside the store's own
+    // set-up (which the script injects) still leaves them to check.
     let mut log = PromiseLog::create(&promises)?;
     if let Some(parent) = promises.parent() {
         StdFs.sync_dir(parent)?;
     }
+    let session = dir.join("session");
+    StdFs.create_dir(&session)?;
+    StdFs.sync_dir(&dir)?;
+    let mut store = open_library(&dir)?;
 
     let fs = CountingFs {
         ops: Arc::new(AtomicUsize::new(0)),

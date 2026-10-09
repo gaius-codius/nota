@@ -4,35 +4,49 @@
 # unsynced file data in its own cache and can drop it on command.
 #
 # Not run in CI: it needs FUSE, a LazyFS build and a few minutes. Run it by
-# hand after changing the write path, journal or salvage.
+# hand after changing the write path, journal, salvage or the store.
 #
-# For each crash point N (the Nth disk-changing recorder operation):
-#   1. mount LazyFS on a fresh backing directory;
-#   2. run `lazyfs_crash write` on the mount; it stops dead after operation N
-#      and the script SIGKILLs it;
-#   3. `lazyfs::clear-cache`: everything not fsync'd is gone, as after a
-#      power cut;
-#   4. `lazyfs_crash check` on the mount: salvage, then the invariants,
-#      against the promises the writer logged outside the mount;
-#   5. clear the cache again and `check --recovered`: what salvage did must
-#      have been durable;
-#   6. unmount.
+# It runs three kinds of crash point, numbered in this order:
 #
-# The journals are fsync'd on a thread per track, as `nota record` does it,
-# so the operations' order and count vary a little from run to run. The
-# points are numbered from one uncrashed run; a point past the end of a
-# shorter run that finished cleanly is reported as unreached, not failed. A
-# run that fails before its point fails it.
+#   ops    after the Nth disk-changing recorder operation. `lazyfs_crash
+#          write --stop-after N` stops dead there and the script SIGKILLs
+#          it, then `lazyfs::clear-cache` drops everything not fsync'd, as
+#          after a power cut.
+#   sqlite inside SQLite's own I/O, which the recorder's counter can't see:
+#          LazyFS crashes itself (losing everything not fsync'd) after the
+#          Nth write or fsync of `library.db-wal` (the row commits) or
+#          `library.db` (the checkpoint when the store closes).
+#   torn   a torn write: the Nth write to a journal, a segment's temp file,
+#          `library.db-wal` or `library.db` is split in two, only one half
+#          (the first or the second) reaches the disk, and LazyFS crashes.
+#
+# After each crash, on a fresh mount of what reached the disk:
+#   1. `lazyfs_crash check`: salvage, then the invariants, against the
+#      promises the writer logged outside the mount;
+#   2. clear the cache and `check --recovered`: what salvage did must have
+#      been durable.
+#
+# The ops points are numbered from one uncrashed run on the plain disk; the
+# sqlite and torn points from one uncrashed run on LazyFS with its
+# operation log on, counting each file's writes and fsyncs. The journals
+# are fsync'd on a thread per track, as `nota record` does it, so the order
+# of the recorder's operations (and a little of their count) varies from
+# run to run; a point past the end of a run that finished cleanly is
+# reported as unreached, not failed. A run that fails before its point
+# fails it.
 #
 # LazyFS loses unsynced file data and sizes, but not directory entries:
 # creates, renames and unlinks reach the disk at once. So this can't catch a
 # missing directory fsync; the in-memory crash tests cover that.
 #
-# Usage: scripts/lazyfs-crash.sh [--step K] [--from N] [--to N]
-#                                [--scratch DIR] [--keep]
+# Usage: scripts/lazyfs-crash.sh [--only KIND] [--step K] [--from N]
+#                                [--to N] [--scratch DIR] [--keep]
 #   LAZYFS   the LazyFS binary
 #            (default ~/.local/share/nota/lazyfs/lazyfs/build/lazyfs)
+#   --only KIND    run only the ops, sqlite or torn points (default: all)
 #   --step K run every Kth crash point (default 1: all of them)
+#   --from N, --to N  the first and last point to run, in the numbering
+#            the script prints
 #   --scratch DIR  where to make the work directory (default ${TMPDIR:-/tmp})
 #   --keep   keep the work directory even when every point passes
 #
@@ -47,11 +61,13 @@ FROM=1
 TO=
 SCRATCH=${TMPDIR:-/tmp}
 KEEP=0
+ONLY=
 
 usage() { sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; }
 
 while [[ $# -gt 0 ]]; do
   case $1 in
+    --only) ONLY=$2; shift 2 ;;
     --step) STEP=$2; shift 2 ;;
     --from) FROM=$2; shift 2 ;;
     --to) TO=$2; shift 2 ;;
@@ -71,13 +87,16 @@ command -v fusermount3 > /dev/null || die "fusermount3 not found"
 [[ $FROM =~ ^[1-9][0-9]{0,8}$ ]] || die "--from needs a positive number"
 [[ -z $TO || $TO =~ ^[1-9][0-9]{0,8}$ ]] || die "--to needs a positive number"
 [[ -z $TO || $FROM -le $TO ]] || die "--from $FROM is after --to $TO"
+[[ -z $ONLY || $ONLY =~ ^(ops|sqlite|torn)$ ]] || die "--only needs ops, sqlite or torn"
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 cargo build --manifest-path "$REPO/Cargo.toml" --example lazyfs_crash --locked --quiet
 BIN=${CARGO_TARGET_DIR:-$REPO/target}/debug/examples/lazyfs_crash
 [[ -x $BIN ]] || die "built, but no binary at $BIN"
 
-WORK=$(mktemp -d "$SCRATCH/nota-lazyfs.XXXXXX")
+# Absolute: LazyFS names a fault's file by its full path in the backing
+# directory.
+WORK=$(cd "$(mktemp -d "$SCRATCH/nota-lazyfs.XXXXXX")" && pwd)
 
 # State for cleanup: only processes and mounts this script started.
 LZ_PID=
@@ -97,7 +116,6 @@ unmount() {
   if [[ -n $LZ_PID ]]; then
     # LazyFS exits once unmounted (with status 134: it aborts on every exit).
     # One that never mounted, or hangs, is killed by its PID.
-    lazyfs_gone() { ! kill -0 "$LZ_PID" 2> /dev/null; }
     if ! wait_for 10 lazyfs_gone; then
       kill -9 "$LZ_PID" 2> /dev/null || true
       # A killed LazyFS that had mounted leaves it "not connected".
@@ -125,6 +143,8 @@ trap cleanup EXIT
 trap 'echo "lazyfs-crash: unexpected failure at line $LINENO" >&2; exit 2' ERR
 trap 'exit 130' INT TERM
 
+lazyfs_gone() { ! kill -0 "$LZ_PID" 2> /dev/null; }
+
 # Waits up to $1 seconds for the command after it to succeed.
 wait_for() {
   local limit=$1 tries
@@ -137,13 +157,18 @@ wait_for() {
   done
 }
 
-# mount_lazyfs DIR: backing DIR/root, mount DIR/mnt.
+# mount_lazyfs DIR [LOG] [INJECTION]: backing DIR/root, mount DIR/mnt. With
+# LOG=1, LazyFS logs every operation to DIR/lazyfs.log; INJECTION is a TOML
+# `[[injection]]` table, a fault LazyFS injects by itself.
 mount_lazyfs() {
-  local dir=$1
+  local dir=$1 log=${2:-0} injection=${3:-} log_all=false
+  [[ $log -eq 0 ]] || log_all=true
   mkdir -p "$dir/root" "$dir/mnt"
   # Made here, before LazyFS starts, so opening the ack FIFO below can't
-  # race LazyFS creating it (and make a plain file instead).
-  mkfifo "$dir/faults.fifo" "$dir/done.fifo"
+  # race LazyFS creating it (and make a plain file instead). A remount
+  # after a crash reuses them.
+  [[ -p $dir/faults.fifo ]] || mkfifo "$dir/faults.fifo"
+  [[ -p $dir/done.fifo ]] || mkfifo "$dir/done.fifo"
   cat > "$dir/lazyfs.toml" << EOF
 [faults]
 fifo_path="$dir/faults.fifo"
@@ -154,8 +179,9 @@ apply_eviction=false
 custom_size="64mb"
 blocks_per_page=1
 [filesystem]
-log_all_operations=false
+log_all_operations=$log_all
 logfile="$dir/lazyfs.log"
+$injection
 EOF
   # No core files: LazyFS aborts on every exit (a joinable thread at exit).
   (
@@ -184,34 +210,122 @@ clear_cache() {
 
 # How many operations a full run does, on the plain disk.
 mkdir "$WORK/count" "$WORK/count/rec"
-TOTAL=$("$BIN" write "$WORK/count/rec" "$WORK/count/promises" | sed -n 's/^ops //p') ||
+OPS=$("$BIN" write "$WORK/count/rec" "$WORK/count/promises" | sed -n 's/^ops //p') ||
   die "the write workload failed on the plain disk"
-[[ $TOTAL =~ ^[0-9]+$ ]] || die "the write workload didn't report its operation count"
+[[ $OPS =~ ^[0-9]+$ ]] || die "the write workload didn't report its operation count"
 "$BIN" check "$WORK/count/rec" "$WORK/count/promises" > /dev/null ||
   die "an uncrashed run fails its own check"
+
+# Each file's writes and fsyncs in a full run on LazyFS, from its log, as
+# lines of "<op> <path under rec/> <count>".
+mount_lazyfs "$WORK/files" 1
+mkdir "$WORK/files/mnt/rec"
+"$BIN" write "$WORK/files/mnt/rec" "$WORK/files/promises" > /dev/null ||
+  die "the write workload failed on LazyFS (see $WORK/files)"
+"$BIN" check "$WORK/files/mnt/rec" "$WORK/files/promises" > /dev/null ||
+  die "an uncrashed run on LazyFS fails its own check (see $WORK/files)"
+unmount
+awk -v root="$WORK/files/root/rec/" '
+  match($0, /lfs_(write|fsync)\(path=[^,)]*/) {
+    call = substr($0, RSTART + 4, RLENGTH - 4)
+    op = substr(call, 1, index(call, "(") - 1)
+    path = substr(call, index(call, "=") + 1)
+    if (index(path, root) == 1) count[op " " substr(path, length(root) + 1)]++
+  }
+  END { for (k in count) print k, count[k] }
+' "$WORK/files/lazyfs.log" | LC_ALL=C sort > "$WORK/counts"
+
+# The points, one per line: "ops N", "sqlite <op> <file> <k>" (crash after
+# the kth op on the file) or "torn <file> <k> <half>" (the kth write to the
+# file, with only that half on the disk).
+POINTS=$WORK/points
+: > "$POINTS"
+if [[ -z $ONLY || $ONLY == ops ]]; then
+  for ((n = 1; n <= OPS; n++)); do echo "ops $n"; done >> "$POINTS"
+fi
+if [[ -z $ONLY || $ONLY == sqlite ]]; then
+  awk '$2 == "library.db-wal" || $2 == "library.db" {
+    for (k = 1; k <= $3; k++) print "sqlite", $1, $2, k
+  }' "$WORK/counts" >> "$POINTS"
+fi
+if [[ -z $ONLY || $ONLY == torn ]]; then
+  awk '$1 == "write" && ($2 ~ /^session\/journal-/ || $2 ~ /^session\/seg-.*\.flac\.tmp$/ ||
+                       $2 == "library.db-wal" || $2 == "library.db") {
+    for (k = 1; k <= $3; k++) for (half = 1; half <= 2; half++) print "torn", $2, k, half
+  }' "$WORK/counts" >> "$POINTS"
+fi
+mapfile -t POINT_LINES < "$POINTS"
+TOTAL=${#POINT_LINES[@]}
+[[ $TOTAL -gt 0 ]] || die "no crash points (see $WORK/counts)"
+grep -q '^sqlite write library.db-wal ' "$POINTS" || [[ $ONLY == ops || $ONLY == torn ]] ||
+  die "no writes to library.db-wal in LazyFS's log (see $WORK/counts)"
 TO=${TO:-$TOTAL}
 [[ $TO -le $TOTAL ]] || TO=$TOTAL
-[[ $FROM -le $TO ]] || die "--from $FROM is past the last point, $TO (a full run has $TOTAL operations)"
+[[ $FROM -le $TO ]] || die "--from $FROM is past the last point, $TO"
 
-echo "LazyFS crash checks: $TOTAL operations; points $FROM..$TO step $STEP; work dir $WORK"
+KINDS=$(awk '{ n[$1]++ } END { printf "%d ops, %d sqlite, %d torn", n["ops"], n["sqlite"], n["torn"] }' "$POINTS")
+echo "LazyFS crash checks: $TOTAL points ($KINDS); points $FROM..$TO step $STEP; work dir $WORK"
 
 PASS=0
 FAILED=()
 START=$SECONDS
 
-# run_point N: a failed point leaves its reason in point-N/result; a passed
-# one removes point-N, and one this run didn't reach leaves
-# point-N.unreached. Called outside any `if`, so `set -e` still stops the
-# script on an unexpected error.
-run_point() {
+# What point N does, in words.
+describe() {
+  local kind=$1
+  shift
+  case $kind in
+    ops) echo "after recorder operation $1" ;;
+    sqlite) echo "after $1 $3 of $2" ;;
+    torn) echo "write $2 of $1 torn, only half $3 on disk" ;;
+  esac
+}
+
+# fail N MESSAGE [OUTPUT]: records point N's failure in point-N/result.
+fail() {
+  local n=$1 message=$2 output=${3:-}
+  {
+    echo "point $n (${POINT_DESC}): $message"
+    [[ -z $output ]] || cat "$output"
+  } > "$WORK/point-$n/result"
+}
+
+# check_point N: on a mount of what reached the disk, checks the invariants,
+# drops the cache and checks again. Unmounts; a passed point is removed.
+check_point() {
   local n=$1
   local dir=$WORK/point-$n
-  mkdir -p "$dir"
+  if ! "$BIN" check "$dir/mnt/rec" "$dir/promises" > "$dir/check.out" 2>&1; then
+    fail "$n" "after the crash" "$dir/check.out"
+    unmount
+    return 0
+  fi
+  clear_cache "$dir"
+  if ! "$BIN" check "$dir/mnt/rec" "$dir/promises" --recovered > "$dir/recheck.out" 2>&1; then
+    fail "$n" "after salvage and a second crash" "$dir/recheck.out"
+    unmount
+    return 0
+  fi
+  unmount
+  rm -rf "$dir"
+}
+
+# unreached N: point N's run finished before it.
+unreached() {
+  rm -rf "$WORK/point-$1"
+  : > "$WORK/point-$1.unreached"
+}
+
+# run_ops_point N K: the writer stops dead after its Kth operation, is
+# killed, and the cache is dropped.
+run_ops_point() {
+  local n=$1 k=$2
+  local dir=$WORK/point-$n
+  local promises=$dir/promises
   mount_lazyfs "$dir"
   mkdir "$dir/mnt/rec"
-  local promises=$dir/promises
 
-  "$BIN" write "$dir/mnt/rec" "$promises" --stop-after "$n" > "$dir/write.out" 2>&1 &
+  "$BIN" write "$dir/mnt/rec" "$promises" --stop-after "$k" > "$dir/write.out" 2>&1 &
   WRITER_PID=$!
   stopped_or_done() { [[ -e $promises.stopped ]] || ! kill -0 "$WRITER_PID" 2> /dev/null; }
   wait_for 60 stopped_or_done || die "point $n: the writer neither stopped nor finished"
@@ -223,11 +337,10 @@ run_point() {
     if [[ $status -ne 0 ]]; then
       # Only a run that ended cleanly made fewer operations; one that failed
       # is a failure, kept with its output.
-      echo "point $n: the writer failed (status $status) before its crash point" > "$dir/result"
+      fail "$n" "the writer failed (status $status) before its crash point"
       return 0
     fi
-    rm -rf "$dir"
-    : > "$dir.unreached"
+    unreached "$n"
     return 0
   fi
   kill -9 "$WRITER_PID"
@@ -235,27 +348,96 @@ run_point() {
   WRITER_PID=
 
   clear_cache "$dir"
-  if ! "$BIN" check "$dir/mnt/rec" "$promises" > "$dir/check.out" 2>&1; then
-    { echo "point $n: after the crash"; cat "$dir/check.out"; } > "$dir/result"
+  check_point "$n"
+}
+
+# run_fault_point N INJECTION: LazyFS injects the fault and crashes itself
+# while the writer runs; the backing directory is then mounted afresh.
+run_fault_point() {
+  local n=$1 injection=$2
+  local dir=$WORK/point-$n
+  mount_lazyfs "$dir" 0 "$injection"
+  # LazyFS reports a fault it can't parse, and runs without it.
+  ! grep -q '\[error\]' "$dir/lazyfs.out" ||
+    die "point $n: LazyFS rejected the fault (see $dir/lazyfs.out)"
+  mkdir "$dir/mnt/rec"
+
+  "$BIN" write "$dir/mnt/rec" "$dir/promises" > "$dir/write.out" 2>&1 &
+  WRITER_PID=$!
+  writer_or_lazyfs_gone() { ! kill -0 "$WRITER_PID" 2> /dev/null || lazyfs_gone; }
+  wait_for 60 writer_or_lazyfs_gone || die "point $n: the writer neither crashed nor finished"
+  local status=0
+  if ! kill -0 "$WRITER_PID" 2> /dev/null; then
+    wait "$WRITER_PID" || status=$?
+    WRITER_PID=
+  fi
+  # The writer's last call fails once LazyFS is dead; give it a moment to
+  # be reaped. A LazyFS still up after that never injected its fault.
+  if ! wait_for 1 lazyfs_gone; then
     unmount
+    if [[ $status -ne 0 ]]; then
+      fail "$n" "the writer failed (status $status) before its fault" "$dir/write.out"
+      return 0
+    fi
+    unreached "$n"
     return 0
   fi
-  clear_cache "$dir"
-  if ! "$BIN" check "$dir/mnt/rec" "$promises" --recovered > "$dir/recheck.out" 2>&1; then
-    { echo "point $n: after salvage and a second crash"; cat "$dir/recheck.out"; } > "$dir/result"
+  # Whatever the writer does now can't reach the disk.
+  if [[ -n $WRITER_PID ]]; then
+    kill -9 "$WRITER_PID" 2> /dev/null || true
+    wait "$WRITER_PID" 2> /dev/null || true
+    WRITER_PID=
+  fi
+  if ! grep -q "Killing LazyFS" "$dir/lazyfs.out"; then
+    fail "$n" "LazyFS died without injecting its fault" "$dir/lazyfs.out"
     unmount
     return 0
   fi
   unmount
-  rm -rf "$dir"
+  mount_lazyfs "$dir"
+  check_point "$n"
+}
+
+# run_point N KIND ARGS...: a failed point leaves its reason in
+# point-N/result; a passed one removes point-N, and one this run didn't
+# reach leaves point-N.unreached. Called outside any `if`, so `set -e` still
+# stops the script on an unexpected error.
+run_point() {
+  local n=$1 kind=$2
+  shift 2
+  local root=$WORK/point-$n/root/rec
+  mkdir -p "$WORK/point-$n"
+  case $kind in
+    ops) run_ops_point "$n" "$1" ;;
+    sqlite)
+      run_fault_point "$n" "[[injection]]
+type=\"clear-cache\"
+from=\"$root/$2\"
+timing=\"after\"
+op=\"$1\"
+occurrence=$3
+crash=true"
+      ;;
+    torn)
+      run_fault_point "$n" "[[injection]]
+type=\"torn-op\"
+file=\"$root/$1\"
+occurrence=$2
+parts=2
+persist=[$3]"
+      ;;
+    *) die "unknown point kind $kind" ;;
+  esac
 }
 
 UNREACHED=0
 for ((n = FROM; n <= TO; n += STEP)); do
-  run_point "$n"
+  read -r -a POINT <<< "${POINT_LINES[n - 1]}"
+  POINT_DESC=$(describe "${POINT[@]}")
+  run_point "$n" "${POINT[@]}"
   if [[ -e $WORK/point-$n.unreached ]]; then
     UNREACHED=$((UNREACHED + 1))
-    echo "  point $n unreached: this run made fewer operations"
+    echo "  point $n unreached (${POINT_DESC}): this run made fewer operations"
   elif [[ -e $WORK/point-$n/result ]]; then
     FAILED+=("$n")
     sed 's/^/  /' "$WORK/point-$n/result" >&2
