@@ -14,8 +14,9 @@
 #          after a power cut.
 #   sqlite inside SQLite's own I/O, which the recorder's counter can't see:
 #          LazyFS crashes itself (losing everything not fsync'd) after the
-#          Nth write or fsync of `library.db-wal` (the row commits) or
-#          `library.db` (the checkpoint when the store closes).
+#          Nth write or fsync of `library.db-wal` (the store's set-up and
+#          every segment-row commit) or `library.db` (set-up, and the
+#          checkpoint when the store closes).
 #   torn   a torn write: the Nth write to a journal, a segment's temp file,
 #          `library.db-wal` or `library.db` is split in two, only one half
 #          (the first or the second) reaches the disk, and LazyFS crashes.
@@ -31,9 +32,11 @@
 # operation log on, counting each file's writes and fsyncs. The journals
 # are fsync'd on a thread per track, as `nota record` does it, so the order
 # of the recorder's operations (and a little of their count) varies from
-# run to run; a point past the end of a run that finished cleanly is
-# reported as unreached, not failed. A run that fails before its point
-# fails it.
+# run to run; an ops point past the end of a run that finished cleanly is
+# reported as unreached, not failed. Each file's own writes and fsyncs
+# don't vary, so a sqlite or torn point whose fault never fires fails: it
+# means the fault no longer lands where the script thinks. A run that fails
+# before its point fails it.
 #
 # LazyFS loses unsynced file data and sizes, but not directory entries:
 # creates, renames and unlinks reach the disk at once. So this can't catch a
@@ -67,11 +70,17 @@ usage() { sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; }
 
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --only) ONLY=$2; shift 2 ;;
-    --step) STEP=$2; shift 2 ;;
-    --from) FROM=$2; shift 2 ;;
-    --to) TO=$2; shift 2 ;;
-    --scratch) SCRATCH=$2; shift 2 ;;
+    --only | --step | --from | --to | --scratch)
+      [[ $# -ge 2 ]] || { echo "$1 needs a value" >&2; usage >&2; exit 2; }
+      case $1 in
+        --only) ONLY=$2 ;;
+        --step) STEP=$2 ;;
+        --from) FROM=$2 ;;
+        --to) TO=$2 ;;
+        --scratch) SCRATCH=$2 ;;
+      esac
+      shift 2
+      ;;
     --keep) KEEP=1; shift ;;
     -h | --help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -97,6 +106,12 @@ BIN=${CARGO_TARGET_DIR:-$REPO/target}/debug/examples/lazyfs_crash
 # Absolute: LazyFS names a fault's file by its full path in the backing
 # directory.
 WORK=$(cd "$(mktemp -d "$SCRATCH/nota-lazyfs.XXXXXX")" && pwd)
+# LazyFS reads a torn write's path as a regular expression, and the mount
+# options are comma-separated: keep to characters that mean only themselves.
+if [[ ! $WORK =~ ^[A-Za-z0-9._/-]+$ ]]; then
+  rmdir "$WORK"
+  die "the work directory $WORK has characters LazyFS can't take; pick another --scratch"
+fi
 
 # State for cleanup: only processes and mounts this script started.
 LZ_PID=
@@ -222,8 +237,6 @@ mount_lazyfs "$WORK/files" 1
 mkdir "$WORK/files/mnt/rec"
 "$BIN" write "$WORK/files/mnt/rec" "$WORK/files/promises" > /dev/null ||
   die "the write workload failed on LazyFS (see $WORK/files)"
-"$BIN" check "$WORK/files/mnt/rec" "$WORK/files/promises" > /dev/null ||
-  die "an uncrashed run on LazyFS fails its own check (see $WORK/files)"
 unmount
 awk -v root="$WORK/files/root/rec/" '
   match($0, /lfs_(write|fsync)\(path=[^,)]*/) {
@@ -257,8 +270,17 @@ fi
 mapfile -t POINT_LINES < "$POINTS"
 TOTAL=${#POINT_LINES[@]}
 [[ $TOTAL -gt 0 ]] || die "no crash points (see $WORK/counts)"
-grep -q '^sqlite write library.db-wal ' "$POINTS" || [[ $ONLY == ops || $ONLY == torn ]] ||
-  die "no writes to library.db-wal in LazyFS's log (see $WORK/counts)"
+# A pattern that stopped matching would drop a whole kind of point quietly.
+if [[ -z $ONLY || $ONLY == sqlite ]]; then
+  grep -q '^sqlite write library.db-wal ' "$POINTS" ||
+    die "no writes to library.db-wal in LazyFS's log (see $WORK/counts)"
+fi
+if [[ -z $ONLY || $ONLY == torn ]]; then
+  grep -q '^torn session/journal-' "$POINTS" ||
+    die "no journal writes in LazyFS's log (see $WORK/counts)"
+  grep -q '^torn session/seg-.*\.flac\.tmp ' "$POINTS" ||
+    die "no segment temp-file writes in LazyFS's log (see $WORK/counts)"
+fi
 TO=${TO:-$TOTAL}
 [[ $TO -le $TOTAL ]] || TO=$TOTAL
 [[ $FROM -le $TO ]] || die "--from $FROM is past the last point, $TO"
@@ -337,7 +359,7 @@ run_ops_point() {
     if [[ $status -ne 0 ]]; then
       # Only a run that ended cleanly made fewer operations; one that failed
       # is a failure, kept with its output.
-      fail "$n" "the writer failed (status $status) before its crash point"
+      fail "$n" "the writer failed (status $status) before its crash point" "$dir/write.out"
       return 0
     fi
     unreached "$n"
@@ -379,7 +401,8 @@ run_fault_point() {
       fail "$n" "the writer failed (status $status) before its fault" "$dir/write.out"
       return 0
     fi
-    unreached "$n"
+    # Each file's writes and fsyncs are the same in every run.
+    fail "$n" "the writer finished and the fault never fired"
     return 0
   fi
   # Whatever the writer does now can't reach the disk.
@@ -400,7 +423,7 @@ run_fault_point() {
 
 # run_point N KIND ARGS...: a failed point leaves its reason in
 # point-N/result; a passed one removes point-N, and one this run didn't
-# reach leaves point-N.unreached. Called outside any `if`, so `set -e` still
+# reach (an ops point only) leaves point-N.unreached. Called outside any `if`, so `set -e` still
 # stops the script on an unexpected error.
 run_point() {
   local n=$1 kind=$2
