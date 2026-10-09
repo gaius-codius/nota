@@ -10,9 +10,10 @@
 //! `t5-live` targets pauses after 8 s with a 10 s cap; `live` uses today's
 //! production settings (3 s target, 10 s cap); `final` uses the production
 //! final settings (15 s target, 25 s cap). All use the same engine and VAD,
-//! fed in 100 ms frames and flushed at each input's end. Disagreement is
+//! fed in 100 ms frames (live) or production 1 s frames (final),
+//! and flushed at each input's end. Disagreement is
 //! Levenshtein word distance divided by the final pass's word count, after
-//! lowercasing and ignoring punctuation. It is agreement, not accuracy.
+//! lowercasing and ignoring punctuation except apostrophes. It is agreement, not accuracy.
 
 use std::error::Error;
 use std::ffi::OsString;
@@ -143,7 +144,7 @@ fn transcribe(
                 &Frame::<ToEngine>::Hello(ProtocolVersion::CURRENT),
             )?;
             let mut first = SampleIndex::ZERO;
-            for samples in audio.chunks(1_600) {
+            for samples in audio.chunks(input_frame(pass)) {
                 let chunk =
                     AudioChunk::new(TrackId::new(0), first, SampleRate::SPEECH, samples.to_vec())
                         .ok_or("sample index overflow")?;
@@ -164,17 +165,33 @@ fn transcribe(
         if read.is_err() {
             let _ = child.kill();
         }
-        writer.join().map_err(|_| "engine feeder thread failed")??;
-        read
+        let fed = writer
+            .join()
+            .unwrap_or_else(|_| Err("engine feeder thread failed".into()));
+        finish_reads(read, fed)
     });
     if result.is_err() {
         let _ = child.kill();
     }
-    let status = child.wait()?;
+    let status = child.wait();
+    let text = result?;
+    let status = status?;
     if !status.success() {
         return Err(format!("{pass} engine exited {status}").into());
     }
-    result
+    Ok(text)
+}
+
+fn input_frame(pass: &str) -> usize {
+    if pass == "final" { 16_000 } else { 1_600 }
+}
+
+fn transcript_line(text: &str) -> String {
+    text.replace(['\t', '\n', '\r'], " ")
+}
+
+fn finish_reads(read: Result<String>, fed: Result<()>) -> Result<String> {
+    read.and_then(|text| fed.map(|()| text))
 }
 
 fn read_pass(
@@ -197,7 +214,7 @@ fn read_pass(
                     "TEXT\t{pass}\t{}\t{}\t{}",
                     t.range().start().get(),
                     t.range().end().get(),
-                    t.text()
+                    transcript_line(t.text())
                 )?;
                 text.push_str(t.text());
                 text.push(' ');
@@ -287,5 +304,32 @@ mod tests {
         )
         .unwrap();
         assert!(read_pass(frames.as_slice(), "live", 160, &mut Vec::new()).is_err());
+    }
+    #[test]
+    fn final_feed_matches_production_frame_size() {
+        assert_eq!(input_frame("final"), 16_000);
+        assert_eq!(input_frame("live"), 1_600);
+        assert_eq!(input_frame("t5-live"), 1_600);
+    }
+
+    #[test]
+    fn initiating_read_error_survives_feeder_cleanup() {
+        let result = finish_reads(Err("output full".into()), Err("broken pipe".into()));
+        assert_eq!(result.unwrap_err().to_string(), "output full");
+        assert_eq!(
+            finish_reads(Ok("text".into()), Err("feed failed".into()))
+                .unwrap_err()
+                .to_string(),
+            "feed failed"
+        );
+        assert_eq!(finish_reads(Ok("text".into()), Ok(())).unwrap(), "text");
+    }
+
+    #[test]
+    fn transcript_stays_on_one_tsv_line() {
+        assert_eq!(
+            transcript_line("one\ttwo\nthree\rfour"),
+            "one two three four"
+        );
     }
 }
