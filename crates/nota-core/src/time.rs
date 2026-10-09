@@ -264,6 +264,32 @@ impl SampleRange {
     }
 }
 
+/// A moment on the calendar: whole seconds since 1970-01-01 00:00 UTC.
+/// Only for saying when something happened (a session's start, shown as a
+/// date); timing within a session uses [`SessionTime`], which a change to
+/// the system's date can't move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct WallTime(i64);
+
+impl WallTime {
+    /// The moment `seconds` after 1970-01-01 00:00 UTC, or `None` before
+    /// it: nota never records anything earlier.
+    #[must_use]
+    pub const fn from_unix_seconds(seconds: i64) -> Option<Self> {
+        if seconds < 0 {
+            None
+        } else {
+            Some(Self(seconds))
+        }
+    }
+
+    /// Seconds since 1970-01-01 00:00 UTC; never negative.
+    #[must_use]
+    pub const fn unix_seconds(self) -> i64 {
+        self.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,5 +535,13 @@ mod tests {
                 prop_assert!(next > d);
             }
         }
+    }
+
+    #[test]
+    fn a_wall_time_is_never_before_1970() {
+        assert_eq!(WallTime::from_unix_seconds(-1), None);
+        assert_eq!(WallTime::from_unix_seconds(0).unwrap().unix_seconds(), 0);
+        let t = WallTime::from_unix_seconds(1_760_000_000).unwrap();
+        assert_eq!(t.unix_seconds(), 1_760_000_000);
     }
 }

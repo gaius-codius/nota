@@ -37,7 +37,8 @@ fn a_new_file_gets_the_current_schema() {
     let dir = TestDir::new("fresh");
     let store = Store::open(&dir.db()).unwrap();
     assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
-    assert_eq!(STEPS.len(), 1);
+    assert_eq!(STEPS.len(), 2);
+    assert_eq!(STEPS.len(), usize::try_from(VERSION - FIRST + 1).unwrap());
     // Opening again changes nothing.
     drop(store);
     let again = Store::open(&dir.db()).unwrap();
@@ -46,7 +47,7 @@ fn a_new_file_gets_the_current_schema() {
 
 #[test]
 fn unknown_versions_are_refused_and_left_alone() {
-    for version in [3, 7, -1] {
+    for version in [4, 7, -1] {
         let dir = TestDir::new(&format!("version{version}"));
         raw(&dir.db())
             .pragma_update(None, "user_version", version)
@@ -218,4 +219,103 @@ fn imported_sessions_with_the_same_coordinates_coexist() {
     store.adopt_session(SessionId::new(2), Some(&b)).unwrap();
     assert_eq!(store.segments(SessionId::new(1)).unwrap(), rows);
     assert_eq!(store.segments(SessionId::new(2)).unwrap(), other);
+}
+
+/// A version 2 library, as M2's first schema made it, with one session.
+fn version_2(path: &Path) {
+    let conn = raw(path);
+    conn.execute_batch(schema::V2).unwrap();
+    conn.pragma_update(None, "user_version", 2).unwrap();
+    conn.execute(
+        "INSERT INTO session (id, title, language, state) VALUES (1, 'old', NULL, 'stopped')",
+        [],
+    )
+    .unwrap();
+}
+
+/// A version 2 library gains `started_at`, null on the sessions it had,
+/// and keeps them; new sessions get their start time.
+#[test]
+fn version_2_upgrades_to_3_keeping_its_sessions() {
+    let dir = TestDir::new("v2");
+    version_2(&dir.db());
+    let mut store = Store::open(&dir.db()).unwrap();
+    assert_eq!(store.pragma_text("user_version"), "3");
+    let old = store.session(SessionId::new(1)).unwrap().unwrap();
+    assert_eq!(old.title.as_deref(), Some("old"));
+    assert_eq!(old.state, SessionState::Stopped);
+    assert_eq!(old.started_at, None);
+    let new = new_session(SessionId::new(2));
+    store.create_session(&new).unwrap();
+    let read = store.session(SessionId::new(2)).unwrap().unwrap();
+    assert!(read.started_at.is_some());
+    assert_eq!(read.started_at, new.started_at);
+}
+
+/// An upgrade that fails partway changes nothing: the steps that ran are
+/// rolled back with it, and the version stays as it was.
+#[test]
+fn a_failed_upgrade_changes_nothing() {
+    // From an empty file: version 2's step runs, then the next fails.
+    let dir = TestDir::new("fails-after-a-step");
+    let mut conn = raw(&dir.db());
+    let failing = [
+        schema::V2,
+        "ALTER TABLE no_such_table ADD COLUMN x INTEGER;",
+    ];
+    assert!(matches!(
+        upgrade_with(&mut conn, &failing),
+        Err(StoreError::Sqlite(_))
+    ));
+    let tables: i64 = conn
+        .query_row("SELECT count(*) FROM sqlite_schema", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(tables, 0, "version 2's tables survived the failed upgrade");
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 0);
+
+    // From version 2: the real step fails, and the file keeps what it held.
+    let dir = TestDir::new("v2-fails");
+    version_2(&dir.db());
+    // A column of that name already there makes the V3 step fail.
+    raw(&dir.db())
+        .execute_batch("ALTER TABLE session ADD COLUMN started_at TEXT;")
+        .unwrap();
+    assert!(matches!(Store::open(&dir.db()), Err(StoreError::Sqlite(_))));
+    let conn = raw(&dir.db());
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 2);
+    let title: String = conn
+        .query_row("SELECT title FROM session WHERE id = 1", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(title, "old");
+}
+
+/// A start time before 1970 can't be stored, and one that's there anyway
+/// (written by something else) is refused on reading, not misread.
+#[test]
+fn a_start_before_1970_is_refused() {
+    let dir = TestDir::new("v3-negative");
+    let mut store = Store::open(&dir.db()).unwrap();
+    store
+        .create_session(&new_session(SessionId::new(1)))
+        .unwrap();
+    let conn = raw(&dir.db());
+    assert!(
+        conn.execute("UPDATE session SET started_at = -1 WHERE id = 1", [])
+            .is_err()
+    );
+    conn.execute_batch("PRAGMA ignore_check_constraints = ON;")
+        .unwrap();
+    conn.execute("UPDATE session SET started_at = -1 WHERE id = 1", [])
+        .unwrap();
+    drop(conn);
+    assert!(matches!(
+        store.session(SessionId::new(1)),
+        Err(StoreError::Corrupt(_))
+    ));
 }

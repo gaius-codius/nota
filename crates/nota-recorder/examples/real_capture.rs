@@ -720,6 +720,7 @@ mod linux {
             id: SESSION,
             title: None,
             language: None,
+            started_at: None,
             tracks: vec![],
         }) {
             Ok(()) | Err(StoreError::SessionExists(_)) => Ok(store),

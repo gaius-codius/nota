@@ -24,6 +24,8 @@ pub(crate) fn new_session(id: SessionId) -> NewSession {
         id,
         title: Some(format!("session {}", id.get())),
         language: Some("en".to_owned()),
+        // 2025-10-09 10:00 UTC, a second apart per session.
+        started_at: nota_core::WallTime::from_unix_seconds(1_760_004_000 + id.get().cast_signed()),
         tracks: vec![
             Track {
                 track: TrackId::new(0),
@@ -70,7 +72,10 @@ fn pragmas_are_set() {
     assert_eq!(store.pragma_text("synchronous"), "2");
     assert_eq!(store.pragma_text("foreign_keys"), "1");
     assert_eq!(store.pragma_text("busy_timeout"), "5000");
-    assert_eq!(store.pragma_text("user_version"), "2");
+    assert_eq!(
+        store.pragma_text("user_version"),
+        migrate::VERSION.to_string()
+    );
 }
 
 #[test]
@@ -257,6 +262,7 @@ fn sessions_and_tracks_read_back() {
             title: one.title.clone(),
             language: one.language.clone(),
             state: SessionState::Recording,
+            started_at: one.started_at,
         })
     );
     assert_eq!(store.tracks(S1).unwrap(), one.tracks);
@@ -503,6 +509,9 @@ fn a_fresh_file_opened_twice_at_once_gets_one_schema() {
         }
     }
     let store = Store::open(&path).unwrap();
-    assert_eq!(store.pragma_text("user_version"), "2");
+    assert_eq!(
+        store.pragma_text("user_version"),
+        migrate::VERSION.to_string()
+    );
     assert_eq!(store.sessions().unwrap(), vec![]);
 }

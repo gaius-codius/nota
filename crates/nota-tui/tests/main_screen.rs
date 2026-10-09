@@ -21,6 +21,7 @@ use nota_tui::{Recording, Theme};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::style::{Color, Modifier};
 
 fn secs(s: u64) -> SessionTime {
     SessionTime::from_elapsed(Duration::from_secs(s)).unwrap()
@@ -51,12 +52,17 @@ fn press_at(screen: &mut Recording, code: KeyCode, at: SessionTime) {
 /// already on the band, the newest two beside the transcript, and a chunk
 /// with the engine.
 fn main_screen() -> Recording {
+    main_screen_in(Theme::default())
+}
+
+/// [`main_screen`] drawn in `theme`.
+fn main_screen_in(theme: Theme) -> Recording {
     let clock = Arc::new(FakeClock::new(secs(4_368)));
     let mut screen = Recording::new(
         "Woodwork workshop".into(),
         "Brave".into(),
         Arc::clone(&clock) as Arc<dyn Clock>,
-        Theme::default(),
+        theme,
     );
 
     // An invented waveform: a level about once per column, from a fixed
@@ -181,4 +187,46 @@ fn too_small_confirming_stop() {
     press(&mut screen, KeyCode::Char('s'));
     let terminal = draw(&screen, 30, 8);
     insta::assert_snapshot!(terminal.backend());
+}
+
+/// With `NO_COLOR`, no cell has a colour or any emphasis: not the frame,
+/// the band, the transcript, nor the footer while a note is typed or the
+/// stop question is open.
+#[test]
+fn no_color_draws_no_colour() {
+    let mut screen = main_screen_in(Theme::no_color());
+    let check = |screen: &Recording| {
+        let terminal = draw(screen, 62, 20);
+        let buffer = terminal.backend().buffer();
+        for cell in &buffer.content {
+            assert_eq!(cell.fg, Color::Reset, "{cell:?}");
+            assert_eq!(cell.bg, Color::Reset, "{cell:?}");
+            assert_eq!(cell.modifier, Modifier::empty(), "{cell:?}");
+        }
+    };
+    check(&screen);
+    press(&mut screen, KeyCode::Char('n'));
+    press(&mut screen, KeyCode::Char('x'));
+    check(&screen);
+    press(&mut screen, KeyCode::Char('s'));
+    check(&screen);
+}
+
+/// The wax panel (the theme's `lighter_background`) fills the frame's
+/// inside and stops at the border.
+#[test]
+fn the_panel_is_behind_the_content_not_the_border() {
+    let theme =
+        Theme::from_colors_toml("lighter_background = \"#10121A\"\nforeground = \"#EDE3D6\"\n")
+            .unwrap();
+    let panel = Color::Rgb(0x10, 0x12, 0x1A);
+    let terminal = draw(&main_screen_in(theme), 62, 20);
+    let buffer = terminal.backend().buffer();
+    for y in 0..20 {
+        for x in 0..62 {
+            let on_border = y == 0 || y == 19 || x == 0 || x == 61;
+            let expected = if on_border { Color::Reset } else { panel };
+            assert_eq!(buffer[(x, y)].bg, expected, "({x}, {y})");
+        }
+    }
 }

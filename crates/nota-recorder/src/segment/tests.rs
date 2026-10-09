@@ -1638,6 +1638,7 @@ fn salvage_on_the_real_filesystem_with_sqlite() {
             id: SESSION,
             title: None,
             language: None,
+            started_at: None,
             tracks: vec![],
         })
         .unwrap();

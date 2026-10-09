@@ -1,5 +1,7 @@
 //! The `nota` program. Every role is this one executable:
 //!
+//! - `nota`: the Home screen, which lists the library's sessions and
+//!   records a new one with `R` (see `app`);
 //! - `nota record`: records a session, the system audio and the microphone
 //!   as two tracks, with live text on the Recording screen (see `record`
 //!   for how it stops safely);
@@ -17,6 +19,7 @@ use std::process::ExitCode;
 use nota_core::recorder::{self, Input, Setup};
 use nota_engine::sherpa::ModelPaths;
 
+mod app;
 mod latency;
 mod library;
 mod live;
@@ -28,13 +31,16 @@ mod tone;
 use record::RecordArgs;
 
 const USAGE: &str = "\
-usage: nota record [--title TEXT] [--data DIR] [--parakeet DIR --vad FILE]
+usage: nota [--data DIR] [--parakeet DIR --vad FILE]
+       nota record [--title TEXT] [--data DIR] [--parakeet DIR --vad FILE]
                    [--mic NODE] [--system NODE]
        nota engine asr --parakeet DIR --vad FILE [--threads N]";
 
 /// What was asked for.
 #[derive(Debug)]
 enum Command {
+    /// Home, and recordings from it.
+    App(RecordArgs),
     Record(RecordArgs),
     EngineAsr(ModelPaths),
 }
@@ -47,6 +53,17 @@ pub fn main(args: &[OsString]) -> ExitCode {
         Err(err) => return fail(&format!("{err}\n{USAGE}"), 2),
     };
     match command {
+        Command::App(args) => {
+            let (said, ran) = app::app(&args);
+            // What the recordings reported, even if nota then failed.
+            if !said.is_empty() {
+                say(&said.join("\n"));
+            }
+            match ran {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => fail(&format!("nota: {err}"), 1),
+            }
+        }
         // The child's stderr is the recorder's to route; it never reaches
         // the screen's terminal.
         Command::EngineAsr(paths) => match nota_engine::run_asr(&paths) {
@@ -94,6 +111,9 @@ fn parse(args: &[OsString]) -> Result<Command, String> {
             parse_engine(words.as_slice()).map(Command::EngineAsr)
         }
         Some("record") => parse_record(words.as_slice()).map(Command::Record),
+        // No command, or options only: Home.
+        None => parse_app(args).map(Command::App),
+        Some(word) if word.starts_with("--") => parse_app(args).map(Command::App),
         _ => Err("unknown command".into()),
     }
 }
@@ -134,6 +154,18 @@ fn parse_engine(args: &[OsString]) -> Result<ModelPaths, String> {
         vad_model: vad.ok_or("--vad is required")?,
         threads,
     })
+}
+
+/// Home's options: where the library is, and the engine's models. The
+/// recording options that Setup will choose (`--title`, `--mic`,
+/// `--system`) and the latency log are `nota record`'s alone.
+fn parse_app(args: &[OsString]) -> Result<RecordArgs, String> {
+    for (flag, _) in pairs(args)? {
+        if matches!(flag, "--title" | "--mic" | "--system" | "--latency-log") {
+            return Err(format!("{flag} is an option of nota record"));
+        }
+    }
+    parse_record(args)
 }
 
 /// `record` and its options. Without `--data`, sessions go in the

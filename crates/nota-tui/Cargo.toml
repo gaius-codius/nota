@@ -1,6 +1,6 @@
 [package]
 name = "nota-tui"
-description = "nota's terminal UI, in ratatui on crossterm: for now the Recording screen, with live text, the level band, marks and notes."
+description = "nota's terminal UI, in ratatui on crossterm: the Home screen, and the Recording screen with live text, the level band, marks and notes."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 nota-core = { path = "../nota-core" }
 ratatui.workspace = true
+toml.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
 
@@ -20,6 +21,7 @@ rustix = { workspace = true, features = ["termios"] }
 
 [dev-dependencies]
 insta.workspace = true
+proptest.workspace = true
 nota-core = { path = "../nota-core", features = ["fake-clock"] }
 
 [lints]

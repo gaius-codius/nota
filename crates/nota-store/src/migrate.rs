@@ -12,6 +12,7 @@
 //! | 0 | an empty file: nothing created yet |
 //! | 1 | the M1 per-session store, `sessions/<n>/nota.db`: a `segment` table with no session column. Never a library database; imported by [`Store::adopt_session`] |
 //! | 2 | the first library schema ([`crate::schema`]) |
+//! | 3 | each session's start time, `session.started_at` |
 //!
 //! # The per-session stores
 //!
@@ -33,23 +34,26 @@ use crate::sessions::{SessionState, insert_session};
 use crate::{Store, StoreError, session_key};
 
 /// The schema version this code writes and understands.
-pub const VERSION: i64 = 2;
+pub const VERSION: i64 = 3;
+
+/// The first library version: what [`STEPS`]' first step makes.
+const FIRST: i64 = 2;
 
 /// The per-session store's version.
 const PER_SESSION: i64 = 1;
 
-/// The SQL that creates each version from an empty file, in order:
-/// version 2. There's no step from 1, which is never a library. A step from
-/// version 2 on will need [`upgrade`] to run only the steps above the file's
-/// version.
-const STEPS: &[&str] = &[schema::V2];
+/// The SQL that makes each version from the one before, in order: version
+/// 2 (from an empty file), then 3. There's no step from 1, which is never
+/// a library. [`upgrade`] runs the steps above the file's version.
+const STEPS: &[&str] = &[schema::V2, schema::V3];
 
 fn version(conn: &Connection) -> Result<i64, StoreError> {
     Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
 }
 
 /// The library database's version, if it's one this code can open: the
-/// current one, or 0 for an empty file. Reads, never writes. The version
+/// current one, an earlier library version it upgrades, or 0 for an empty
+/// file. Reads, never writes. The version
 /// and the tables are read in one statement, so another process's commit
 /// can't fall between them.
 pub(crate) fn check(conn: &Connection) -> Result<i64, StoreError> {
@@ -60,7 +64,7 @@ pub(crate) fn check(conn: &Connection) -> Result<i64, StoreError> {
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     match (version, tables) {
-        (VERSION, _) => Ok(VERSION),
+        (FIRST..=VERSION, _) => Ok(version),
         (PER_SESSION, _) => Err(StoreError::PerSessionStore),
         (0, 0) => Ok(0),
         (other, _) => Err(StoreError::UnknownSchema(other)),
@@ -70,15 +74,24 @@ pub(crate) fn check(conn: &Connection) -> Result<i64, StoreError> {
 /// Brings the database to [`VERSION`]. A database at the current version
 /// is only read, so opening one takes no write lock.
 pub(crate) fn upgrade(conn: &mut Connection) -> Result<(), StoreError> {
+    upgrade_with(conn, STEPS)
+}
+
+/// [`upgrade`] with `steps` as the steps, so a test can make one fail
+/// after another has run.
+fn upgrade_with(conn: &mut Connection, steps: &[&str]) -> Result<(), StoreError> {
     if check(conn)? == VERSION {
         return Ok(());
     }
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    // Another process may have created the schema since the check.
-    if check(&tx)? == VERSION {
+    // Another process may have upgraded it since the check.
+    let from = check(&tx)?;
+    if from == VERSION {
         return Ok(());
     }
-    for step in STEPS {
+    // The steps above the file's version: all of them for an empty file.
+    let done = usize::try_from((from - FIRST + 1).max(0)).unwrap_or(0);
+    for step in steps.iter().skip(done) {
         tx.execute_batch(step)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
@@ -165,7 +178,7 @@ impl Store {
         if session_exists(&tx, key)? {
             return Ok(Adopted::Known);
         }
-        insert_session(&tx, id, None, None, SessionState::Stopped)?;
+        insert_session(&tx, id, None, None, None, SessionState::Stopped)?;
         for row in rows.iter().flatten() {
             segments::insert(&tx, id, row)?;
         }

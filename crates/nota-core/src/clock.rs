@@ -5,6 +5,10 @@
 //! `Instant::now`, `SystemTime::now`, their `elapsed` shortcuts and
 //! `rustix::time::clock_gettime` elsewhere.
 //!
+//! The calendar's time, [`wall_now`], is read here too, for saying when
+//! a session started. Nothing times anything by it: the system's date can
+//! be changed under it.
+//!
 //! Session time keeps counting while the machine is suspended, so a sleep
 //! shows up as a gap between epochs rather than vanishing. On Linux that
 //! takes `CLOCK_BOOTTIME`: `Instant` uses `CLOCK_MONOTONIC`, which stops
@@ -13,7 +17,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use crate::time::SessionTime;
+use crate::time::{SessionTime, WallTime};
 
 /// A source of session time. It never goes backwards.
 pub trait Clock: Send + Sync + std::fmt::Debug {
@@ -62,6 +66,20 @@ impl Clock for SystemClock {
         let before = self.latest.fetch_max(nanos, Ordering::SeqCst);
         SessionTime::from_nanos(before.max(nanos))
     }
+}
+
+/// The calendar's time now, to the second, or `None` if the system's date
+/// is before 1970 or past the year 292 billion.
+#[must_use]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the clock module is the one place nota reads the calendar's time"
+)]
+pub fn wall_now() -> Option<WallTime> {
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    WallTime::from_unix_seconds(i64::try_from(since.as_secs()).ok()?)
 }
 
 /// The system's monotonic clock couldn't be read.
@@ -221,5 +239,13 @@ mod tests {
         .join()
         .unwrap();
         assert_eq!(seen, SessionTime::from_nanos(42));
+    }
+
+    /// The calendar's time is read, and it's after this code was written.
+    #[test]
+    fn the_wall_clock_reads_the_calendar() {
+        let now = wall_now().unwrap();
+        // 2026-01-01 00:00 UTC.
+        assert!(now.unix_seconds() > 1_767_225_600, "{now:?}");
     }
 }
