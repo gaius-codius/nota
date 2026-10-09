@@ -121,6 +121,8 @@ pub enum Op {
     SyncDir(PathBuf),
     /// [`Fs::remove`].
     Remove(PathBuf),
+    /// [`Fs::remove_dir`].
+    RemoveDir(PathBuf),
     /// [`Fs::read`].
     Read(PathBuf),
     /// [`Fs::list`].
@@ -136,6 +138,8 @@ pub enum Fault {
     Rename,
     /// [`Fs::remove`] of the path.
     Remove,
+    /// [`Fs::remove_dir`] of the path.
+    RemoveDir,
     /// [`Fs::read`] of the path.
     Read,
 }
@@ -350,6 +354,7 @@ enum NameOp {
     MakeDir(PathBuf),
     Rename(PathBuf, PathBuf),
     Unlink(PathBuf),
+    RemoveDir(PathBuf),
 }
 
 impl NameOp {
@@ -360,7 +365,8 @@ impl NameOp {
             Self::Link(path, _)
             | Self::MakeDir(path)
             | Self::Rename(path, _)
-            | Self::Unlink(path) => path.parent(),
+            | Self::Unlink(path)
+            | Self::RemoveDir(path) => path.parent(),
         }
     }
 
@@ -379,6 +385,9 @@ impl NameOp {
             }
             Self::Unlink(path) => {
                 names.files.remove(path);
+            }
+            Self::RemoveDir(path) => {
+                names.dirs.remove(path);
             }
         }
     }
@@ -873,6 +882,30 @@ impl Fs for FakeFs {
         Ok(())
     }
 
+    fn remove_dir(&self, path: &Path) -> io::Result<()> {
+        valid_path(path)?;
+        let mut state = self.lock();
+        state.admit()?;
+        state.fault(Fault::RemoveDir, path)?;
+        state.dir_exists(path)?;
+        if state
+            .names
+            .files
+            .keys()
+            .chain(state.names.dirs.iter())
+            .any(|entry| entry.parent() == Some(path))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::DirectoryNotEmpty,
+                "directory is not empty",
+            ));
+        }
+        state.names.dirs.remove(path);
+        state.pending.push(NameOp::RemoveDir(path.to_path_buf()));
+        state.log.push(Op::RemoveDir(path.to_path_buf()));
+        Ok(())
+    }
+
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         valid_path(path)?;
         let mut state = self.lock();
@@ -1243,6 +1276,94 @@ mod tests {
         let _f = fs.create(&p("/a/x")).unwrap();
         fs.sync_dir(&p("/b")).unwrap();
         assert_eq!(after_crash(&fs, CrashOutcome::LoseUnsynced, "/a/x"), None);
+    }
+
+    #[test]
+    fn remove_dir_rejects_files_missing_and_nonempty_directories() {
+        let fs = FakeFs::with_dirs(["/s", "/s/nested"]);
+        let _file = fs.create(&p("/s/file")).unwrap();
+        assert_eq!(
+            fs.remove_dir(&p("/s/file")).unwrap_err().kind(),
+            io::ErrorKind::NotADirectory
+        );
+        assert_eq!(
+            fs.remove_dir(&p("/missing")).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            fs.remove_dir(&p("/s")).unwrap_err().kind(),
+            io::ErrorKind::DirectoryNotEmpty
+        );
+        fs.remove(&p("/s/file")).unwrap();
+        assert_eq!(
+            fs.remove_dir(&p("/s")).unwrap_err().kind(),
+            io::ErrorKind::DirectoryNotEmpty
+        );
+        fs.remove_dir(&p("/s/nested")).unwrap();
+        fs.remove_dir(&p("/s")).unwrap();
+        assert_eq!(fs.ops().last(), Some(&Op::RemoveDir(p("/s"))));
+        assert_eq!(
+            fs.list(&p("/s")).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn remove_dir_is_durable_only_after_parent_sync() {
+        for outcome in CrashOutcome::standard() {
+            let fs = FakeFs::with_dirs(["/s", "/s/empty"]);
+            fs.remove_dir(&p("/s/empty")).unwrap();
+            fs.sync_dir(&p("/s")).unwrap();
+            assert!(
+                fs.crash(outcome).list(&p("/s")).unwrap().is_empty(),
+                "{outcome:?}"
+            );
+        }
+        let fs = FakeFs::with_dirs(["/s", "/s/empty"]);
+        fs.remove_dir(&p("/s/empty")).unwrap();
+        fs.sync_dir(&p("/")).unwrap();
+        assert_eq!(
+            fs.crash(CrashOutcome::LoseUnsynced).list(&p("/s")).unwrap(),
+            vec![p("/s/empty")]
+        );
+        assert!(
+            fs.crash(CrashOutcome::KeepAll)
+                .list(&p("/s"))
+                .unwrap()
+                .is_empty()
+        );
+        let mut seen = BTreeSet::new();
+        for seed in 0..100 {
+            seen.insert(
+                fs.crash(CrashOutcome::Partial { seed })
+                    .list(&p("/s"))
+                    .unwrap(),
+            );
+        }
+        assert_eq!(seen.len(), 2, "partial crashes preserve or lose the unlink");
+    }
+
+    #[test]
+    fn remove_dir_failures_preserve_the_name_and_count_as_operations() {
+        let fs = FakeFs::with_dirs(["/s"]);
+        fs.fail_after(0, io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            fs.remove_dir(&p("/s")).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(fs.list(&p("/")).unwrap(), vec![p("/s")]);
+        fs.fail_on(&p("/s"), Fault::RemoveDir, io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            fs.remove_dir(&p("/s")).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        fs.crash_after(0);
+        assert!(fs.remove_dir(&p("/s")).is_err());
+        assert!(fs.has_crashed());
+        assert_eq!(
+            fs.crash(CrashOutcome::KeepAll).list(&p("/")).unwrap(),
+            vec![p("/s")]
+        );
     }
 
     #[test]

@@ -209,7 +209,7 @@ fn each_session_shows_what_salvage_found() {
     // A journal set aside as damaged: recovered, but not "nothing lost".
     let aside = vec![PathBuf::from("journal-000003.unreadable")];
     assert_eq!(
-        shown(Needs::Nothing, &[Salvaged::Left(id, aside)]),
+        shown(Needs::Nothing, &[Salvaged::Left(id, aside, Box::default())]),
         (Status::Ready, Some("recovered after a crash".into()))
     );
     // Another session's salvage says nothing about this one.

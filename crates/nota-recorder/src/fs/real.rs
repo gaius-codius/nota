@@ -91,6 +91,15 @@ impl Fs for StdFs {
         std::fs::remove_file(path)
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the durable-write layer is the one place that removes empty directories"
+    )]
+    fn remove_dir(&self, path: &Path) -> io::Result<()> {
+        valid_path(path)?;
+        std::fs::remove_dir(path)
+    }
+
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         read_at_most(path, MAX_READ_LEN)
     }
@@ -346,6 +355,36 @@ fn sync_dir(dir: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::test_dir::TestDir;
+
+    #[test]
+    fn remove_dir_removes_only_an_empty_directory() {
+        let dir = TestDir::new("empty-dir");
+        let child = dir.0.join("child");
+        let file = child.join("file");
+        let fs = StdFs;
+        fs.create_dir(&child).unwrap();
+        drop(fs.create(&file).unwrap());
+        assert_eq!(
+            fs.remove_dir(&file).unwrap_err().kind(),
+            io::ErrorKind::NotADirectory
+        );
+        assert_eq!(
+            fs.remove_dir(&child).unwrap_err().kind(),
+            io::ErrorKind::DirectoryNotEmpty
+        );
+        fs.remove(&file).unwrap();
+        fs.remove_dir(&child).unwrap();
+        fs.sync_dir(&dir.0).unwrap();
+        assert!(fs.list(&dir.0).unwrap().is_empty());
+        assert_eq!(
+            fs.remove_dir(&child).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            fs.remove_dir(Path::new("/")).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
 
     #[test]
     fn create_write_sync_rename_read_remove() {

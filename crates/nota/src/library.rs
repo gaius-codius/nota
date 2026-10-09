@@ -34,10 +34,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use nota_core::{SampleCount, SampleRate, SessionId, TrackId, WallTime};
+use nota_recorder::disk::{BALLAST_LEN, Ballast, DiskWatch, Freed, WatchedStore};
 use nota_recorder::fs::{Fs, StdFs};
 use nota_recorder::journal::JournalId;
 use nota_recorder::segment::{
-    Depth, DurableSegment, SegmentLength, SegmentStore, needs_salvage, read_findings, salvage, scan,
+    Depth, DurableSegment, Published, SegmentLength, SegmentStore, needs_salvage, read_findings,
+    salvage_start, scan,
 };
 use nota_recorder::session::{SessionDir, SessionStore};
 use nota_store::{NewSession, SegmentRow, SessionState, StoreError, Writer};
@@ -71,8 +73,14 @@ impl SessionPaths {
 
     /// Keeps `session`, this session's row, in its directory, so it can be
     /// adopted with it if the library database never takes it.
+    #[cfg(test)]
     pub(crate) fn keep(&self, session: &NewSession) -> io::Result<()> {
-        kept::write(&StdFs, &self.dir, session)
+        self.keep_on(&StdFs, session)
+    }
+
+    /// Keeps the row through the startup disk watch.
+    pub(crate) fn keep_on<S: Fs>(&self, fs: &S, session: &NewSession) -> io::Result<()> {
+        kept::write(fs, &self.dir, session)
     }
 
     /// Where an M1 session kept its own store.
@@ -92,7 +100,7 @@ pub(crate) enum Salvaged {
     /// can't use, or by a segment that doesn't match its row); the next
     /// start tries again. Also the journals it set aside as damaged, as in
     /// `Done`.
-    Left(SessionId, Vec<PathBuf>),
+    Left(SessionId, Vec<PathBuf>, Box<Published>),
     /// Another nota is using it; it's left alone.
     InUse(SessionId),
     /// Salvage failed, or couldn't start because the session couldn't be
@@ -105,9 +113,11 @@ pub(crate) enum Salvaged {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Listed {
     pub(crate) id: SessionId,
-    /// Its title, if the library database has one.
+    /// Its title from the library database, or the row kept on disk if
+    /// there is no database row available.
     pub(crate) title: Option<String>,
-    /// When it started, if the library database knows.
+    /// When it started, from the database or the row kept on disk if
+    /// there is no database row available.
     pub(crate) started_at: Option<WallTime>,
     /// How much audio its longest track has published, if the library
     /// database could be read.
@@ -222,7 +232,11 @@ impl Library {
     /// there but can't be read, isn't added, so the next start can still
     /// import them. A kept row that doesn't parse never will: the session is
     /// added with its number alone rather than holding up its audio.
-    fn adopt(&self, session: &SessionPaths) -> Result<(), String> {
+    fn adopt<S: Fs + Clone>(
+        &self,
+        session: &SessionPaths,
+        watch: &Arc<DiskWatch<S>>,
+    ) -> Result<(), String> {
         // Known already: nothing on disk is read again.
         if self
             .db
@@ -240,8 +254,7 @@ impl Library {
         let row = kept::read(&StdFs, &session.dir, session.id)
             .map_err(|e| format!("reading its title and tracks: {e}"))?
             .unwrap_or_else(|| NewSession::bare(session.id));
-        self.db
-            .with(|db| db.adopt_session(&row, per_session))
+        self.database(watch, |db| db.adopt_session(&row, per_session))
             .map(|_| ())
             .map_err(|e| e.to_string())
     }
@@ -258,8 +271,18 @@ impl Library {
     /// tries again. A database that can't be opened is tried once, not
     /// once for each session.
     pub(crate) fn salvage_all(&self, length: SegmentLength) -> io::Result<Vec<Salvaged>> {
+        let watch = startup_watch(&StdFs, &self.root, BALLAST_LEN)?;
+        self.salvage_watched(length, &watch)
+    }
+
+    /// Salvages through a watch that already holds the startup ballast.
+    pub(crate) fn salvage_watched<S: Fs + Clone + 'static>(
+        &self,
+        length: SegmentLength,
+        watch: &Arc<DiskWatch<S>>,
+    ) -> io::Result<Vec<Salvaged>> {
         let sessions = self.existing()?;
-        if let Err(e) = self.db.with(|_| Ok(())) {
+        if let Err(e) = self.database(watch, |_| Ok(())) {
             return Ok(sessions
                 .iter()
                 .filter(|s| {
@@ -272,7 +295,7 @@ impl Library {
         }
         Ok(sessions
             .iter()
-            .filter_map(|session| self.salvage_one(session, length))
+            .filter_map(|session| self.salvage_one(session, length, watch))
             .collect())
     }
 
@@ -282,13 +305,18 @@ impl Library {
     ///
     /// The session is locked first, so a session another nota is
     /// recording is never adopted or marked stopped under it.
-    fn salvage_one(&self, session: &SessionPaths, length: SegmentLength) -> Option<Salvaged> {
+    fn salvage_one<S: Fs + Clone + 'static>(
+        &self,
+        session: &SessionPaths,
+        length: SegmentLength,
+        watch: &Arc<DiskWatch<S>>,
+    ) -> Option<Salvaged> {
         // Nothing in it yet, as `create` leaves it, unless the database
         // holds rows for it: then its files are gone, and the scan says so.
         if is_empty(session) && !self.has_rows(session.id) {
             return None;
         }
-        let dir = SessionDir::new(session.id, StdFs, &session.audio());
+        let dir = SessionDir::new(session.id, watch.fs(), &session.audio());
         // An audio directory that can't be listed has nothing to salvage now.
         let journals = needs_salvage(&dir).unwrap_or(false);
         let lock = match dir.lock() {
@@ -300,7 +328,7 @@ impl Library {
                 });
             }
         };
-        if let Err(e) = self.adopt(session) {
+        if let Err(e) = self.adopt(session, watch) {
             return journals.then(|| {
                 Salvaged::Failed(
                     session.id,
@@ -310,30 +338,43 @@ impl Library {
         }
         // No one is recording it: whatever the database says, it stopped.
         // If this fails, the next start tries again.
-        let _stopped = self.db.with(|db| db.stop_recording(session.id));
-        let mut bound = SessionStore::new(lock, self.db.clone());
-        let salvaged = journals.then(|| match salvage(&mut bound, length) {
-            Ok(published) => {
-                let aside = published.quarantined().to_vec();
-                if needs_salvage(&dir).unwrap_or(true) {
-                    Salvaged::Left(session.id, aside)
-                } else {
-                    Salvaged::Done(session.id, aside)
-                }
-            }
-            Err(e) => Salvaged::Failed(session.id, e.to_string()),
-        });
-        // Salvage checks only the rows its journals overlap: a row whose
-        // file is gone with no journals left is found here. Both record
-        // what they find in the findings file, which is then indexed. Each
-        // is tried again at the next start if it fails.
-        let _scanned = scan(&mut bound, Depth::Names);
-        if let Ok(findings) = read_findings(&dir) {
-            let _indexed = self
-                .db
-                .with(|db| db.index_findings(session.id, &findings.indexed()));
-        }
+        let _stopped = self.database(watch, |db| db.stop_recording(session.id));
+        let store = WatchedStore::new(self.db.clone(), Arc::clone(watch), &self.db_path());
+        let mut bound = SessionStore::new(lock, store);
+        let salvaged = journals.then(|| salvage_result(&mut bound, &dir, length, watch));
+        self.index_checked(&mut bound, &dir, watch);
         salvaged
+    }
+
+    /// Checks rows with no journals too, then copies the findings index.
+    fn index_checked<S: Fs + Clone + 'static>(
+        &self,
+        bound: &mut SessionStore<nota_recorder::disk::WatchedFs<S>, WatchedStore<Writer, S>>,
+        dir: &SessionDir<nota_recorder::disk::WatchedFs<S>>,
+        watch: &Arc<DiskWatch<S>>,
+    ) {
+        let _scanned = scan(bound, Depth::Names);
+        if let Ok(findings) = read_findings(dir) {
+            let _indexed =
+                self.database(watch, |db| db.index_findings(dir.id(), &findings.indexed()));
+        }
+    }
+
+    /// Database writes aren't filesystem operations: note SQLite's full-disk
+    /// error and retry once after freeing the ballast.
+    fn database<S: Fs + Clone, R>(
+        &self,
+        watch: &Arc<DiskWatch<S>>,
+        mut work: impl FnMut(&mut nota_store::Store) -> Result<R, StoreError>,
+    ) -> Result<R, StoreError> {
+        let first = self.db.with(|db| work(db));
+        if first.as_ref().is_err_and(StoreError::is_disk_full) {
+            watch.note_full(Some(&self.db_path()));
+            if watch.full().is_some_and(|f| f.ballast == Freed::Freed) {
+                return self.db.with(|db| work(db));
+            }
+        }
+        first
     }
 
     /// Whether the library database holds segment rows for `id`, or can't
@@ -350,6 +391,8 @@ impl Library {
     /// library database with its title and the audio its rows hold, and
     /// each one on disk that the database doesn't have (or every one, if
     /// the database can't be read: that's said as each one's attention).
+    /// Sessions without a database row use their title and start time
+    /// from the row kept on disk, if that row can be read.
     /// Audio is counted at `rate`, the rate every track records at.
     pub(crate) fn listing(&self, rate: SampleRate) -> io::Result<Vec<Listed>> {
         let on_disk = self.existing()?;
@@ -401,12 +444,18 @@ impl Library {
             listed
                 .entry(session.id.get())
                 .and_modify(|listed| listed.needs = needs.clone())
-                .or_insert(Listed {
-                    id: session.id,
-                    title: None,
-                    started_at: None,
-                    recorded: None,
-                    needs,
+                .or_insert_with(|| {
+                    let row = kept::read(&StdFs, &session.dir, session.id)
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| NewSession::bare(session.id));
+                    Listed {
+                        id: session.id,
+                        title: row.title,
+                        started_at: row.started_at,
+                        recorded: None,
+                        needs,
+                    }
                 });
         }
         Ok(listed.into_values().collect())
@@ -414,7 +463,13 @@ impl Library {
 
     /// Makes a new session's directories, numbered after every session on
     /// disk and, if the database can be read, every session in it.
+    #[cfg(test)]
     pub(crate) fn create(&self) -> io::Result<SessionPaths> {
+        self.create_on(&StdFs)
+    }
+
+    /// Makes the new session through the startup disk watch.
+    pub(crate) fn create_on<S: Fs>(&self, fs: &S) -> io::Result<SessionPaths> {
         let on_disk = self.existing()?.last().map_or(0, |last| last.id.get());
         // A database that can't be read now could hold a number the disk
         // doesn't show only if a session's directory was deleted by hand:
@@ -430,15 +485,20 @@ impl Library {
         // Another nota may take the same number first: try the next.
         for _ in 0..16 {
             let dir = self.sessions().join(next.to_string());
-            match StdFs.create_dir(&dir) {
+            match fs.create_dir(&dir) {
                 Ok(()) => {
-                    StdFs.sync_dir(&self.sessions())?;
                     let paths = SessionPaths {
                         id: SessionId::new(next),
                         dir,
                     };
-                    StdFs.create_dir(&paths.audio())?;
-                    StdFs.sync_dir(&paths.dir)?;
+                    if let Err(e) = (|| {
+                        fs.sync_dir(&self.sessions())?;
+                        fs.create_dir(&paths.audio())?;
+                        fs.sync_dir(&paths.dir)
+                    })() {
+                        discard_empty(fs, &paths);
+                        return Err(e);
+                    }
                     return Ok(paths);
                 }
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
@@ -448,6 +508,64 @@ impl Library {
             }
         }
         Err(no_number())
+    }
+}
+
+/// Reports both unfinished publication and files kept for cleanup.
+fn salvage_result<S: Fs + Clone + 'static, T: SegmentStore>(
+    bound: &mut SessionStore<nota_recorder::disk::WatchedFs<S>, T>,
+    dir: &SessionDir<nota_recorder::disk::WatchedFs<S>>,
+    length: SegmentLength,
+    watch: &DiskWatch<S>,
+) -> Salvaged {
+    match salvage_start(bound, length, watch) {
+        Ok(published) => {
+            let aside = published.quarantined().to_vec();
+            if needs_salvage(dir).unwrap_or(true) || !published.temps_kept().is_empty() {
+                Salvaged::Left(dir.id(), aside, Box::new(published))
+            } else {
+                Salvaged::Done(dir.id(), aside)
+            }
+        }
+        Err(e) => Salvaged::Failed(dir.id(), e.to_string()),
+    }
+}
+
+/// Holds the existing ballast before startup can write anything.
+pub(crate) fn startup_watch<S: Fs + Clone>(
+    fs: &S,
+    root: &Path,
+    len: u64,
+) -> io::Result<Arc<DiskWatch<S>>> {
+    let watch = DiskWatch::new(fs.clone());
+    if let Some(ballast) = Ballast::find(fs, root, len)? {
+        watch.hold(ballast);
+    }
+    Ok(watch)
+}
+
+/// Removes only empty scaffolding that this start just created. Never
+/// removes audio, journals or a session made by another start.
+pub(crate) fn discard_empty<S: Fs>(fs: &S, paths: &SessionPaths) {
+    let audio = paths.audio();
+    // Opening the writer may have left only its unpublished marks temp.
+    if let Ok(files) = fs.list(&audio) {
+        for path in files {
+            if path
+                .file_name()
+                .is_some_and(|n| n == "session-marks.tmp" || n == "session.txt.partial")
+            {
+                let _removed = fs.remove(&path);
+            }
+        }
+    }
+    let partial = paths.dir.join(kept::KEPT_PARTIAL);
+    let _partial = fs.remove(&partial);
+    let _audio = fs.remove_dir(&audio);
+    let _contents = fs.sync_dir(&paths.dir);
+    let _session = fs.remove_dir(&paths.dir);
+    if let Some(parent) = paths.dir.parent() {
+        let _synced = fs.sync_dir(parent);
     }
 }
 

@@ -17,7 +17,7 @@ use nota_recorder::disk::{
     WatchedFs, WatchedStore,
 };
 use nota_recorder::engine::{EngineCommand, EngineConfig, EngineSupervisor};
-use nota_recorder::fs::StdFs;
+use nota_recorder::fs::{Fs, StdFs, is_disk_full};
 use nota_recorder::segment::{PublishQueue, Publisher};
 use nota_recorder::session::{SessionDir, SessionLock, SessionStore, SessionWriter, Syncing};
 use nota_store::{Heard, NewSession, Track, TrackKind};
@@ -26,10 +26,12 @@ use nota_tui::Event;
 use super::live::{LiveInput, spawn_live};
 use super::save::{Saver, ToSave};
 use super::signals::{SignalThread, listen_for_signals};
-use super::summary::{Outcome, file_names, track_name};
+use super::summary::{Outcome, file_names, held_notes, track_name};
 use super::{BoxError, MIC, RATE, RecordArgs, SYSTEM, segment_length};
 use crate::latency::{DrawEnds, LatencyLog};
-use crate::library::{Library, NewSessionRows, Salvaged};
+use crate::library::{
+    Library, NewSessionRows, Salvaged, SessionPaths, discard_empty, startup_watch,
+};
 use crate::live::Live;
 use crate::terminal::Screen;
 
@@ -113,10 +115,17 @@ pub(super) fn start<B: CaptureBackend>(
     };
 
     let library = library.map_or_else(|| Library::open(&args.data), Ok)?;
-    note_salvaged(&library, &mut outcome)?;
-    let session = library.create()?;
+    let ballast_len = ballast_length(args);
+    let recovery = startup_watch(&StdFs, &args.data, ballast_len)?;
+    for salvaged in library.salvage_watched(segment_length(), &recovery)? {
+        outcome.notes.push(salvage_note(&salvaged));
+    }
+    // Recovery has its own watch: a full disk it got past mustn't stop
+    // the new recording. Hold whatever ballast is still there.
+    let watch = startup_watch(&StdFs, &args.data, ballast_len)?;
+    let session = create_session(&library, &watch)?;
     outcome.session.clone_from(&session.dir);
-    let Opened(watch, lock, mut writer) = open_session(session.id, &session.audio(), clock)?;
+    let (lock, mut writer) = open_session(&session, &watch, clock)?;
 
     let sources = sources(setup);
     let (started, events) = start_tracks(backend, &sources, RATE, clock);
@@ -138,19 +147,20 @@ pub(super) fn start<B: CaptureBackend>(
     // opened later doesn't push the first one's audio later.
     let timelines = open_timelines(&mut writer, &captures)?;
 
-    // Checked, and a ballast already there held, before the recorder
-    // starts; then while recording. A full disk stops it.
-    let disk = watch_disk(args, &session.audio(), captures.len(), &watch, &ui, clock)?;
-
-    // Recording never waits on the database: the session's row is kept in
-    // its directory too, so it's adopted with its title and tracks if the
-    // database never takes it.
+    // Keep the title before recording starts, through the same watch as
+    // the journals. With no room, startup leaves no empty session behind.
     let row = session_row(setup, session.id, &sources, &captures);
-    if let Err(e) = session.keep(&row) {
+    if let Err(error) = keep_session(&watch, &session, &row) {
+        if is_disk_full(&error) {
+            return Err(start_error(error));
+        }
         outcome.notes.push(format!(
-            "the session's title and tracks weren't kept with its audio: {e}"
+            "the session's title and tracks weren't kept with its audio: {error}"
         ));
     }
+    watch.start_recording();
+    let disk = watch_disk(args, &session.audio(), captures.len(), &watch, &ui, clock)?;
+
     let rows = NewSessionRows::new(library.db().clone(), row);
     // The live text, marks and notes are stored as they come, on a thread
     // of their own; whichever of it and the publisher writes first adds the
@@ -213,29 +223,78 @@ pub(super) fn start<B: CaptureBackend>(
     Ok((started, screening))
 }
 
-/// The new session's audio directory, owned through a watched
-/// filesystem, and its writer, with the watch.
-struct Opened(
-    Arc<DiskWatch<StdFs>>,
-    SessionLock<RecordFs>,
-    SessionWriter<RecordFs>,
-);
+/// Keeps the new row before recording starts, with one full-disk retry.
+fn keep_session<S: Fs + Clone + 'static>(
+    watch: &Arc<DiskWatch<S>>,
+    session: &SessionPaths,
+    row: &NewSession,
+) -> std::io::Result<()> {
+    let write = || session.keep_on(&watch.fs(), row);
+    let kept = retry_start(write(), watch, write);
+    if let Err(error) = kept {
+        if is_disk_full(&error) {
+            discard_empty(&watch.fs(), session);
+        }
+        return Err(error);
+    }
+    Ok(())
+}
 
-/// Opens the new session's audio directory through a watched filesystem.
+/// Makes the session through the watch, retrying after the ballast freed.
+fn create_session(
+    library: &Library,
+    watch: &Arc<DiskWatch<StdFs>>,
+) -> Result<SessionPaths, BoxError> {
+    let first = library.create_on(&watch.fs());
+    retry_start(first, watch, || library.create_on(&watch.fs())).map_err(start_error)
+}
+
+/// Retries a startup operation once if freeing the ballast made room.
+fn retry_start<S: Fs + Clone, T>(
+    first: std::io::Result<T>,
+    watch: &DiskWatch<S>,
+    again: impl FnOnce() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    if first.as_ref().is_err_and(is_disk_full)
+        && watch
+            .full()
+            .is_some_and(|f| f.ballast == nota_recorder::disk::Freed::Freed)
+    {
+        again()
+    } else {
+        first
+    }
+}
+
+/// Says plainly when starting failed for want of space.
+fn start_error(error: std::io::Error) -> BoxError {
+    if is_disk_full(&error) {
+        "the disk is full: free some space".into()
+    } else {
+        error.into()
+    }
+}
+
+/// Opens the new writer before any track can record audio.
 fn open_session(
-    id: SessionId,
-    audio: &std::path::Path,
+    session: &SessionPaths,
+    watch: &Arc<DiskWatch<StdFs>>,
     clock: &Arc<dyn Clock>,
-) -> Result<Opened, BoxError> {
-    // Every write of the recording, the publisher's too, goes through the
-    // watch: the first to meet a full disk frees the ballast.
-    let watch = DiskWatch::new(StdFs);
-    let lock = SessionDir::new(id, watch.fs(), audio).lock()?;
-    // A track's fsyncs on a thread of its own: neither track's audio waits
-    // for the other's disk.
-    let writer = SessionWriter::open(&lock, RATE, segment_length(), Arc::clone(clock))?
-        .with_syncing(Syncing::Threads);
-    Ok(Opened(watch, lock, writer))
+) -> Result<(SessionLock<RecordFs>, SessionWriter<RecordFs>), BoxError> {
+    let lock = SessionDir::new(session.id, watch.fs(), &session.audio())
+        .lock()
+        .map_err(start_error)?;
+    let writer = SessionWriter::open(&lock, RATE, segment_length(), Arc::clone(clock))?;
+    Ok((lock, writer.with_syncing(Syncing::Threads)))
+}
+
+/// Tests keep a smaller ballast for their short recordings.
+fn ballast_length(args: &RecordArgs) -> u64 {
+    if args.tone {
+        TONE_BALLAST_LEN
+    } else {
+        BALLAST_LEN
+    }
 }
 
 /// Starts the disk monitor for a recording of `tracks` tracks into
@@ -252,11 +311,7 @@ fn watch_disk(
         data_dir: args.data.clone(),
         audio_dir: audio.to_path_buf(),
         usage: Usage::new(tracks, RATE, segment_length()),
-        ballast_len: if args.tone {
-            TONE_BALLAST_LEN
-        } else {
-            BALLAST_LEN
-        },
+        ballast_len: ballast_length(args),
         interval: CHECK_INTERVAL,
     };
     let reports = disk_reports(ui.clone(), Arc::clone(clock));
@@ -352,26 +407,25 @@ fn open_timelines<S>(
     Ok(timelines)
 }
 
-/// Salvages the sessions an earlier run left, and notes what became of
-/// each.
-fn note_salvaged(library: &Library, outcome: &mut Outcome) -> Result<(), BoxError> {
-    for salvaged in library.salvage_all(segment_length())? {
-        outcome.notes.push(salvage_note(&salvaged));
-    }
-    Ok(())
-}
-
 /// What the summary says of one salvaged session.
 fn salvage_note(salvaged: &Salvaged) -> String {
     match salvaged {
         Salvaged::Done(id, aside) => {
             format!("salvaged session {}{}", id.get(), set_aside_part(aside))
         }
-        Salvaged::Left(id, aside) => format!(
-            "salvaged session {}, but some of its journals are still to publish{}",
-            id.get(),
-            set_aside_part(aside)
-        ),
+        Salvaged::Left(id, aside, held) => {
+            let notes = held_notes(held);
+            let why = if notes.is_empty() {
+                "some of its journals are still to publish".to_owned()
+            } else {
+                notes.join("; ")
+            };
+            format!(
+                "salvaged session {}: {why}{}",
+                id.get(),
+                set_aside_part(aside)
+            )
+        }
         Salvaged::InUse(id) => format!("session {} is in use; not salvaged", id.get()),
         Salvaged::Failed(id, e) => format!("salvaging session {} failed: {e}", id.get()),
     }
@@ -843,12 +897,157 @@ mod salvage_note_tests {
         let left = Salvaged::Left(
             SessionId::new(3),
             aside(&["journal-000000.unreadable", "journal-000004.unreadable"]),
+            Box::default(),
         );
         assert_eq!(
             salvage_note(&left),
-            "salvaged session 3, but some of its journals are still to publish; \
+            "salvaged session 3: some of its journals are still to publish; \
              journals were damaged, so parts of it weren't published: \
              journal-000000.unreadable, journal-000004.unreadable are kept"
         );
+    }
+    /// Removes the fixture's files through the filesystem boundary.
+    fn remove_fixture(path: &std::path::Path) {
+        if let Ok(children) = StdFs.list(path) {
+            for child in children {
+                remove_fixture(&child);
+            }
+            let _ = StdFs.remove_dir(path);
+        } else {
+            let _ = StdFs.remove(path);
+        }
+    }
+
+    /// Startup names the real directory that prevents a segment being published.
+    #[test]
+    fn startup_names_a_directory_blocking_salvage() {
+        use nota_core::{FakeClock, SampleIndex, SessionTime};
+        let root = std::env::temp_dir().join(format!("nota-start-held-{}", std::process::id()));
+        remove_fixture(&root);
+        let library = Library::open(&root).unwrap();
+        let session = library.create().unwrap();
+        let lock = SessionDir::new(session.id, StdFs, &session.audio())
+            .lock()
+            .unwrap();
+        let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
+        let mut writer = SessionWriter::open(&lock, RATE, segment_length(), clock).unwrap();
+        writer
+            .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+            .unwrap();
+        writer.append(MIC, &[7; 50]).unwrap();
+        writer.finish().unwrap();
+        // Release the recording lock so startup can salvage, rather than report in use.
+        drop(lock);
+        StdFs
+            .create_dir(&session.audio().join("seg-t0-000000000000.flac"))
+            .unwrap();
+        let salvaged = library.salvage_all(segment_length()).unwrap();
+        assert_eq!(salvaged.len(), 1);
+        assert_eq!(
+            salvage_note(&salvaged[0]),
+            "salvaged session 1: seg-t0-000000000000.flac: a directory is in the way; its audio is still to publish"
+        );
+        // A blocked publish must preserve its journal for a later retry.
+        assert!(StdFs.list(&session.audio()).unwrap().iter().any(|path| {
+            path.file_name()
+                .is_some_and(|name| name == "journal-000000")
+        }));
+        drop(library);
+        remove_fixture(&root);
+    }
+}
+
+#[cfg(test)]
+mod space_tests {
+    use super::*;
+    use nota_recorder::disk::{Ballast, Freed};
+    use nota_recorder::fs::fake::FakeFs;
+
+    /// The directories a new start owns before it keeps the session row.
+    fn pending_session(fs: &FakeFs) -> SessionPaths {
+        let session = SessionPaths {
+            id: SessionId::new(1),
+            dir: PathBuf::from("/data/sessions/1"),
+        };
+        fs.create_dir(&session.dir).unwrap();
+        fs.create_dir(&session.audio()).unwrap();
+        session
+    }
+
+    /// A full disk without ballast refuses startup and leaves no session.
+    #[test]
+    fn a_full_start_without_ballast_leaves_nothing() {
+        let fs = FakeFs::with_dirs([PathBuf::from("/data"), PathBuf::from("/data/sessions")]);
+        let session = pending_session(&fs);
+        fs.set_capacity(Some(0));
+        let watch = startup_watch(&fs, std::path::Path::new("/data"), 1_024).unwrap();
+        // Keeping the row is the last startup write before capture runs.
+        let error = keep_session(&watch, &session, &NewSession::bare(session.id)).unwrap_err();
+        assert_eq!(
+            start_error(error).to_string(),
+            "the disk is full: free some space"
+        );
+        assert!(
+            fs.list(std::path::Path::new("/data/sessions"))
+                .unwrap()
+                .is_empty()
+        );
+        // The removal is synced, so a crash doesn't bring the empty start back.
+        for outcome in nota_recorder::fs::fake::CrashOutcome::standard() {
+            let crashed = fs.crash(outcome);
+            assert!(
+                crashed
+                    .list(std::path::Path::new("/data/sessions"))
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    /// Startup retries a partial row write after freeing the ballast.
+    #[test]
+    fn a_full_start_frees_ballast_and_keeps_its_row() {
+        let root = PathBuf::from("/data");
+        let fs = FakeFs::with_dirs([root.clone(), root.join("sessions")]);
+        Ballast::keep(&fs, &root, 1_024, || false).unwrap();
+        let session = pending_session(&fs);
+        // No byte fits until the watch unlinks the existing ballast.
+        fs.set_capacity(Some(1_024));
+        let watch = startup_watch(&fs, &root, 1_024).unwrap();
+        keep_session(&watch, &session, &NewSession::bare(session.id)).unwrap();
+        assert_eq!(watch.full().unwrap().ballast, Freed::Freed);
+        assert!(
+            fs.read(&session.dir.join("session.txt"))
+                .unwrap()
+                .starts_with(b"nota")
+        );
+        // A recovered startup must not stop the new recording's monitor.
+        watch.start_recording();
+        assert!(watch.full().is_none());
+        assert!(!watch.holds_ballast());
+    }
+
+    /// Cleanup refuses to remove any session containing recorded audio.
+    #[test]
+    fn startup_cleanup_keeps_audio() {
+        use nota_recorder::fs::FsFile;
+        let fs = FakeFs::with_dirs([PathBuf::from("/data"), PathBuf::from("/data/sessions")]);
+        let session = pending_session(&fs);
+        let journal = session.audio().join("journal-000000");
+        fs.create(&journal).unwrap().write_all(&[7; 40]).unwrap();
+        // Another startup failure must never make the audio collateral.
+        discard_empty(&fs, &session);
+        assert_eq!(fs.read(&journal).unwrap(), [7; 40]);
+        assert!(fs.list(&session.dir).unwrap().contains(&session.audio()));
+    }
+
+    /// Errors unrelated to space keep their original cause.
+    #[test]
+    fn a_start_permission_error_keeps_its_cause() {
+        let error = start_error(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "denied",
+        ));
+        assert_eq!(error.to_string(), "denied");
     }
 }

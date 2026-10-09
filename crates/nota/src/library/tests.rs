@@ -197,7 +197,7 @@ fn salvage_that_leaves_journals_says_so() {
     StdFs.create_dir(&session.audio().join(journal)).unwrap();
     let done = library.salvage_all(length()).unwrap();
     assert!(
-        matches!(done[..], [Salvaged::Left(id, _)] if id == session.id),
+        matches!(done[..], [Salvaged::Left(id, _, _)] if id == session.id),
         "{done:?}"
     );
 }
@@ -1140,4 +1140,126 @@ fn a_row_that_doesnt_parse_is_one_sessions_problem_in_the_listing() {
     assert_eq!(listed[0].recorded, None);
     assert_eq!(listed[1].recorded, Some(Duration::from_secs(60)));
     assert_eq!(listed[1].needs, Needs::Nothing);
+}
+
+#[test]
+fn listing_uses_kept_metadata_without_a_database_row() {
+    let tmp = TestDir::new("listing-kept-no-row");
+    let library = Library::open(&tmp.0).unwrap();
+    let session = library.create().unwrap();
+    let kept = NewSession {
+        title: Some("Woodland ecology".into()),
+        started_at: WallTime::from_unix_seconds(1_760_004_000),
+        ..NewSession::bare(session.id)
+    };
+    session.keep(&kept).unwrap();
+    leave_journal(&session);
+    assert_eq!(
+        library.db().with(|db| db.session(session.id)).unwrap(),
+        None
+    );
+
+    let listed = library.listing(SampleRate::SPEECH).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, session.id);
+    assert_eq!(listed[0].title, kept.title);
+    assert_eq!(listed[0].started_at, kept.started_at);
+    assert_eq!(listed[0].recorded, None);
+    assert!(matches!(listed[0].needs, Needs::Attention(_)));
+    // Listing does not adopt a row or modify the kept metadata.
+    assert_eq!(
+        library.db().with(|db| db.session(session.id)).unwrap(),
+        None
+    );
+    assert_eq!(
+        kept::read(&StdFs, &session.dir, session.id).unwrap(),
+        Some(kept)
+    );
+}
+
+#[test]
+fn listing_uses_kept_metadata_when_the_database_cant_be_read() {
+    let tmp = TestDir::new("listing-kept-bad-db");
+    let library = Library::open(&tmp.0).unwrap();
+    let session = library.create().unwrap();
+    let kept = NewSession {
+        title: Some("River habitats".into()),
+        started_at: WallTime::from_unix_seconds(1_760_004_001),
+        ..NewSession::bare(session.id)
+    };
+    session.keep(&kept).unwrap();
+    leave_journal(&session);
+    drop(library);
+    break_db(&tmp.0);
+    let library = Library::open(&tmp.0).unwrap();
+
+    let listed = library.listing(SampleRate::SPEECH).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, session.id);
+    assert_eq!(listed[0].title, kept.title);
+    assert_eq!(listed[0].started_at, kept.started_at);
+    assert_eq!(listed[0].recorded, None);
+    let Needs::Attention(why) = &listed[0].needs else {
+        panic!("{listed:?}");
+    };
+    assert!(why.starts_with("audio still to save"), "{why}");
+}
+
+#[test]
+fn listing_database_metadata_takes_precedence_over_kept_metadata() {
+    let tmp = TestDir::new("listing-kept-precedence");
+    let library = Library::open(&tmp.0).unwrap();
+    for (title, started_at) in [
+        (
+            Some("Edited title".to_owned()),
+            WallTime::from_unix_seconds(1_760_008_000),
+        ),
+        (None, None),
+    ] {
+        let session = library.create().unwrap();
+        session
+            .keep(&NewSession {
+                title: Some("Original title".into()),
+                started_at: WallTime::from_unix_seconds(1_760_004_000),
+                ..NewSession::bare(session.id)
+            })
+            .unwrap();
+        library
+            .db()
+            .with(|db| {
+                db.create_session(&NewSession {
+                    title: title.clone(),
+                    started_at,
+                    ..NewSession::bare(session.id)
+                })
+            })
+            .unwrap();
+        let listed = library.listing(SampleRate::SPEECH).unwrap();
+        let row = listed.iter().find(|row| row.id == session.id).unwrap();
+        assert_eq!(row.title, title);
+        assert_eq!(row.started_at, started_at);
+        assert_eq!(row.recorded, None);
+        assert_eq!(row.needs, Needs::Nothing);
+    }
+}
+
+#[test]
+fn listing_without_kept_metadata_still_has_unknown_title_and_start() {
+    let tmp = TestDir::new("listing-no-kept");
+    let library = Library::open(&tmp.0).unwrap();
+    let session = library.create().unwrap();
+    leave_journal(&session);
+    for library in [Some(library), None] {
+        let library = library.unwrap_or_else(|| {
+            break_db(&tmp.0);
+            Library::open(&tmp.0).unwrap()
+        });
+        let listed = library.listing(SampleRate::SPEECH).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, session.id);
+        assert_eq!(listed[0].title, None);
+        assert_eq!(listed[0].started_at, None);
+        assert_eq!(listed[0].recorded, None);
+        assert!(matches!(listed[0].needs, Needs::Attention(_)));
+    }
 }

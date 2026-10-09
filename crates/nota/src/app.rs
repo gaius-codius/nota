@@ -536,7 +536,7 @@ fn session(listed: Listed, salvaged: &[Salvaged], dates: &Dates) -> Session {
         // Journals salvage left, or set aside as damaged, show as attention
         // above while they're there; once none are left, it's recovered.
         // "Nothing lost" only if salvage set nothing aside.
-        (Needs::Nothing, Some(Salvaged::Done(_, aside) | Salvaged::Left(_, aside))) => {
+        (Needs::Nothing, Some(Salvaged::Done(_, aside) | Salvaged::Left(_, aside, _))) => {
             let recovered = if aside.is_empty() {
                 "recovered after a crash · nothing lost"
             } else {
@@ -560,7 +560,7 @@ fn session(listed: Listed, salvaged: &[Salvaged], dates: &Dates) -> Session {
 const fn salvaged_id(salvaged: &Salvaged) -> SessionId {
     match salvaged {
         Salvaged::Done(id, _)
-        | Salvaged::Left(id, _)
+        | Salvaged::Left(id, _, _)
         | Salvaged::InUse(id)
         | Salvaged::Failed(id, _) => *id,
     }

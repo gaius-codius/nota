@@ -40,6 +40,13 @@ const HEADER: &str = "nota session 1";
 /// crash leaves the whole file or none.
 pub(crate) fn write<F: Fs>(fs: &F, dir: &Path, session: &NewSession) -> io::Result<()> {
     let partial = dir.join(KEPT_PARTIAL);
+    // A failed startup may have left this name. Sync its removal before
+    // using it again, so a crash can't rename the old partial over the row.
+    match fs.remove(&partial) {
+        Ok(()) => fs.sync_dir(dir)?,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
     let mut file = fs.create(&partial)?;
     file.write_all(encode(session).as_bytes())?;
     file.sync()?;

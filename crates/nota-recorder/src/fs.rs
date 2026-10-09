@@ -156,6 +156,24 @@ pub trait Fs: Send + Sync + fmt::Debug {
     /// Any I/O error, including [`io::ErrorKind::NotFound`].
     fn remove(&self, path: &Path) -> io::Result<()>;
 
+    /// Removes only an empty directory at `path`. Durable only after
+    /// [`Fs::sync_dir`] on its parent. Never removes its contents.
+    ///
+    /// The default refuses: wrappers must forward this operation explicitly.
+    ///
+    /// # Errors
+    ///
+    /// Any I/O error, including [`io::ErrorKind::NotFound`],
+    /// [`io::ErrorKind::NotADirectory`] and [`io::ErrorKind::DirectoryNotEmpty`];
+    /// [`io::ErrorKind::Unsupported`] by default.
+    fn remove_dir(&self, path: &Path) -> io::Result<()> {
+        let _ = path;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "this filesystem can't remove an empty directory",
+        ))
+    }
+
     /// Reads the whole file at `path`, as the running system sees it
     /// (durable or not). Only a regular file is read, not followed through
     /// a symlink, and only up to [`MAX_READ_LEN`] bytes, so whatever is put

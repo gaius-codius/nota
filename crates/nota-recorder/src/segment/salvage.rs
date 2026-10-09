@@ -250,6 +250,29 @@ fn store_error<E: Error + Send + Sync + 'static>(e: E) -> PublishError {
     PublishError::Store(Box::new(e))
 }
 
+/// Salvages at startup through the disk watch. If a full disk freed the
+/// ballast, retry once: the first attempt may have left part of a segment.
+///
+/// # Errors
+///
+/// As [`salvage`], after the retry if one was needed.
+pub fn salvage_start<S: Fs + Clone + 'static, T: SegmentStore>(
+    session: &mut SessionStore<crate::disk::WatchedFs<S>, T>,
+    length: SegmentLength,
+    watch: &crate::disk::DiskWatch<S>,
+) -> Result<Published, PublishError> {
+    let first = salvage(session, length);
+    if first.is_err()
+        && watch
+            .full()
+            .is_some_and(|f| f.ballast == crate::disk::Freed::Freed)
+    {
+        salvage(session, length)
+    } else {
+        first
+    }
+}
+
 /// Recovers a session after a crash: publishes every journal left in its
 /// directory as segments, adds the rows missing from its store, and deletes
 /// the journals once their rows are committed. Leftover segment and findings

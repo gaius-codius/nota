@@ -387,3 +387,168 @@ fn enospc_at_any_operation_frees_the_ballast_and_loses_nothing_promised() {
         assert!(kinds.contains(&kind), "{kinds:?}");
     }
 }
+
+/// Whether an old stopped session has a reserve to free at startup.
+#[derive(Debug, Clone, Copy)]
+enum StartupBallast {
+    /// A durable reserve left by the previous recording.
+    Existing,
+    /// No reserve was available to the previous recording.
+    Missing,
+}
+
+/// An old stopped recording on a disk with no free bytes.
+struct StartupDisk {
+    /// Durable journals and, when requested, the existing reserve.
+    fs: FakeFs,
+    /// The audio the stopped recording promised durable.
+    promised: Promised,
+}
+
+/// Finishes a recording without publishing, then fills the remaining space.
+fn stopped_full_disk(ballast: StartupBallast) -> StartupDisk {
+    let fs = FakeFs::with_dirs([session(), db(), data()]);
+    let promised = record(
+        &fs,
+        Recording {
+            steps: 4,
+            publish: false,
+            fail_at: None,
+        },
+    );
+    if let StartupBallast::Existing = ballast {
+        assert!(
+            Ballast::keep(&fs, &data(), BALLAST, || false)
+                .unwrap()
+                .is_some()
+        );
+    }
+    // Make the old session the durable starting point for every retry.
+    let fs = fs.copy_disk();
+    let used = fs
+        .paths()
+        .iter()
+        .map(|p| fs.read(p).unwrap().len() as u64)
+        .sum();
+    fs.set_capacity(Some(used));
+    assert_eq!(fs.free_space(&data()).unwrap(), 0);
+    StartupDisk {
+        fs: fs.copy_disk(),
+        promised,
+    }
+}
+
+/// The outcome of a startup attempt, including a caught full disk.
+struct StartupRun {
+    /// Published rows, or the error that stopped the attempt.
+    published: Result<Published, Box<dyn Error>>,
+    /// The watch's first full-disk report.
+    full: Option<Full>,
+}
+
+/// Uses only the reserve surviving on disk, as a fresh startup does.
+fn startup_salvage(fs: &FakeFs) -> StartupRun {
+    let watch = DiskWatch::new(fs.clone());
+    let published = startup_salvage_into(fs, &watch);
+    StartupRun {
+        published,
+        full: watch.full(),
+    }
+}
+
+/// Salvages through the same watched filesystem for audio and row writes.
+fn startup_salvage_into(
+    fs: &FakeFs,
+    watch: &Arc<DiskWatch<FakeFs>>,
+) -> Result<Published, Box<dyn Error>> {
+    if let Some(ballast) = Ballast::find(fs, &data(), BALLAST)? {
+        watch.hold(ballast);
+    }
+    let disk = watch.fs();
+    let lock = SessionDir::new(SESSION, disk.clone(), &session()).lock()?;
+    let mut store = SessionStore::new(lock, FakeStore::new(&disk, &db()));
+    Ok(salvage_start(&mut store, length(), watch)?)
+}
+
+/// Startup uses the old reserve's room to publish every stopped journal.
+#[test]
+fn startup_salvage_on_a_full_disk_frees_existing_ballast_and_publishes_all_audio() {
+    let old = stopped_full_disk(StartupBallast::Existing);
+    // The initial write meets the actual capacity limit, freeing the reserve.
+    let run = startup_salvage(&old.fs);
+    let done = run.published.unwrap();
+    assert_eq!(
+        run.full.as_ref().map(|full| full.ballast),
+        Some(Freed::Freed)
+    );
+    assert!(!done.segments().is_empty());
+    assert!(
+        !old.fs
+            .paths()
+            .contains(&data().join(crate::disk::ballast_file_name(BALLAST)))
+    );
+    // Verify decoded samples, row hashes and removal of every source journal.
+    check_after(&old.promised, &observe(&old.fs)).unwrap();
+}
+
+/// With no reserve, startup preserves the stopped recording's journals.
+#[test]
+fn startup_salvage_on_a_full_disk_without_ballast_keeps_journals() {
+    let old = stopped_full_disk(StartupBallast::Missing);
+    let before = observe(&old.fs);
+    let journals: BTreeMap<_, _> = before
+        .files
+        .into_iter()
+        .filter(|(p, _)| is_journal(p))
+        .collect();
+    assert!(!journals.is_empty());
+    // A failed publish must leave its only durable audio sources intact.
+    let run = startup_salvage(&old.fs);
+    assert!(run.published.is_err());
+    assert_eq!(
+        run.full.as_ref().map(|full| full.ballast),
+        Some(Freed::None)
+    );
+    let after = observe(&old.fs);
+    for (path, bytes) in journals {
+        assert_eq!(after.files.get(&path), Some(&bytes));
+    }
+    check_durable(&old.promised, &journal_samples(&after).unwrap()).unwrap();
+}
+
+/// Every startup crash can recover with the same remaining capacity.
+#[test]
+fn startup_salvage_on_a_full_disk_crashed_anywhere_keeps_all_durable_audio() {
+    let old = stopped_full_disk(StartupBallast::Existing);
+    let probe = old.fs.copy_disk();
+    startup_salvage(&probe).published.unwrap();
+    let operations = probe.attempted();
+    assert!(operations > 30, "{operations}");
+    let settled = observe(&probe);
+    check_after(&old.promised, &settled).unwrap();
+    // Crash both the first attempt and its reserve-backed retry at each operation.
+    for after in 0..=operations {
+        for outcome in CrashOutcome::standard() {
+            check_startup_crash(&old, &settled, after, outcome);
+        }
+    }
+}
+
+/// Recovers a particular crash without raising the disk's capacity.
+fn check_startup_crash(old: &StartupDisk, settled: &Observed, after: usize, outcome: CrashOutcome) {
+    let run = old.fs.copy_disk();
+    run.crash_after(after);
+    let _ = startup_salvage(&run);
+    let survived = run.crash(outcome);
+    // A fresh watch holds any reserve whose unlink was lost in the crash.
+    startup_salvage(&survived)
+        .published
+        .unwrap_or_else(|error| panic!("after {after} operations, {outcome:?}: {error}"));
+    let recovered = observe(&survived);
+    check_after(&old.promised, &recovered)
+        .unwrap_or_else(|error| panic!("after {after} operations, {outcome:?}: {error}"));
+    assert_eq!(&recovered, settled, "after {after} operations, {outcome:?}");
+    // Repeated startup is stable once the journal recovery is complete.
+    startup_salvage(&survived).published.unwrap();
+    assert_eq!(observe(&survived), recovered);
+}
