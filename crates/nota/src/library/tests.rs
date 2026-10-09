@@ -191,7 +191,7 @@ fn salvage_that_leaves_journals_says_so() {
     let library = Library::open(&tmp.0).unwrap();
     let session = library.create().unwrap();
     // A directory under a journal's name: there, but it can't be read.
-    let journal = nota_recorder::journal::JournalId::new(0).file_name();
+    let journal = JournalId::new(0).file_name();
     StdFs.create_dir(&session.audio().join(journal)).unwrap();
     let done = library.salvage_all(length()).unwrap();
     assert!(
@@ -614,7 +614,7 @@ fn listed_row(track: u32, start: u64, samples: u64) -> SegmentRow {
     reason = "test scaffolding outside the recorder's write path"
 )]
 fn leave_journal(session: &SessionPaths) {
-    let name = nota_recorder::journal::JournalId::new(1).file_name();
+    let name = JournalId::new(1).file_name();
     std::fs::write(session.audio().join(name), b"").unwrap();
 }
 
@@ -735,4 +735,30 @@ fn the_longest_track_sets_the_length() {
     assert_eq!(longest_track(&[], rate), None);
     let rows = [listed_row(1, 0, 16_000), listed_row(0, 0, 8_000)];
     assert_eq!(longest_track(&rows, rate), Some(Duration::from_secs(1)));
+}
+
+/// A journal salvage set aside as damaged needs the user: what it couldn't
+/// read is still there. Other files named like it don't count.
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test scaffolding outside the recorder's write path"
+)]
+fn a_journal_set_aside_as_damaged_needs_you() {
+    let tmp = TestDir::new("listing-set-aside");
+    let library = Library::open(&tmp.0).unwrap();
+    let session = library.create().unwrap();
+    let journal = JournalId::new(3).file_name();
+    std::fs::write(session.audio().join("salvage-findings.unreadable"), b"").unwrap();
+    std::fs::write(session.audio().join("notes.unreadable"), b"").unwrap();
+    let listed = library.listing(SampleRate::SPEECH).unwrap();
+    assert_eq!(listed[0].needs, Needs::Nothing);
+    std::fs::write(session.audio().join(format!("{journal}.unreadable")), b"x").unwrap();
+    let listed = library.listing(SampleRate::SPEECH).unwrap();
+    assert_eq!(
+        listed[0].needs,
+        Needs::Attention(
+            "1 damaged journal set aside · audio salvage couldn't read is kept".to_owned()
+        )
+    );
 }

@@ -171,6 +171,13 @@ impl Home {
         if ctrl_c {
             return Some(Action::Quit);
         }
+        // A key held with Ctrl or Alt is another key: Alt+R doesn't record.
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            return None;
+        }
         if self.opened.is_some() {
             if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
                 self.opened = None;
@@ -252,10 +259,14 @@ impl Home {
                 Span::styled(what, self.theme.text_hint),
             ]
         };
-        // Only keys that work: `⏎` needs a session to open.
-        let mut left = key("R", " last settings").to_vec();
-        if !self.sessions.is_empty() {
-            left.extend(key("  ⏎", " open"));
+        // Only keys that work: `⏎` needs a session to open, and while nota
+        // is busy (finishing a recording) no keys are read at all.
+        let mut left = Vec::new();
+        if self.busy.is_none() {
+            left.extend(key("R", " last settings"));
+            if !self.sessions.is_empty() {
+                left.extend(key("  ⏎", " open"));
+            }
         }
         let right = vec![Span::styled(
             self.engines.as_str(),

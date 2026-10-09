@@ -252,10 +252,31 @@ fn version_2_upgrades_to_3_keeping_its_sessions() {
     assert_eq!(read.started_at, new.started_at);
 }
 
-/// An upgrade that fails partway changes nothing: the file stays at
-/// version 2 with what it held.
+/// An upgrade that fails partway changes nothing: the steps that ran are
+/// rolled back with it, and the version stays as it was.
 #[test]
-fn a_failed_upgrade_leaves_version_2() {
+fn a_failed_upgrade_changes_nothing() {
+    // From an empty file: version 2's step runs, then the next fails.
+    let dir = TestDir::new("fails-after-a-step");
+    let mut conn = raw(&dir.db());
+    let failing = [
+        schema::V2,
+        "ALTER TABLE no_such_table ADD COLUMN x INTEGER;",
+    ];
+    assert!(matches!(
+        upgrade_with(&mut conn, &failing),
+        Err(StoreError::Sqlite(_))
+    ));
+    let tables: i64 = conn
+        .query_row("SELECT count(*) FROM sqlite_schema", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(tables, 0, "version 2's tables survived the failed upgrade");
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 0);
+
+    // From version 2: the real step fails, and the file keeps what it held.
     let dir = TestDir::new("v2-fails");
     version_2(&dir.db());
     // A column of that name already there makes the V3 step fail.

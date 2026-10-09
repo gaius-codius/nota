@@ -209,9 +209,20 @@ fn each_session_shows_what_salvage_found() {
         shown(Needs::Nothing, &[Salvaged::Done(other)]),
         (Status::Ready, None)
     );
+    // Salvage at start failed, and its journals are still there: its
+    // error says why.
+    assert_eq!(
+        shown(
+            Needs::Attention("audio still to save".into()),
+            &[Salvaged::Failed(id, "disk".into())]
+        ),
+        (Status::NeedsYou, Some("salvage failed: disk".into()))
+    );
+    // A later salvage (a recording's start) left nothing to save: the old
+    // failure isn't shown.
     assert_eq!(
         shown(Needs::Nothing, &[Salvaged::Failed(id, "disk".into())]),
-        (Status::NeedsYou, Some("salvage failed: disk".into()))
+        (Status::Ready, None)
     );
     assert_eq!(
         shown(Needs::Attention("why".into()), &[Salvaged::Done(id)]),

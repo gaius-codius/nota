@@ -64,8 +64,10 @@ pub(super) type Recorded = (
 /// Starts everything a recording needs, in order: the signals and the
 /// terminal first (without one there's nothing to record into), then the
 /// session, the tracks, the publisher, the live thread and the recorder.
-/// The terminal is `screen` if given (the app's, already set up), else
-/// it's set up here.
+/// The terminal is `screen` and the library `library` if given (the
+/// app's, already set up and open), else they're set up here. A lent
+/// terminal was set up after the app's own signal listener, so the order
+/// holds for it too.
 ///
 /// # Errors
 ///
@@ -76,6 +78,7 @@ pub(super) fn start<B: CaptureBackend>(
     backend: &B,
     clock: &Arc<dyn Clock>,
     screen: Option<Screen>,
+    library: Option<Library>,
 ) -> Result<(Started<B>, Screening), BoxError> {
     let mut outcome = Outcome::default();
     let (ui, ui_events) = mpsc::channel::<Event>();
@@ -87,7 +90,7 @@ pub(super) fn start<B: CaptureBackend>(
         None => Screen::enter(draws.clone().map(|d| (d, Arc::clone(clock))))?,
     };
 
-    let library = Library::open(&args.data)?;
+    let library = library.map_or_else(|| Library::open(&args.data), Ok)?;
     note_salvaged(&library, &mut outcome)?;
     let session = library.create()?;
     outcome.session.clone_from(&session.dir);

@@ -34,7 +34,9 @@ pub(crate) struct Screen {
     /// Never dropped. Its drop shows the cursor and, if that fails, prints
     /// the error with `eprintln!`, which panics when stderr is the terminal
     /// that has just hung up. [`restore`] shows the cursor instead, and the
-    /// buffers are freed at exit (there's one screen per process).
+    /// buffers (a few kilobytes) are freed at exit. There's one screen per
+    /// process, or a few: the app sets one up again after a recording that
+    /// couldn't start, whose failure restored the terminal.
     terminal: ManuallyDrop<Terminal<Output>>,
 }
 

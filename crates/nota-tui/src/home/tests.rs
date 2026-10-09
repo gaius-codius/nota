@@ -67,6 +67,13 @@ fn r_records_and_q_esc_and_ctrl_c_quit() {
     // `r` waits for Setup, and `/` for search: neither does anything yet.
     assert_eq!(press(&mut home, KeyCode::Char('r')), None);
     assert_eq!(press(&mut home, KeyCode::Char('/')), None);
+    // Held with Ctrl or Alt, they're other keys.
+    let alt_r = KeyEvent::new(KeyCode::Char('R'), KeyModifiers::ALT | KeyModifiers::SHIFT);
+    assert_eq!(home.handle_key(alt_r), None);
+    let ctrl_q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL);
+    assert_eq!(home.handle_key(ctrl_q), None);
+    let shift_r = KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT);
+    assert_eq!(home.handle_key(shift_r), Some(Action::Record));
     // A key's release isn't a press.
     let mut release = KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE);
     release.kind = KeyEventKind::Release;
@@ -136,8 +143,13 @@ fn the_top_border_counts_the_sessions_that_need_you() {
     );
     assert!(row(&draw(&mut home, 20), 0).ends_with(" ! 2 needs you ─╮"));
     home.set_busy(Some("finishing the recording".into()));
-    let top = row(&draw(&mut home, 20), 0);
+    let buf = draw(&mut home, 20);
+    let top = row(&buf, 0);
     assert!(top.ends_with(" ◐ finishing the recording ─╮"), "{top}");
+    // No keys are read while it's busy, so none are offered.
+    let bottom = row(&buf, 19);
+    assert!(bottom.starts_with("╰─  ───"), "{bottom}");
+    assert!(!bottom.contains('R'), "{bottom}");
 }
 
 #[test]

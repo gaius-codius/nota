@@ -22,6 +22,7 @@ use std::time::Duration;
 
 use nota_core::{SampleCount, SampleRate, SessionId, TrackId, WallTime};
 use nota_recorder::fs::{Fs, StdFs};
+use nota_recorder::journal::JournalId;
 use nota_recorder::segment::{
     DurableSegment, SegmentLength, SegmentStore, needs_salvage, read_findings, salvage,
 };
@@ -354,6 +355,16 @@ fn needs(session: &SessionPaths) -> Needs {
         Ok(_) => {}
         Err(e) => return Needs::Attention(e.to_string()),
     }
+    match set_aside(&session.audio()) {
+        Ok(0) => {}
+        Ok(n) => {
+            let journals = if n == 1 { "journal" } else { "journals" };
+            return Needs::Attention(format!(
+                "{n} damaged {journals} set aside · audio salvage couldn't read is kept"
+            ));
+        }
+        Err(e) => return Needs::Attention(format!("its audio can't be checked: {e}")),
+    }
     match needs_salvage(&dir) {
         Ok(false) => Needs::Nothing,
         Ok(true) => match dir.lock() {
@@ -364,6 +375,18 @@ fn needs(session: &SessionPaths) -> Needs {
         },
         Err(e) => Needs::Attention(format!("its audio can't be checked: {e}")),
     }
+}
+
+/// How many journals salvage has set aside in `audio` as damaged: renamed
+/// to a journal's name with `.unreadable` after it. What salvage could
+/// read of them is published; the rest may hold audio it couldn't.
+fn set_aside(audio: &Path) -> io::Result<usize> {
+    Ok(StdFs
+        .list(audio)?
+        .iter()
+        .filter_map(|path| path.file_name()?.to_str()?.strip_suffix(".unreadable"))
+        .filter(|journal| JournalId::from_file_name(std::ffi::OsStr::new(journal)).is_some())
+        .count())
 }
 
 /// How long the longest track's audio in `rows` is, at `rate`. `None`

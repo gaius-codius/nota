@@ -24,7 +24,7 @@ pub(crate) fn new_session(id: SessionId) -> NewSession {
         id,
         title: Some(format!("session {}", id.get())),
         language: Some("en".to_owned()),
-        // 2026-10-09 10:00 UTC, a second apart per session.
+        // 2025-10-09 10:00 UTC, a second apart per session.
         started_at: nota_core::WallTime::from_unix_seconds(1_760_004_000 + id.get().cast_signed()),
         tracks: vec![
             Track {

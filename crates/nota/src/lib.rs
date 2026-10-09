@@ -53,15 +53,17 @@ pub fn main(args: &[OsString]) -> ExitCode {
         Err(err) => return fail(&format!("{err}\n{USAGE}"), 2),
     };
     match command {
-        Command::App(args) => match app::app(&args) {
-            Ok(said) => {
-                if !said.is_empty() {
-                    say(&said.join("\n"));
-                }
-                ExitCode::SUCCESS
+        Command::App(args) => {
+            let (said, ran) = app::app(&args);
+            // What the recordings reported, even if nota then failed.
+            if !said.is_empty() {
+                say(&said.join("\n"));
             }
-            Err(err) => fail(&format!("nota: {err}"), 1),
-        },
+            match ran {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => fail(&format!("nota: {err}"), 1),
+            }
+        }
         // The child's stderr is the recorder's to route; it never reaches
         // the screen's terminal.
         Command::EngineAsr(paths) => match nota_engine::run_asr(&paths) {

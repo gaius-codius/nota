@@ -74,6 +74,12 @@ pub(crate) fn check(conn: &Connection) -> Result<i64, StoreError> {
 /// Brings the database to [`VERSION`]. A database at the current version
 /// is only read, so opening one takes no write lock.
 pub(crate) fn upgrade(conn: &mut Connection) -> Result<(), StoreError> {
+    upgrade_with(conn, STEPS)
+}
+
+/// [`upgrade`] with `steps` as the steps, so a test can make one fail
+/// after another has run.
+fn upgrade_with(conn: &mut Connection, steps: &[&str]) -> Result<(), StoreError> {
     if check(conn)? == VERSION {
         return Ok(());
     }
@@ -85,7 +91,7 @@ pub(crate) fn upgrade(conn: &mut Connection) -> Result<(), StoreError> {
     }
     // The steps above the file's version: all of them for an empty file.
     let done = usize::try_from((from - FIRST + 1).max(0)).unwrap_or(0);
-    for step in STEPS.iter().skip(done) {
+    for step in steps.iter().skip(done) {
         tx.execute_batch(step)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;

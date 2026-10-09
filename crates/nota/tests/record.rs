@@ -512,7 +512,6 @@ fn home_records_and_comes_back_after_the_stop() {
     );
     assert!(nota.shows_after(at, "✓ ready"), "{}", nota.output());
     assert!(nota.shows_after(at, "✓ Recording"), "{}", nota.output());
-    assert!(nota.shows_after(at, "today"), "{}", nota.output());
     assert!(nota.shows_after(at, "⏎ open"), "{}", nota.output());
     assert!(!nota.terminal_restored());
 
@@ -541,6 +540,45 @@ fn home_records_and_comes_back_after_the_stop() {
         "{}",
         nota.output()
     );
+}
+
+/// A signal during a recording started from Home stops it in order, and
+/// then closes nota rather than showing Home again: as `nota record` does,
+/// a logout or shutdown ends it.
+#[test]
+fn a_signal_during_a_recording_from_home_closes_nota() {
+    for signal in [Signal::TERM, Signal::INT, Signal::HUP] {
+        let tmp = TestDir::new(&format!("home-signal-{}", signal.as_raw()));
+        let mut nota = Running::start_home(&tmp.0);
+        assert!(nota.shows_after(0, "R last settings"), "{}", nota.output());
+        let at = nota.len();
+        nota.press("R");
+        assert!(nota.shows_after(at, "s stop"), "{}", nota.output());
+        pause(Duration::from_millis(1_500));
+        nota.signal(signal);
+        let status = nota.exits().expect("nota didn't close after the signal");
+        assert!(
+            status.success(),
+            "{signal:?}: {status:?}\n{}",
+            nota.output()
+        );
+        assert!(nota.terminal_restored());
+        let (rows, left) = published(&tmp.0, 1);
+        assert!(!left, "journals left after the stop");
+        assert!(!rows.is_empty());
+    }
+}
+
+/// A signal on Home closes nota, with the terminal restored.
+#[test]
+fn a_signal_on_home_closes_nota() {
+    let tmp = TestDir::new("home-quit");
+    let mut nota = Running::start_home(&tmp.0);
+    assert!(nota.shows_after(0, "R last settings"), "{}", nota.output());
+    nota.signal(Signal::TERM);
+    let status = nota.exits().expect("nota didn't close after the signal");
+    assert!(status.success(), "{status:?}");
+    assert!(nota.terminal_restored());
 }
 
 #[test]

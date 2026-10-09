@@ -5,7 +5,7 @@
 //! nothing.
 
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use ratatui::style::{Color, Modifier, Style};
 
@@ -67,14 +67,19 @@ impl Theme {
     /// fails: it gives the default.
     #[must_use]
     pub fn load() -> Self {
-        let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
-        if no_color {
+        Self::from_env(
+            std::env::var_os("NO_COLOR").as_deref(),
+            std::env::var_os("HOME").as_deref().map(Path::new),
+        )
+    }
+
+    /// [`Theme::load`] with `NO_COLOR`'s value and the home directory
+    /// given.
+    fn from_env(no_color: Option<&std::ffi::OsStr>, home: Option<&Path>) -> Self {
+        if no_color.is_some_and(|v| !v.is_empty()) {
             return Self::no_color();
         }
-        let colors = std::env::var_os("HOME")
-            .map(|home| PathBuf::from(home).join(COLORS_TOML))
-            .and_then(|path| read_small(&path));
-        colors
+        home.and_then(|home| read_small(&home.join(COLORS_TOML)))
             .and_then(|text| Self::from_colors_toml(&text).ok())
             .unwrap_or_default()
     }
@@ -321,6 +326,52 @@ green = "#A8B36A"
     #[test]
     fn a_missing_file_reads_as_nothing() {
         assert_eq!(read_small(Path::new("/nonexistent/nota/colors.toml")), None);
+    }
+
+    /// A home directory with `colors` as its Omarchy theme's file, removed
+    /// when dropped.
+    struct Home(std::path::PathBuf);
+
+    impl Home {
+        #[expect(clippy::disallowed_methods, reason = "test scaffolding")]
+        fn with(name: &str, colors: Option<&str>) -> Self {
+            let home =
+                std::env::temp_dir().join(format!("nota-theme-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&home);
+            let dir = home.join(COLORS_TOML);
+            std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+            if let Some(colors) = colors {
+                std::fs::write(&dir, colors).unwrap();
+            }
+            Self(home)
+        }
+    }
+
+    impl Drop for Home {
+        #[expect(clippy::disallowed_methods, reason = "test scaffolding")]
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// What the environment chooses: `NO_COLOR` (when not empty) over the
+    /// theme; a missing or malformed file, or no home, gives the default.
+    #[test]
+    fn the_environment_chooses_the_theme() {
+        let themed = Home::with("themed", Some(BATROUN_NOIR));
+        let batroun = Theme::from_colors_toml(BATROUN_NOIR).unwrap();
+        let no = |v: &str| Some(std::ffi::OsString::from(v));
+        assert_eq!(Theme::from_env(None, Some(&themed.0)), batroun);
+        assert_eq!(Theme::from_env(no("").as_deref(), Some(&themed.0)), batroun);
+        assert_eq!(
+            Theme::from_env(no("1").as_deref(), Some(&themed.0)),
+            Theme::no_color()
+        );
+        let missing = Home::with("missing", None);
+        assert_eq!(Theme::from_env(None, Some(&missing.0)), Theme::default());
+        let broken = Home::with("broken", Some("accent = "));
+        assert_eq!(Theme::from_env(None, Some(&broken.0)), Theme::default());
+        assert_eq!(Theme::from_env(None, None), Theme::default());
     }
 
     proptest! {

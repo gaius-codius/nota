@@ -13,6 +13,11 @@
 //! At start, sessions an earlier run left are salvaged, as `nota record`
 //! does. What each recording's stop reports, and anything that went wrong,
 //! is said on stderr once nota closes, as `nota record` says it.
+//!
+//! SIGHUP, SIGTERM and SIGINT close nota wherever it is: Home closes at
+//! once, and a recording stops in order first. The app listens for them
+//! from before the terminal is set up until it's restored
+//! ([`QuitSignals`]).
 
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -25,7 +30,7 @@ use nota_tui::{Action, Home, InputThread, RunError, Session, Status, Theme};
 
 use crate::library::{Library, Listed, Needs, Salvaged};
 use crate::record::{
-    BoxError, Lent, RATE, RecordArgs, last_setup, listen_for_signals, record_in, segment_length,
+    BoxError, Lent, QuitSignals, RATE, RecordArgs, last_setup, record_in, segment_length,
 };
 use crate::terminal::Screen;
 
@@ -34,26 +39,36 @@ const STOPPING: &str = "finishing the recording";
 
 /// Runs Home until it's closed, recording each time `R` is pressed.
 /// `args` says where the library is and how to record; its start command
-/// is replaced by each recording's.
+/// is replaced by each recording's. SIGHUP, SIGTERM and SIGINT close nota,
+/// on Home or during a recording (which stops in order first).
 ///
 /// Returns what to say once the terminal is restored: each recording's
-/// outcome and notes, as `nota record` gives them.
+/// outcome and notes, as `nota record` gives them, even if nota then
+/// failed.
 ///
 /// # Errors
 ///
 /// If the library can't be opened, or the terminal can't be set up or
 /// fails.
-pub(crate) fn app(args: &RecordArgs) -> Result<Vec<String>, BoxError> {
+pub(crate) fn app(args: &RecordArgs) -> (Vec<String>, Result<(), BoxError>) {
+    let mut said = Vec::new();
+    let ran = run_app(args, &mut said);
+    (said, ran)
+}
+
+fn run_app(args: &RecordArgs, said: &mut Vec<String>) -> Result<(), BoxError> {
+    // Before the terminal is set up: a signal from here on closes nota in
+    // order, never leaving the terminal raw.
+    let quit = QuitSignals::listen()?;
     let library = Library::open(&args.data)?;
     let salvaged = library.salvage_all(segment_length())?;
     let clock: Arc<dyn Clock> =
         Arc::new(SystemClock::start().map_err(|_| "the system clock can't be read")?);
     let theme = Theme::load();
     let engines = engines(args);
-    let mut said = Vec::new();
     let mut screen: Option<Screen> = None;
     let mut notice = None;
-    loop {
+    while !quit.asked() {
         let mut current = match screen.take() {
             Some(screen) => screen,
             None => Screen::enter(None)?,
@@ -69,68 +84,101 @@ pub(crate) fn app(args: &RecordArgs) -> Result<Vec<String>, BoxError> {
             .collect();
         let mut home = Home::new(sessions, engines, theme);
         home.set_notice(notice.take());
-        match show_home(&mut current, &mut home, &clock)? {
-            Action::Quit => return Ok(said),
+        match show_home(&mut current, &mut home, &clock, &quit)? {
+            Action::Quit => return Ok(()),
             Action::Record => {}
         }
-        let mut record = args.clone();
-        record.start = Command::Start(last_setup(&library).unwrap_or_else(first_setup));
-        let mut stopping = |screen: &mut Screen| {
-            home.set_busy(Some(STOPPING.to_owned()));
-            // Only a courtesy: if drawing fails, the next draw says so.
-            let _ = screen.clear();
-            let _ = screen.terminal().draw(|frame| home.draw(frame));
-        };
-        let lent = Lent {
-            screen: current,
-            stopping: &mut stopping,
-        };
-        match record_in(&record, Some(lent)) {
-            Ok((outcome, back)) => {
-                said.push(format!(
-                    "nota: recorded to {} ({} segments)",
-                    outcome.session.display(),
-                    outcome.segments
-                ));
-                said.extend(outcome.notes.iter().map(|note| format!("  {note}")));
-                // A terminal that failed (as after a hangup) isn't handed
-                // back: there's nothing to show Home on.
-                match back {
-                    Some(back) => screen = Some(back),
-                    None => return Ok(said),
-                }
-            }
-            Err(e) => {
-                said.push(format!("nota: couldn't record: {e}"));
-                notice = Some(format!("couldn't record: {e}"));
-            }
+        match record_from(args, &library, current, &mut home, said) {
+            Recorded::Back(back) => screen = Some(back),
+            Recorded::Failed(e) => notice = Some(format!("the recording failed: {e}")),
+            Recorded::TerminalGone => return Ok(()),
+        }
+    }
+    Ok(())
+}
+
+/// How a recording from Home went, for what comes next.
+enum Recorded {
+    /// It was recorded, and the terminal is back for Home.
+    Back(Screen),
+    /// It failed: the terminal was restored, and Home says why.
+    Failed(String),
+    /// It was recorded, but the terminal failed (as after a hangup):
+    /// there's nothing to show Home on.
+    TerminalGone,
+}
+
+/// Records with the last session's settings on the app's terminal, `home`
+/// showing while it stops, and adds what it reported to `said`.
+fn record_from(
+    args: &RecordArgs,
+    library: &Library,
+    screen: Screen,
+    home: &mut Home,
+    said: &mut Vec<String>,
+) -> Recorded {
+    let mut record = args.clone();
+    record.start = Command::Start(last_setup(library).unwrap_or_else(first_setup));
+    let mut stopping = |screen: &mut Screen| {
+        home.set_busy(Some(STOPPING.to_owned()));
+        // Only a courtesy: if drawing fails, the next draw says so.
+        let _ = screen.clear();
+        let _ = screen.terminal().draw(|frame| home.draw(frame));
+    };
+    let lent = Lent {
+        screen,
+        library: library.clone(),
+        stopping: &mut stopping,
+    };
+    match record_in(&record, Some(lent)) {
+        Ok((outcome, back)) => {
+            said.push(format!(
+                "nota: recorded to {} ({} segments)",
+                outcome.session.display(),
+                outcome.segments
+            ));
+            said.extend(outcome.notes.iter().map(|note| format!("  {note}")));
+            back.map_or(Recorded::TerminalGone, Recorded::Back)
+        }
+        Err(e) => {
+            said.push(format!("nota: the recording failed: {e}"));
+            Recorded::Failed(e.to_string())
         }
     }
 }
 
-/// Runs Home on `screen` until it asks for something. SIGHUP, SIGTERM and
-/// SIGINT close it.
+/// Runs Home on `screen` until it asks for something, or a signal closes
+/// it.
 fn show_home(
     screen: &mut Screen,
     home: &mut Home,
     clock: &Arc<dyn Clock>,
+    quit: &QuitSignals,
 ) -> Result<Action, BoxError> {
     let (ui, ui_events) = mpsc::channel();
-    let signals = listen_for_signals(ui.clone())?;
-    let input = InputThread::spawn(ui, Arc::clone(clock))?;
-    // A new screen: drawn whole, not as changes to the last one's cells.
-    let ran = screen
-        .clear()
-        .map_err(RunError::Terminal)
-        .and_then(|()| nota_tui::run_home(screen.terminal(), home, &ui_events));
-    let _ = input.stop();
-    let _ = signals.close();
-    match ran {
-        Ok(action) => Ok(action),
-        Err(RunError::Terminal(e)) => Err(format!("the screen failed: {e}").into()),
-        Err(RunError::InputLost(kind)) => Err(format!("the keyboard was lost: {kind}").into()),
-        Err(RunError::CommandsClosed(_)) => Ok(Action::Quit),
+    quit.show_home(Some(ui.clone()));
+    // A signal before Home was there to take it.
+    if quit.asked() {
+        quit.show_home(None);
+        return Ok(Action::Quit);
     }
+    let input = InputThread::spawn(ui, Arc::clone(clock));
+    let ran = input.map_err(BoxError::from).and_then(|input| {
+        // A new screen: drawn whole, not as changes to the last one's cells.
+        let ran = screen
+            .clear()
+            .map_err(RunError::Terminal)
+            .and_then(|()| nota_tui::run_home(screen.terminal(), home, &ui_events));
+        let _ = input.stop();
+        match ran {
+            Ok(action) => Ok(action),
+            Err(RunError::Terminal(e)) => Err(format!("the screen failed: {e}").into()),
+            Err(RunError::InputLost(kind)) => Err(format!("the keyboard was lost: {kind}").into()),
+            Err(RunError::CommandsClosed(_)) => Ok(Action::Quit),
+        }
+    });
+    quit.show_home(None);
+    ran
 }
 
 /// The setup of a first recording: both tracks from the system's default
@@ -184,10 +232,17 @@ fn session(listed: Listed, salvaged: &[Salvaged], dates: &Dates) -> Session {
     let id = listed.id;
     let salvage = salvaged.iter().find(|s| salvaged_id(s) == id);
     let (status, detail) = match (listed.needs, salvage) {
+        // Salvage at start failed, and what it would have saved is still
+        // there: its error says why better than the listing can.
+        (Needs::Attention(_), Some(Salvaged::Failed(_, e))) => {
+            (Status::NeedsYou, Some(format!("salvage failed: {e}")))
+        }
         (Needs::Attention(why), _) => (Status::NeedsYou, Some(why)),
         (Needs::InUse, _) => (Status::Processing, Some("being recorded".to_owned())),
-        (Needs::Nothing, Some(Salvaged::Failed(_, e))) => {
-            (Status::NeedsYou, Some(format!("salvage failed: {e}")))
+        // Salvage at start failed, but a later one (each recording's start
+        // salvages too) left nothing to save.
+        (Needs::Nothing, Some(Salvaged::Failed(..) | Salvaged::InUse(_)) | None) => {
+            (Status::Ready, None)
         }
         // Journals salvage left show as attention above; once none are
         // left, it's recovered.
@@ -195,7 +250,6 @@ fn session(listed: Listed, salvaged: &[Salvaged], dates: &Dates) -> Session {
             Status::Ready,
             Some("recovered after a crash · nothing lost".to_owned()),
         ),
-        (Needs::Nothing, Some(Salvaged::InUse(_)) | None) => (Status::Ready, None),
     };
     Session {
         id: id.get(),
