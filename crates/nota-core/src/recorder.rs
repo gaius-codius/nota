@@ -12,7 +12,7 @@
 //!
 //! | Message | Sent by | When |
 //! |---|---|---|
-//! | [`Command::Start`] | `nota record` (later, the Setup screen) | Once, to start a session with a [`Setup`] |
+//! | [`Command::Start`] | `nota record`, from its arguments (later, the Setup screen) | Once, to start a session with a [`Setup`] |
 //! | [`Command::Mark`] | the Recording screen | `m`: a [`Mark`] at the moment of the key |
 //! | [`Command::Note`] | the Recording screen | `⏎` after `n`, or the screen closing with a note half typed: a [`Note`] pinned to the moment of `n` |
 //! | [`Command::Stop`] | the Recording screen | The stop is confirmed (`s` or Ctrl+C, then `y`) |
@@ -22,7 +22,7 @@
 //! | Message | Sent by | When |
 //! |---|---|---|
 //! | [`Event::Level`] | the live thread | At most every 100 ms per track while it captures: the peak since the last one |
-//! | [`Event::Recorded`] | the live thread | With each level: how much audio the journals hold |
+//! | [`Event::Recorded`] | the live thread | With each level: how much audio has been recorded |
 //! | [`Event::Text`] | the live thread | Each stretch of speech the engine heard, placed in session time |
 //! | [`Event::Transcribing`] | the live thread | Speech is with the engine, not yet text, or no longer is |
 //! | [`Event::Engine`] | the live thread | The transcriber came up or went down |
@@ -33,12 +33,15 @@
 //! | [`Event::Epoch`] | the recorder | A track's stream was reopened, or audio was lost: a new epoch |
 //! | [`Event::Gap`] | the recorder | With an epoch after the first: the time with no audio before it |
 //! | [`Event::Stopping`] | the recorder | The recording is stopping without a [`Command::Stop`]: on a signal, or once every stream has ended. The screens close |
-//! | [`Event::Stopped`] | the recorder | Last: the session is finished, with its [`Outcome`]. In `nota record` the screen has closed by then, and the outcome is the summary printed after it |
+//! | [`Event::Stopped`] | the recorder | Last: the session is finished, with its [`Outcome`] |
 //!
-//! Every kind of event M2 needs is here, including those nothing sends yet
-//! (warnings, device and disk events, durable progress, epochs and gaps,
-//! engine status, transcribing): the work that produces each fills in the
-//! sending side, and the screens' handling, without adding a variant.
+//! Every kind of event M2's plan names is here, including those nothing
+//! sends yet: warnings (drift among them), device and disk events, durable
+//! progress, epochs and gaps, engine status and transcribing. The work that
+//! produces each fills in the sending side, and the screens' handling,
+//! without adding a variant. [`Event::Stopped`] isn't sent yet either: in
+//! `nota record` the screen has closed before the session is finished, so
+//! the [`Outcome`] is returned and printed as the summary instead.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -135,7 +138,8 @@ pub enum Event {
         /// How loud it was.
         level: Level,
     },
-    /// How much of the recording the journals hold so far, in bytes.
+    /// How much audio has been recorded so far, in bytes: two a sample,
+    /// as the journals hold it, not counting their framing.
     Recorded(u64),
     /// New live text.
     Text(Utterance),
@@ -263,6 +267,9 @@ pub enum Cause {
     DigitalZeros,
     /// The track has been below its noise floor for a while.
     Quiet,
+    /// The track's clock has drifted from the session clock past the
+    /// stated limit.
+    Drift,
     /// The track's stream failed and delivers nothing more, for this
     /// reason. The other tracks record on.
     StreamFailed(String),

@@ -12,7 +12,7 @@ use nota_core::{Clock, TrackId};
 use nota_recorder::segment::PublishReport;
 use nota_tui::{Ended, Event, InputThread, Recording, RunError, Theme};
 
-use super::{MIC, RecordArgs, SYSTEM};
+use super::{MIC, SYSTEM};
 use crate::terminal::Screen;
 
 /// How the screen went.
@@ -32,7 +32,7 @@ pub(super) struct Shown {
 /// Only if the input thread can't start.
 pub(super) fn show(
     mut screen: Screen,
-    args: &RecordArgs,
+    title: &str,
     listening: &str,
     clock: &Arc<dyn Clock>,
     ui: &Sender<Event>,
@@ -44,7 +44,7 @@ pub(super) fn show(
         Theme::default()
     };
     let mut recording = Recording::new(
-        args.setup.title.clone(),
+        title.to_owned(),
         listening.to_owned(),
         Arc::clone(clock),
         theme,

@@ -70,6 +70,7 @@ pub(super) type Recorded = (
 /// If any of it can't be started, or no stream at all can.
 pub(super) fn start<B: CaptureBackend>(
     args: &RecordArgs,
+    setup: &Setup,
     backend: &B,
     clock: &Arc<dyn Clock>,
 ) -> Result<(Started<B>, Screening), BoxError> {
@@ -90,7 +91,7 @@ pub(super) fn start<B: CaptureBackend>(
     let mut writer = SessionWriter::open(&lock, RATE, segment_length(), Arc::clone(clock))?
         .with_syncing(Syncing::Threads);
 
-    let sources = sources(&args.setup);
+    let sources = sources(setup);
     let (started, events) = start_tracks(backend, &sources, RATE, clock);
     let mut captures: Vec<Capture<B::Stream>> = Vec::new();
     let mut listening = Vec::new();
@@ -112,7 +113,7 @@ pub(super) fn start<B: CaptureBackend>(
 
     // The session's row is added by the publisher, before its first
     // segment's: recording never waits on the database.
-    let rows = session_rows(&library, args, session.id, &sources, &captures);
+    let rows = session_rows(&library, setup, session.id, &sources, &captures);
     let publisher = Publisher::spawn(SessionStore::new(lock.clone(), rows), segment_length())?;
     let (live_inputs, live_received) = mpsc::channel::<LiveInput>();
     let engine = match &args.models {
@@ -222,7 +223,7 @@ fn note_salvaged(library: &Library, outcome: &mut Outcome) -> Result<(), BoxErro
 /// that started.
 fn session_rows<S>(
     library: &Library,
-    args: &RecordArgs,
+    setup: &Setup,
     id: SessionId,
     sources: &[(TrackId, Source); 2],
     captures: &[Capture<S>],
@@ -231,7 +232,7 @@ fn session_rows<S>(
         library.db().clone(),
         NewSession {
             id,
-            title: Some(args.setup.title.clone()),
+            title: Some(setup.title.clone()),
             language: None,
             tracks: sources
                 .iter()

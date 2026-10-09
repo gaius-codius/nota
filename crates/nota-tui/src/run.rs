@@ -84,15 +84,21 @@ impl<E: std::fmt::Display> std::fmt::Display for RunError<E> {
         match self {
             Self::Terminal(err) => write!(f, "drawing the screen failed: {err}"),
             Self::InputLost(kind) => write!(f, "reading keys from the terminal failed: {kind}"),
-            Self::CommandsClosed(command) => {
-                let what = match command {
-                    Command::Start(_) => "a start",
-                    Command::Mark(_) => "a mark",
-                    Command::Note(_) => "a note",
-                    Command::Stop => "a stop",
-                };
-                write!(f, "{what} couldn't be given: nothing receives commands")
-            }
+            Self::CommandsClosed(command) => match command {
+                Command::Mark(mark) => write!(
+                    f,
+                    "a mark at {:?} couldn't be stored: nothing receives commands",
+                    mark.at.elapsed()
+                ),
+                Command::Note(note) => write!(
+                    f,
+                    "a note at {:?} couldn't be stored: nothing receives commands",
+                    note.at().elapsed()
+                ),
+                Command::Start(_) | Command::Stop => {
+                    f.write_str("a command couldn't be given: nothing receives commands")
+                }
+            },
         }
     }
 }

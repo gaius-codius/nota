@@ -60,8 +60,8 @@ fn watch(mut signals: signal_hook::iterator::Signals, ui: &Sender<Event>) -> boo
     overran || signals.pending().any(|signal| signal == SIGXCPU)
 }
 
-/// Elsewhere nothing records yet (see [`record`]), so there's nothing to
-/// stop in order.
+/// Elsewhere nothing records yet (see [`record`](super::record)), so
+/// there's nothing to stop in order.
 #[cfg(not(unix))]
 pub(super) struct SignalThread;
 

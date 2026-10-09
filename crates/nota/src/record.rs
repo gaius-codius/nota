@@ -21,10 +21,10 @@
 //! # The screen
 //!
 //! The screen and `nota record` talk only in the recorder protocol
-//! ([`nota_core::recorder`]): the start command's [`Setup`] decides what
-//! the tracks record, the live thread and the recorder send the screen
-//! events, and the screen gives back marks, notes and the stop as
-//! commands.
+//! ([`nota_core::recorder`]). `nota record` itself gives the start
+//! command, from its arguments; its [`Setup`] decides what the tracks
+//! record. The live thread and the recorder send the screen events, and
+//! the screen gives back marks, notes and the stop as commands.
 //!
 //! # Stopping
 //!
@@ -60,7 +60,7 @@ use std::error::Error;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use nota_core::recorder::Setup;
+use nota_core::recorder::{Command, Setup};
 use nota_core::{Clock, SampleRate, SystemClock, TrackId};
 use nota_recorder::capture::CaptureBackend;
 use nota_recorder::segment::SegmentLength;
@@ -88,9 +88,9 @@ type BoxError = Box<dyn Error + Send + Sync>;
 pub(crate) struct RecordArgs {
     /// The data directory, holding `sessions/`.
     pub(crate) data: PathBuf,
-    /// What to record and the session's title: what the start command
-    /// carries.
-    pub(crate) setup: Setup,
+    /// The command that starts the recording: [`Command::Start`], with
+    /// what to record and the session's title.
+    pub(crate) start: Command,
     /// The engine's models, `--parakeet` and `--vad`; without them there's
     /// no live text.
     pub(crate) models: Option<(PathBuf, PathBuf)>,
@@ -109,12 +109,15 @@ pub(crate) struct RecordArgs {
 /// stream at all), or the screen failed; in the second case the recording
 /// was still finished first.
 pub(crate) fn record(args: &RecordArgs) -> Result<Outcome, BoxError> {
+    let Command::Start(setup) = &args.start else {
+        return Err("a recording starts only with a start command".into());
+    };
     let clock: Arc<dyn Clock> =
         Arc::new(SystemClock::start().map_err(|_| "the system clock can't be read")?);
     #[cfg(feature = "fake-capture")]
     if args.tone {
         let tone = crate::tone::Tone::new(Arc::clone(&clock));
-        let mut outcome = record_with(args, &tone, &clock)?;
+        let mut outcome = record_with(args, setup, &tone, &clock)?;
         outcome.notes.extend(tone.report());
         return Ok(outcome);
     }
@@ -122,7 +125,12 @@ pub(crate) fn record(args: &RecordArgs) -> Result<Outcome, BoxError> {
         return Err("--tone is only for nota's tests".into());
     }
     #[cfg(target_os = "linux")]
-    return record_with(args, &nota_recorder::capture::PipeWireBackend, &clock);
+    return record_with(
+        args,
+        setup,
+        &nota_recorder::capture::PipeWireBackend,
+        &clock,
+    );
     #[cfg(not(target_os = "linux"))]
     Err("recording needs Linux for now".into())
 }
@@ -132,18 +140,20 @@ pub(crate) fn segment_length() -> SegmentLength {
     SegmentLength::default_at(RATE)
 }
 
-/// Starts a recording, shows its screen until it's closed, then stops it.
+/// Starts a recording as `setup` says, shows its screen until it's
+/// closed, then stops it.
 fn record_with<B: CaptureBackend>(
     args: &RecordArgs,
+    setup: &Setup,
     backend: &B,
     clock: &Arc<dyn Clock>,
 ) -> Result<Outcome, BoxError> {
-    let (started, screening) = start::start(args, backend, clock)?;
+    let (started, screening) = start::start(args, setup, backend, clock)?;
 
     // The screen, until it's closed.
     let shown = show(
         screening.screen,
-        args,
+        &setup.title,
         &screening.listening,
         clock,
         &screening.ui,
@@ -152,4 +162,36 @@ fn record_with<B: CaptureBackend>(
     drop(screening.ui);
 
     stop::stop(started, shown)
+}
+
+#[cfg(test)]
+mod tests {
+    use nota_core::SessionTime;
+    use nota_core::recorder::Mark;
+
+    use super::*;
+
+    /// The recorder starts on a start command, and on nothing else: the
+    /// session isn't made, so the data directory stays empty.
+    #[test]
+    fn only_a_start_command_starts_a_recording() {
+        let data = std::env::temp_dir().join(format!("nota-start-{}", std::process::id()));
+        for given in [
+            Command::Stop,
+            Command::Mark(Mark {
+                at: SessionTime::ZERO,
+            }),
+        ] {
+            let args = RecordArgs {
+                data: data.clone(),
+                start: given,
+                models: None,
+                tone: false,
+                latency_log: None,
+            };
+            let err = record(&args).unwrap_err();
+            assert!(err.to_string().contains("start command"), "{err}");
+        }
+        assert!(!data.exists());
+    }
 }

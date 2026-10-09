@@ -14,7 +14,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use nota_core::recorder::{Input, Setup};
+use nota_core::recorder::{self, Input, Setup};
 use nota_engine::sherpa::ModelPaths;
 
 mod latency;
@@ -139,17 +139,12 @@ fn parse_engine(args: &[OsString]) -> Result<ModelPaths, String> {
 /// `record` and its options. Without `--data`, sessions go in the
 /// platform's data directory (`~/.local/share/nota` on Linux).
 fn parse_record(args: &[OsString]) -> Result<RecordArgs, String> {
-    let mut record = RecordArgs {
-        data: PathBuf::new(),
-        setup: Setup {
-            title: "Recording".to_owned(),
-            mic: Input::Default,
-            system: Input::Default,
-        },
-        models: None,
-        tone: false,
-        latency_log: None,
+    let mut setup = Setup {
+        title: "Recording".to_owned(),
+        mic: Input::Default,
+        system: Input::Default,
     };
+    let (mut tone, mut latency_log) = (false, None);
     let (mut data, mut parakeet, mut vad) = (None, None, None);
     for (flag, value) in pairs(args)? {
         let text = || {
@@ -159,25 +154,25 @@ fn parse_record(args: &[OsString]) -> Result<RecordArgs, String> {
                 .ok_or_else(|| format!("{flag} takes text"))
         };
         match flag {
-            "--title" => record.setup.title = text()?,
+            "--title" => setup.title = text()?,
             "--data" => data = Some(PathBuf::from(value)),
             "--parakeet" => parakeet = Some(PathBuf::from(value)),
             "--vad" => vad = Some(PathBuf::from(value)),
-            "--mic" => record.setup.mic = Input::Device(text()?),
-            "--system" => record.setup.system = Input::Device(text()?),
+            "--mic" => setup.mic = Input::Device(text()?),
+            "--system" => setup.system = Input::Device(text()?),
             #[cfg(feature = "fake-capture")]
-            "--tone" => record.tone = text()? == "yes",
+            "--tone" => tone = text()? == "yes",
             #[cfg(feature = "latency-log")]
-            "--latency-log" => record.latency_log = Some(PathBuf::from(value)),
+            "--latency-log" => latency_log = Some(PathBuf::from(value)),
             _ => return Err(format!("unknown option {flag}")),
         }
     }
-    record.models = match (parakeet, vad) {
+    let models = match (parakeet, vad) {
         (Some(p), Some(v)) => Some((p, v)),
         (None, None) => None,
         _ => return Err("--parakeet and --vad go together".into()),
     };
-    record.data = match data {
+    let data = match data {
         // Absolute, so every directory in it has a parent to make it in.
         Some(dir) => {
             std::path::absolute(&dir).map_err(|e| format!("--data {}: {e}", dir.display()))?
@@ -187,7 +182,13 @@ fn parse_record(args: &[OsString]) -> Result<RecordArgs, String> {
             .data_dir()
             .to_path_buf(),
     };
-    Ok(record)
+    Ok(RecordArgs {
+        data,
+        start: recorder::Command::Start(setup),
+        models,
+        tone,
+        latency_log,
+    })
 }
 
 #[cfg(test)]
