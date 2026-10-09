@@ -431,16 +431,15 @@ impl<S: Fs + Clone> DiskWatch<S> {
     }
 
     /// Waits up to `timeout` until the monitor is asked to stop, or, if
-    /// `until_full`, the disk fills; returns whether it was asked to stop.
-    fn wait(&self, timeout: Duration, until_full: bool) -> bool {
+    /// `until_full`, the disk fills.
+    fn wait(&self, timeout: Duration, until_full: bool) {
         let state = self.lock();
-        self.changed
+        let _woken = self
+            .changed
             .wait_timeout_while(state, timeout, |s| {
                 !(s.stopping || until_full && s.full.is_some())
             })
-            .unwrap_or_else(PoisonError::into_inner)
-            .0
-            .stopping
+            .unwrap_or_else(PoisonError::into_inner);
     }
 
     /// Whether the monitor was asked to stop.
@@ -753,9 +752,10 @@ fn monitor<S: Fs + Clone>(
             report(DiskReport::Full(full));
         }
         // Woken at once by a full disk not yet reported, or a stop. The
-        // stop is read again, so a wait that returns early never keeps a
-        // stopped monitor running.
-        if watch.wait(config.interval, !reported_full) || watch.stopping() {
+        // stop is read after the wait, whyever it returned, so a wait that
+        // returns early never keeps a stopped monitor running.
+        watch.wait(config.interval, !reported_full);
+        if watch.stopping() {
             break;
         }
         if !reported_full && watch.full().is_some() {
