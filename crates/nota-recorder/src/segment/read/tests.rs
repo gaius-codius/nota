@@ -114,3 +114,38 @@ fn a_file_that_isnt_flac_gives_no_audio() {
     let err = read_segment(&fs, dir, &row, SampleRate::SPEECH).unwrap_err();
     assert!(matches!(err, ReadSegmentError::Flac(_)), "{err}");
 }
+
+proptest::proptest! {
+    /// Whatever a segment file holds, reading it gives its row's audio or
+    /// an error, never a panic: here, a published segment with bytes
+    /// overwritten, cut short or added to, under a row hashed to match.
+    #[test]
+    fn damaged_segment_files_are_errors_not_panics(
+        len in 1_u64..9_000,
+        edits in proptest::collection::vec((0_usize..20_000, proptest::num::u8::ANY), 0..8),
+        cut in proptest::option::of(0_usize..20_000),
+        extra in proptest::collection::vec(proptest::num::u8::ANY, 0..16),
+    ) {
+        let fs = FakeFs::new();
+        let dir = dir(&fs);
+        let audio = samples(len);
+        let mut bytes = flac::encode(SampleRate::SPEECH, &[&audio]).unwrap();
+        for (at, value) in edits {
+            if let Some(byte) = bytes.get_mut(at) {
+                *byte = value;
+            }
+        }
+        if let Some(cut) = cut {
+            bytes.truncate(cut);
+        }
+        bytes.extend(extra);
+        let range = SampleRange::new(SampleIndex::new(0), SampleIndex::new(len)).unwrap();
+        let mut file = fs.create(&dir.join(segment_file_name(TRACK, range))).unwrap();
+        file.write_all(&bytes).unwrap();
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        let row = SegmentRow::new(TRACK, EpochId::new(0), range, Sha256Digest::new(digest)).unwrap();
+        if let Ok(read) = read_segment(&fs, dir, &row, SampleRate::SPEECH) {
+            proptest::prop_assert_eq!(read.len() as u64, len);
+        }
+    }
+}
