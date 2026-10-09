@@ -43,6 +43,8 @@ signal-hook.workspace = true
 nota = { path = ".", features = ["fake-capture", "latency-log"] }
 nota-core = { path = "../nota-core", features = ["fake-clock"] }
 nota-recorder = { path = "../nota-recorder", features = ["fake-fs"] }
+# The kept session row's parser, over any bytes.
+proptest.workspace = true
 # To make an M1 per-session store in the migration test.
 rusqlite.workspace = true
 

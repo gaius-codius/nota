@@ -1648,6 +1648,7 @@ dependencies = [
  "nota-recorder",
  "nota-store",
  "nota-tui",
+ "proptest",
  "ratatui",
  "rusqlite",
  "rustix",
