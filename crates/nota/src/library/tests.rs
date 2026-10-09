@@ -527,6 +527,32 @@ fn an_m1b_session_directory_is_adopted_and_salvaged() {
     assert!(library.salvage_all(length()).unwrap().is_empty());
 }
 
+/// The publisher's rows and the saver's are clones: whichever writes
+/// first adds the session's row, and the other then never adds it again,
+/// even once the session is stopped.
+#[test]
+fn clones_of_new_rows_add_the_session_s_row_once() {
+    let tmp = TestDir::new("rows-clones");
+    let library = Library::open(&tmp.0).unwrap();
+    let id = SessionId::new(4);
+    let publisher = new_rows(&library, id);
+    let saver = publisher.clone();
+    saver.added(id).unwrap();
+    assert!(library.db().with(|db| db.session(id)).unwrap().is_some());
+    library
+        .db()
+        .with(|db| db.set_state(id, SessionState::Stopped))
+        .unwrap();
+    // A fresh one would take the stopped row as another recording's.
+    assert!(new_rows(&library, id).added(id).is_err());
+    publisher.added(id).unwrap();
+    saver.added(id).unwrap();
+    assert!(matches!(
+        saver.added(SessionId::new(5)),
+        Err(StoreError::NoSession(_))
+    ));
+}
+
 #[test]
 fn new_rows_take_their_own_row_back_but_no_one_elses() {
     let tmp = TestDir::new("own-row");
@@ -534,7 +560,7 @@ fn new_rows_take_their_own_row_back_but_no_one_elses() {
     let id = SessionId::new(4);
     let mine = || {
         let NewSessionRows { pending, .. } = new_rows(&library, id);
-        pending.unwrap()
+        pending.lock().unwrap().clone().unwrap()
     };
     // Added by a call whose answer was lost: the same title, still
     // recording. Taken as added.

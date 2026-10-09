@@ -6,7 +6,7 @@ use nota_store::{SessionState, StoreError};
 use super::BoxError;
 use super::live::LiveInput;
 use super::start::Started;
-use super::summary::{Outcome, Shown, note_published};
+use super::summary::{Outcome, Shown, note_published, note_saved};
 
 /// Stops what `started` started, in order, and finishes the session.
 ///
@@ -30,6 +30,7 @@ pub(super) fn stop<B: CaptureBackend>(
         publisher,
         live_inputs,
         live,
+        saver,
         recorder,
     } = started;
     // Stop, in order.
@@ -64,6 +65,9 @@ pub(super) fn stop<B: CaptureBackend>(
         outcome.notes.push(format!("finishing the recording: {e}"));
     }
     note_published(&mut outcome, &stopped.published?);
+    // Everything the live thread and the screen gave is stored, or given
+    // up on, before the session is marked stopped.
+    let saved = saver.finish();
     match library
         .db()
         .with(|db| db.set_state(session, SessionState::Stopped))
@@ -92,11 +96,6 @@ pub(super) fn stop<B: CaptureBackend>(
     if let Some(problem) = shown.problem {
         outcome.notes.push(problem);
     }
-    if shown.marks > 0 {
-        outcome.notes.push(format!(
-            "{} marks and notes made; they aren't saved yet",
-            shown.marks
-        ));
-    }
+    note_saved(&mut outcome, &saved, shown.marks);
     Ok(outcome)
 }

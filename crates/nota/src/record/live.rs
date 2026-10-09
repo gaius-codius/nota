@@ -12,6 +12,7 @@ use nota_recorder::capture::RecorderEvent;
 use nota_recorder::engine::{EngineEvent, EngineStatus, EngineSupervisor};
 use nota_tui::Event;
 
+use super::save::ToSave;
 use crate::latency::{LatencyLog, Problem};
 use crate::live::{Actions, Live};
 
@@ -25,15 +26,19 @@ pub(super) enum LiveInput {
 }
 
 /// The live thread: feeds the engine and the screen until told recording
-/// is done, then shuts the engine down. With a latency log, notes when each
-/// text is handed to the screen, and anything that keeps text from it, by
-/// `clock`, including what the engine reports after the screen has closed
-/// (waiting up to [`LATE_WAIT`] for it), and returns the log.
+/// is done, and hands each text placed for the screen to the saver
+/// (`save`). Then it shuts the engine down, and keeps handing on the text
+/// the engine sends meanwhile (its answer to the last flush) until the
+/// engine's events end, waiting up to [`LATE_WAIT`] for each. With a
+/// latency log, notes when each text is handed to the screen, and anything
+/// that keeps text from it, by `clock`, including what the engine reports
+/// after the screen has closed, and returns the log.
 pub(super) fn spawn_live(
     mut live: Live,
     mut engine: Option<EngineSupervisor>,
     inputs: Receiver<LiveInput>,
     ui: Sender<Event>,
+    save: Sender<ToSave>,
     mut log: Option<(LatencyLog, Arc<dyn Clock>)>,
 ) -> io::Result<JoinHandle<Option<LatencyLog>>> {
     thread::Builder::new()
@@ -58,7 +63,7 @@ pub(super) fn spawn_live(
                 } else {
                     Vec::new()
                 };
-                apply(actions, engine.as_mut(), &ui);
+                apply(actions, engine.as_mut(), &ui, &save);
                 if let Some((log, clock)) = log.as_mut() {
                     let now = clock.now();
                     match noted {
@@ -75,26 +80,31 @@ pub(super) fn spawn_live(
                     }
                 }
             }
+            // The engine's events go on through their own thread while it
+            // shuts down, and end once it has.
             if let Some(engine) = engine {
                 engine.shutdown();
             }
-            if let Some((log, clock)) = log.as_mut() {
-                // The screen has closed: text from now on never shows.
-                while let Ok(input) = inputs.recv_timeout(LATE_WAIT) {
+            while let Ok(input) = inputs.recv_timeout(LATE_WAIT) {
+                if let Some((log, clock)) = log.as_mut() {
+                    // The screen has closed: text from now on never shows.
                     match Noted::of(&input) {
                         Noted::Heard(track) => log.problem(Problem::Late, Some(track), clock.now()),
                         Noted::Problem(problem, track) => log.problem(problem, track, clock.now()),
                         Noted::Nothing => {}
                     }
                 }
+                if let LiveInput::Engine(event) = input {
+                    save_texts(&live.engine(event).updates, &save);
+                }
             }
             log.map(|(log, _)| log)
         })
 }
 
-/// How long the live thread waits, with a latency log, for what the engine
-/// reports after the screen has closed: its events pass through a thread of
-/// their own.
+/// How long the live thread waits for each of the engine's events after
+/// the engine has shut down: they pass through a thread of their own,
+/// which ends once they have, so this only bounds the wait if it doesn't.
 const LATE_WAIT: Duration = Duration::from_secs(1);
 
 /// What the latency log notes about one input to the live thread.
@@ -128,7 +138,12 @@ impl Noted {
     }
 }
 
-fn apply(actions: Actions, engine: Option<&mut EngineSupervisor>, ui: &Sender<Event>) {
+fn apply(
+    actions: Actions,
+    engine: Option<&mut EngineSupervisor>,
+    ui: &Sender<Event>,
+    save: &Sender<ToSave>,
+) {
     if let Some(engine) = engine {
         if let Some(chunk) = actions.transcribe {
             // Refused audio would only make the engine fail; the recording
@@ -139,8 +154,19 @@ fn apply(actions: Actions, engine: Option<&mut EngineSupervisor>, ui: &Sender<Ev
             engine.flush(track);
         }
     }
+    save_texts(&actions.updates, save);
     for update in actions.updates {
         let _ = ui.send(Event::Recorder(update));
+    }
+}
+
+/// Hands the texts among `updates` to the saver.
+fn save_texts(updates: &[recorder::Event], save: &Sender<ToSave>) {
+    for update in updates {
+        if let recorder::Event::Text(text) = update {
+            // A saver that has stopped has said why in its report.
+            let _ = save.send(ToSave::Heard(text.clone()));
+        }
     }
 }
 
@@ -182,12 +208,14 @@ mod tests {
         };
         let (inputs, received) = mpsc::channel();
         let (ui, screen) = mpsc::channel();
+        let (save, saved) = mpsc::channel();
         let log = LatencyLog::new(PathBuf::new());
         let live = spawn_live(
             Live::new(&timelines),
             None,
             received,
             ui,
+            save,
             Some((log, Arc::clone(&clock))),
         )
         .unwrap();
@@ -212,8 +240,9 @@ mod tests {
         // The system audio's first 2 s, from 0.5 s.
         inputs.send(heard(SYSTEM, 0, 32_000)).unwrap();
         inputs.send(LiveInput::Done).unwrap();
-        // After the screen closed: never shown.
+        // After the screen closed: never shown, but saved.
         inputs.send(heard(MIC, 56_000, 72_000)).unwrap();
+        drop(inputs);
 
         let log = live.join().unwrap().unwrap();
         let shown = screen
@@ -221,6 +250,21 @@ mod tests {
             .filter(|e| matches!(e, Event::Recorder(recorder::Event::Text(_))))
             .count();
         assert_eq!(shown, 2);
+        let saved: Vec<_> = saved
+            .try_iter()
+            .map(|s| match s {
+                ToSave::Heard(u) => (u.track(), u.start(), u.end()),
+                ToSave::Annotation(_) => panic!("{s:?}"),
+            })
+            .collect();
+        assert_eq!(
+            saved,
+            [
+                (MIC, ms(500), ms(3_500)),
+                (SYSTEM, ms(500), ms(2_500)),
+                (MIC, ms(3_500), ms(4_500))
+            ]
+        );
         // Drawn by the draw after the first to end at or after 4.2 s.
         assert_eq!(
             log.contents(&[ms(4_000), ms(4_200), ms(4_230)]),
@@ -231,5 +275,47 @@ mod tests {
              text\t1\t500\t2500\t4200\t4230\n\
              late\t0\t-\t-\t4200\t-\n"
         );
+    }
+
+    /// GAI-204: text the engine sends after recording is done (its answer
+    /// to the shutdown's flush, which comes through the engine's events
+    /// thread while the shutdown runs) is handed to the saver, however
+    /// late, until the engine's events end.
+    #[test]
+    fn text_the_engine_sends_during_its_shutdown_is_saved() {
+        use nota_core::messages::Transcript;
+        use nota_core::{SampleIndex, SampleRange, SessionTime};
+
+        let mut timeline = TrackTimeline::new(MIC);
+        timeline
+            .open_epoch(SessionTime::ZERO, SampleIndex::ZERO, RATE)
+            .unwrap();
+        let (inputs, received) = mpsc::channel();
+        let (ui, screen) = mpsc::channel();
+        let (save, saved) = mpsc::channel();
+        let live = spawn_live(Live::new(&[timeline]), None, received, ui, save, None).unwrap();
+        // The engine's events thread, still passing events on after Done.
+        let engine_events = inputs.clone();
+        inputs.send(LiveInput::Done).unwrap();
+        drop(inputs);
+        let late = thread::spawn(move || {
+            let (_keep, never) = mpsc::channel::<()>();
+            let _ = never.recv_timeout(Duration::from_millis(300));
+            let range = SampleRange::new(SampleIndex::ZERO, SampleIndex::new(16_000)).unwrap();
+            let text = Transcript::new(MIC, range, "the last words".to_owned()).unwrap();
+            engine_events
+                .send(LiveInput::Engine(EngineEvent::Transcript(text)))
+                .unwrap();
+        });
+        assert!(live.join().unwrap().is_none());
+        late.join().unwrap();
+        let saved: Vec<_> = saved.try_iter().collect();
+        assert_eq!(saved.len(), 1, "{saved:?}");
+        let ToSave::Heard(u) = &saved[0] else {
+            panic!("{saved:?}");
+        };
+        assert_eq!(u.text(), "the last words");
+        assert_eq!(u.end(), SessionTime::from_nanos(1_000_000_000));
+        drop(screen);
     }
 }

@@ -6,13 +6,16 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread;
 
 use nota_core::recorder::Command;
 pub(crate) use nota_core::recorder::Outcome;
 use nota_core::{Clock, TrackId};
 use nota_recorder::segment::PublishReport;
+use nota_store::Annotation;
 use nota_tui::{Ended, Event, InputThread, Recording, RunError, Theme};
 
+use super::save::{Saved, ToSave};
 use super::{MIC, SYSTEM};
 use crate::terminal::Screen;
 
@@ -25,13 +28,15 @@ pub(super) struct Shown {
     pub(super) problem: Option<String>,
 }
 
-/// Shows the Recording screen on `screen` until it's closed. The terminal
-/// is handed back as it is, unless it failed: then it's restored here, and
+/// Shows the Recording screen on `screen` until it's closed, handing each
+/// mark and note to the saver (`save`) as it's made. The terminal is
+/// handed back as it is, unless it failed: then it's restored here, and
 /// `None` comes back.
 ///
 /// # Errors
 ///
-/// Only if the input thread can't start; the terminal is restored.
+/// Only if the input thread, or the thread that passes marks and notes
+/// on, can't start; the terminal is restored.
 pub(super) fn show(
     mut screen: Screen,
     title: &str,
@@ -39,6 +44,7 @@ pub(super) fn show(
     clock: &Arc<dyn Clock>,
     ui: &Sender<Event>,
     ui_events: &Receiver<Event>,
+    save: &Sender<ToSave>,
 ) -> io::Result<(Shown, Option<Screen>)> {
     let mut recording = Recording::new(
         title.to_owned(),
@@ -47,6 +53,12 @@ pub(super) fn show(
         Theme::load(),
     );
     let (commands, given) = mpsc::channel::<Command>();
+    let passing = {
+        let save = save.clone();
+        thread::Builder::new()
+            .name("nota-marks".into())
+            .spawn(move || pass_on(given, &save))?
+    };
     let input = InputThread::spawn(ui.clone(), Arc::clone(clock))?;
     // A new screen (after Home, say): drawn whole, not as changes to the
     // last one's cells.
@@ -56,13 +68,16 @@ pub(super) fn show(
         .and_then(|()| nota_tui::run(screen.terminal(), &mut recording, ui_events, &commands));
     // Keys may be gone with the terminal; nothing to do about it.
     let _ = input.stop();
-    let mut marks = marks_in(given.try_iter());
+    // The screen is done giving commands: the thread passes on the last.
+    drop(commands);
+    let mut marks = passing.join().unwrap_or(0);
     let problem = match ran {
         Ok(Ended::Stopped | Ended::Closed) => None,
         Err(RunError::InputLost(kind)) => Some(format!("the keyboard was lost: {kind}")),
         Err(RunError::Terminal(e)) => Some(format!("the screen failed: {e}")),
+        // The thread that passes them on stopped: this one is saved here.
         Err(RunError::CommandsClosed(command)) => {
-            marks += marks_in([command]);
+            marks += pass_on([command], save);
             None
         }
     };
@@ -70,17 +85,45 @@ pub(super) fn show(
     Ok((Shown { marks, problem }, screen))
 }
 
-/// How many marks and notes `commands` gives. The stop the screen also
-/// gives needs nothing more: the screen has closed, and the recording stops
+/// Hands each mark and note `commands` gives to the saver, as it comes,
+/// and says how many there were. The start and the stop the screen also
+/// gives need nothing more: the screen has closed, and the recording stops
 /// as it does however the screen closes.
-fn marks_in(commands: impl IntoIterator<Item = Command>) -> usize {
-    commands
-        .into_iter()
-        .filter(|command| match command {
-            Command::Mark(_) | Command::Note(_) => true,
-            Command::Start(_) | Command::Stop => false,
-        })
-        .count()
+fn pass_on(commands: impl IntoIterator<Item = Command>, save: &Sender<ToSave>) -> usize {
+    let mut made = 0;
+    for command in commands {
+        let annotation = match command {
+            Command::Mark(mark) => Annotation::Mark(mark),
+            Command::Note(note) => Annotation::Note(note),
+            Command::Start(_) | Command::Stop => continue,
+        };
+        made += 1;
+        // A saver that has stopped has said why in its report.
+        let _ = save.send(ToSave::Annotation(annotation));
+    }
+    made
+}
+
+/// What the summary says of what the saver couldn't store, of `made`
+/// marks and notes.
+pub(super) fn note_saved(outcome: &mut Outcome, saved: &Saved, made: usize) {
+    let why = saved
+        .error
+        .as_deref()
+        .map(|e| format!(" (last error: {e})"))
+        .unwrap_or_default();
+    if saved.lost_text > 0 {
+        outcome.notes.push(format!(
+            "{} lines of live text weren't saved to the library{why}; the audio has them",
+            saved.lost_text
+        ));
+    }
+    if saved.lost_annotations > 0 {
+        outcome.notes.push(format!(
+            "{} of {made} marks and notes weren't saved to the library{why}",
+            saved.lost_annotations
+        ));
+    }
 }
 
 pub(super) fn note_published(outcome: &mut Outcome, report: &PublishReport) {
@@ -146,11 +189,12 @@ mod tests {
 
     use super::*;
 
-    /// The marks and notes the screen gives reach the summary; the start
-    /// and the stop aren't counted as either.
+    /// The marks and notes the screen gives are handed to the saver, in
+    /// order, and counted; the start and the stop aren't either.
     #[test]
-    fn the_summary_counts_the_marks_and_notes_given() {
+    fn marks_and_notes_given_are_handed_to_the_saver() {
         let at = SessionTime::from_nanos(5);
+        let note = Note::new(at, "ask about clamps").unwrap();
         let given = [
             Command::Start(Setup {
                 title: "Workshop".to_owned(),
@@ -158,12 +202,48 @@ mod tests {
                 system: Input::Default,
             }),
             Command::Mark(Mark { at }),
-            Command::Note(Note::new(at, "ask about clamps").unwrap()),
+            Command::Note(note.clone()),
             Command::Mark(Mark { at }),
             Command::Stop,
         ];
-        assert_eq!(marks_in(given), 3);
-        assert_eq!(marks_in([Command::Stop]), 0);
+        let (save, saved) = mpsc::channel();
+        assert_eq!(pass_on(given, &save), 3);
+        assert_eq!(
+            saved.try_iter().collect::<Vec<_>>(),
+            [
+                ToSave::Annotation(Annotation::Mark(Mark { at })),
+                ToSave::Annotation(Annotation::Note(note)),
+                ToSave::Annotation(Annotation::Mark(Mark { at })),
+            ]
+        );
+        assert_eq!(pass_on([Command::Stop], &save), 0);
+        // A saver that has gone doesn't stop the counting.
+        drop(saved);
+        assert_eq!(pass_on([Command::Mark(Mark { at })], &save), 1);
+    }
+
+    #[test]
+    fn the_summary_says_what_wasn_t_saved() {
+        let mut outcome = Outcome::default();
+        note_saved(&mut outcome, &Saved::default(), 2);
+        assert!(outcome.notes.is_empty());
+        let saved = Saved {
+            text: 4,
+            annotations: 1,
+            lost_text: 3,
+            lost_annotations: 1,
+            error: Some("disk I/O error".to_owned()),
+        };
+        note_saved(&mut outcome, &saved, 2);
+        assert_eq!(
+            outcome.notes,
+            [
+                "3 lines of live text weren't saved to the library \
+                 (last error: disk I/O error); the audio has them",
+                "1 of 2 marks and notes weren't saved to the library \
+                 (last error: disk I/O error)"
+            ]
+        );
     }
 
     /// A journal damaged in the middle, with synced audio after it, is set
