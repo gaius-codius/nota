@@ -3,7 +3,10 @@
 `fuzz/` is a separate Cargo workspace (it is excluded from the root one), so
 `cargo nextest` doesn't run it. It is for occasional long runs with AFL++
 through `cargo-afl`. CI builds the targets with `cargo afl build --locked`,
-so they keep compiling, but doesn't fuzz. CI sets
+so they keep compiling, and runs clippy on them, but doesn't fuzz. Its
+`Cargo.toml` copies the root workspace's lint table, which a separate
+workspace can't inherit; keep the two the same. The pre-push hook runs the
+same clippy. CI sets
 `RUSTFLAGS="-C target-cpu=x86-64"`, which cargo-afl appends after its own
 `-C target-cpu=native`, and rustc uses the last one: the job's cached
 `target/` can come from a runner with a different CPU, and build scripts and

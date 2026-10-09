@@ -5,7 +5,7 @@
 # The sherpa-onnx-sys build script would otherwise download its archive with
 # no checksum, and trust any copy it already unpacked. So every build points
 # SHERPA_ONNX_LIB_DIR at the directory this script fills:
-#   - .cargo/config.toml points it at target/sherpa-onnx/sherpa-onnx-lib,
+#   - .cargo/config.toml points it at target/sherpa-onnx/sherpa-onnx-lib-PIN,
 #     under this script's default directory, so a build fails until this
 #     script has run (and nota-engine's build script refuses a build with
 #     the variable unset);
@@ -14,13 +14,20 @@
 #
 #   scripts/sherpa-onnx.sh           # then cargo build, test, clippy...
 #
-# Each run checks the archive again, unpacks it afresh and replaces
-# DIR/sherpa-onnx-lib. The old one is removed first, so after a failed check
-# no library is left for a build to use. Cargo bundles the libraries into
-# sherpa-onnx-sys's rlib and reruns its build script only when the variable
-# changes, so the script also cleans that crate's build output when the
-# check fails or the pinned archive differs from the one last unpacked
-# (recorded in DIR/sherpa-onnx-lib.sha256).
+# Each run checks the archive again, unpacks it afresh and replaces the
+# library directory. The old one is removed first, so after a failed check
+# no library is left for a build to use.
+#
+# Cargo bundles the libraries into sherpa-onnx-sys's rlib and reruns its
+# build script only when SHERPA_ONNX_LIB_DIR changes, in each target
+# directory separately. So the library directory's name carries the pins
+# (DIR/sherpa-onnx-lib-PIN, PIN a hash of the version, every platform's
+# checksum and the layout below): a new pin is a new path, and every target
+# directory rebuilds the crate the next time it builds, not just the one
+# this script can see.
+# .cargo/config.toml names the directory too, and this script fails until
+# it names the current one. After a failed check the script also cleans the
+# crate's build output from the current target directory.
 #
 # On Linux x86-64 the pinned archive is upstream's build without
 # text-to-speech, with empty stand-ins for the three text-to-speech libraries
@@ -64,30 +71,37 @@ done
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
-# Per platform: the archive's suffix, its SHA-256, and whether it's the
-# no-TTS build. A case, not an associative array: macOS ships bash 3.2.
+# Per platform: the archive's SHA-256. Variables, not an associative array:
+# macOS ships bash 3.2.
+sha256_linux_x64=36f2ebd0b9aa09248ff6461a30dcb7edfe7eecf2deb67dfb0ceb3aaf4906051f
+sha256_osx_arm64=9091bf160dc7fdacedbc906b212badf53c2993f4e5277a0e03998e96c31d60da
+sha256_osx_x64=a3f88da3e54c850a12d61431e73f8affcd1f13738b75b768847dd79541835b4b
+sha256_win_x64=56ffcf3c454c1f14f7bc9887286cc8143e7e542dc632804e1c447d5f8d534eaf
+
+# Per platform: the archive's suffix, its checksum, and whether it's the
+# no-TTS build.
 no_tts=0
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64)
     platform=linux-x64
     suffix=linux-x64-static-no-tts-lib
-    sha256=36f2ebd0b9aa09248ff6461a30dcb7edfe7eecf2deb67dfb0ceb3aaf4906051f
+    sha256=$sha256_linux_x64
     no_tts=1
     ;;
   Darwin-arm64)
     platform=osx-arm64
     suffix=osx-arm64-static-lib
-    sha256=9091bf160dc7fdacedbc906b212badf53c2993f4e5277a0e03998e96c31d60da
+    sha256=$sha256_osx_arm64
     ;;
   Darwin-x86_64)
     platform=osx-x64
     suffix=osx-x64-static-lib
-    sha256=a3f88da3e54c850a12d61431e73f8affcd1f13738b75b768847dd79541835b4b
+    sha256=$sha256_osx_x64
     ;;
   MINGW*-x86_64 | MSYS*-x86_64)
     platform=win-x64
     suffix=win-x64-static-MT-Release-lib
-    sha256=56ffcf3c454c1f14f7bc9887286cc8143e7e542dc632804e1c447d5f8d534eaf
+    sha256=$sha256_win_x64
     ;;
   *) die "no pinned sherpa-onnx archive for $(uname -s)-$(uname -m)" ;;
 esac
@@ -107,11 +121,30 @@ fi
 
 sha256_of() {
   if command -v sha256sum >/dev/null; then
-    sha256sum "$1" | cut -d' ' -f1
+    sha256sum "$@" | cut -d' ' -f1
   else
-    shasum -a 256 "$1" | cut -d' ' -f1
+    shasum -a 256 "$@" | cut -d' ' -f1
   fi
 }
+
+# What this script does to an archive once unpacked (the no-TTS stand-ins
+# below): bump it whenever that changes, so the directory's name changes and
+# builds pick the new libraries up, as they would a new pin.
+layout=1
+
+# Every platform's pins and the layout, so .cargo/config.toml can name one
+# directory on all of them.
+pin=$(printf '%s\n' "$version" "$layout" "$sha256_linux_x64" "$sha256_osx_arm64" "$sha256_osx_x64" \
+  "$sha256_win_x64" | sha256_of | cut -c1-16)
+lib_name=sherpa-onnx-lib-$pin
+
+if [[ -z $dest ]]; then
+  # The default directory is the one .cargo/config.toml points builds at.
+  config=$repo/.cargo/config.toml
+  if [[ -f $config ]] && ! grep -q "^SHERPA_ONNX_LIB_DIR *=.*\"target/sherpa-onnx/$lib_name\"" "$config"; then
+    die "$config must set SHERPA_ONNX_LIB_DIR to \"target/sherpa-onnx/$lib_name\" (the pins or the layout changed)"
+  fi
+fi
 
 # Absolute, since the sys crate's build script runs in its own directory.
 dest=${dest:-$repo/target/sherpa-onnx}
@@ -119,9 +152,8 @@ mkdir -p "$dest"
 dest=$(cd "$dest" && pwd)
 url=https://github.com/k2-fsa/sherpa-onnx/releases/download/v$version/$name.tar.bz2
 archive=$dest/$name.tar.bz2
-lib=$dest/sherpa-onnx-lib
+lib=$dest/$lib_name
 unpack=$dest/sherpa-onnx-unpack
-stamp=$dest/sherpa-onnx-lib.sha256
 
 # Drops the libraries an earlier run bundled into sherpa-onnx-sys's rlib:
 # its build output in every profile and target of the target directory
@@ -142,14 +174,12 @@ clean_sys() {
     find -H "$target_dir" \( -path '*/.fingerprint/sherpa-onnx-sys-*' -o -path '*/build/sherpa-onnx-sys-*' \
       -o -name 'libsherpa_onnx_sys*' \) -prune -exec rm -rf {} +
   fi
-  rm -f "$stamp"
 }
 
-# Nothing is left to link until the archive has passed its check.
-rm -rf "$lib" "$unpack"
-if [[ -f $stamp && $(cat "$stamp") != "$sha256" ]]; then
-  clean_sys
-fi
+# Nothing is left to link until the archive has passed its check: neither
+# this pin's libraries nor an earlier pin's (nor the checksum stamp that
+# scripts before the pinned directory name kept).
+rm -rf "$dest"/sherpa-onnx-lib "$dest"/sherpa-onnx-lib-* "$dest"/sherpa-onnx-lib.sha256 "$unpack"
 
 if [[ ! -f $archive ]]; then
   curl -fsSL --proto =https --retry 3 --retry-all-errors --connect-timeout 30 -o "$archive.part" "$url"
@@ -182,7 +212,6 @@ if [[ $no_tts -eq 1 ]]; then
 fi
 mv "$unpack/$name/lib" "$lib"
 rm -rf "$unpack"
-echo "$sha256" >"$stamp"
 
 # Windows tools want a Windows path (forward slashes work).
 if command -v cygpath >/dev/null; then

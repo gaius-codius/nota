@@ -10,13 +10,20 @@ set -euo pipefail
 max_bytes=$((1024 * 1024))
 media='\.(wav|flac|mp3|m4a|aac|ogg|oga|opus|webm|weba|mp4|mkv|mov|caf|aiff?|wma|pcm|raw)$'
 
-if [[ ${1:-} == --staged ]]; then
+usage() {
+  echo "usage: check-files.sh --staged | check-files.sh BASE HEAD" >&2
+  exit 2
+}
+
+if [[ $# -eq 1 && $1 == --staged ]]; then
   files=$(git diff --cached --name-only --diff-filter=AM)
   size() { git cat-file -s ":$1"; }
-else
+elif [[ $# -eq 2 && $1 != -* ]]; then
   base=$1 head=$2
   files=$(git diff --name-only --diff-filter=AM "$base" "$head")
   size() { git cat-file -s "$head:$1"; }
+else
+  usage
 fi
 
 status=0

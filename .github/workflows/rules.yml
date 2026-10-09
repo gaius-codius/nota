@@ -1,6 +1,7 @@
 # Repo rules that aren't about the code itself: no recordings or large files,
 # no secrets, and no silent weakening of checks. Separate from CI so editing a
-# PR's body re-runs only this.
+# PR's body re-runs only this. Editing a closed PR's text runs nothing: its
+# branch may be gone, and nothing on it needs checking any more.
 name: Repo rules
 
 on:
@@ -15,7 +16,7 @@ permissions:
 jobs:
   files:
     name: No recordings or large files
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && github.event.pull_request.state == 'open'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -29,7 +30,7 @@ jobs:
 
   weakened:
     name: Weakened checks are explained
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && github.event.pull_request.state == 'open'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -44,6 +45,7 @@ jobs:
 
   secrets:
     name: No secrets (gitleaks)
+    if: github.event_name != 'pull_request' || github.event.pull_request.state == 'open'
     runs-on: ubuntu-latest
     env:
       GITLEAKS_VERSION: 8.30.1

@@ -140,6 +140,7 @@ unmount() {
     if mountpoint -q "$MNT"; then
       fusermount3 -u "$MNT" 2> /dev/null || fusermount3 -uz "$MNT" 2> /dev/null || true
     elif [[ -n $LZ_PID ]] && ! kill -0 "$LZ_PID" 2> /dev/null; then
+      # LazyFS died: the mount is left "not connected".
       fusermount3 -uz "$MNT" 2> /dev/null || true
     fi
   fi
@@ -147,7 +148,11 @@ unmount() {
     # LazyFS exits once unmounted (with status 134: it aborts on every exit).
     # One that never mounted, or hangs, is killed by its PID.
     lazyfs_gone() { ! kill -0 "$LZ_PID" 2> /dev/null; }
-    wait_for 10 lazyfs_gone || kill -9 "$LZ_PID" 2> /dev/null || true
+    if ! wait_for 10 lazyfs_gone; then
+      kill -9 "$LZ_PID" 2> /dev/null || true
+      # A killed LazyFS that had mounted leaves it "not connected".
+      [[ -z $MNT ]] || fusermount3 -uz "$MNT" 2> /dev/null || true
+    fi
     wait "$LZ_PID" 2> /dev/null || true
     LZ_PID=
   fi

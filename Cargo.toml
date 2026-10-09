@@ -16,6 +16,9 @@ publish = false
 cpal = { version = "0.18", default-features = false }
 # Decodes FLAC segments in tests, to check what was encoded.
 claxon = "0.4"
+# The platform's data directory, where the library is kept. Brings in
+# option-ext, which is MPL-2.0: accepted, see deny.toml.
+directories = "6"
 # The journal's per-frame checksum (CRC-32, IEEE).
 crc32fast = { version = "1.5", default-features = false, features = ["std"] }
 # FLAC segments: a pure-Rust encoder, without its logging, threading and serde.
