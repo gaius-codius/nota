@@ -1,0 +1,190 @@
+# Which crates in the tree expose a function clippy.toml's `disallowed-methods`
+# bans: reading the clock; writing, renaming, removing or syncing files.
+# `scripts/check-clippy-bans.sh` checks this map against Cargo.lock and
+# fuzz/Cargo.lock, and fails until every crate in them is listed here, so a
+# new dependency's clock reads and file writes are looked for when it arrives,
+# not after a reviewer happens to spot one.
+#
+# Each crate goes in one of these sections:
+#
+#   [ban]                 functions of the families, by path. Each must also
+#                         be in clippy.toml's disallowed-methods.
+#   [allow: <reason>]     functions (paths) or whole crates (names) of the
+#                         families that are deliberately not banned. Like an
+#                         #[expect], each says why.
+#   [none: <reason>]      crates whose API has no such function, including
+#                         the types it returns.
+#   [indirect: <reason>]  crates nota's code can't name: no nota crate
+#                         depends on them directly, and no direct dependency
+#                         re-exports them. The check fails if one becomes a
+#                         direct dependency, so it's classified then.
+#
+# A crate can have [ban] and [allow] paths both, but a crate under [none] or
+# [indirect] has no paths. Names are as Cargo.lock spells them; paths use the
+# crate's name in Rust (`jiff_core`, not `jiff-core`). A new version of a crate
+# already here isn't re-checked: when a bump adds API, review it as you would
+# a new crate. Changes here count as check changes (scripts/check-weakened.sh).
+
+[ban]
+# cpal's stream clock, which nota reads through the session clock instead.
+cpal::traits::StreamTrait::now
+jiff::Timestamp::now
+jiff::Zoned::now
+# Only with ratatui's `widget-calendar` feature, off today.
+ratatui_widgets::calendar::CalendarEventStore::today
+# Opening a database file creates it. nota-store opens the library; tests that
+# build a database by hand say so with #[expect].
+rusqlite::Connection::open
+rusqlite::Connection::open_with_flags
+rusqlite::Connection::open_with_flags_and_vfs
+rusqlite::Connection::backup
+rusqlite::Connection::restore
+rustix::time::clock_gettime
+rustix::time::clock_gettime_dynamic
+rustix::thread::nanosleep
+rustix::thread::clock_nanosleep_relative
+rustix::thread::clock_nanosleep_absolute
+rustix::fs::open
+rustix::fs::openat
+rustix::fs::openat2
+rustix::fs::mkdir
+rustix::fs::mkdirat
+rustix::fs::rename
+rustix::fs::renameat
+rustix::fs::renameat_with
+rustix::fs::unlink
+rustix::fs::unlinkat
+rustix::fs::rmdir
+rustix::fs::link
+rustix::fs::linkat
+rustix::fs::symlink
+rustix::fs::symlinkat
+rustix::fs::ftruncate
+rustix::fs::fallocate
+rustix::fs::copy_file_range
+rustix::fs::chmod
+rustix::fs::chmodat
+rustix::fs::fchmod
+rustix::fs::utimensat
+rustix::fs::futimens
+rustix::fs::chown
+rustix::fs::fchown
+rustix::fs::chownat
+rustix::fs::ioctl_ficlone
+rustix::fs::fclonefileat
+rustix::fs::ioctl_setflags
+rustix::fs::mknodat
+rustix::fs::mkfifoat
+rustix::fs::setxattr
+rustix::fs::fsetxattr
+rustix::fs::lsetxattr
+rustix::fs::removexattr
+rustix::fs::fremovexattr
+rustix::fs::lremovexattr
+rustix::fs::sendfile
+rustix::pipe::splice
+rustix::pipe::vmsplice
+rustix::pipe::tee
+rustix::io::write
+rustix::io::pwrite
+rustix::io::writev
+rustix::io::pwritev
+rustix::io::pwritev2
+rustix::fs::fsync
+rustix::fs::fdatasync
+rustix::fs::fcntl_fullfsync
+rustix::fs::syncfs
+rustix::fs::sync
+rustix::fs::ext4_ioc_resize_fs
+# WAV writers, for text-to-speech and tests; nota-engine only recognizes.
+sherpa_onnx::write
+sherpa_onnx::Wave::write
+sherpa_onnx::GeneratedAudio::save
+# Deletes the temporary file an image escape names. Only with ratatui's
+# `termwiz` feature, off today.
+termwiz::escape::apc::KittyImageData::load_data
+
+[allow: unsafe functions, and unsafe code is forbidden in nota's crates]
+rustix::mm::msync
+rustix::fs::fcopyfile
+
+[allow: an anonymous file in memory, never on disk]
+rustix::fs::memfd_create
+
+[allow: reads how long a timer has left, not the time; nota has no timerfd]
+rustix::time::timerfd_gettime
+
+[allow: test-only; writes pending snapshots (.snap.new) next to the tests]
+insta
+
+[allow: test-only; writes failing cases to proptest-regressions/ and times cases out on the clock]
+proptest
+
+[allow: SQLite for wasm32 only, which nota doesn't build for; writes browser storage, not files]
+rsqlite-vfs sqlite-wasm-rs
+
+[none: FFI declarations; every function is unsafe, and unsafe code is forbidden in nota's crates]
+jni-sys libc libsqlite3-sys linux-raw-sys windows windows-core
+windows-implement windows-interface windows-link windows-result
+windows-strings
+
+[none: terminal I/O; opens /dev/tty or the console internally, but no function reads the clock or writes files]
+crossterm ratatui ratatui-core ratatui-crossterm ratatui-termina
+ratatui-termwiz termina vtparse wezterm-color-types wezterm-input-types
+
+[none: audio, codecs, hashing, parsing, data types and system lookups; no function reads the clock or writes files]
+afl block-buffer claxon crc32fast crypto-common dasp_sample digest
+directories errno fallible-iterator fallible-streaming-iterator flacenc
+generic-array jiff-core jiff-static jni jni-macros rand rand_core serde_core
+serde_spanned sha2 signal-hook signal-hook-registry thread-priority toml
+toml_datetime typenum unicode-segmentation unicode-width
+
+[indirect: only a dependency of a dependency, and no direct dependency re-exports it]
+adler2 aes aho-corasick allocator-api2 alsa alsa-sys annotate-snippets
+anstyle anyhow approx arbitrary atomic audio_thread_priority autocfg base64
+bindgen bitflags bit-set bit-vec block2 built bumpalo by_address bytemuck
+byteorder bytes bzip2 bzip2-sys castaway cc cexpr cfg_aliases cfg-expr
+cfg-if cipher clang-sys combine compact_str constant_time_eq convert_case
+cookie-factory coreaudio-rs cpufeatures crc crc-catalog crossbeam-utils
+crossterm_winapi csscolorparser darling darling_core darling_macro dbus
+deflate64 defmt defmt-macros defmt-parser deltae deranged derive_arbitrary
+derive_more derive_more-impl dirs-sys dispatch2 displaydoc document-features
+either equivalent euclid fancy-regex fastrand filedescriptor filetime
+find-msvc-tools finl_unicode fixedbitset flate2 fnv foldhash form_urlencoded
+futures-core futures-task futures-util getrandom glob hash32 hashbrown
+hashlink heapless heck hex hmac home icu_collections icu_locale_core
+icu_normalizer icu_normalizer_data icu_properties icu_properties_data
+icu_provider ident_case idna idna_adapter indexmap indoc inout instability
+itertools itoa jni-sys-macros jobserver js-sys kasuari lab lazy_static
+libdbus-sys libloading libm libredox libspa libspa-sys line-clipping
+litemap litrs lock_api log lru lzma-rs lzma-sys mac_address mach2 md-5
+memchr memmem memoffset minimal-lexical miniz_oxide mio ndk ndk-context
+ndk-sys nix nom num-conv num-derive num_enum num_enum_derive num_threads
+num-traits objc2 objc2-audio-toolbox objc2-avf-audio objc2-core-audio
+objc2-core-audio-types objc2-core-foundation objc2-encode objc2-foundation
+once_cell option-ext ordered-float palette palette_derive palette_math
+parking_lot parking_lot_core pbkdf2 percent-encoding pest pest_derive
+pest_generator pest_meta phf phf_codegen phf_generator phf_macros phf_shared
+pin-project-lite pipewire pipewire-sys pkg-config portable-atomic
+portable-atomic-util potential_utf powerfmt ppv-lite86 proc-macro2
+proc-macro-crate quote rand_chacha rand_xorshift redox_syscall redox_users
+r-efi regex regex-automata regex-syntax ring rustc-hash rustc_version
+rustls rustls-pki-types rustls-webpki rustversion ryu same-file scopeguard
+semver seq-macro serde serde_derive serde_json sha1 sherpa-onnx-sys shlex
+signal-hook-mio simd-adler32 simd_cesu8 simdutf8 similar siphasher slab
+smallvec stable_deref_trait static_assertions strsim strum strum_macros
+subtle syn synstructure system-deps tar target-lexicon tempfile terminfo
+termios thiserror thiserror-impl time time-core tinystr toml_edit
+toml_parser toml_writer ucd-trie unarray unicode-ident unicode-truncate
+untrusted ureq url utf8_iter utf8parse uuid vcpkg version_check
+version-compare walkdir wasi wasip2 wasm-bindgen wasm-bindgen-macro
+wasm-bindgen-macro-support wasm-bindgen-shared webpki-roots web-sys
+wezterm-bidi wezterm-blob-leases wezterm-dynamic wezterm-dynamic-derive
+winapi winapi-i686-pc-windows-gnu winapi-util winapi-x86_64-pc-windows-gnu
+windows_aarch64_gnullvm windows_aarch64_msvc windows-collections
+windows-future windows_i686_gnu windows_i686_gnullvm windows_i686_msvc
+windows-numerics windows-sys windows-targets windows-threading
+windows_x86_64_gnu windows_x86_64_gnullvm windows_x86_64_msvc
+winnow wit-bindgen writeable xattr xdg xz2 yoke yoke-derive zerocopy
+zerocopy-derive zerofrom zerofrom-derive zeroize zeroize_derive zerotrie
+zerovec zerovec-derive zip zlib-rs zmij zopfli zstd zstd-safe zstd-sys

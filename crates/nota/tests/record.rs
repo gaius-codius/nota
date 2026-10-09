@@ -802,6 +802,10 @@ fn marks_and_notes_stored_before_a_kill_survive_it_and_salvage() {
 /// nothing that records. The recording carries on, and once the lock goes,
 /// what was made meanwhile is saved and every sample is published.
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test scaffolding: holds the library's lock"
+)]
 fn a_library_locked_mid_session_costs_nothing_once_it_is_back() {
     let tmp = TestDir::new("locked-library");
     let mut nota = recording(&tmp.0);

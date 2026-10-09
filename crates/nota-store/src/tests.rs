@@ -445,6 +445,7 @@ fn error_display_is_specific() {
 
 /// A connection straight to the file, for tests that set a database up by
 /// hand.
+#[expect(clippy::disallowed_methods, reason = "test scaffolding")]
 pub(crate) fn raw(path: &Path) -> Connection {
     Connection::open(path).unwrap()
 }

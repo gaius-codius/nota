@@ -17,6 +17,10 @@ disallowed-methods = [
   # jiff reads the calendar's time too; nota reads it only through nota-core's `wall_now`.
   { path = "jiff::Timestamp::now", reason = "read the calendar's time through wall_now in nota-core's clock module", allow-invalid = true },
   { path = "jiff::Zoned::now", reason = "read the calendar's time through wall_now in nota-core's clock module", allow-invalid = true },
+  # cpal's stream clock; the session clock is the one time base.
+  { path = "cpal::traits::StreamTrait::now", reason = "read time through the session clock in nota-core, so timing code can be tested with a fake clock", allow-invalid = true },
+  # Only with ratatui's `widget-calendar` feature.
+  { path = "ratatui_widgets::calendar::CalendarEventStore::today", reason = "read the calendar's time through wall_now in nota-core's clock module", allow-invalid = true },
   { path = "std::thread::sleep", reason = "sleeping hides races and makes tests slow and flaky; wait on a channel or the clock instead" },
   # rustix's sleeps (its `thread` feature, off in the tree today).
   { path = "rustix::thread::nanosleep", reason = "sleeping hides races and makes tests slow and flaky; wait on a channel or the clock instead", allow-invalid = true },
@@ -45,6 +49,18 @@ disallowed-methods = [
   { path = "std::fs::File::set_permissions", reason = "recordings and the database go through the durable-write layer; anything else needs #[expect] with a reason" },
   { path = "std::fs::File::set_times", reason = "recordings and the database go through the durable-write layer; anything else needs #[expect] with a reason" },
   { path = "std::fs::File::set_modified", reason = "recordings and the database go through the durable-write layer; anything else needs #[expect] with a reason" },
+  # Opening a database file creates it.
+  { path = "rusqlite::Connection::open", reason = "the library database is opened by nota-store; anything else needs #[expect] with a reason", allow-invalid = true },
+  { path = "rusqlite::Connection::open_with_flags", reason = "the library database is opened by nota-store; anything else needs #[expect] with a reason", allow-invalid = true },
+  { path = "rusqlite::Connection::open_with_flags_and_vfs", reason = "the library database is opened by nota-store; anything else needs #[expect] with a reason", allow-invalid = true },
+  { path = "rusqlite::Connection::backup", reason = "the library database is opened by nota-store; anything else needs #[expect] with a reason", allow-invalid = true },
+  { path = "rusqlite::Connection::restore", reason = "the library database is opened by nota-store; anything else needs #[expect] with a reason", allow-invalid = true },
+  # sherpa-onnx's WAV writers.
+  { path = "sherpa_onnx::write", reason = "recordings and the database go through the durable-write layer; anything else needs #[expect] with a reason", allow-invalid = true },
+  { path = "sherpa_onnx::Wave::write", reason = "recordings and the database go through the durable-write layer; anything else needs #[expect] with a reason", allow-invalid = true },
+  { path = "sherpa_onnx::GeneratedAudio::save", reason = "recordings and the database go through the durable-write layer; anything else needs #[expect] with a reason", allow-invalid = true },
+  # Deletes the temporary file an image escape names (ratatui's `termwiz` feature).
+  { path = "termwiz::escape::apc::KittyImageData::load_data", reason = "recordings and the database go through the durable-write layer; anything else needs #[expect] with a reason", allow-invalid = true },
   # rustix's file functions (its `fs` feature, which libspa and pipewire
   # enable) reach the same system calls without std.
   { path = "rustix::fs::open", reason = "recordings and the database go through the durable-write layer; anything else needs #[expect] with a reason", allow-invalid = true },
@@ -81,6 +97,7 @@ disallowed-methods = [
   { path = "rustix::fs::chownat", reason = "recordings and the database go through the durable-write layer; anything else needs #[expect] with a reason", allow-invalid = true },
   { path = "rustix::fs::ioctl_ficlone", reason = "recordings and the database go through the durable-write layer; anything else needs #[expect] with a reason", allow-invalid = true },
   { path = "rustix::fs::fclonefileat", reason = "recordings and the database go through the durable-write layer; anything else needs #[expect] with a reason", allow-invalid = true },
+  { path = "rustix::fs::ext4_ioc_resize_fs", reason = "recordings and the database go through the durable-write layer; anything else needs #[expect] with a reason", allow-invalid = true },
   { path = "rustix::fs::ioctl_setflags", reason = "recordings and the database go through the durable-write layer; anything else needs #[expect] with a reason", allow-invalid = true },
   { path = "rustix::fs::mknodat", reason = "recordings and the database go through the durable-write layer; anything else needs #[expect] with a reason", allow-invalid = true },
   { path = "rustix::fs::mkfifoat", reason = "recordings and the database go through the durable-write layer; anything else needs #[expect] with a reason", allow-invalid = true },

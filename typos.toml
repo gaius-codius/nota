@@ -11,3 +11,7 @@ extend-exclude = [
 # needs them, with a comment saying why.
 [default.extend-words]
 caf = "caf"  # Core Audio Format, in scripts/check-files.sh
+# Crate names, in clippy.toml and clippy-crates.txt.
+flate = "flate"
+ratatui = "ratatui"
+writeable = "writeable"

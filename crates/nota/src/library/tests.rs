@@ -451,6 +451,7 @@ fn a_resumed_session_records_without_the_database_and_publishes_once_it_is_back(
 
 /// Makes the per-session store an M1b recording kept, at `path`, holding
 /// `rows`.
+#[expect(clippy::disallowed_methods, reason = "test scaffolding")]
 fn per_session_store(path: &Path, rows: &[SegmentRow]) {
     let conn = rusqlite::Connection::open(path).unwrap();
     let mode: String = conn
