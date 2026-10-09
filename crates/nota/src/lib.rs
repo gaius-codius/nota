@@ -6,7 +6,8 @@
 //!   as two tracks, with live text on the Recording screen (see `record`
 //!   for how it stops safely);
 //! - `nota engine asr`: the speech engine child, which `nota record`
-//!   starts and talks to over stdin and stdout.
+//!   starts and talks to over stdin and stdout, and the app starts for the
+//!   final pass after each recording (see `jobs` and `final_pass`).
 //!
 //! The binary's `main` only calls [`main`]; the code is here so its tests
 //! can turn on the `fake-capture` feature.
@@ -22,6 +23,10 @@ use nota_engine::chunker::ChunkerConfig;
 use nota_engine::sherpa::ModelPaths;
 
 mod app;
+#[cfg(feature = "fake-capture")]
+mod fake_engine;
+mod final_pass;
+mod jobs;
 mod latency;
 mod library;
 mod live;
@@ -45,6 +50,10 @@ enum Command {
     App(RecordArgs),
     Record(RecordArgs),
     EngineAsr(ModelPaths, ChunkerConfig),
+    /// `nota engine fake`: the engine child with stand-in models (tests
+    /// only).
+    #[cfg(feature = "fake-capture")]
+    EngineFake(ChunkerConfig),
 }
 
 /// Runs the command in `args` (without the program name).
@@ -71,6 +80,11 @@ pub fn main(args: &[OsString]) -> ExitCode {
         Command::EngineAsr(paths, chunking) => match nota_engine::run_asr(&paths, chunking) {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => fail(&format!("nota engine asr: {err}"), 1),
+        },
+        #[cfg(feature = "fake-capture")]
+        Command::EngineFake(chunking) => match fake_engine::run(chunking) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => fail(&format!("nota engine fake: {err}"), 1),
         },
         Command::Record(args) => match record::record(&args) {
             Ok(outcome) => {
@@ -113,6 +127,10 @@ fn parse(args: &[OsString]) -> Result<Command, String> {
             parse_engine(words.as_slice())
                 .map(|(paths, chunking)| Command::EngineAsr(paths, chunking))
         }
+        #[cfg(feature = "fake-capture")]
+        Some("engine") if args.get(1).and_then(|a| a.to_str()) == Some("fake") => {
+            parse_pass(args.get(2..).unwrap_or_default()).map(Command::EngineFake)
+        }
         Some("record") => parse_record(words.as_slice()).map(Command::Record),
         // No command, or options only: Home.
         None => parse_app(args).map(Command::App),
@@ -151,13 +169,7 @@ fn parse_engine(args: &[OsString]) -> Result<(ModelPaths, ChunkerConfig), String
                     .filter(|&n| n > 0)
                     .ok_or("--threads takes a positive number")?;
             }
-            "--pass" => {
-                chunking = match value.to_str() {
-                    Some("live") => ChunkerConfig::live(SampleRate::SPEECH),
-                    Some("final") => ChunkerConfig::final_pass(SampleRate::SPEECH),
-                    _ => return Err("--pass takes live or final".into()),
-                };
-            }
+            "--pass" => chunking = pass(value)?,
             _ => return Err(format!("unknown option {flag}")),
         }
     }
@@ -167,6 +179,28 @@ fn parse_engine(args: &[OsString]) -> Result<(ModelPaths, ChunkerConfig), String
         threads,
     };
     Ok((paths, chunking))
+}
+
+/// `--pass`'s value: how the engine cuts the audio.
+fn pass(value: &OsString) -> Result<ChunkerConfig, String> {
+    match value.to_str() {
+        Some("live") => Ok(ChunkerConfig::live(SampleRate::SPEECH)),
+        Some("final") => Ok(ChunkerConfig::final_pass(SampleRate::SPEECH)),
+        _ => Err("--pass takes live or final".into()),
+    }
+}
+
+/// `engine fake`'s only option, `--pass`.
+#[cfg(feature = "fake-capture")]
+fn parse_pass(args: &[OsString]) -> Result<ChunkerConfig, String> {
+    let mut chunking = ChunkerConfig::live(SampleRate::SPEECH);
+    for (flag, value) in pairs(args)? {
+        match flag {
+            "--pass" => chunking = pass(value)?,
+            _ => return Err(format!("unknown option {flag}")),
+        }
+    }
+    Ok(chunking)
 }
 
 /// Home's options: where the library is, and the engine's models. The
@@ -191,9 +225,9 @@ fn parse_record(args: &[OsString]) -> Result<RecordArgs, String> {
     };
     // Only the test and measurement builds take the options that set these.
     #[cfg(feature = "fake-capture")]
-    let mut tone = false;
+    let (mut tone, mut fake_engine) = (false, false);
     #[cfg(not(feature = "fake-capture"))]
-    let tone = false;
+    let (tone, fake_engine) = (false, false);
     #[cfg(feature = "latency-log")]
     let mut latency_log = None;
     #[cfg(not(feature = "latency-log"))]
@@ -215,6 +249,8 @@ fn parse_record(args: &[OsString]) -> Result<RecordArgs, String> {
             "--system" => setup.system = Input::Device(text()?),
             #[cfg(feature = "fake-capture")]
             "--tone" => tone = text()? == "yes",
+            #[cfg(feature = "fake-capture")]
+            "--fake-engine" => fake_engine = text()? == "yes",
             #[cfg(feature = "latency-log")]
             "--latency-log" => latency_log = Some(PathBuf::from(value)),
             _ => return Err(format!("unknown option {flag}")),
@@ -241,6 +277,7 @@ fn parse_record(args: &[OsString]) -> Result<RecordArgs, String> {
         models,
         tone,
         latency_log,
+        fake_engine,
     })
 }
 

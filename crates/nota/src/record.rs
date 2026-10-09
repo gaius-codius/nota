@@ -45,7 +45,9 @@
 //! (a last fsync of every journal), the publisher publishes the last
 //! journals while the engine is shut down (its answer to the last flush
 //! is still saved), and the saver stores what it was given before the
-//! session is marked stopped. Further signals are ignored
+//! session is marked stopped and the jobs that follow a stop (the final
+//! pass) are queued; after a full disk they wait for space. The app runs
+//! them (see `jobs`). Further signals are ignored
 //! meanwhile: the default action would kill the process before the last
 //! segments are published. (The app listens for them too, for its whole
 //! life, and closes once the recording has stopped.) Anything left
@@ -88,7 +90,9 @@ use std::sync::Arc;
 use nota_core::recorder::{Command, Setup};
 use nota_core::{Clock, SampleRate, SystemClock, TrackId};
 use nota_recorder::capture::CaptureBackend;
+use nota_recorder::engine::EngineCommand;
 use nota_recorder::segment::SegmentLength;
+use nota_store::HeardBy;
 
 mod live;
 mod save;
@@ -102,6 +106,7 @@ pub(crate) use start::last_setup;
 pub(crate) use summary::Outcome;
 use summary::show;
 
+use crate::final_pass::Engine;
 use crate::library::Library;
 use crate::terminal::Screen;
 
@@ -130,6 +135,53 @@ pub(crate) struct RecordArgs {
     /// Log when each text reached the screen to this file
     /// (`--latency-log`, built only with the `latency-log` feature).
     pub(crate) latency_log: Option<PathBuf>,
+    /// Run the final pass with nota's stand-in engine, `nota engine fake`
+    /// (`--fake-engine yes`, tests only).
+    pub(crate) fake_engine: bool,
+}
+
+/// The engine the final pass runs: the stand-in if asked for, else the
+/// real one if there are models; `None` without either.
+///
+/// # Errors
+///
+/// If nota's own executable can't be found.
+pub(crate) fn final_engine(args: &RecordArgs) -> std::io::Result<Option<Engine>> {
+    let program = std::env::current_exe()?;
+    if args.fake_engine {
+        return Ok(Some(Engine {
+            command: EngineCommand {
+                program,
+                args: ["engine", "fake", "--pass", "final"]
+                    .map(Into::into)
+                    .to_vec(),
+            },
+            heard_by: HeardBy {
+                engine: "fake".to_owned(),
+                model: "fake".to_owned(),
+            },
+        }));
+    }
+    let Some(models) = &args.models else {
+        return Ok(None);
+    };
+    let (engine, model) = start::heard_by(models);
+    Ok(Some(Engine {
+        command: EngineCommand {
+            program,
+            args: vec![
+                "engine".into(),
+                "asr".into(),
+                "--parakeet".into(),
+                models.0.as_os_str().to_owned(),
+                "--vad".into(),
+                models.1.as_os_str().to_owned(),
+                "--pass".into(),
+                "final".into(),
+            ],
+        },
+        heard_by: HeardBy { engine, model },
+    }))
 }
 
 /// Records a session until it's stopped, then finishes it.
@@ -274,6 +326,7 @@ mod tests {
                 models: None,
                 tone: false,
                 latency_log: None,
+                fake_engine: false,
             };
             let err = record(&args).unwrap_err();
             assert!(err.to_string().contains("start command"), "{err}");

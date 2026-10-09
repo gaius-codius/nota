@@ -11,7 +11,9 @@
 //! records with the last session's settings, and stopping returns to Home.
 //!
 //! At start, sessions an earlier run left are salvaged, as `nota record`
-//! does. What each recording's stop reports, and anything that went wrong,
+//! does. While Home is open, the jobs queued after each stop (the final
+//! pass) run in the background, never while a recording is going, here or
+//! in another nota (see `jobs`). What each recording's stop reports, and anything that went wrong,
 //! is said on stderr once nota closes, as `nota record` says it.
 //!
 //! SIGHUP, SIGTERM and SIGINT close nota wherever it is: Home closes at
@@ -20,8 +22,9 @@
 //! ([`QuitSignals`]).
 
 use std::io;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use jiff::Timestamp;
@@ -31,14 +34,20 @@ use nota_core::recorder::{Command, Input, Setup};
 use nota_core::{Clock, SessionId, SessionTime, SystemClock, WallTime, wall_now};
 use nota_tui::{Action, Home, InputThread, RunError, Session, Status, Theme};
 
+use crate::final_pass::Jobs;
+use crate::jobs::{Capture, FreeSpace, Runner};
 use crate::library::{Library, Listed, Needs, Salvaged};
 use crate::record::{
-    BoxError, Lent, QuitSignals, RATE, RecordArgs, last_setup, record_in, segment_length,
+    BoxError, Lent, QuitSignals, RATE, RecordArgs, final_engine, last_setup, record_in,
+    segment_length,
 };
 use crate::terminal::Screen;
 
 /// What Home shows while a recording stops.
 const STOPPING: &str = "finishing the recording";
+
+/// How often the runner looks for a recording in another nota, at most.
+const ELSEWHERE: Duration = Duration::from_secs(2);
 
 /// How often Home lists the sessions again while it's open, so a status
 /// another nota changes (a recording stopping, a salvage finishing) shows.
@@ -75,6 +84,10 @@ fn run_app(args: &RecordArgs, said: &mut Vec<String>) -> Result<(), BoxError> {
         Arc::new(SystemClock::start().map_err(|_| "the system clock can't be read")?);
     let theme = Theme::load();
     let engines = engines(args);
+    // Set while this nota records: no job runs then.
+    let here = Arc::new(AtomicBool::new(false));
+    let (runner, mut notice) = start_jobs(args, &library, &clock, &here);
+    let jobs = Background { runner, here };
     let mut listing = Listing {
         library: &library,
         salvaged: &salvaged,
@@ -85,7 +98,6 @@ fn run_app(args: &RecordArgs, said: &mut Vec<String>) -> Result<(), BoxError> {
         said: None,
     };
     let mut screen: Option<Screen> = None;
-    let mut notice = None;
     while !quit.asked() {
         let mut current = match screen.take() {
             Some(screen) => screen,
@@ -97,13 +109,83 @@ fn run_app(args: &RecordArgs, said: &mut Vec<String>) -> Result<(), BoxError> {
             Action::Quit => return Ok(()),
             Action::Record => {}
         }
-        match record_from(args, &library, current, &mut home, said) {
+        match record_from(args, &library, current, &mut home, said, &jobs) {
             Recorded::Back(back) => screen = Some(back),
             Recorded::Failed(e) => notice = Some(format!("the recording failed: {e}")),
             Recorded::TerminalGone => return Ok(()),
         }
     }
     Ok(())
+}
+
+/// The jobs that run after each stop, and whether this nota is recording.
+struct Background {
+    /// `None` if they can't run, or another nota runs them.
+    runner: Option<Runner>,
+    here: Arc<AtomicBool>,
+}
+
+/// Starts the job runner, or says why it couldn't be.
+fn start_jobs(
+    args: &RecordArgs,
+    library: &Library,
+    clock: &Arc<dyn Clock>,
+    here: &Arc<AtomicBool>,
+) -> (Option<Runner>, Option<String>) {
+    let cant = |e: io::Error| format!("the work after a recording can't run: {e}");
+    let engine = match final_engine(args) {
+        Ok(engine) => engine,
+        Err(e) => return (None, Some(cant(e))),
+    };
+    let capture = Recordings {
+        library: library.clone(),
+        here: Arc::clone(here),
+        clock: Arc::clone(clock),
+        elsewhere: Mutex::new(None),
+    };
+    match Runner::spawn(
+        &args.data,
+        library.db().clone(),
+        Jobs::new(library.clone(), engine, Arc::clone(clock)),
+        capture,
+        FreeSpace(args.data.clone()),
+    ) {
+        Ok(runner) => (runner, None),
+        Err(e) => (None, Some(cant(e))),
+    }
+}
+
+/// Whether a recording is going: this nota's, known at once, or another
+/// nota's, found by its locked session ([`Library::recording`]) at most
+/// every [`ELSEWHERE`].
+struct Recordings {
+    library: Library,
+    here: Arc<AtomicBool>,
+    clock: Arc<dyn Clock>,
+    /// When another nota was last looked for, and whether one was
+    /// recording.
+    elsewhere: Mutex<Option<(SessionTime, bool)>>,
+}
+
+impl Capture for Recordings {
+    fn recording(&self) -> bool {
+        if self.here.load(Ordering::SeqCst) {
+            return true;
+        }
+        let now = self.clock.now();
+        let mut seen = self
+            .elsewhere
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some((at, was)) = *seen
+            && now.checked_duration_since(at).unwrap_or_default() < ELSEWHERE
+        {
+            return was;
+        }
+        let is = self.library.recording();
+        *seen = Some((now, is));
+        is
+    }
 }
 
 /// How a recording from Home went, for what comes next.
@@ -118,13 +200,16 @@ enum Recorded {
 }
 
 /// Records with the last session's settings on the app's terminal, `home`
-/// showing while it stops, and adds what it reported to `said`.
+/// showing while it stops, and adds what it reported to `said`. No job
+/// runs meanwhile; once it has stopped, its own are queued and the runner
+/// is woken for them.
 fn record_from(
     args: &RecordArgs,
     library: &Library,
     screen: Screen,
     home: &mut Home,
     said: &mut Vec<String>,
+    jobs: &Background,
 ) -> Recorded {
     let mut record = args.clone();
     record.start = Command::Start(last_setup(library).unwrap_or_else(first_setup));
@@ -139,7 +224,18 @@ fn record_from(
         library: library.clone(),
         stopping: &mut stopping,
     };
-    match record_in(&record, Some(lent)) {
+    jobs.here.store(true, Ordering::SeqCst);
+    // A job running now stops within a moment; the recording doesn't wait
+    // for it.
+    if let Some(runner) = &jobs.runner {
+        runner.wake();
+    }
+    let recorded = record_in(&record, Some(lent));
+    jobs.here.store(false, Ordering::SeqCst);
+    if let Some(runner) = &jobs.runner {
+        runner.wake();
+    }
+    match recorded {
         Ok((outcome, back)) => {
             said.push(format!(
                 "nota: recorded to {} ({} segments)",

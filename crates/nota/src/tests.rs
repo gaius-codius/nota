@@ -11,21 +11,23 @@ fn engine(list: &[&str]) -> Result<ModelPaths, String> {
 fn engine_cutting(list: &[&str]) -> Result<(ModelPaths, ChunkerConfig), String> {
     match parse(&args(list))? {
         Command::EngineAsr(paths, chunking) => Ok((paths, chunking)),
-        Command::Record(_) | Command::App(_) => Err("record".into()),
+        Command::Record(_) | Command::App(_) | Command::EngineFake(_) => Err("record".into()),
     }
 }
 
 fn record(list: &[&str]) -> Result<RecordArgs, String> {
     match parse(&args(list))? {
         Command::Record(args) => Ok(args),
-        Command::EngineAsr(..) | Command::App(_) => Err("engine".into()),
+        Command::EngineAsr(..) | Command::App(_) | Command::EngineFake(_) => Err("engine".into()),
     }
 }
 
 fn app(list: &[&str]) -> Result<RecordArgs, String> {
     match parse(&args(list))? {
         Command::App(args) => Ok(args),
-        Command::EngineAsr(..) | Command::Record(_) => Err("not the app".into()),
+        Command::EngineAsr(..) | Command::Record(_) | Command::EngineFake(_) => {
+            Err("not the app".into())
+        }
     }
 }
 
@@ -59,6 +61,29 @@ fn the_engine_cuts_for_the_live_pass_unless_told_the_final_one() {
     assert_eq!(cut(&["--pass", "live"]), Ok(live));
     assert_eq!(cut(&["--pass", "final"]), Ok(final_pass));
     assert!(cut(&["--pass", "fast"]).is_err());
+    let fake = |list: &[&str]| match parse(&args(list)) {
+        Ok(Command::EngineFake(chunking)) => Ok(chunking),
+        Ok(_) => Err("not the fake".to_owned()),
+        Err(e) => Err(e),
+    };
+    assert_eq!(fake(&["engine", "fake"]), Ok(live));
+    assert_eq!(fake(&["engine", "fake", "--pass", "final"]), Ok(final_pass));
+    assert!(fake(&["engine", "fake", "--threads", "2"]).is_err());
+}
+
+#[test]
+fn the_fake_engine_runs_only_when_asked() {
+    assert!(!record(&["record", "--data", "/d"]).unwrap().fake_engine);
+    assert!(
+        record(&["record", "--data", "/d", "--fake-engine", "yes"])
+            .unwrap()
+            .fake_engine
+    );
+    assert!(
+        app(&["--data", "/d", "--fake-engine", "yes"])
+            .unwrap()
+            .fake_engine
+    );
 }
 
 #[test]

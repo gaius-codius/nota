@@ -2,7 +2,7 @@
 
 use nota_recorder::capture::CaptureBackend;
 use nota_recorder::disk::{DiskSummary, Freed, MonitorPanicked};
-use nota_store::{SessionState, StoreError};
+use nota_store::{StoreError, Wait};
 
 use super::BoxError;
 use super::live::LiveInput;
@@ -69,15 +69,18 @@ pub(super) fn stop<B: CaptureBackend>(
         outcome.notes.push(format!("finishing the recording: {e}"));
     }
     // The disk's notes even if publishing went wrong.
-    note_disk(&mut outcome, disk.stop(), full_while_recording);
+    let disk = disk.stop();
+    // The session's jobs wait for space if the disk filled at any point.
+    let full = full_while_recording || disk.as_ref().is_ok_and(|d| d.full.is_some());
+    note_disk(&mut outcome, disk, full_while_recording);
     // Everything the live thread and the screen gave is stored, or given
-    // up on, before the session is marked stopped (and before a failed
-    // publisher returns early).
+    // up on, before the session is marked stopped and its jobs queued (and
+    // before a failed publisher returns early).
     let saved = saver.finish();
     note_published(&mut outcome, &stopped.published?);
     match library
         .db()
-        .with(|db| db.set_state(session, SessionState::Stopped))
+        .with(|db| db.finish_recording(session, full.then_some(Wait::Space)))
     {
         Ok(()) => {}
         Err(StoreError::NoSession(_)) => outcome.notes.push(
