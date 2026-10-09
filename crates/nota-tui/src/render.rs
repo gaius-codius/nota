@@ -24,6 +24,7 @@ use crate::annotation::Annotation;
 use crate::band::column_of;
 use crate::screen::Recording;
 use crate::text::{display_width, graphemes, wrap};
+use crate::theme::Theme;
 
 /// The smallest screen the layout fits (the spec's "about 60×20").
 pub(crate) const MIN_WIDTH: u16 = 60;
@@ -52,6 +53,11 @@ impl Recording {
             return;
         }
         let buf = frame.buffer_mut();
+        // The wax panel, inside the frame.
+        buf.set_style(
+            Rect::new(area.x + 1, area.y + 1, area.width - 2, area.height - 2),
+            self.theme.panel,
+        );
         self.draw_top(area, buf);
         // Inside the frame, with a column of padding on each side.
         let inner = Rect::new(area.x + 2, area.y + 1, area.width - 4, area.height - 2);
@@ -75,8 +81,8 @@ impl Recording {
     fn draw_too_small(&self, area: Rect, buf: &mut Buffer) {
         // The stop question shows here too, so a stop is never confirmed
         // unseen.
-        let lines = if self.is_confirming_stop() {
-            [
+        if self.is_confirming_stop() {
+            let lines = [
                 Line::styled("stop recording?", self.theme.text_bright),
                 Line::from(vec![
                     Span::styled("y", self.theme.text),
@@ -84,20 +90,10 @@ impl Recording {
                     Span::styled("n", self.theme.text),
                     Span::styled(" keep recording", self.theme.text_hint),
                 ]),
-            ]
+            ];
+            centred(area, lines, buf);
         } else {
-            [
-                Line::styled("make the window larger", self.theme.text),
-                Line::styled(
-                    format!("nota needs {MIN_WIDTH}×{MIN_HEIGHT}"),
-                    self.theme.text_hint,
-                ),
-            ]
-        };
-        let top = area.y + area.height.saturating_sub(2) / 2;
-        for (row, line) in (top..area.bottom()).zip(lines) {
-            let x = area.x + area.width.saturating_sub(width_u16(&line)) / 2;
-            buf.set_line(x, row, &line, area.right().saturating_sub(x));
+            too_small(area, &self.theme, buf);
         }
     }
 
@@ -300,9 +296,30 @@ impl Recording {
     }
 }
 
+/// The "make the window larger" message, centred in `area`.
+pub(crate) fn too_small(area: Rect, theme: &Theme, buf: &mut Buffer) {
+    let lines = [
+        Line::styled("make the window larger", theme.text),
+        Line::styled(
+            format!("nota needs {MIN_WIDTH}×{MIN_HEIGHT}"),
+            theme.text_hint,
+        ),
+    ];
+    centred(area, lines, buf);
+}
+
+/// Two lines, each centred, in the middle rows of `area`.
+fn centred(area: Rect, lines: [Line<'_>; 2], buf: &mut Buffer) {
+    let top = area.y + area.height.saturating_sub(2) / 2;
+    for (row, line) in (top..area.bottom()).zip(lines) {
+        let x = area.x + area.width.saturating_sub(width_u16(&line)) / 2;
+        buf.set_line(x, row, &line, area.right().saturating_sub(x));
+    }
+}
+
 /// Which side of a frame row keeps its content when both don't fit.
 #[derive(Debug, Clone, Copy)]
-enum Keep {
+pub(crate) enum Keep {
     /// The top row: its right side is the state, which carries warnings.
     Right,
     /// The bottom row: its left side is the keys or the note being typed;
@@ -313,7 +330,7 @@ enum Keep {
 /// Draws a frame's top or bottom row, `╭─ left ───── right ─╮`, across the
 /// width of `row`. If both sides don't fit, the side not kept is cut short
 /// with `…`, down to nothing.
-fn frame_row(
+pub(crate) fn frame_row(
     row: Rect,
     (left_corner, right_corner): (char, char),
     left: Vec<Span<'_>>,
@@ -350,13 +367,13 @@ fn frame_row(
 }
 
 /// The columns `spans` take when drawn.
-fn spans_width(spans: &[Span<'_>]) -> usize {
+pub(crate) fn spans_width(spans: &[Span<'_>]) -> usize {
     spans.iter().map(|span| display_width(&span.content)).sum()
 }
 
 /// The spans cut to at most `room` columns, ending in `…` if anything was
 /// cut. Cuts fall between grapheme clusters.
-fn truncate(spans: Vec<Span<'_>>, room: usize) -> Vec<Span<'_>> {
+pub(crate) fn truncate(spans: Vec<Span<'_>>, room: usize) -> Vec<Span<'_>> {
     if spans_width(&spans) <= room {
         return spans;
     }

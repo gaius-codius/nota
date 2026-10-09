@@ -7,7 +7,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
 use nota_core::recorder::{self, Cause, Input, Setup, Warning, WarningState};
-use nota_core::{Clock, EpochId, SessionId, TrackId, TrackTimeline};
+use nota_core::{Clock, EpochId, SessionId, TrackId, TrackTimeline, wall_now};
 use nota_recorder::capture::{
     Capture, CaptureBackend, RecordError, RecorderEvent, Source, record_tracks, start_tracks,
 };
@@ -81,6 +81,10 @@ pub(super) type Recorded = (
 /// Starts everything a recording needs, in order: the signals and the
 /// terminal first (without one there's nothing to record into), then the
 /// session, the tracks, the publisher, the live thread and the recorder.
+/// The terminal is `screen` and the library `library` if given (the
+/// app's, already set up and open), else they're set up here. A lent
+/// terminal was set up after the app's own signal listener, so the order
+/// holds for it too.
 ///
 /// # Errors
 ///
@@ -90,26 +94,24 @@ pub(super) fn start<B: CaptureBackend>(
     setup: &Setup,
     backend: &B,
     clock: &Arc<dyn Clock>,
+    screen: Option<Screen>,
+    library: Option<Library>,
 ) -> Result<(Started<B>, Screening), BoxError> {
     let mut outcome = Outcome::default();
     let (ui, ui_events) = mpsc::channel::<Event>();
     let signals = listen_for_signals(ui.clone())?;
     // The terminal first: without one there's nothing to record into.
     let draws = args.latency_log.as_ref().map(|_| DrawEnds::default());
-    let screen = Screen::enter(draws.clone().map(|d| (d, Arc::clone(clock))))?;
+    let screen = match screen {
+        Some(screen) => screen,
+        None => Screen::enter(draws.clone().map(|d| (d, Arc::clone(clock))))?,
+    };
 
-    let library = Library::open(&args.data)?;
+    let library = library.map_or_else(|| Library::open(&args.data), Ok)?;
     note_salvaged(&library, &mut outcome)?;
     let session = library.create()?;
     outcome.session.clone_from(&session.dir);
-    // Every write of the recording, the publisher's too, goes through the
-    // watch: the first to meet a full disk frees the ballast.
-    let watch = DiskWatch::new(StdFs);
-    let lock = SessionDir::new(session.id, watch.fs(), &session.audio()).lock()?;
-    // A track's fsyncs on a thread of its own: neither track's audio waits
-    // for the other's disk.
-    let mut writer = SessionWriter::open(&lock, RATE, segment_length(), Arc::clone(clock))?
-        .with_syncing(Syncing::Threads);
+    let Opened(watch, lock, mut writer) = open_session(session.id, &session.audio(), clock)?;
 
     let sources = sources(setup);
     let (started, events) = start_tracks(backend, &sources, RATE, clock);
@@ -131,13 +133,13 @@ pub(super) fn start<B: CaptureBackend>(
     // opened later doesn't push the first one's audio later.
     let mut timelines = open_timelines(&mut writer, &captures)?;
 
-    // The disk is checked, and a ballast already there held, before the
-    // recorder starts; then while recording. A full disk stops it.
+    // Checked, and a ballast already there held, before the recorder
+    // starts; then while recording. A full disk stops it.
     let disk = watch_disk(args, &session.audio(), captures.len(), &watch, &ui, clock)?;
 
     // The session's row is added by the publisher, before its first
-    // segment's: recording never waits on the database.
-    // SQLite writes the database itself: its commits are watched too.
+    // segment's: recording never waits on the database. SQLite writes the
+    // database itself, so its commits are watched too.
     let rows = session_rows(&library, setup, session.id, &sources, &captures);
     let rows = WatchedStore::new(rows, watch, &library.db_path());
     let publisher = Publisher::spawn(SessionStore::new(lock.clone(), rows), segment_length())?;
@@ -210,6 +212,31 @@ pub(super) fn start<B: CaptureBackend>(
         listening: listening.join(" + "),
     };
     Ok((started, screening))
+}
+
+/// The new session's audio directory, owned through a watched
+/// filesystem, and its writer, with the watch.
+struct Opened(
+    Arc<DiskWatch<StdFs>>,
+    SessionLock<RecordFs>,
+    SessionWriter<RecordFs>,
+);
+
+/// Opens the new session's audio directory through a watched filesystem.
+fn open_session(
+    id: SessionId,
+    audio: &std::path::Path,
+    clock: &Arc<dyn Clock>,
+) -> Result<Opened, BoxError> {
+    // Every write of the recording, the publisher's too, goes through the
+    // watch: the first to meet a full disk frees the ballast.
+    let watch = DiskWatch::new(StdFs);
+    let lock = SessionDir::new(id, watch.fs(), audio).lock()?;
+    // A track's fsyncs on a thread of its own: neither track's audio waits
+    // for the other's disk.
+    let writer = SessionWriter::open(&lock, RATE, segment_length(), Arc::clone(clock))?
+        .with_syncing(Syncing::Threads);
+    Ok(Opened(watch, lock, writer))
 }
 
 /// Starts the disk monitor for a recording of `tracks` tracks into
@@ -340,6 +367,8 @@ fn session_rows<S>(
             id,
             title: Some(setup.title.clone()),
             language: None,
+            // When it started, for its date; read once, here.
+            started_at: wall_now(),
             tracks: sources
                 .iter()
                 .filter(|(track, _)| captures.iter().any(|c| c.track() == *track))
@@ -396,6 +425,38 @@ fn sources(setup: &Setup) -> [(TrackId, Source); 2] {
         (MIC, source(&setup.mic, Source::Microphone)),
         (SYSTEM, source(&setup.system, Source::SystemAudio)),
     ]
+}
+
+/// The setup the last session recorded with: its title, and each track's
+/// source, as [`source_name`] named it in the library. A track it didn't
+/// record (a stream that didn't start) follows the default. `None` if
+/// there's no last session, or the library database can't be read.
+pub(crate) fn last_setup(library: &Library) -> Option<Setup> {
+    let (session, tracks) = library
+        .db()
+        .with(|db| {
+            let Some(last) = db.sessions()?.pop() else {
+                return Ok(None);
+            };
+            let tracks = db.tracks(last.id)?;
+            Ok(Some((last, tracks)))
+        })
+        .ok()??;
+    let input = |kind: TrackKind, default: &str| {
+        let source = tracks
+            .iter()
+            .find(|t| t.kind == kind)
+            .and_then(|t| t.source.as_deref());
+        match source {
+            Some(name) if name != default => Input::Device(name.to_owned()),
+            _ => Input::Default,
+        }
+    };
+    Some(Setup {
+        title: session.title.unwrap_or_else(|| "Recording".to_owned()),
+        mic: input(TrackKind::Microphone, &source_name(&Source::Microphone)),
+        system: input(TrackKind::System, &source_name(&Source::SystemAudio)),
+    })
 }
 
 /// What a track records.

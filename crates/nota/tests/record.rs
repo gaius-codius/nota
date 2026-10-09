@@ -133,11 +133,31 @@ impl Running {
     /// own, as a terminal's job is, so the test can signal the group.
     /// Otherwise it stays in the test's group, so it goes with the test if
     /// the test is killed.
+    fn start_as(data: &Path, extra: &[&str], own_group: bool, env: &[(&str, &str)]) -> Self {
+        let record = ["record", "--tone", "yes", "--title", "Workshop"];
+        Self::start_command(&record, data, extra, own_group, env)
+    }
+
+    /// `nota` with no command: Home, recording a tone when asked to. Its
+    /// home directory is `data`, so the screen draws in the default theme
+    /// whatever the machine's Omarchy theme is.
+    fn start_home(data: &Path) -> Self {
+        let home = data.to_str().unwrap();
+        Self::start_command(&["--tone", "yes"], data, &[], false, &[("HOME", home)])
+    }
+
+    /// Starts nota with `words`, then `--data` and `extra`.
     #[expect(
         clippy::disallowed_methods,
         reason = "opening the pseudo-terminal's other end"
     )]
-    fn start_as(data: &Path, extra: &[&str], own_group: bool, env: &[(&str, &str)]) -> Self {
+    fn start_command(
+        words: &[&str],
+        data: &Path,
+        extra: &[&str],
+        own_group: bool,
+        env: &[(&str, &str)],
+    ) -> Self {
         // Close-on-exec, so nota holds only the slave: closing the test's
         // master is then a real hangup.
         let master =
@@ -163,7 +183,8 @@ impl Running {
         .unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_nota"));
         command
-            .args(["record", "--tone", "yes", "--title", "Workshop", "--data"])
+            .args(words)
+            .arg("--data")
             .arg(data)
             .args(extra)
             .stdin(Stdio::from(slave.try_clone().unwrap()))
@@ -459,6 +480,106 @@ fn stops_on(signal: Signal, name: &str) {
     assert!(status.success(), "{status:?}: {}", nota.output());
     assert!(nota.terminal_restored());
     assert_everything_sent_saved(&nota, &tmp.0, 1, &[0, 1], 1_450);
+}
+
+/// `nota` with no command opens Home. `R` records with the last settings
+/// (a first recording: the default devices, titled "Recording"), stopping
+/// comes back to Home with the new session listed, and `q` closes nota
+/// with the terminal restored and the recording's summary said.
+#[test]
+fn home_records_and_comes_back_after_the_stop() {
+    let tmp = TestDir::new("home");
+    let mut nota = Running::start_home(&tmp.0);
+    assert!(
+        nota.shows_after(0, "nothing recorded yet"),
+        "{}",
+        nota.output()
+    );
+    assert!(nota.shows_after(0, "R last settings"), "{}", nota.output());
+
+    let at = nota.len();
+    nota.press("R");
+    assert!(nota.shows_after(at, "s stop"), "{}", nota.output());
+    pause(Duration::from_millis(1_500));
+    let at = nota.len();
+    nota.press("s");
+    assert!(nota.shows_after(at, "stop recording?"), "{}", nota.output());
+    // Past the guard that takes a quick `y` for typing.
+    pause(Duration::from_millis(700));
+    let at = nota.len();
+    nota.press("y");
+    // One word: a draw skips cells that are blank already, such as the
+    // spaces between words in the default theme.
+    assert!(nota.shows_after(at, "finishing"), "{}", nota.output());
+    assert!(nota.shows_after(at, "✓ ready"), "{}", nota.output());
+    assert!(nota.shows_after(at, "✓ Recording"), "{}", nota.output());
+    assert!(nota.shows_after(at, "⏎ open"), "{}", nota.output());
+    assert!(!nota.terminal_restored());
+
+    // The session is saved and stopped, with the setup's title.
+    let (rows, left) = published(&tmp.0, 1);
+    assert!(!left, "journals left after the stop");
+    assert!(rows.iter().any(|&(track, ..)| track == 0));
+    assert!(rows.iter().any(|&(track, ..)| track == 1));
+    let session = Store::open(&tmp.0.join("library.db"))
+        .unwrap()
+        .session(SessionId::new(1))
+        .unwrap()
+        .unwrap();
+    assert_eq!(session.state, SessionState::Stopped);
+    assert_eq!(session.title.as_deref(), Some("Recording"));
+    // Its start was written with its row: after this code was written.
+    let started = session.started_at.expect("no start time");
+    assert!(started.unix_seconds() > 1_767_225_600, "{started:?}");
+
+    nota.press("q");
+    let status = nota.exits().expect("nota didn't close");
+    assert!(status.success(), "{status:?}");
+    assert!(nota.terminal_restored());
+    assert!(
+        nota.shows_after(0, "nota: recorded to"),
+        "{}",
+        nota.output()
+    );
+}
+
+/// A signal during a recording started from Home stops it in order, and
+/// then closes nota rather than showing Home again: as `nota record` does,
+/// a logout or shutdown ends it.
+#[test]
+fn a_signal_during_a_recording_from_home_closes_nota() {
+    for signal in [Signal::TERM, Signal::INT, Signal::HUP] {
+        let tmp = TestDir::new(&format!("home-signal-{}", signal.as_raw()));
+        let mut nota = Running::start_home(&tmp.0);
+        assert!(nota.shows_after(0, "R last settings"), "{}", nota.output());
+        let at = nota.len();
+        nota.press("R");
+        assert!(nota.shows_after(at, "s stop"), "{}", nota.output());
+        pause(Duration::from_millis(1_500));
+        nota.signal(signal);
+        let status = nota.exits().expect("nota didn't close after the signal");
+        assert!(
+            status.success(),
+            "{signal:?}: {status:?}\n{}",
+            nota.output()
+        );
+        assert!(nota.terminal_restored());
+        let (rows, left) = published(&tmp.0, 1);
+        assert!(!left, "journals left after the stop");
+        assert!(!rows.is_empty());
+    }
+}
+
+/// A signal on Home closes nota, with the terminal restored.
+#[test]
+fn a_signal_on_home_closes_nota() {
+    let tmp = TestDir::new("home-quit");
+    let mut nota = Running::start_home(&tmp.0);
+    assert!(nota.shows_after(0, "R last settings"), "{}", nota.output());
+    nota.signal(Signal::TERM);
+    let status = nota.exits().expect("nota didn't close after the signal");
+    assert!(status.success(), "{status:?}");
+    assert!(nota.terminal_restored());
 }
 
 #[test]

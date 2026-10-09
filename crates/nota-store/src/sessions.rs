@@ -3,7 +3,7 @@
 //! A session's number is its directory's (`sessions/<n>/`), so the
 //! database and the disk name it the same way.
 
-use nota_core::{SessionId, TrackId};
+use nota_core::{SessionId, TrackId, WallTime};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
 use crate::segments::{parse_track, session_exists};
@@ -84,6 +84,8 @@ pub struct NewSession {
     pub title: Option<String>,
     /// The language spoken, as a BCP 47 tag (`en`, `de-CH`), if known.
     pub language: Option<String>,
+    /// When it started, if the calendar's time could be read.
+    pub started_at: Option<WallTime>,
     /// Its tracks, each with a different number.
     pub tracks: Vec<Track>,
 }
@@ -99,21 +101,43 @@ pub struct Session {
     pub language: Option<String>,
     /// Where it is in its life.
     pub state: SessionState,
+    /// When it started, if that's known: not for a session from before
+    /// schema version 3, nor one adopted from disk.
+    pub started_at: Option<WallTime>,
 }
 
-type RawSession = (i64, Option<String>, Option<String>, String);
+type RawSession = (i64, Option<String>, Option<String>, String, Option<i64>);
 
-fn parse_session_row((id, title, language, state): RawSession) -> Result<Session, StoreError> {
+/// The columns [`raw_session`] reads, in order.
+const SESSION_COLUMNS: &str = "id, title, language, state, started_at";
+
+fn parse_session_row(
+    (id, title, language, state, started_at): RawSession,
+) -> Result<Session, StoreError> {
+    let started_at = started_at
+        .map(|seconds| {
+            WallTime::from_unix_seconds(seconds).ok_or_else(|| {
+                StoreError::Corrupt(format!("session {id} started before 1970: {seconds}"))
+            })
+        })
+        .transpose()?;
     Ok(Session {
         id: parse_session(id)?,
         title,
         language,
         state: SessionState::parse(&state)?,
+        started_at,
     })
 }
 
 fn raw_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawSession> {
-    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+    ))
 }
 
 /// Adds the session's row, in `state`, inside the caller's transaction.
@@ -122,6 +146,7 @@ pub(crate) fn insert_session(
     id: SessionId,
     title: Option<&str>,
     language: Option<&str>,
+    started_at: Option<WallTime>,
     state: SessionState,
 ) -> Result<(), StoreError> {
     let key = session_key(id)?;
@@ -129,8 +154,15 @@ pub(crate) fn insert_session(
         return Err(StoreError::SessionExists(id));
     }
     conn.execute(
-        "INSERT INTO session (id, title, language, state) VALUES (?1, ?2, ?3, ?4)",
-        params![key, title, language, state.as_str()],
+        "INSERT INTO session (id, title, language, state, started_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            key,
+            title,
+            language,
+            state.as_str(),
+            started_at.map(WallTime::unix_seconds)
+        ],
     )?;
     Ok(())
 }
@@ -154,6 +186,7 @@ impl Store {
             new.id,
             new.title.as_deref(),
             new.language.as_deref(),
+            new.started_at,
             SessionState::Recording,
         )?;
         let key = session_key(new.id)?;
@@ -181,7 +214,7 @@ impl Store {
     pub fn session(&self, id: SessionId) -> Result<Option<Session>, StoreError> {
         self.conn
             .query_row(
-                "SELECT id, title, language, state FROM session WHERE id = ?1",
+                &format!("SELECT {SESSION_COLUMNS} FROM session WHERE id = ?1"),
                 [session_key(id)?],
                 raw_session,
             )
@@ -197,9 +230,9 @@ impl Store {
     /// [`StoreError::Corrupt`] if a row doesn't parse, and
     /// [`StoreError::Sqlite`] for any SQLite failure.
     pub fn sessions(&self) -> Result<Vec<Session>, StoreError> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, title, language, state FROM session ORDER BY id")?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {SESSION_COLUMNS} FROM session ORDER BY id"
+        ))?;
         let raws = stmt
             .query_map([], raw_session)?
             .collect::<Result<Vec<_>, _>>()?;

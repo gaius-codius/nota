@@ -315,7 +315,8 @@ mod tests {
         let dir = TestDir::new("free");
         let fs = StdFs;
         let before = fs.free_space(&dir.0).unwrap();
-        assert!(before > 0);
+        // Any disk the tests run on has a megabyte free.
+        assert!(before > 1 << 20, "{before}");
         assert_eq!(
             fs.free_space(&dir.0.join("missing")).unwrap_err().kind(),
             io::ErrorKind::NotFound

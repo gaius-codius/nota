@@ -6,7 +6,7 @@
 # Not run in CI: it needs FUSE, a LazyFS build and a few minutes. Run it by
 # hand after changing the write path, journal, salvage or the store.
 #
-# It runs three kinds of crash point, numbered in this order:
+# It runs five kinds of crash point, numbered in this order:
 #
 #   ops    after the Nth disk-changing recorder operation. `lazyfs_crash
 #          write --stop-after N` stops dead there and the script SIGKILLs
@@ -20,23 +20,48 @@
 #   torn   a torn write: the Nth write to a journal, a segment's temp file,
 #          `library.db-wal` or `library.db` is split in two, only one half
 #          (the first or the second) reaches the disk, and LazyFS crashes.
+#   reorder  unsynced writes reordered: in the Gth group of writes to a
+#          journal or `library.db-wal` between two of its fsyncs (a WAL
+#          group is one commit's frames), the group's writes up to the Ith
+#          (I >= 2) reach the disk except the one before it, and LazyFS
+#          crashes (LazyFS's `torn-seq`): a later write lands without an
+#          earlier one, after whatever came before that.
+#   salvage  inside salvage: `lazyfs_crash write --no-publish` leaves every
+#          journal unpublished, on the plain disk; on a copy of that, LazyFS
+#          crashes itself (losing everything not fsync'd) after the Nth write
+#          or fsync of a file `lazyfs_crash check` writes while it salvages:
+#          the segments and the store's commits, and the store's opening
+#          before salvage and its checkpoint into `library.db` after. (Clean
+#          journals leave salvage nothing to report, so its findings file
+#          isn't written here.) Journal deletes need no point of their own:
+#          LazyFS writes unlinks through.
 #
 # After each crash, on a fresh mount of what reached the disk:
 #   1. `lazyfs_crash check`: salvage, then the invariants, against the
-#      promises the writer logged outside the mount;
+#      promises the writer logged outside the mount; for a salvage point,
+#      salvage must also end exactly where an uninterrupted salvage of the
+#      same copy did (the same files, byte for byte, and the same rows);
 #   2. clear the cache and `check --recovered`: what salvage did must have
 #      been durable.
 #
 # The ops points are numbered from one uncrashed run on the plain disk; the
-# sqlite and torn points from one uncrashed run on LazyFS with its
-# operation log on, counting each file's writes and fsyncs. The journals
+# sqlite, torn and reorder points from one uncrashed run on LazyFS with its
+# operation log on, counting each file's writes and fsyncs, and the salvage
+# points from one uncrashed salvage on LazyFS, logged the same way. The journals
 # are fsync'd on a thread per track, as `nota record` does it, so the order
 # of the recorder's operations (and a little of their count) varies from
 # run to run; an ops point past the end of a run that finished cleanly is
 # reported as unreached, not failed. Each file's own writes and fsyncs
-# don't vary, so a sqlite or torn point whose fault never fires fails: it
-# means the fault no longer lands where the script thinks. A run that fails
-# before its point fails it.
+# don't vary, so a sqlite, torn, reorder or salvage point whose fault never
+# fires fails: it means the fault no longer lands where the script thinks.
+# A run that fails before its point fails it. Where a journal's fsyncs fall
+# among its writes (its reorder groups) could vary, since a sync thread
+# makes them while the writer appends; it hasn't in practice, but a journal
+# reorder point that "never fired" may be that, not a broken fault.
+#
+# LazyFS's torn-seq keeps the write it holds back in one slot for all
+# files; with one fault per mount, as here, that slot only ever holds the
+# faulted file's write.
 #
 # LazyFS loses unsynced file data and sizes, but not directory entries:
 # creates, renames and unlinks reach the disk at once. So this can't catch a
@@ -46,7 +71,8 @@
 #                                [--to N] [--scratch DIR] [--keep]
 #   LAZYFS   the LazyFS binary
 #            (default ~/.local/share/nota/lazyfs/lazyfs/build/lazyfs)
-#   --only KIND    run only the ops, sqlite or torn points (default: all)
+#   --only KIND    run only the ops, sqlite, torn, reorder or salvage
+#            points (default: all)
 #   --step K run every Kth crash point (default 1: all of them)
 #   --from N, --to N  the first and last point to run, in the numbering
 #            the script prints
@@ -96,7 +122,8 @@ command -v fusermount3 > /dev/null || die "fusermount3 not found"
 [[ $FROM =~ ^[1-9][0-9]{0,8}$ ]] || die "--from needs a positive number"
 [[ -z $TO || $TO =~ ^[1-9][0-9]{0,8}$ ]] || die "--to needs a positive number"
 [[ -z $TO || $FROM -le $TO ]] || die "--from $FROM is after --to $TO"
-[[ -z $ONLY || $ONLY =~ ^(ops|sqlite|torn)$ ]] || die "--only needs ops, sqlite or torn"
+[[ -z $ONLY || $ONLY =~ ^(ops|sqlite|torn|reorder|salvage)$ ]] ||
+  die "--only needs ops, sqlite, torn, reorder or salvage"
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 cargo build --manifest-path "$REPO/Cargo.toml" --example lazyfs_crash --locked --quiet
@@ -238,19 +265,56 @@ mkdir "$WORK/files/mnt/rec"
 "$BIN" write "$WORK/files/mnt/rec" "$WORK/files/promises" > /dev/null ||
   die "the write workload failed on LazyFS (see $WORK/files)"
 unmount
-awk -v root="$WORK/files/root/rec/" '
-  match($0, /lfs_(write|fsync)\(path=[^,)]*/) {
-    call = substr($0, RSTART + 4, RLENGTH - 4)
-    op = substr(call, 1, index(call, "(") - 1)
-    path = substr(call, index(call, "=") + 1)
-    if (index(path, root) == 1) count[op " " substr(path, length(root) + 1)]++
+
+# The writes and fsyncs in LazyFS's log DIR/lazyfs.log under DIR/root/rec/,
+# one per line: "<op> <path under rec/>", in order.
+file_ops() {
+  awk -v root="$1/root/rec/" '
+    match($0, /lfs_(write|fsync)\(path=[^,)]*/) {
+      call = substr($0, RSTART + 4, RLENGTH - 4)
+      op = substr(call, 1, index(call, "(") - 1)
+      path = substr(call, index(call, "=") + 1)
+      if (index(path, root) == 1) print op, substr(path, length(root) + 1)
+    }
+  ' "$1/lazyfs.log"
+}
+# Counted per file: "<op> <path> <count>".
+count_ops() { awk '{ n[$0]++ } END { for (k in n) print k, n[k] }' | LC_ALL=C sort; }
+file_ops "$WORK/files" | count_ops > "$WORK/counts"
+# Each group of two or more writes to a file between two of its fsyncs, the
+# groups LazyFS's torn-seq counts: "<path> <group> <writes>".
+file_ops "$WORK/files" | awk '
+  function close_group(f) {
+    if (run[f] >= 2) print f, ++groups[f], run[f]
+    run[f] = 0
   }
-  END { for (k in count) print k, count[k] }
-' "$WORK/files/lazyfs.log" | LC_ALL=C sort > "$WORK/counts"
+  $1 == "write" { run[$2]++; next }
+  { close_group($2) }
+  END { for (f in run) close_group(f) }
+' | LC_ALL=C sort -k1,1 -k2,2n > "$WORK/groups"
+
+# Salvage's own writes and fsyncs: a recording left entirely to salvage,
+# made on the plain disk (so all of it is on the disk), then salvaged once on
+# LazyFS, uncrashed, where it ends in salvage-end.
+if [[ -z $ONLY || $ONLY == salvage ]]; then
+  mkdir -p "$WORK/salvage-base/rec"
+  "$BIN" write "$WORK/salvage-base/rec" "$WORK/salvage-base/promises" --no-publish > /dev/null ||
+    die "the write workload failed with --no-publish"
+  mkdir -p "$WORK/salvage-ref/root"
+  cp -a "$WORK/salvage-base/rec" "$WORK/salvage-ref/root/rec"
+  mount_lazyfs "$WORK/salvage-ref" 1
+  "$BIN" check "$WORK/salvage-ref/mnt/rec" "$WORK/salvage-base/promises" \
+    --end "$WORK/salvage-end" > /dev/null ||
+    die "an uncrashed salvage fails its own check (see $WORK/salvage-ref)"
+  unmount
+  file_ops "$WORK/salvage-ref" | count_ops > "$WORK/salvage-counts"
+fi
 
 # The points, one per line: "ops N", "sqlite <op> <file> <k>" (crash after
-# the kth op on the file) or "torn <file> <k> <half>" (the kth write to the
-# file, with only that half on the disk).
+# the kth op on the file), "torn <file> <k> <half>" (the kth write to the
+# file, with only that half on the disk), "reorder <file> <group> <i>" (the
+# group's writes up to the ith on the disk, except the one before it) or
+# "salvage <op> <file> <k>" (as sqlite, while salvaging).
 POINTS=$WORK/points
 : > "$POINTS"
 if [[ -z $ONLY || $ONLY == ops ]]; then
@@ -267,6 +331,16 @@ if [[ -z $ONLY || $ONLY == torn ]]; then
     for (k = 1; k <= $3; k++) for (half = 1; half <= 2; half++) print "torn", $2, k, half
   }' "$WORK/counts" >> "$POINTS"
 fi
+if [[ -z $ONLY || $ONLY == reorder ]]; then
+  awk '$1 ~ /^session\/journal-/ || $1 == "library.db-wal" {
+    for (i = 2; i <= $3; i++) print "reorder", $1, $2, i
+  }' "$WORK/groups" >> "$POINTS"
+fi
+if [[ -z $ONLY || $ONLY == salvage ]]; then
+  # The shared-memory index isn't data; SQLite rebuilds it.
+  awk '$2 != "library.db-shm" { for (k = 1; k <= $3; k++) print "salvage", $1, $2, k }' \
+    "$WORK/salvage-counts" >> "$POINTS"
+fi
 mapfile -t POINT_LINES < "$POINTS"
 TOTAL=${#POINT_LINES[@]}
 [[ $TOTAL -gt 0 ]] || die "no crash points (see $WORK/counts)"
@@ -281,11 +355,26 @@ if [[ -z $ONLY || $ONLY == torn ]]; then
   grep -q '^torn session/seg-.*\.flac\.tmp ' "$POINTS" ||
     die "no segment temp-file writes in LazyFS's log (see $WORK/counts)"
 fi
+if [[ -z $ONLY || $ONLY == reorder ]]; then
+  grep -q '^reorder session/journal-' "$POINTS" ||
+    die "no journal write groups in LazyFS's log (see $WORK/groups)"
+  grep -q '^reorder library.db-wal ' "$POINTS" ||
+    die "no library.db-wal write groups in LazyFS's log (see $WORK/groups)"
+fi
+if [[ -z $ONLY || $ONLY == salvage ]]; then
+  grep -q '^salvage write session/seg-.*\.flac\.tmp ' "$POINTS" ||
+    die "no segment writes in salvage's log (see $WORK/salvage-counts)"
+  grep -q '^salvage fsync library.db-wal ' "$POINTS" ||
+    die "no store commits in salvage's log (see $WORK/salvage-counts)"
+fi
 TO=${TO:-$TOTAL}
 [[ $TO -le $TOTAL ]] || TO=$TOTAL
 [[ $FROM -le $TO ]] || die "--from $FROM is past the last point, $TO"
 
-KINDS=$(awk '{ n[$1]++ } END { printf "%d ops, %d sqlite, %d torn", n["ops"], n["sqlite"], n["torn"] }' "$POINTS")
+KINDS=$(awk '{ n[$1]++ } END {
+  printf "%d ops, %d sqlite, %d torn, %d reorder, %d salvage",
+    n["ops"], n["sqlite"], n["torn"], n["reorder"], n["salvage"]
+}' "$POINTS")
 echo "LazyFS crash checks: $TOTAL points ($KINDS); points $FROM..$TO step $STEP; work dir $WORK"
 
 PASS=0
@@ -300,6 +389,8 @@ describe() {
     ops) echo "after recorder operation $1" ;;
     sqlite) echo "after $1 $3 of $2" ;;
     torn) echo "write $2 of $1 torn, only half $3 on disk" ;;
+    reorder) echo "write group $2 of $1: writes up to $3 on disk except $(($3 - 1))" ;;
+    salvage) echo "in salvage, after $1 $3 of $2" ;;
   esac
 }
 
@@ -312,13 +403,19 @@ fail() {
   } > "$WORK/point-$n/result"
 }
 
-# check_point N: on a mount of what reached the disk, checks the invariants,
-# drops the cache and checks again. Unmounts; a passed point is removed.
+# check_point N [END]: on a mount of what reached the disk, checks the
+# invariants, drops the cache and checks again. With END, salvage must end
+# exactly as recorded there. Unmounts; a passed point is removed.
 check_point() {
-  local n=$1
+  local n=$1 end=${2:-}
   local dir=$WORK/point-$n
-  if ! "$BIN" check "$dir/mnt/rec" "$dir/promises" > "$dir/check.out" 2>&1; then
+  if ! "$BIN" check "$dir/mnt/rec" "$dir/promises" --end "$dir/end" > "$dir/check.out" 2>&1; then
     fail "$n" "after the crash" "$dir/check.out"
+    unmount
+    return 0
+  fi
+  if [[ -n $end ]] && ! diff "$end" "$dir/end" > "$dir/end.diff"; then
+    fail "$n" "salvage ended differently from an uninterrupted salvage" "$dir/end.diff"
     unmount
     return 0
   fi
@@ -373,21 +470,32 @@ run_ops_point() {
   check_point "$n"
 }
 
-# run_fault_point N INJECTION: LazyFS injects the fault and crashes itself
-# while the writer runs; the backing directory is then mounted afresh.
+# run_fault_point N RUN INJECTION: LazyFS injects the fault and crashes
+# itself while RUN runs: `write` records afresh; `salvage` checks (and so
+# salvages) a copy of the unpublished recording. The backing directory is
+# then mounted afresh.
 run_fault_point() {
-  local n=$1 injection=$2
+  local n=$1 run=$2 injection=$3
   local dir=$WORK/point-$n
+  local end='' what="the writer"
+  local cmd=("$BIN" write "$dir/mnt/rec" "$dir/promises")
+  if [[ $run == salvage ]]; then
+    cp -a "$WORK/salvage-base/rec" "$dir/root/rec"
+    cp "$WORK/salvage-base/promises" "$dir/promises"
+    end=$WORK/salvage-end
+    what="salvage"
+    cmd=("$BIN" check "$dir/mnt/rec" "$dir/promises")
+  fi
   mount_lazyfs "$dir" 0 "$injection"
   # LazyFS reports a fault it can't parse, and runs without it.
   ! grep -q '\[error\]' "$dir/lazyfs.out" ||
     die "point $n: LazyFS rejected the fault (see $dir/lazyfs.out)"
-  mkdir "$dir/mnt/rec"
+  [[ $run == salvage ]] || mkdir "$dir/mnt/rec"
 
-  "$BIN" write "$dir/mnt/rec" "$dir/promises" > "$dir/write.out" 2>&1 &
+  "${cmd[@]}" > "$dir/write.out" 2>&1 &
   WRITER_PID=$!
   writer_or_lazyfs_gone() { ! kill -0 "$WRITER_PID" 2> /dev/null || lazyfs_gone; }
-  wait_for 60 writer_or_lazyfs_gone || die "point $n: the writer neither crashed nor finished"
+  wait_for 60 writer_or_lazyfs_gone || die "point $n: $what neither crashed nor finished"
   local status=0
   if ! kill -0 "$WRITER_PID" 2> /dev/null; then
     wait "$WRITER_PID" || status=$?
@@ -398,11 +506,11 @@ run_fault_point() {
   if ! wait_for 1 lazyfs_gone; then
     unmount
     if [[ $status -ne 0 ]]; then
-      fail "$n" "the writer failed (status $status) before its fault" "$dir/write.out"
+      fail "$n" "$what failed (status $status) before its fault" "$dir/write.out"
       return 0
     fi
     # Each file's writes and fsyncs are the same in every run.
-    fail "$n" "the writer finished and the fault never fired"
+    fail "$n" "$what finished and the fault never fired"
     return 0
   fi
   # Whatever the writer does now can't reach the disk.
@@ -418,7 +526,7 @@ run_fault_point() {
   fi
   unmount
   mount_lazyfs "$dir"
-  check_point "$n"
+  check_point "$n" "$end"
 }
 
 # run_point N KIND ARGS...: a failed point leaves its reason in
@@ -429,11 +537,13 @@ run_point() {
   local n=$1 kind=$2
   shift 2
   local root=$WORK/point-$n/root/rec
-  mkdir -p "$WORK/point-$n"
+  mkdir -p "$WORK/point-$n/root"
   case $kind in
     ops) run_ops_point "$n" "$1" ;;
-    sqlite)
-      run_fault_point "$n" "[[injection]]
+    sqlite | salvage)
+      local run=write
+      [[ $kind == sqlite ]] || run=salvage
+      run_fault_point "$n" "$run" "[[injection]]
 type=\"clear-cache\"
 from=\"$root/$2\"
 timing=\"after\"
@@ -442,12 +552,23 @@ occurrence=$3
 crash=true"
       ;;
     torn)
-      run_fault_point "$n" "[[injection]]
+      run_fault_point "$n" write "[[injection]]
 type=\"torn-op\"
 file=\"$root/$1\"
 occurrence=$2
 parts=2
 persist=[$3]"
+      ;;
+    reorder)
+      # Writes 1..I-2 and I: LazyFS crashes after the last.
+      local persist=$3 i
+      for ((i = $3 - 2; i >= 1; i--)); do persist="$i,$persist"; done
+      run_fault_point "$n" write "[[injection]]
+type=\"torn-seq\"
+op=\"write\"
+file=\"$root/$1\"
+occurrence=$2
+persist=[$persist]"
       ;;
     *) die "unknown point kind $kind" ;;
   esac

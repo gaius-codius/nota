@@ -1,0 +1,24 @@
+---
+source: crates/nota-tui/tests/home_screen.rs
+expression: terminal.backend()
+---
+"╭─ ≈ nota · Joinery · mortise and tenon ─────── 2 Oct · 58m ─╮"
+"│                                                            │"
+"│  Reviewing a session comes in a later version of nota.     │"
+"│                                                            │"
+"│  ! This session needs you:                                 │"
+"│    stopped early: disk full · free space to finish         │"
+"│                                                            │"
+"│                                                            │"
+"│                                                            │"
+"│                                                            │"
+"│                                                            │"
+"│                                                            │"
+"│                                                            │"
+"│                                                            │"
+"│                                                            │"
+"│                                                            │"
+"│                                                            │"
+"│                                                            │"
+"│                                                            │"
+"╰─ esc back ────────────────────────────────────── parakeet ─╯"

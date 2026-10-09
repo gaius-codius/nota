@@ -818,3 +818,23 @@ fn the_warning_holds_under_an_hour_left_not_at_an_hour() {
         assert_eq!(monitor.stop().unwrap().low, warned);
     }
 }
+
+#[test]
+fn exactly_the_floor_free_counts_as_room() {
+    let fs = FakeFs::with_dirs(["/data/s"]);
+    fs.set_capacity(Some(FULL_FLOOR));
+    let watch = DiskWatch::new(fs.clone());
+    let (monitor, reports) =
+        spawn_monitor(&watch, config(small(1), 1 << 30, Duration::from_millis(1)));
+    assert_eq!(until_ballast(&reports).1, Ok(false));
+    assert_eq!(watch.full(), None);
+    // One byte past it: the floor is crossed while recording.
+    let mut hog = fs.create(&p("/data/s/hog")).unwrap();
+    hog.write_all(b"x").unwrap();
+    loop {
+        if let DiskReport::Full(_) = reports.recv_timeout(WAIT).unwrap() {
+            break;
+        }
+    }
+    monitor.stop().unwrap();
+}

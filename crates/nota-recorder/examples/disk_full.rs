@@ -129,6 +129,7 @@ fn run(dir: &Path, with_ballast: bool, interval: Duration) -> Res<()> {
         title: None,
         language: None,
         tracks: vec![],
+        started_at: None,
     })?;
     let watch = DiskWatch::new(StdFs);
     if with_ballast {

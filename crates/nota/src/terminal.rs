@@ -12,7 +12,7 @@ use std::mem::ManuallyDrop;
 use std::sync::{Arc, Once};
 
 use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
+use ratatui::backend::{Backend, ClearType, CrosstermBackend};
 use ratatui::crossterm::cursor::{Hide, Show};
 use ratatui::crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use ratatui::crossterm::execute;
@@ -34,7 +34,9 @@ pub(crate) struct Screen {
     /// Never dropped. Its drop shows the cursor and, if that fails, prints
     /// the error with `eprintln!`, which panics when stderr is the terminal
     /// that has just hung up. [`restore`] shows the cursor instead, and the
-    /// buffers are freed at exit (there's one screen per process).
+    /// buffers (a few kilobytes) are freed at exit. There's one screen per
+    /// process, or a few: the app sets one up again after a recording that
+    /// couldn't start, whose failure restored the terminal.
     terminal: ManuallyDrop<Terminal<Output>>,
 }
 
@@ -69,6 +71,21 @@ impl Screen {
     /// The terminal to draw on.
     pub(crate) fn terminal(&mut self) -> &mut Terminal<Output> {
         &mut self.terminal
+    }
+
+    /// Clears the terminal for a new screen, so its first draw writes every
+    /// cell rather than its changes from the last screen's. (`ratatui`'s own
+    /// `clear` reads the cursor's position from the terminal, which would
+    /// race the input thread for the reply.)
+    ///
+    /// # Errors
+    ///
+    /// Writing to the terminal failed.
+    pub(crate) fn clear(&mut self) -> io::Result<()> {
+        self.terminal.backend_mut().clear_region(ClearType::All)?;
+        // The last frame is forgotten too: the next draw is against blank.
+        self.terminal.swap_buffers();
+        Ok(())
     }
 }
 

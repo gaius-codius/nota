@@ -34,13 +34,16 @@
 //! The screen closes when `s` is confirmed with `y`, when a signal arrives,
 //! every stream has ended or the disk is full (each sends it `Stopping`),
 //! or when the terminal fails (it's gone after a hangup). Whichever it is,
-//! the same steps follow: the terminal is restored, the streams stop, the
+//! the same steps follow: the terminal is restored (or, when the app lent
+//! it, kept, with Home showing that the recording is finishing), the
+//! streams stop, the
 //! recorder records what they had sent and returns, the writer finishes
 //! (a last fsync of every journal), the publisher publishes the last
 //! journals, and the engine is shut down. Further signals are ignored
 //! meanwhile: the default action would kill the process before the last
-//! segments are published. Anything left unpublished (a disk error, say) is
-//! salvaged at the next start.
+//! segments are published. (The app listens for them too, for its whole
+//! life, and closes once the recording has stopped.) Anything left
+//! unpublished (a disk error, say) is salvaged at the next start.
 //!
 //! # A full disk
 //!
@@ -86,17 +89,22 @@ mod start;
 mod stop;
 mod summary;
 
+pub(crate) use signals::QuitSignals;
+pub(crate) use start::last_setup;
 pub(crate) use summary::Outcome;
 use summary::show;
 
+use crate::library::Library;
+use crate::terminal::Screen;
+
 /// Every track is recorded at the engine's rate.
-const RATE: SampleRate = SampleRate::SPEECH;
+pub(crate) const RATE: SampleRate = SampleRate::SPEECH;
 /// The microphone's track.
 pub(crate) const MIC: TrackId = TrackId::new(0);
 /// The system audio's track.
 pub(crate) const SYSTEM: TrackId = TrackId::new(1);
 
-type BoxError = Box<dyn Error + Send + Sync>;
+pub(crate) type BoxError = Box<dyn Error + Send + Sync>;
 
 /// What to record, and where.
 #[derive(Debug, Clone)]
@@ -124,6 +132,31 @@ pub(crate) struct RecordArgs {
 /// stream at all), or the screen failed; in the second case the recording
 /// was still finished first.
 pub(crate) fn record(args: &RecordArgs) -> Result<Outcome, BoxError> {
+    record_in(args, None).map(|(outcome, _)| outcome)
+}
+
+/// The app's terminal, lent to a recording, and what to draw on it while
+/// the recording stops.
+pub(crate) struct Lent<'a> {
+    pub(crate) screen: Screen,
+    /// The app's library, so the process keeps one connection to its
+    /// database.
+    pub(crate) library: Library,
+    pub(crate) stopping: &'a mut dyn FnMut(&mut Screen),
+}
+
+/// Records as [`record`] does. With `lent`, on the app's terminal: once
+/// the Recording screen closes, `stopping` draws on it while the recording
+/// stops, and the terminal comes back with the outcome (unless it failed).
+/// Without, the terminal is set up here and restored before the stop.
+///
+/// # Errors
+///
+/// As [`record`]'s. A lent terminal is restored, not handed back.
+pub(crate) fn record_in(
+    args: &RecordArgs,
+    lent: Option<Lent<'_>>,
+) -> Result<(Outcome, Option<Screen>), BoxError> {
     let Command::Start(setup) = &args.start else {
         return Err("a recording starts only with a start command".into());
     };
@@ -132,9 +165,9 @@ pub(crate) fn record(args: &RecordArgs) -> Result<Outcome, BoxError> {
     #[cfg(feature = "fake-capture")]
     if args.tone {
         let tone = crate::tone::Tone::new(Arc::clone(&clock));
-        let mut outcome = record_with(args, setup, &tone, &clock)?;
+        let (mut outcome, screen) = record_with(args, setup, &tone, &clock, lent)?;
         outcome.notes.extend(tone.report());
-        return Ok(outcome);
+        return Ok((outcome, screen));
     }
     if args.tone {
         return Err("--tone is only for nota's tests".into());
@@ -145,9 +178,13 @@ pub(crate) fn record(args: &RecordArgs) -> Result<Outcome, BoxError> {
         setup,
         &nota_recorder::capture::PipeWireBackend,
         &clock,
+        lent,
     );
     #[cfg(not(target_os = "linux"))]
-    Err("recording needs Linux for now".into())
+    {
+        drop(lent);
+        Err("recording needs Linux for now".into())
+    }
 }
 
 /// The window every segment is cut to.
@@ -162,8 +199,17 @@ fn record_with<B: CaptureBackend>(
     setup: &Setup,
     backend: &B,
     clock: &Arc<dyn Clock>,
-) -> Result<Outcome, BoxError> {
-    let (started, screening) = start::start(args, setup, backend, clock)?;
+    lent: Option<Lent<'_>>,
+) -> Result<(Outcome, Option<Screen>), BoxError> {
+    let (given, library, stopping) = match lent {
+        Some(Lent {
+            screen,
+            library,
+            stopping,
+        }) => (Some(screen), Some(library), Some(stopping)),
+        None => (None, None, None),
+    };
+    let (started, screening) = start::start(args, setup, backend, clock, given, library)?;
 
     // The screen, until it's closed.
     let shown = show(
@@ -175,8 +221,23 @@ fn record_with<B: CaptureBackend>(
         &screening.ui_events,
     );
     drop(screening.ui);
+    let (shown, screen) = match shown {
+        Ok((shown, screen)) => (Ok(shown), screen),
+        Err(e) => (Err(e), None),
+    };
+    // `nota record` restores the terminal before stopping; the app keeps
+    // it, and shows that the recording is stopping.
+    let screen = match (screen, stopping) {
+        (Some(mut screen), Some(stopping)) => {
+            stopping(&mut screen);
+            Some(screen)
+        }
+        _ => None,
+    };
 
-    stop::stop(started, shown)
+    // Recorded, whatever stopping says: the error says it was the stop.
+    let outcome = stop::stop(started, shown).map_err(|e| format!("stopping it: {e}"))?;
+    Ok((outcome, screen))
 }
 
 #[cfg(test)]

@@ -1,0 +1,24 @@
+---
+source: crates/nota-tui/tests/home_screen.rs
+expression: terminal.backend()
+---
+"╭─ ≈ nota ───────────────────────────────────────── ✓ ready ─╮"
+"│                                                            │"
+"│                                                            │"
+"│            ⠀⣀⣀⣀⣀⣀⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀                        │"
+"│            ⠛⠉⠉⠉⠉⠉⠉⠛⠳⠶⣤⣀⡀⠀⠀⠀⠀⠀⢀⣀⣤⡴⠶⠛                        │"
+"│            ⣤⠶⠶⠶⠶⠶⠶⣤⣄⣀⠀⠉⠙⠛⠛⠛⠛⠛⠋⠉⠀⢀⣀⣤                        │"
+"│            ⠀⣀⣀⣀⣀⣀⣀⠀⠈⠉⠛⠶⢦⣤⣤⣤⣤⣤⡴⠶⠛⠋⠉⠀     n o t a            │"
+"│            ⠛⠉⠉⠉⠉⠉⠉⠛⠳⠶⣤⣀⡀⠀⠀⠀⠀⠀⢀⣀⣤⡴⠶⠛                        │"
+"│            ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠙⠛⠛⠛⠛⠛⠋⠉⠀⠀⠀⠀                        │"
+"│                                                            │"
+"│                                                            │"
+"│ recent                                                     │"
+"│   ✓ Woodwork workshop · hand planes         2h 42m  today  │"
+"│ ▸ ✓ Sharpening · chisels                       41m  3 Oct  │"
+"│     recovered after a crash · nothing lost                 │"
+"│                                                            │"
+"│                                                            │"
+"│                                                            │"
+"│                                                            │"
+"╰─ R last settings  ⏎ open ─────────────────────── parakeet ─╯"
