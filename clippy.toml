@@ -124,3 +124,10 @@ disallowed-methods = [
   { path = "rustix::fs::syncfs", reason = "fsync goes through the durable-write layer, so durable positions come only from it", allow-invalid = true },
   { path = "rustix::fs::sync", reason = "fsync goes through the durable-write layer, so durable positions come only from it", allow-invalid = true },
 ]
+
+# Types whose functions all fall under the bans above.
+disallowed-types = [
+  # sherpa-onnx's console display for its examples: `new` and `render` read
+  # the clock, `finalize_sentence` the wall clock, and `render` prints.
+  { path = "sherpa_onnx::DisplayManager", reason = "read time through the session clock in nota-core, so timing code can be tested with a fake clock; and the TUI owns the terminal", allow-invalid = true },
+]

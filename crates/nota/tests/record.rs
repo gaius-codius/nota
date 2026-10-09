@@ -797,15 +797,17 @@ fn marks_and_notes_stored_before_a_kill_survive_it_and_salvage() {
     assert!(annotations(&tmp.0, 2).is_empty());
 }
 
+/// A connection to the library behind nota's back, to hold its lock.
+#[expect(clippy::disallowed_methods, reason = "test scaffolding")]
+fn open_library(path: &Path) -> rusqlite::Connection {
+    rusqlite::Connection::open(path).unwrap()
+}
+
 /// Acceptance (GAI-310): the library database failing mid-session (another
 /// connection holding its write lock past the busy timeout) holds up
 /// nothing that records. The recording carries on, and once the lock goes,
 /// what was made meanwhile is saved and every sample is published.
 #[test]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "test scaffolding: holds the library's lock"
-)]
 fn a_library_locked_mid_session_costs_nothing_once_it_is_back() {
     let tmp = TestDir::new("locked-library");
     let mut nota = recording(&tmp.0);
@@ -816,7 +818,7 @@ fn a_library_locked_mid_session_costs_nothing_once_it_is_back() {
         "{:?}",
         annotations(&tmp.0, 1)
     );
-    let lock = rusqlite::Connection::open(tmp.0.join("library.db")).unwrap();
+    let lock = open_library(&tmp.0.join("library.db"));
     lock.execute_batch("BEGIN IMMEDIATE").unwrap();
     nota.press("nmade while locked\r");
     pause(Duration::from_millis(300));

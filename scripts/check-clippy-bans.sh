@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Fails when a crate in the tree isn't classified in clippy-crates.txt, or when
-# a function the map lists under [ban] isn't in clippy.toml's
-# disallowed-methods. So a dependency that brings a new way to read the clock
-# or write a file (as jiff brought `Timestamp::now`) fails here until someone
-# has looked, instead of passing clippy because nobody banned it.
+# a function or type the map lists under [ban] isn't in clippy.toml's
+# disallowed-methods or disallowed-types. So a dependency that brings a new way
+# to read the clock or write a file (as jiff brought `Timestamp::now`) fails
+# here until someone has looked, instead of passing clippy because nobody
+# banned it. nota's own crates are the ones named nota or nota-*; every other
+# package in the lock files counts as a dependency.
 #
 # Also fails on a map entry for a crate no longer in the tree, a crate listed
 # twice or under contradictory sections, and an [indirect] crate that a nota
@@ -39,11 +41,13 @@ function ident(name) { gsub(/-/, "_", name); return name }
 function quoted(s) { sub(/^[^"]*"/, "", s); sub(/".*$/, "", s); return s }
 function flush(   i) {
   if (pkg != "") {
-    if (src) {
+    # The crates of nota are named nota or nota-*; any other package,
+    # including a path dependency outside the workspace, needs classifying.
+    if (!src && pkg ~ /^nota(-|$)/) {
+      for (i = 1; i <= ndeps; i++) dep_of_member[deps[i]] = 1
+    } else {
       external[pkg] = 1
       in_tree[ident(pkg)] = pkg
-    } else {
-      for (i = 1; i <= ndeps; i++) dep_of_member[deps[i]] = 1
     }
   }
   pkg = ""; src = 0; ndeps = 0; in_deps = 0
@@ -100,16 +104,21 @@ file == 1 {
   next
 }
 
-# clippy.toml: the paths in disallowed-methods.
+# clippy.toml: the paths in disallowed-methods, and in disallowed-types (a
+# banned type takes all its functions with it). Comments are dropped first,
+# so a ban commented out does not count; a path always comes before any "#"
+# in a reason.
 file == 2 {
-  if ($0 ~ /^[a-z-]+[ \t]*=/) in_methods = ($0 ~ /^disallowed-methods[ \t]*=/)
-  if (in_methods && match($0, /path[ \t]*=[ \t]*"[^"]*"/))
-    in_clippy[quoted(substr($0, RSTART, RLENGTH))] = 1
+  line = $0
+  sub(/#.*/, "", line)
+  if (line ~ /^[a-z-]+[ \t]*=/) in_bans = (line ~ /^disallowed-(methods|types)[ \t]*=/)
+  if (in_bans && match(line, /path[ \t]*=[ \t]*"[^"]*"/))
+    in_clippy[quoted(substr(line, RSTART, RLENGTH))] = 1
   next
 }
 
-# A lock: packages with a source are dependencies, those without are the
-# workspace members, and the crates those depend on are direct.
+# A lock: the crates of nota have no source; the crates they depend on are
+# direct.
 /^\[\[package\]\]/ { flush(); next }
 /^name = / { pkg = quoted($0); next }
 /^source = / { src = 1; next }
@@ -130,7 +139,7 @@ END {
   for (c in named_line)
     if (!(c in in_tree)) problem(map ":" named_line[c] ": no crate " named_as[c] " in the lock files; remove it")
   for (w in banned_in_map)
-    if (!(w in in_clippy)) problem(map ":" banned_in_map[w] ": " w " is under [ban], but clippy.toml'"'"'s disallowed-methods doesn'"'"'t name it")
+    if (!(w in in_clippy)) problem(map ":" banned_in_map[w] ": " w " is under [ban], but clippy.toml'"'"'s disallowed-methods and disallowed-types don'"'"'t name it")
   for (p in dep_of_member)
     if ((ident(p) in named_kind) && named_kind[ident(p)] == "indirect")
       problem(map ":" named_line[ident(p)] ": " p " is under [indirect], but a nota crate now depends on it directly; classify its functions")

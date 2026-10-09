@@ -8,7 +8,9 @@
 # Each crate goes in one of these sections:
 #
 #   [ban]                 functions of the families, by path. Each must also
-#                         be in clippy.toml's disallowed-methods.
+#                         be in clippy.toml's disallowed-methods (or, for a
+#                         type whose functions are all banned with it, in
+#                         disallowed-types).
 #   [allow: <reason>]     functions (paths) or whole crates (names) of the
 #                         families that are deliberately not banned. Like an
 #                         #[expect], each says why.
@@ -97,6 +99,10 @@ rustix::fs::syncfs
 rustix::fs::sync
 rustix::fs::ext4_ioc_resize_fs
 # WAV writers, for text-to-speech and tests; nota-engine only recognizes.
+# DisplayManager, its example's console display, reads the clock and prints;
+# banned as a type, which covers `new`, `default`, `render` and
+# `finalize_sentence`.
+sherpa_onnx::DisplayManager
 sherpa_onnx::write
 sherpa_onnx::Wave::write
 sherpa_onnx::GeneratedAudio::save
@@ -113,6 +119,9 @@ rustix::fs::memfd_create
 
 [allow: reads how long a timer has left, not the time; nota has no timerfd]
 rustix::time::timerfd_gettime
+
+[allow: SQL can write files (ATTACH, VACUUM INTO) and read the clock (datetime('now')) through any connection, which no ban on a function can see; nota-store owns the library's SQL, and opening a file is banned above]
+rusqlite
 
 [allow: test-only; writes pending snapshots (.snap.new) next to the tests]
 insta
