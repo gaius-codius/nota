@@ -22,7 +22,7 @@
 //! | Message | Sent by | When |
 //! |---|---|---|
 //! | [`Event::Level`] | the live thread | At most every 100 ms per track while it captures: the peak since the last one |
-//! | [`Event::Recorded`] | the live thread | With each level: how much audio has been recorded |
+//! | [`Event::Recorded`] | the live thread | With each level: how much audio has been captured |
 //! | [`Event::Text`] | the live thread | Each stretch of speech the engine heard, placed in session time |
 //! | [`Event::Transcribing`] | the live thread | Speech is with the engine, not yet text, or no longer is |
 //! | [`Event::Engine`] | the live thread | The transcriber came up or went down |
@@ -138,8 +138,9 @@ pub enum Event {
         /// How loud it was.
         level: Level,
     },
-    /// How much audio has been recorded so far, in bytes: two a sample,
-    /// as the journals hold it, not counting their framing.
+    /// How much audio has been captured so far, in bytes: two a sample,
+    /// as the journals hold it, not counting their framing. It isn't what
+    /// is on disk: samples a broken journal dropped count too.
     Recorded(u64),
     /// New live text.
     Text(Utterance),

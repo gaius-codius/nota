@@ -1,5 +1,5 @@
-//! The screen's loop, on threads and channels: keys and the recorder's
-//! events in, commands to the recorder out.
+//! The screen's loop, on threads and channels: keys, pastes and the
+//! recorder's events in, commands to the recorder out.
 
 use std::io;
 use std::sync::Arc;
@@ -49,6 +49,8 @@ pub enum Event {
     },
     /// What the recorder reports.
     Recorder(recorder::Event),
+    /// Text pasted into the terminal, whole (bracketed paste).
+    Paste(String),
     /// The terminal changed size.
     Resize,
     /// Reading the terminal failed and the input thread has stopped: no more
@@ -117,7 +119,7 @@ impl<E: std::error::Error + 'static> std::error::Error for RunError<E> {
 /// and sends each command the screen gives to `commands`: each new mark and
 /// note to be stored, and the stop. Redraws at least every 250 ms, applying
 /// at most 1 000 events in between. A note still being typed when the loop
-/// ends is saved, unless it's blank.
+/// ends is saved, unless it's blank, whatever ended it: drawing failing too.
 ///
 /// It ends with [`Ended::Stopped`] as soon as a stop is confirmed on the
 /// screen, once [`Command::Stop`] is sent; events after that key are left
@@ -148,9 +150,12 @@ pub fn run<B: Backend>(
         None => Ok(()),
     };
     loop {
-        terminal
-            .draw(|frame| screen.draw(frame))
-            .map_err(RunError::Terminal)?;
+        if let Err(err) = terminal.draw(|frame| screen.draw(frame)) {
+            // A terminal that has closed fails the draw before the signal's
+            // `Stopping` arrives.
+            save_draft(screen)?;
+            return Err(RunError::Terminal(err));
+        }
         let first = match events.recv_timeout(REDRAW) {
             Ok(event) => event,
             Err(RecvTimeoutError::Timeout) => continue,
@@ -166,6 +171,10 @@ pub fn run<B: Backend>(
             let was_asking = screen.is_confirming_stop();
             let given = match event {
                 Event::Key { key, at } => screen.handle_key_at(key, at),
+                Event::Paste(text) => {
+                    screen.paste(&text);
+                    None
+                }
                 Event::Recorder(recorder::Event::Stopping | recorder::Event::Stopped(_)) => {
                     save_draft(screen)?;
                     return Ok(Ended::Closed);
@@ -237,14 +246,14 @@ pub fn run_home<B: Backend>(
                 Event::Recorder(recorder::Event::Stopping | recorder::Event::Stopped(_)) => {
                     return Ok(Action::Quit);
                 }
-                Event::Recorder(_) | Event::Resize => {}
+                Event::Recorder(_) | Event::Paste(_) | Event::Resize => {}
                 Event::InputLost(kind) => return Err(RunError::InputLost(kind)),
             }
         }
     }
 }
 
-/// A thread that reads keys and resizes from the terminal and sends them as
+/// A thread that reads keys, pastes and resizes from the terminal and sends them as
 /// [`Event`]s, each key stamped with the session clock as it's read. Keys
 /// already waiting when it starts are discarded: they were typed before the
 /// screen was there to take them (during a slow start-up, say), and a
@@ -414,6 +423,7 @@ fn read_input(
                 key,
                 at: clock.now(),
             },
+            event::Event::Paste(text) => Event::Paste(text),
             event::Event::Resize(..) => Event::Resize,
             _ => continue,
         };
@@ -567,6 +577,124 @@ mod tests {
         // Pinned to when `n` was read (7 ns), not the clock's 11 ns.
         let at = SessionTime::from_nanos(7);
         assert_eq!(sent, [Command::Note(Note::new(at, "ok").unwrap())]);
+    }
+
+    /// A terminal that draws `draws` frames, then fails: closed, as after
+    /// a hang-up.
+    struct Closing {
+        inner: TestBackend,
+        draws: usize,
+    }
+
+    impl Backend for Closing {
+        type Error = io::Error;
+
+        fn draw<'a, I>(&mut self, content: I) -> io::Result<()>
+        where
+            I: Iterator<Item = (u16, u16, &'a ratatui::buffer::Cell)>,
+        {
+            let Some(left) = self.draws.checked_sub(1) else {
+                return Err(io::ErrorKind::BrokenPipe.into());
+            };
+            self.draws = left;
+            self.inner.draw(content).map_err(|never| match never {})
+        }
+        fn hide_cursor(&mut self) -> io::Result<()> {
+            self.inner.hide_cursor().map_err(|never| match never {})
+        }
+        fn show_cursor(&mut self) -> io::Result<()> {
+            self.inner.show_cursor().map_err(|never| match never {})
+        }
+        fn get_cursor_position(&mut self) -> io::Result<ratatui::layout::Position> {
+            self.inner
+                .get_cursor_position()
+                .map_err(|never| match never {})
+        }
+        fn set_cursor_position<P: Into<ratatui::layout::Position>>(
+            &mut self,
+            position: P,
+        ) -> io::Result<()> {
+            self.inner
+                .set_cursor_position(position)
+                .map_err(|never| match never {})
+        }
+        fn clear(&mut self) -> io::Result<()> {
+            self.inner.clear().map_err(|never| match never {})
+        }
+        fn clear_region(&mut self, clear_type: ratatui::backend::ClearType) -> io::Result<()> {
+            self.inner
+                .clear_region(clear_type)
+                .map_err(|never| match never {})
+        }
+        fn size(&self) -> io::Result<ratatui::layout::Size> {
+            self.inner.size().map_err(|never| match never {})
+        }
+        fn window_size(&mut self) -> io::Result<ratatui::backend::WindowSize> {
+            self.inner.window_size().map_err(|never| match never {})
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Backend::flush(&mut self.inner).map_err(|never| match never {})
+        }
+    }
+
+    #[test]
+    fn a_half_typed_note_is_saved_when_drawing_fails() {
+        let clock = Arc::new(FakeClock::new(SessionTime::from_nanos(11)));
+        let mut screen = screen(&clock);
+        let closing = Closing {
+            inner: TestBackend::new(62, 20),
+            draws: 1,
+        };
+        let mut terminal = Terminal::new(closing).unwrap();
+        let (event_tx, event_rx) = mpsc::channel();
+        let (note_tx, note_rx) = mpsc::channel();
+        // Applied after the first draw; the second fails. The recorder's
+        // sender stays alive, so only the failed draw ends the loop.
+        for event in [key('n'), key('h'), key('u'), key('p')] {
+            event_tx.send(event).unwrap();
+        }
+        let err = run(&mut terminal, &mut screen, &event_rx, &note_tx).unwrap_err();
+        assert!(
+            matches!(&err, RunError::Terminal(e) if e.kind() == io::ErrorKind::BrokenPipe),
+            "{err}"
+        );
+        let at = SessionTime::from_nanos(7);
+        assert_eq!(
+            note_rx.try_iter().collect::<Vec<_>>(),
+            [Command::Note(Note::new(at, "hup").unwrap())]
+        );
+        drop(event_tx);
+    }
+
+    #[test]
+    fn a_paste_goes_into_the_note() {
+        let clock = Arc::new(FakeClock::new(SessionTime::from_nanos(11)));
+        let mut screen = screen(&clock);
+        let mut terminal = Terminal::new(TestBackend::new(62, 20)).unwrap();
+        let (event_tx, event_rx) = mpsc::channel();
+        let (note_tx, note_rx) = mpsc::channel();
+        for event in [
+            // Before any note: dropped, and its letters aren't keys.
+            Event::Paste("msy".into()),
+            key('n'),
+            Event::Paste("grain\nfiller".into()),
+            key_at(KeyCode::Enter, 8),
+        ] {
+            event_tx.send(event).unwrap();
+        }
+        drop(event_tx);
+        run(&mut terminal, &mut screen, &event_rx, &note_tx).unwrap();
+        let at = SessionTime::from_nanos(7);
+        assert_eq!(
+            note_rx.try_iter().collect::<Vec<_>>(),
+            [Command::Note(Note::new(at, "grain filler").unwrap())]
+        );
+    }
+
+    #[test]
+    fn home_ignores_a_paste() {
+        let events = vec![Event::Paste("R".into()), key('q')];
+        assert_eq!(run_home_over(events).unwrap(), Action::Quit);
     }
 
     #[test]
@@ -836,12 +964,14 @@ mod tests {
         for event in [
             terminal_key(KeyCode::Char('m'), KeyModifiers::NONE),
             event::Event::FocusGained,
+            event::Event::Paste("pasted".into()),
             event::Event::Resize(70, 24),
         ] {
             later_tx.send(event).unwrap();
         }
         let wait = Duration::from_secs(5);
         let sent = [
+            event_rx.recv_timeout(wait).unwrap(),
             event_rx.recv_timeout(wait).unwrap(),
             event_rx.recv_timeout(wait).unwrap(),
         ];
@@ -852,6 +982,7 @@ mod tests {
                     key: KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
                     at: SessionTime::from_nanos(42),
                 },
+                Event::Paste("pasted".into()),
                 Event::Resize,
             ]
         );

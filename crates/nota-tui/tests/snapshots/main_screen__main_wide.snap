@@ -1,0 +1,24 @@
+---
+source: crates/nota-tui/tests/main_screen.rs
+expression: terminal.backend()
+---
+"╭─ ≈ nota · Woodwork workshop ────────────────── ● REC 01:12:48 ─╮  ╭─ marks & notes ────────── 6 ─╮"
+"│          ◆             ◇           ◆             ◇        ◆◇   │  │ ◆ 0:11:18                    │"
+"│ ▇▂█▂▄█▅▄▄▁▆██▅▂▄▆▄█▁█▄▇▇█▁▇█████▇█▇▁▅▇▂▅▁█▂▅▇▇▆▂▅▂▂█▄▂▅▄▃▂▁█▅▅ │  │   Plane with the grain, nev… │"
+"│                                                                │  │                              │"
+"│   out.                                                         │  │ ◇ 0:27:37                    │"
+"│ ◆ Mark the face side first so every cut starts from one edge.  │  │   ask about the grain filler │"
+"│   …and of course we need to sand along the grain first. If the │  │                              │"
+"│   board is between eighteen and twenty millimetres we can      │  │ ◆ 0:41:26                    │"
+"│   plane it by hand.                                            │  │   Mark the face side first … │"
+"│   Anything thicker goes straight through the machine.          │  │                              │"
+"│   …so the cupping could be from the drying shed, and we did    │  │ ◇ 0:57:45                    │"
+"│   look at that in the last session.                            │  │   bring the long clamps      │"
+"│ ◆ Remember that for a wide panel you check the moisture, the   │  │                              │"
+"│   stain and the clamps before anything else.                   │  │ ◆ 1:09:03                    │"
+"│ ◇ The table is getting full sun most days, so the joints may   │  │   Remember that for a wide … │"
+"│   open up in summer as well.                                   │  │                              │"
+"│   Then we have the finish itself, and we want to rule out a    │  │ ◇ 1:10:00                    │"
+"│   reaction, so test the oil on a scrap first…                  │  │   sun on the table           │"
+"│   ░░░                                                          │  │                              │"
+"╰─ m mark  n note  s stop ─────────────────────── Brave · 14 MB ─╯  ╰─ j/k move ─────── 3 ◆ · 3 ◇ ─╯"

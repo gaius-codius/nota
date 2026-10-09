@@ -1709,7 +1709,6 @@ dependencies = [
  "rustix",
  "toml",
  "unicode-segmentation",
- "unicode-width",
 ]
 
 [[package]]
