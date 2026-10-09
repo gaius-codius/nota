@@ -6,14 +6,17 @@
 //! and the keys `m` (mark), `n` (note) and `s` (stop, which asks first) in
 //! the footer.
 //!
-//! The screen owns no threads and reads no devices. The rest of nota sends it
-//! [`Update`]s (levels, text, bytes written) and key presses as [`Event`]s
-//! over a channel, and [`run()`] draws it and sends each new mark and note out
-//! over another channel, until the stop is confirmed or nota closes it.
+//! The screen owns no threads and reads no devices. It talks to the recorder
+//! only in the recorder protocol ([`nota_core::recorder`]): the recorder's
+//! events and the terminal's keys come in as [`Event`]s over a channel, and
+//! [`run()`] draws the screen and sends each [`Command`] it gives (a mark, a
+//! note, the stop) out over another, until the stop is confirmed or the
+//! recorder closes it.
 //! Time comes only from the session [`Clock`], so marks and notes are stamped
 //! in session time and tests run on a fake clock.
 //!
 //! [`Clock`]: nota_core::Clock
+//! [`Command`]: nota_core::recorder::Command
 
 mod annotation;
 mod band;
@@ -24,9 +27,6 @@ mod screen;
 mod text;
 mod theme;
 
-pub use annotation::{Annotation, Mark, Note};
-pub use level::Level;
 pub use run::{Ended, Event, InputThread, RunError, run};
-pub use screen::{Recording, Update};
-pub use text::Utterance;
+pub use screen::Recording;
 pub use theme::Theme;

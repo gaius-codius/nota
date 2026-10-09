@@ -14,8 +14,8 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use nota_core::recorder::{Input, Setup};
 use nota_engine::sherpa::ModelPaths;
-use nota_recorder::capture::Source;
 
 mod latency;
 mod library;
@@ -141,10 +141,12 @@ fn parse_engine(args: &[OsString]) -> Result<ModelPaths, String> {
 fn parse_record(args: &[OsString]) -> Result<RecordArgs, String> {
     let mut record = RecordArgs {
         data: PathBuf::new(),
-        title: "Recording".to_owned(),
+        setup: Setup {
+            title: "Recording".to_owned(),
+            mic: Input::Default,
+            system: Input::Default,
+        },
         models: None,
-        mic: Source::Microphone,
-        system: Source::SystemAudio,
         tone: false,
         latency_log: None,
     };
@@ -157,12 +159,12 @@ fn parse_record(args: &[OsString]) -> Result<RecordArgs, String> {
                 .ok_or_else(|| format!("{flag} takes text"))
         };
         match flag {
-            "--title" => record.title = text()?,
+            "--title" => record.setup.title = text()?,
             "--data" => data = Some(PathBuf::from(value)),
             "--parakeet" => parakeet = Some(PathBuf::from(value)),
             "--vad" => vad = Some(PathBuf::from(value)),
-            "--mic" => record.mic = Source::Device(text()?),
-            "--system" => record.system = Source::Device(text()?),
+            "--mic" => record.setup.mic = Input::Device(text()?),
+            "--system" => record.setup.system = Input::Device(text()?),
             #[cfg(feature = "fake-capture")]
             "--tone" => record.tone = text()? == "yes",
             #[cfg(feature = "latency-log")]

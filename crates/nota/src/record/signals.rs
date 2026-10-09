@@ -6,6 +6,7 @@ use std::sync::mpsc::Sender;
 #[cfg(unix)]
 use std::thread::{self, JoinHandle};
 
+use nota_core::recorder;
 use nota_tui::Event;
 
 /// The handle that stops the signal thread.
@@ -51,7 +52,7 @@ fn watch(mut signals: signal_hook::iterator::Signals, ui: &Sender<Event>) -> boo
         if signal == SIGXCPU {
             overran = true;
         } else {
-            let _ = ui.send(Event::Close);
+            let _ = ui.send(Event::Recorder(recorder::Event::Stopping));
         }
     }
     // Once closed, the iterator stops without reading what's still

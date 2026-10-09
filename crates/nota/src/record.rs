@@ -8,8 +8,9 @@
 //!   order. The capture streams live here: they stop on the thread that
 //!   started them.
 //! - **Recorder:** records both tracks into one session writer
-//!   ([`record_tracks`]); hands finished journals to the publisher and
-//!   everything else to the live thread. It never waits on either.
+//!   ([`record_tracks`](nota_recorder::capture::record_tracks)); hands
+//!   finished journals to the publisher and everything else to the live
+//!   thread. It never waits on either.
 //! - **Publisher:** publishes finished journals as segments.
 //! - **Live:** feeds the engine, flushes it at each new epoch, and turns
 //!   levels and text into screen updates (see [`crate::live`]).
@@ -17,10 +18,19 @@
 //! - **Signals:** turns SIGHUP, SIGTERM and SIGINT into a request to close
 //!   the screen, and notes SIGXCPU (see below).
 //!
+//! # The screen
+//!
+//! The screen and `nota record` talk only in the recorder protocol
+//! ([`nota_core::recorder`]): the start command's [`Setup`] decides what
+//! the tracks record, the live thread and the recorder send the screen
+//! events, and the screen gives back marks, notes and the stop as
+//! commands.
+//!
 //! # Stopping
 //!
-//! The screen closes when `s` is confirmed with `y`, when a signal arrives,
-//! or when the terminal fails (it's gone after a hangup). Whichever it is,
+//! The screen closes when `s` is confirmed with `y`, when a signal arrives
+//! or every stream has ended (both send it `Stopping`), or when the
+//! terminal fails (it's gone after a hangup). Whichever it is,
 //! the same steps follow: the terminal is restored, the streams stop, the
 //! recorder records what they had sent and returns, the writer finishes
 //! (a last fsync of every journal), the publisher publishes the last
@@ -50,8 +60,9 @@ use std::error::Error;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use nota_core::recorder::Setup;
 use nota_core::{Clock, SampleRate, SystemClock, TrackId};
-use nota_recorder::capture::{CaptureBackend, Source};
+use nota_recorder::capture::CaptureBackend;
 use nota_recorder::segment::SegmentLength;
 
 mod live;
@@ -77,15 +88,12 @@ type BoxError = Box<dyn Error + Send + Sync>;
 pub(crate) struct RecordArgs {
     /// The data directory, holding `sessions/`.
     pub(crate) data: PathBuf,
-    /// The session's title, shown on the screen.
-    pub(crate) title: String,
+    /// What to record and the session's title: what the start command
+    /// carries.
+    pub(crate) setup: Setup,
     /// The engine's models, `--parakeet` and `--vad`; without them there's
     /// no live text.
     pub(crate) models: Option<(PathBuf, PathBuf)>,
-    /// The microphone's source.
-    pub(crate) mic: Source,
-    /// The system audio's source.
-    pub(crate) system: Source,
     /// Record a tone instead of the audio server (tests only).
     pub(crate) tone: bool,
     /// Log when each text reached the screen to this file

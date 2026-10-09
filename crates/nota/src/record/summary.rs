@@ -1,33 +1,19 @@
-//! How a recording went: the summary's `Outcome`, and the screen whose
-//! result feeds it.
+//! How a recording went: the screen, whose result feeds the summary, and
+//! the summary's notes.
 
 use std::fmt::Write as _;
 use std::io;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 
+use nota_core::recorder::Command;
+pub(crate) use nota_core::recorder::Outcome;
 use nota_core::{Clock, TrackId};
 use nota_recorder::segment::PublishReport;
-use nota_tui::{Annotation, Ended, Event, InputThread, Recording, RunError, Theme};
+use nota_tui::{Ended, Event, InputThread, Recording, RunError, Theme};
 
 use super::{MIC, RecordArgs, SYSTEM};
 use crate::terminal::Screen;
-
-/// How a recording went, for the summary printed after it.
-#[derive(Debug, Default)]
-pub(crate) struct Outcome {
-    /// The session's directory.
-    pub(crate) session: PathBuf,
-    /// Things worth saying: sessions salvaged, streams that didn't start,
-    /// journals left for salvage.
-    pub(crate) notes: Vec<String>,
-    /// Segments published.
-    pub(crate) segments: usize,
-    /// Whether everything recorded was published, with nothing left for
-    /// the next start's salvage.
-    pub(crate) complete: bool,
-}
 
 /// How the screen went.
 pub(super) struct Shown {
@@ -58,25 +44,41 @@ pub(super) fn show(
         Theme::default()
     };
     let mut recording = Recording::new(
-        args.title.clone(),
+        args.setup.title.clone(),
         listening.to_owned(),
         Arc::clone(clock),
         theme,
     );
-    let (annotations, made) = mpsc::channel::<Annotation>();
+    let (commands, given) = mpsc::channel::<Command>();
     let input = InputThread::spawn(ui.clone(), Arc::clone(clock))?;
-    let ran = nota_tui::run(screen.terminal(), &mut recording, ui_events, &annotations);
+    let ran = nota_tui::run(screen.terminal(), &mut recording, ui_events, &commands);
     // Keys may be gone with the terminal; nothing to do about it.
     let _ = input.stop();
     drop(screen);
-    let marks = made.try_iter().count();
-    let (marks, problem) = match ran {
-        Ok(Ended::Stopped | Ended::Closed) => (marks, None),
-        Err(RunError::InputLost(kind)) => (marks, Some(format!("the keyboard was lost: {kind}"))),
-        Err(RunError::Terminal(e)) => (marks, Some(format!("the screen failed: {e}"))),
-        Err(RunError::AnnotationsClosed(_)) => (marks + 1, None),
+    let mut marks = marks_in(given.try_iter());
+    let problem = match ran {
+        Ok(Ended::Stopped | Ended::Closed) => None,
+        Err(RunError::InputLost(kind)) => Some(format!("the keyboard was lost: {kind}")),
+        Err(RunError::Terminal(e)) => Some(format!("the screen failed: {e}")),
+        Err(RunError::CommandsClosed(command)) => {
+            marks += marks_in([command]);
+            None
+        }
     };
     Ok(Shown { marks, problem })
+}
+
+/// How many marks and notes `commands` gives. The stop the screen also
+/// gives needs nothing more: the screen has closed, and the recording stops
+/// as it does however the screen closes.
+fn marks_in(commands: impl IntoIterator<Item = Command>) -> usize {
+    commands
+        .into_iter()
+        .filter(|command| match command {
+            Command::Mark(_) | Command::Note(_) => true,
+            Command::Start(_) | Command::Stop => false,
+        })
+        .count()
 }
 
 pub(super) fn note_published(outcome: &mut Outcome, report: &PublishReport) {
@@ -100,5 +102,33 @@ pub(super) fn track_name(track: Option<TrackId>) -> &'static str {
         Some(MIC) => "the mic",
         Some(SYSTEM) => "the system audio",
         _ => "a track",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nota_core::SessionTime;
+    use nota_core::recorder::{Input, Mark, Note, Setup};
+
+    use super::*;
+
+    /// The marks and notes the screen gives reach the summary; the start
+    /// and the stop aren't counted as either.
+    #[test]
+    fn the_summary_counts_the_marks_and_notes_given() {
+        let at = SessionTime::from_nanos(5);
+        let given = [
+            Command::Start(Setup {
+                title: "Workshop".to_owned(),
+                mic: Input::Default,
+                system: Input::Default,
+            }),
+            Command::Mark(Mark { at }),
+            Command::Note(Note::new(at, "ask about clamps").unwrap()),
+            Command::Mark(Mark { at }),
+            Command::Stop,
+        ];
+        assert_eq!(marks_in(given), 3);
+        assert_eq!(marks_in([Command::Stop]), 0);
     }
 }

@@ -12,10 +12,10 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use nota_core::messages::{AudioChunk, Transcript};
+use nota_core::recorder::{Event, Level};
 use nota_core::{SessionTime, TrackId, TrackTimeline, Utterance};
 use nota_recorder::capture::RecorderEvent;
 use nota_recorder::engine::EngineEvent;
-use nota_tui::{Level, Update};
 
 /// How often each track's level is sent: well within the screen's 250 ms.
 const LEVEL_EVERY: Duration = Duration::from_millis(100);
@@ -28,8 +28,8 @@ pub(crate) struct Actions {
     /// A track whose epoch ended: the engine should transcribe what it
     /// holds of it now, so text doesn't run across the gap.
     pub(crate) flush: Option<TrackId>,
-    /// News for the screen.
-    pub(crate) updates: Vec<Update>,
+    /// Events for the screen.
+    pub(crate) updates: Vec<Event>,
 }
 
 /// A track's level since it was last sent.
@@ -71,7 +71,7 @@ impl Live {
                     // Two bytes a sample, as the journals hold it.
                     actions
                         .updates
-                        .push(Update::Recorded(self.recorded_samples.saturating_mul(2)));
+                        .push(Event::Recorded(self.recorded_samples.saturating_mul(2)));
                 }
                 actions.transcribe = Some(chunk);
             }
@@ -96,21 +96,20 @@ impl Live {
         if let EngineEvent::Transcript(transcript) = event
             && let Some(text) = self.place(transcript)
         {
-            actions.updates.push(Update::Text(text));
+            actions.updates.push(Event::Text(text));
         }
         actions
     }
 
-    /// `transcript` as the screen shows it, placed in session time.
-    fn place(&self, transcript: Transcript) -> Option<nota_tui::Utterance> {
+    /// `transcript` placed in session time.
+    fn place(&self, transcript: Transcript) -> Option<Utterance> {
         let timeline = self.followers.get(&transcript.track())?;
-        let placed = Utterance::place(transcript, timeline)?;
-        nota_tui::Utterance::new(placed.start(), placed.end(), placed.into_text())
+        Utterance::place(transcript, timeline)
     }
 
     /// The track's level, if it's due: the peak since the last one, at the
     /// session time `chunk` ends.
-    fn level(&mut self, chunk: &AudioChunk) -> Option<Update> {
+    fn level(&mut self, chunk: &AudioChunk) -> Option<Event> {
         let track = chunk.track();
         let (_, end) = self.followers.get(&track)?.span_of(chunk.range())?;
         let meter = self.meters.entry(track).or_default();
@@ -125,7 +124,11 @@ impl Live {
         let level = Level::from_peak(meter.peak);
         meter.peak = 0;
         meter.sent_at = Some(end);
-        Some(Update::Level { at: end, level })
+        Some(Event::Level {
+            track,
+            at: end,
+            level,
+        })
     }
 }
 

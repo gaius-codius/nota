@@ -6,10 +6,11 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use nota_core::recorder;
 use nota_core::{Clock, TrackId};
 use nota_recorder::capture::RecorderEvent;
 use nota_recorder::engine::{EngineEvent, EngineStatus, EngineSupervisor};
-use nota_tui::{Event, Update};
+use nota_tui::Event;
 
 use crate::latency::{LatencyLog, Problem};
 use crate::live::{Actions, Live};
@@ -50,7 +51,7 @@ pub(super) fn spawn_live(
                         .updates
                         .iter()
                         .filter_map(|u| match u {
-                            Update::Text(text) => Some((text.start(), text.end())),
+                            recorder::Event::Text(text) => Some((text.start(), text.end())),
                             _ => None,
                         })
                         .collect()
@@ -139,7 +140,7 @@ fn apply(actions: Actions, engine: Option<&mut EngineSupervisor>, ui: &Sender<Ev
         }
     }
     for update in actions.updates {
-        let _ = ui.send(Event::Update(update));
+        let _ = ui.send(Event::Recorder(update));
     }
 }
 
@@ -217,7 +218,7 @@ mod tests {
         let log = live.join().unwrap().unwrap();
         let shown = screen
             .try_iter()
-            .filter(|e| matches!(e, Event::Update(Update::Text(_))))
+            .filter(|e| matches!(e, Event::Recorder(recorder::Event::Text(_))))
             .count();
         assert_eq!(shown, 2);
         // Drawn by the draw after the first to end at or after 4.2 s.

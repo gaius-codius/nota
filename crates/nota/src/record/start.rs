@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
+use nota_core::recorder::{self, Input, Setup};
 use nota_core::{Clock, EpochId, SessionId, TrackId, TrackTimeline};
 use nota_recorder::capture::{
     Capture, CaptureBackend, RecordError, RecorderEvent, Source, record_tracks, start_tracks,
@@ -89,7 +90,7 @@ pub(super) fn start<B: CaptureBackend>(
     let mut writer = SessionWriter::open(&lock, RATE, segment_length(), Arc::clone(clock))?
         .with_syncing(Syncing::Threads);
 
-    let sources = [(MIC, args.mic.clone()), (SYSTEM, args.system.clone())];
+    let sources = sources(&args.setup);
     let (started, events) = start_tracks(backend, &sources, RATE, clock);
     let mut captures: Vec<Capture<B::Stream>> = Vec::new();
     let mut listening = Vec::new();
@@ -156,7 +157,7 @@ pub(super) fn start<B: CaptureBackend>(
                     });
                 // Every stream has ended, or recording failed: the screen
                 // has nothing more to show, so close it and stop.
-                let _ = ui.send(Event::Close);
+                let _ = ui.send(Event::Recorder(recorder::Event::Stopping));
                 (writer, result, failures, lost)
             })?
     };
@@ -230,7 +231,7 @@ fn session_rows<S>(
         library.db().clone(),
         NewSession {
             id,
-            title: Some(args.title.clone()),
+            title: Some(args.setup.title.clone()),
             language: None,
             tracks: sources
                 .iter()
@@ -278,6 +279,18 @@ fn start_engine(
     Ok(supervisor)
 }
 
+/// Each track's source, as `setup` chose it.
+fn sources(setup: &Setup) -> [(TrackId, Source); 2] {
+    let source = |input: &Input, default| match input {
+        Input::Default => default,
+        Input::Device(name) => Source::Device(name.clone()),
+    };
+    [
+        (MIC, source(&setup.mic, Source::Microphone)),
+        (SYSTEM, source(&setup.system, Source::SystemAudio)),
+    ]
+}
+
 /// What a track records.
 const fn track_kind(track: TrackId) -> TrackKind {
     if track.get() == SYSTEM.get() {
@@ -299,6 +312,29 @@ fn source_name(source: &Source) -> String {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// The setup a start command carries decides what each track records.
+    #[test]
+    fn the_setup_chooses_each_track_s_source() {
+        let mut setup = Setup {
+            title: "Workshop".to_owned(),
+            mic: Input::Default,
+            system: Input::Default,
+        };
+        assert_eq!(
+            sources(&setup),
+            [(MIC, Source::Microphone), (SYSTEM, Source::SystemAudio)]
+        );
+        setup.mic = Input::Device("usb-mic".to_owned());
+        setup.system = Input::Device("speakers.monitor".to_owned());
+        assert_eq!(
+            sources(&setup),
+            [
+                (MIC, Source::Device("usb-mic".to_owned())),
+                (SYSTEM, Source::Device("speakers.monitor".to_owned()))
+            ]
+        );
+    }
 
     #[test]
     fn each_track_is_named_for_what_it_records() {

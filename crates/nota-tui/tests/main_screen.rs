@@ -11,14 +11,32 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use nota_core::{Clock, FakeClock, SessionTime};
-use nota_tui::{Level, Recording, Theme, Update, Utterance};
+use nota_core::messages::Transcript;
+use nota_core::recorder::{Event, Level};
+use nota_core::{
+    Clock, FakeClock, SampleIndex, SampleRange, SampleRate, SessionTime, TrackId, TrackTimeline,
+    Utterance,
+};
+use nota_tui::{Recording, Theme};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 fn secs(s: u64) -> SessionTime {
     SessionTime::from_elapsed(Duration::from_secs(s)).unwrap()
+}
+
+/// What the mic heard from `start` to `end` seconds into the session.
+fn heard(start: u64, end: u64, text: &str) -> Utterance {
+    let track = TrackId::new(0);
+    let mut timeline = TrackTimeline::new(track);
+    timeline
+        .open_epoch(SessionTime::ZERO, SampleIndex::ZERO, SampleRate::SPEECH)
+        .unwrap();
+    let sample = |s: u64| SampleIndex::new(s * u64::from(SampleRate::SPEECH.hz()));
+    let range = SampleRange::new(sample(start), sample(end)).unwrap();
+    let transcript = Transcript::new(track, range, text.to_owned()).unwrap();
+    Utterance::place(transcript, &timeline).unwrap()
 }
 
 fn press(screen: &mut Recording, code: KeyCode) {
@@ -47,7 +65,8 @@ fn main_screen() -> Recording {
     for s in (0..=4_368).step_by(70) {
         seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         let peak = Level::FULL_SCALE.peak() >> ((seed >> 16) % 10);
-        screen.update(Update::Level {
+        screen.update(Event::Level {
+            track: TrackId::new(0),
             at: secs(s),
             level: Level::from_peak(peak),
         });
@@ -86,11 +105,10 @@ fn main_screen() -> Recording {
         ),
     ];
     for (start, end, text) in lines {
-        let utterance = Utterance::new(secs(start), secs(end), text.into()).unwrap();
-        screen.update(Update::Text(utterance));
+        screen.update(Event::Text(heard(start, end, text)));
     }
-    screen.update(Update::Transcribing(true));
-    screen.update(Update::Recorded(14_200_000));
+    screen.update(Event::Transcribing(true));
+    screen.update(Event::Recorded(14_200_000));
 
     // Marks and notes at the moments their keys were pressed; a note's text
     // is typed after `n`. The last two fall beside the transcript.

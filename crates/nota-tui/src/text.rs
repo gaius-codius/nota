@@ -1,43 +1,7 @@
-//! Live text: what the engine heard, placed in session time, and wrapped to
-//! the screen.
+//! Live text, wrapped to the screen.
 
-use nota_core::SessionTime;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
-
-/// One stretch of heard speech, in session time.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Utterance {
-    start: SessionTime,
-    end: SessionTime,
-    text: String,
-}
-
-impl Utterance {
-    /// Speech from `start` to `end`, or `None` if it ends before it starts.
-    #[must_use]
-    pub fn new(start: SessionTime, end: SessionTime, text: String) -> Option<Self> {
-        (start <= end).then_some(Self { start, end, text })
-    }
-
-    /// When the speech started.
-    #[must_use]
-    pub fn start(&self) -> SessionTime {
-        self.start
-    }
-
-    /// When the speech ended.
-    #[must_use]
-    pub fn end(&self) -> SessionTime {
-        self.end
-    }
-
-    /// What was heard.
-    #[must_use]
-    pub fn text(&self) -> &str {
-        &self.text
-    }
-}
 
 /// Whether `c` is drawn as text: not a control character, and not one of
 /// the bidirectional formatting characters, which could make the terminal
@@ -108,21 +72,27 @@ pub(crate) fn wrap(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
+/// What track 0 heard from `start` to `end` seconds into the session, for
+/// tests: placed through a timeline whose one epoch starts at 0.
+#[cfg(test)]
+pub(crate) fn heard(start: u64, end: u64, text: &str) -> nota_core::Utterance {
+    use nota_core::messages::Transcript;
+    use nota_core::{SampleIndex, SampleRange, SampleRate, SessionTime, TrackId, TrackTimeline};
+
+    let track = TrackId::new(0);
+    let mut timeline = TrackTimeline::new(track);
+    timeline
+        .open_epoch(SessionTime::ZERO, SampleIndex::ZERO, SampleRate::SPEECH)
+        .unwrap();
+    let sample = |s: u64| SampleIndex::new(s * u64::from(SampleRate::SPEECH.hz()));
+    let range = SampleRange::new(sample(start), sample(end)).unwrap();
+    let transcript = Transcript::new(track, range, text.to_owned()).unwrap();
+    nota_core::Utterance::place(transcript, &timeline).unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn utterances_cannot_end_before_they_start() {
-        let (early, late) = (SessionTime::from_nanos(1), SessionTime::from_nanos(2));
-        assert!(Utterance::new(late, early, "x".into()).is_none());
-        let utterance = Utterance::new(early, late, "x".into()).unwrap();
-        assert_eq!(
-            (utterance.start(), utterance.end(), utterance.text()),
-            (early, late, "x")
-        );
-        assert!(Utterance::new(late, late, String::new()).is_some());
-    }
 
     #[test]
     fn wraps_between_words() {

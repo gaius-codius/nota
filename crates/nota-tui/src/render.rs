@@ -13,6 +13,7 @@
 //! ╰─ m mark  n note  s stop ─────────────────── <source · size> ─╯  keys, status
 //! ```
 
+use nota_core::Utterance;
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
@@ -22,7 +23,7 @@ use ratatui::text::{Line, Span};
 use crate::annotation::Annotation;
 use crate::band::column_of;
 use crate::screen::Recording;
-use crate::text::{Utterance, display_width, graphemes, wrap};
+use crate::text::{display_width, graphemes, wrap};
 
 /// The smallest screen the layout fits (the spec's "about 60×20").
 pub(crate) const MIN_WIDTH: u16 = 60;
@@ -230,7 +231,7 @@ impl Recording {
             } else {
                 self.theme.text_secondary
             };
-            let bar = level.map_or(' ', crate::level::Level::bar);
+            let bar = level.map_or(' ', crate::level::bar);
             buf.set_string(x, area.y + 1, bar.encode_utf8(&mut [0; 4]), style);
         }
     }
@@ -417,14 +418,13 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use nota_core::{Clock, FakeClock, SessionTime};
+    use nota_core::recorder::{Event, Level, Mark, Note};
+    use nota_core::{Clock, FakeClock, SessionTime, TrackId};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
     use super::*;
-    use crate::annotation::{Mark, Note};
-    use crate::level::Level;
-    use crate::screen::Update;
+    use crate::text::heard;
     use crate::theme::Theme;
 
     fn secs(s: u64) -> SessionTime {
@@ -442,15 +442,15 @@ mod tests {
             Theme::default(),
         );
         for s in 0..=100 {
-            screen.update(Update::Level {
+            screen.update(Event::Level {
+                track: TrackId::new(0),
                 at: secs(s),
                 level: Level::from_peak(1_000),
             });
         }
         for i in 1..=utterances {
             let text = format!("utterance {i}");
-            let utterance = Utterance::new(secs(i * 10), secs(i * 10 + 5), text).unwrap();
-            screen.update(Update::Text(utterance));
+            screen.update(Event::Text(heard(i * 10, i * 10 + 5, &text)));
         }
         screen
     }
@@ -571,7 +571,7 @@ mod tests {
     fn the_stop_question_takes_the_footer() {
         let theme = Theme::default();
         let mut screen = screen("Mic", 0);
-        screen.update(Update::Recorded(14_200_000));
+        screen.update(Event::Recorded(14_200_000));
         screen.stop = crate::screen::Stop::Asking {
             since: SessionTime::ZERO,
         };
