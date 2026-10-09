@@ -16,8 +16,8 @@
 //!   rows), it appends a line to `<promises>` and fsyncs it. Keep
 //!   `<promises>` off the filesystem under test. Without `--stop-after` it
 //!   runs to the end and prints `ops <total>`.
-//! - `check <dir> <promises> [--recovered] [--end <file>]` checks the invariants the
-//!   in-memory crash tests check (`src/segment/tests.rs`): before salvage,
+//! - `check <dir> <promises> [--recovered] [--end <file>]` checks the
+//!   invariants the in-memory crash tests check (`src/segment/tests.rs`): before salvage,
 //!   every row has its file and every promised sample is in a row or a
 //!   journal; after salvage, only segments and rows are left, holding every
 //!   promised sample and every promised row; a second salvage changes

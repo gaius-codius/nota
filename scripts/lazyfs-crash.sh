@@ -29,9 +29,12 @@
 #   salvage  inside salvage: `lazyfs_crash write --no-publish` leaves every
 #          journal unpublished, on the plain disk; on a copy of that, LazyFS
 #          crashes itself (losing everything not fsync'd) after the Nth write
-#          or fsync of a file salvage writes (its segments, findings and the
-#          store) while `lazyfs_crash check` salvages. Journal deletes need
-#          no point of their own: LazyFS writes unlinks through.
+#          or fsync of a file `lazyfs_crash check` writes while it salvages:
+#          the segments and the store's commits, and the store's opening
+#          before salvage and its checkpoint into `library.db` after. (Clean
+#          journals leave salvage nothing to report, so its findings file
+#          isn't written here.) Journal deletes need no point of their own:
+#          LazyFS writes unlinks through.
 #
 # After each crash, on a fresh mount of what reached the disk:
 #   1. `lazyfs_crash check`: salvage, then the invariants, against the
@@ -49,10 +52,12 @@
 # of the recorder's operations (and a little of their count) varies from
 # run to run; an ops point past the end of a run that finished cleanly is
 # reported as unreached, not failed. Each file's own writes and fsyncs
-# don't vary (nor, so far, where its fsyncs fall among its writes), so a
-# sqlite, torn, reorder or salvage point whose fault never fires fails: it
-# means the fault no longer lands where the script thinks. A run that fails
-# before its point fails it.
+# don't vary, so a sqlite, torn, reorder or salvage point whose fault never
+# fires fails: it means the fault no longer lands where the script thinks.
+# A run that fails before its point fails it. Where a journal's fsyncs fall
+# among its writes (its reorder groups) could vary, since a sync thread
+# makes them while the writer appends; it hasn't in practice, but a journal
+# reorder point that "never fired" may be that, not a broken fault.
 #
 # LazyFS's torn-seq keeps the write it holds back in one slot for all
 # files; with one fault per mount, as here, that slot only ever holds the
@@ -306,8 +311,10 @@ if [[ -z $ONLY || $ONLY == salvage ]]; then
 fi
 
 # The points, one per line: "ops N", "sqlite <op> <file> <k>" (crash after
-# the kth op on the file) or "torn <file> <k> <half>" (the kth write to the
-# file, with only that half on the disk).
+# the kth op on the file), "torn <file> <k> <half>" (the kth write to the
+# file, with only that half on the disk), "reorder <file> <group> <i>" (the
+# group's writes up to the ith on the disk, except the one before it) or
+# "salvage <op> <file> <k>" (as sqlite, while salvaging).
 POINTS=$WORK/points
 : > "$POINTS"
 if [[ -z $ONLY || $ONLY == ops ]]; then
