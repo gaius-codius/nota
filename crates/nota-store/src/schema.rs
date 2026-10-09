@@ -15,7 +15,7 @@
 //! |---|---|---|
 //! | `session` | number, title, language, state, when it started (V3) | `nota record`, and adopting a session found on disk |
 //! | `track` | each track's kind and source | `nota record`, and adopting a session found on disk with its row kept |
-//! | `segment` | each published segment: its track, epoch, samples, SHA-256 | the recorder's publish step and salvage |
+//! | `segment` | each published segment: its track, epoch, samples, SHA-256, decoded-audio digest (V5) | the recorder's publish step and salvage |
 //! | `epoch` | each epoch's first sample, rate and session-time anchor | the epochs package |
 //! | `utterance`, `word` | the heard text, as the engine confirmed it, with word times; never changed (V4's triggers) | `nota record`'s live text ([`crate::transcript`]) |
 //! | `revision`, `revision_text` | the displayed text: revision 0 is the heard text, each later one a new row holding only what it changes; never changed | revision 0 with the first utterance, later ones by term clean-up |
@@ -23,6 +23,7 @@
 //! | `mark`, `note` | marks and notes made while recording, in session time | `nota record`, as each is made ([`crate::annotations`]) |
 //! | `job` | work queued after a stop | the job queue |
 //! | `event` | the timeline: device changes, warnings, gaps | the detectors |
+//! | `finding` | an index of each session's findings file: rows whose file didn't prove them, and rows that don't parse (V5) | the app, from the findings files ([`crate::findings`]) |
 //!
 //! Session times are nanoseconds from the session's start
 //! ([`SessionTime`](nota_core::SessionTime)); samples are indices at the
@@ -258,6 +259,34 @@ CREATE TRIGGER revision_text_only_in_the_newest BEFORE INSERT ON revision_text
 WHEN NEW.revision = 0
   OR NEW.revision IS NOT (SELECT max(number) FROM revision WHERE session_id = NEW.session_id)
 BEGIN SELECT RAISE(ABORT, 'a revision is never added to'); END;
+";
+
+/// Version 5: each segment row's decoded-audio digest
+/// ([`AudioDigest`](crate::AudioDigest)), null for rows committed before it
+/// (their SHA-256 alone proves their file); and `finding`, an index of the
+/// findings file each session's directory keeps, so the library can list
+/// what needs the user without reading every directory. The file is the
+/// record; the index is replaced from it, one session at a time.
+///
+/// A finding names its row by track and first sample, as stored, which a
+/// row that doesn't parse still has; the rest of the row (end, epoch,
+/// hashes) is null for one that doesn't.
+pub(crate) const V5: &str = "
+ALTER TABLE segment ADD COLUMN audio_digest BLOB
+    CHECK (audio_digest IS NULL OR length(audio_digest) = 32);
+
+CREATE TABLE finding (
+    session_id INTEGER NOT NULL REFERENCES session(id),
+    track INTEGER NOT NULL,
+    start_sample INTEGER NOT NULL,
+    end_sample INTEGER,
+    epoch INTEGER,
+    sha256 BLOB,
+    audio_digest BLOB,
+    problem TEXT NOT NULL,
+    status TEXT NOT NULL
+) STRICT;
+CREATE INDEX finding_by_session ON finding (session_id, status);
 ";
 
 #[cfg(test)]

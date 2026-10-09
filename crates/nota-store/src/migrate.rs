@@ -14,6 +14,7 @@
 //! | 2 | the first library schema ([`crate::schema`]) |
 //! | 3 | each session's start time, `session.started_at` |
 //! | 4 | triggers that keep the heard text and its revisions append-only |
+//! | 5 | each segment row's decoded-audio digest, `segment.audio_digest`, and the findings index, `finding` |
 //!
 //! # The per-session stores
 //!
@@ -26,6 +27,7 @@
 
 use std::path::Path;
 
+use nota_core::SessionId;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
 use crate::schema;
@@ -34,7 +36,7 @@ use crate::sessions::{NewSession, SessionState, insert_session, insert_tracks};
 use crate::{Store, StoreError, session_key};
 
 /// The schema version this code writes and understands.
-pub const VERSION: i64 = 4;
+pub const VERSION: i64 = 5;
 
 /// The first library version: what [`STEPS`]' first step makes.
 const FIRST: i64 = 2;
@@ -43,9 +45,9 @@ const FIRST: i64 = 2;
 const PER_SESSION: i64 = 1;
 
 /// The SQL that makes each version from the one before, in order: version
-/// 2 (from an empty file), then 3 and 4. There's no step from 1, which is never
+/// 2 (from an empty file), then 3, 4 and 5. There's no step from 1, which is never
 /// a library. [`upgrade`] runs the steps above the file's version.
-const STEPS: &[&str] = &[schema::V2, schema::V3, schema::V4];
+const STEPS: &[&str] = &[schema::V2, schema::V3, schema::V4, schema::V5];
 
 fn version(conn: &Connection) -> Result<i64, StoreError> {
     Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
@@ -111,8 +113,9 @@ pub enum Adopted {
     Imported(usize),
 }
 
-/// The segment rows in the per-session store at `path`, which must exist.
-fn read_per_session(path: &Path) -> Result<Vec<crate::SegmentRow>, StoreError> {
+/// The segment rows in `session`'s per-session store at `path`, which must
+/// exist. They have no audio digest: version 1 kept none.
+fn read_per_session(session: SessionId, path: &Path) -> Result<Vec<crate::SegmentRow>, StoreError> {
     // Read-write, so SQLite can recover a write-ahead log a crash left, but
     // never created (a store that isn't there holds nothing to import), and
     // never through a symlink.
@@ -131,13 +134,15 @@ fn read_per_session(path: &Path) -> Result<Vec<crate::SegmentRow>, StoreError> {
         other => return Err(StoreError::UnknownSchema(other)),
     }
     let mut stmt = conn.prepare(
-        "SELECT track, epoch, start_sample, end_sample, sha256 \
+        "SELECT track, epoch, start_sample, end_sample, sha256, NULL \
          FROM segment ORDER BY track, start_sample",
     )?;
     let raws = stmt
         .query_map([], raw_from_row)?
         .collect::<Result<Vec<_>, _>>()?;
-    raws.into_iter().map(parse_row).collect()
+    raws.into_iter()
+        .map(|raw| parse_row(session, raw))
+        .collect()
 }
 
 impl Store {
@@ -155,7 +160,7 @@ impl Store {
     /// # Errors
     ///
     /// [`StoreError::UnknownSchema`] if the per-session store's version
-    /// isn't 1, [`StoreError::Corrupt`] if one of its rows doesn't parse,
+    /// isn't 1, [`StoreError::CorruptRow`] if one of its rows doesn't parse,
     /// [`StoreError::Conflict`] if two of its rows overlap,
     /// [`StoreError::OutOfRange`] if the session's number doesn't fit
     /// SQLite's integer, and [`StoreError::Sqlite`] for any SQLite failure,
@@ -171,7 +176,7 @@ impl Store {
             return Ok(Adopted::Known);
         }
         let rows = match per_session {
-            Some(path) => Some(read_per_session(path)?),
+            Some(path) => Some(read_per_session(id, path)?),
             None => None,
         };
         let tx = self

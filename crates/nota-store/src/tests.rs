@@ -345,34 +345,87 @@ fn an_unwritable_path_is_a_create_error() {
 }
 
 #[test]
-fn corrupt_rows_are_reported() {
-    let cases: [(i64, i64, &str); 4] = [
-        (-1, 0, "track"),
-        (1 << 33, 0, "track"),
-        (1, -5, "epoch"),
-        (1, 1 << 40, "epoch"),
+fn corrupt_rows_are_reported_by_name() {
+    let cases: [(i64, i64, &str, &str); 6] = [
+        (-1, 0, "zeroblob(32)", "track"),
+        (1 << 33, 0, "zeroblob(32)", "track"),
+        (1, -5, "zeroblob(32)", "epoch"),
+        (1, 1 << 40, "zeroblob(32)", "epoch"),
+        (1, 0, "zeroblob(31)", "hash is 31 bytes"),
+        (
+            1,
+            0,
+            "zeroblob(32), audio_digest = zeroblob(5)",
+            "audio digest is 5 bytes",
+        ),
     ];
-    for (i, (track, epoch, what)) in cases.into_iter().enumerate() {
+    for (i, (track, epoch, hash, what)) in cases.into_iter().enumerate() {
         let dir = TestDir::new(&format!("corrupt{i}"));
-        let store = open(&dir);
+        let mut store = open(&dir);
+        // A good row first, so the bad one isn't simply the only one.
+        store.insert_segment(S1, &row(0, 0, 0, 10, 1)).unwrap();
         // Past the table's checks, as a damaged file could be.
         store
             .conn
             .execute_batch("PRAGMA ignore_check_constraints = ON")
             .unwrap();
+        let (hash, audio) = hash
+            .split_once(", audio_digest = ")
+            .unwrap_or((hash, "NULL"));
         store
             .conn
             .execute(
-                "INSERT INTO segment (session_id, track, epoch, start_sample, end_sample, sha256) \
-                 VALUES (1, ?1, ?2, 0, 10, zeroblob(32))",
+                &format!(
+                    "INSERT INTO segment \
+                     (session_id, track, epoch, start_sample, end_sample, sha256, audio_digest) \
+                     VALUES (1, ?1, ?2, 4800, 4810, {hash}, {audio})"
+                ),
                 params![track, epoch],
             )
             .unwrap();
         match store.segments(S1) {
-            Err(StoreError::Corrupt(msg)) => assert!(msg.contains(what), "{msg}"),
-            got => panic!("expected corrupt, got {got:?}"),
+            Err(StoreError::CorruptRow { session, key, why }) => {
+                assert_eq!(session, S1);
+                assert_eq!(key, RowKey { track, start: 4800 });
+                assert!(why.contains(what), "{why}");
+                let shown = StoreError::CorruptRow { session, key, why }.to_string();
+                assert!(
+                    shown.contains(&format!(
+                        "session 1's segment row at track {track}, sample 4800"
+                    )),
+                    "{shown}"
+                );
+            }
+            got => panic!("expected a corrupt row, got {got:?}"),
         }
+        // Another session's rows still read.
+        assert_eq!(store.segments(S2).unwrap(), vec![]);
     }
+}
+
+#[test]
+fn an_audio_digest_is_kept_and_part_of_the_row() {
+    let dir = TestDir::new("audio-digest");
+    let mut store = open(&dir);
+    let plain = row(1, 0, 0, 480, 7);
+    let with = plain.with_audio(AudioDigest::new([9; 32]));
+    assert_eq!(with.audio(), Some(AudioDigest::new([9; 32])));
+    assert_eq!(plain.audio(), None);
+    assert_eq!(store.insert_segment(S1, &with).unwrap(), Inserted::New);
+    assert_eq!(
+        store.insert_segment(S1, &with).unwrap(),
+        Inserted::AlreadyPresent
+    );
+    // The same samples and hash with another digest, or none, is another row.
+    for other in [plain, plain.with_audio(AudioDigest::new([8; 32]))] {
+        assert!(matches!(
+            store.insert_segment(S1, &other),
+            Err(StoreError::Conflict { existing }) if existing == with
+        ));
+    }
+    let older = row(1, 0, 480, 960, 7);
+    store.insert_segment(S1, &older).unwrap();
+    assert_eq!(open(&dir).segments(S1).unwrap(), vec![with, older]);
 }
 
 #[test]
@@ -386,10 +439,16 @@ fn checks_stop_bad_rows() {
         "(1, -1, 0, 0, 10, zeroblob(32))",
         "(1, 4294967296, 0, 0, 10, zeroblob(32))",
         "(1, 1, -1, 0, 10, zeroblob(32))",
+        "(1, 1, 0, 0, 10, zeroblob(32), zeroblob(31))",
     ] {
+        let audio = if values.matches(',').count() == 6 {
+            ", audio_digest"
+        } else {
+            ""
+        };
         let sql = format!(
-            "INSERT INTO segment (session_id, track, epoch, start_sample, end_sample, sha256) \
-             VALUES {values}"
+            "INSERT INTO segment \
+             (session_id, track, epoch, start_sample, end_sample, sha256{audio}) VALUES {values}"
         );
         assert!(store.conn.execute(&sql, []).is_err(), "{sql}");
     }
@@ -399,7 +458,7 @@ fn checks_stop_bad_rows() {
 fn error_display_is_specific() {
     use std::error::Error as _;
     let existing = row(3, 0, 42, 50, 1);
-    let cases: [(StoreError, &str); 10] = [
+    let cases: [(StoreError, &str); 11] = [
         (StoreError::Sqlite(rusqlite::Error::InvalidQuery), "sqlite"),
         (
             StoreError::Create(std::io::Error::other("disk on fire")),
@@ -425,6 +484,17 @@ fn error_display_is_specific() {
             "session 32 is in",
         ),
         (StoreError::Corrupt("bad hash".to_owned()), "bad hash"),
+        (
+            StoreError::CorruptRow {
+                session: SessionId::new(4),
+                key: RowKey {
+                    track: -2,
+                    start: 99,
+                },
+                why: "odd".to_owned(),
+            },
+            "session 4's segment row at track -2, sample 99 doesn't parse: odd",
+        ),
     ];
     for (err, needle) in cases {
         let text = err.to_string();

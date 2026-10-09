@@ -79,6 +79,7 @@ fn the_schema_has_exactly_these_tables() {
         [
             "epoch",
             "event",
+            "finding",
             "job",
             "mark",
             "note",

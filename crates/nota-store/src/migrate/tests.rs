@@ -37,7 +37,7 @@ fn a_new_file_gets_the_current_schema() {
     let dir = TestDir::new("fresh");
     let store = Store::open(&dir.db()).unwrap();
     assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
-    assert_eq!(STEPS.len(), 3);
+    assert_eq!(STEPS.len(), 4);
     assert_eq!(STEPS.len(), usize::try_from(VERSION - FIRST + 1).unwrap());
     // Opening again changes nothing.
     drop(store);
@@ -90,7 +90,10 @@ fn a_per_session_store_is_not_opened_as_the_library() {
         Err(StoreError::PerSessionStore)
     ));
     // And it's left as it was.
-    assert_eq!(read_per_session(&path).unwrap(), [row(0, 0, 0, 480, 1)]);
+    assert_eq!(
+        read_per_session(SessionId::new(1), &path).unwrap(),
+        [row(0, 0, 0, 480, 1)]
+    );
 }
 
 #[test]
@@ -220,7 +223,8 @@ fn a_bad_per_session_store_adopts_nothing() {
         .unwrap();
     assert!(matches!(
         store.adopt_session(&NewSession::bare(id), Some(&corrupt)),
-        Err(StoreError::Corrupt(m)) if m.contains("epoch")
+        Err(StoreError::CorruptRow { session, key, why })
+            if session == id && key == crate::RowKey { track: 0, start: 0 } && why.contains("epoch")
     ));
 
     #[cfg(unix)]
@@ -387,7 +391,7 @@ fn version_3_upgrades_to_4_and_its_heard_text_becomes_append_only() {
         .unwrap();
     }
     let store = Store::open(&dir.db()).unwrap();
-    assert_eq!(store.pragma_text("user_version"), "4");
+    assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
     let heard = store.utterances(SessionId::new(1)).unwrap();
     assert_eq!(heard[0].heard.utterance.text(), "still changeable at 3");
     drop(store);
@@ -396,4 +400,33 @@ fn version_3_upgrades_to_4_and_its_heard_text_becomes_append_only() {
             .execute("UPDATE utterance SET text = 'changed' WHERE id = 1", [])
             .is_err()
     );
+}
+
+/// A version 4 library keeps its segment rows, with no audio digest, and
+/// gains the findings index; new rows can carry a digest.
+#[test]
+fn version_4_upgrades_to_5_keeping_its_rows_without_a_digest() {
+    let dir = TestDir::new("v4");
+    {
+        let conn = raw(&dir.db());
+        for step in [schema::V2, schema::V3, schema::V4] {
+            conn.execute_batch(step).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 4).unwrap();
+        conn.execute_batch(
+            "INSERT INTO session (id, state) VALUES (1, 'stopped');
+             INSERT INTO segment (session_id, track, epoch, start_sample, end_sample, sha256)
+             VALUES (1, 0, 0, 0, 480, zeroblob(32));",
+        )
+        .unwrap();
+    }
+    let mut store = Store::open(&dir.db()).unwrap();
+    assert_eq!(store.pragma_text("user_version"), "5");
+    let old = row(0, 0, 0, 480, 0);
+    assert_eq!(store.segments(SessionId::new(1)).unwrap(), [old]);
+    assert_eq!(old.audio(), None);
+    let new = row(0, 0, 480, 960, 1).with_audio(crate::AudioDigest::new([2; 32]));
+    store.insert_segment(SessionId::new(1), &new).unwrap();
+    assert_eq!(store.segments(SessionId::new(1)).unwrap(), [old, new]);
+    assert_eq!(store.findings(SessionId::new(1)).unwrap(), []);
 }
