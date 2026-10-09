@@ -187,8 +187,9 @@ impl Transcriber for Parakeet {
 /// The words in a recogniser's `tokens`, each started at its first token's
 /// time and ended at its last token's time plus its duration (both in
 /// seconds from the start of `len` samples of audio), or, without
-/// durations, where the next word starts. A token beginning with a space
-/// starts a word; punctuation stays with the word before. Words are kept
+/// durations, where the next word starts. A token after a space (its own,
+/// or a token that is only a space) starts a word; punctuation stays with
+/// the word before. Words are kept
 /// inside the audio, in order and not overlapping. Empty if the times
 /// don't match the tokens one for one.
 fn words_of(
@@ -208,17 +209,24 @@ fn words_of(
         }
     };
     let mut words: Vec<TimedWord> = Vec::new();
+    // Whether the next token with text starts a word: the first does, and
+    // so does any after a space, even a space on its own (Parakeet's lone
+    // `▁`, before a number's digits).
+    let mut new_word = true;
     for (k, token) in tokens.iter().enumerate() {
-        let end = durations.map(|d| sample(starts[k] + d[k]));
+        new_word |= token.starts_with(char::is_whitespace);
         let trimmed = token.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let end = durations.map(|d| sample(starts[k] + d[k]));
         match words.last_mut() {
-            Some(word) if !token.starts_with(char::is_whitespace) => {
+            Some(word) if !new_word => {
                 word.text.push_str(trimmed);
                 if let Some(end) = end {
                     word.to = word.to.max(end);
                 }
             }
-            _ if trimmed.is_empty() => {}
             last => {
                 let floor = last.map_or(SampleCount::ZERO, |word| word.to);
                 let from = sample(starts[k]).max(floor);
@@ -229,6 +237,7 @@ fn words_of(
                 });
             }
         }
+        new_word = false;
     }
     // Without durations, each word runs on to the next, and the last to
     // the end of the audio.
@@ -588,6 +597,15 @@ mod tests {
                 ("now", 8_000, 8_000),
                 ("end", 16_000, 16_000),
             ]
+        );
+        // A space on its own, as Parakeet gives one before a number's
+        // digits, starts a word too.
+        let t = tokens(&[" in", " ", "1", "9", "9", "0", "."]);
+        let starts = [0.1, 0.3, 0.3, 0.4, 0.5, 0.6, 0.7];
+        let words = words_of(&t, &starts, None, len);
+        assert_eq!(
+            spans(&words),
+            [("in", 1_600, 4_800), ("1990.", 4_800, 16_000)]
         );
         // A time that isn't a number is the start.
         let words = words_of(&tokens(&[" a", " b"]), &[f32::NAN, 0.5], None, len);

@@ -78,6 +78,18 @@ frame it accepts:
   inside the transcript's range, and starts no earlier than the word before
   ends
 
-Seeds are any encoded frames; the property tests in
+Seeds are any encoded frames. A handshake is enough to start from:
+
+```sh
+mkdir -p in-protocol
+printf '\x07\x00\x00\x00\x00nota\x01\x00' > in-protocol/hello
+cargo afl build --release
+AFL_SKIP_CPUFREQ=1 AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 \
+  cargo afl fuzz -i in-protocol -o out-protocol target/release/engine_protocol
+```
+
+`in-protocol/` and `out-protocol/` are git-ignored too.
+
+The property tests in
 `crates/nota-core/src/protocol/props.rs` cover the same contract on every
 `cargo nextest` run.

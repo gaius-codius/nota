@@ -38,9 +38,10 @@ impl Utterance {
 
     /// Places `transcript` as [`Utterance::place`] does, and each of its
     /// words through the same timeline. Every word lies within the
-    /// utterance's span, in order: the timeline only moves forward, and a
-    /// word it can't time (which needs a time past what a [`SessionTime`]
-    /// holds) takes the utterance's span.
+    /// utterance's span, in order: each starts no earlier than the one
+    /// before ended, and a word the timeline can't time (which needs a time
+    /// past what a [`SessionTime`] holds) runs from there to the
+    /// utterance's end.
     #[must_use]
     pub fn place_with_words(
         transcript: Transcript,
@@ -58,18 +59,24 @@ impl Utterance {
             track,
             text,
         };
+        let mut floor = utterance.start;
         let words = heard
             .iter()
-            .map(|word| utterance.place_word(word, timeline))
+            .map(|word| {
+                let placed = utterance.place_word(word, timeline, floor);
+                floor = placed.end;
+                placed
+            })
             .collect();
         Some((utterance, words))
     }
 
-    /// `word` in session time, within the utterance's span.
-    fn place_word(&self, word: &HeardWord, timeline: &TrackTimeline) -> Word {
-        let within = |at: SessionTime| at.clamp(self.start, self.end);
+    /// `word` in session time, within the utterance's span and starting no
+    /// earlier than `floor`, where the word before it ended.
+    fn place_word(&self, word: &HeardWord, timeline: &TrackTimeline, floor: SessionTime) -> Word {
+        let within = |at: SessionTime| at.clamp(floor, self.end);
         let range = word.range();
-        let start = timeline.time_of(range.start()).map_or(self.start, within);
+        let start = timeline.time_of(range.start()).map_or(floor, within);
         let end = if range.is_empty() {
             start
         } else {
