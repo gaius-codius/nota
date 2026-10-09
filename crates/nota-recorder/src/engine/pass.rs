@@ -10,8 +10,9 @@
 //! the sink has committed is a point the pass can carry on from:
 //! - text comes only once the engine has confirmed it (the supervisor
 //!   holds it until then), so a sample's text reaches the sink once;
-//! - audio the engine couldn't transcribe (it kept failing on it) reaches
-//!   the sink as skipped, so the pass still moves past it;
+//! - audio the engine couldn't transcribe (it kept failing on it), and a
+//!   segment that couldn't be read back, reach the sink as skipped, so the
+//!   pass still moves past them and the rest is done;
 //! - each track's runs of samples (consecutive segments in one epoch) are
 //!   flushed at their end, so a chunk never spans a gap or a reopened
 //!   stream.
@@ -91,15 +92,16 @@ impl PassConfig {
     /// minutes without progress. Each request may take 60 s; a track is
     /// flushed only at the end of each of its runs, never for want of
     /// audio; 25 s (one chunk) is skipped when engines keep failing on it;
-    /// and a stop waits at most 2 s for the engine's last answer, which
-    /// the pass, stopping, wouldn't use.
+    /// and the engine is killed at once when the pass ends: a pass that's
+    /// done has nothing left to confirm, and one that's stopped (for a
+    /// recording) wouldn't use what it confirmed.
     #[must_use]
     pub fn final_pass(command: EngineCommand) -> Self {
         let mut engine = EngineConfig::new(command);
         engine.request_timeout = Duration::from_secs(60);
         engine.idle_flush = Duration::from_hours(24);
         engine.poison_skip = SampleCount::new(25 * 16_000);
-        engine.shutdown_wait = Duration::from_secs(2);
+        engine.shutdown_wait = Duration::ZERO;
         Self {
             engine,
             frame: SampleCount::new(16_000),
@@ -119,8 +121,6 @@ pub enum PassEnd<E> {
     /// Nothing was confirmed for [`PassConfig::stall`]; why the engine was
     /// down, if it said.
     Stalled(Option<String>),
-    /// A segment's audio couldn't be read.
-    Segment(SegmentRow, ReadSegmentError),
     /// The sink failed.
     Sink(E),
     /// The supervisor couldn't be started.
@@ -134,12 +134,6 @@ impl<E: fmt::Display> fmt::Display for PassEnd<E> {
             Self::Stopped => write!(f, "stopped"),
             Self::Stalled(Some(why)) => write!(f, "the transcriber stopped working: {why}"),
             Self::Stalled(None) => write!(f, "the transcriber stopped answering"),
-            Self::Segment(row, e) => write!(
-                f,
-                "the segment of track {} from sample {} {e}",
-                row.track().get(),
-                row.range().start().get()
-            ),
             Self::Sink(e) => write!(f, "{e}"),
             Self::Engine(e) => write!(f, "the transcriber couldn't be started: {e}"),
         }
@@ -153,7 +147,9 @@ const POLL: Duration = Duration::from_millis(100);
 /// Runs a pass over `tracks`, one after the other, reading each segment's
 /// audio with `read` (16 kHz samples, one per sample of its row), until
 /// every track is confirmed to its last published sample, `stop` returns
-/// true, or it fails. Committed results go to `sink` as they come.
+/// true, or it fails. Committed results go to `sink` as they come. A
+/// segment `read` can't give is skipped: its samples go to the sink as
+/// skipped once everything before them is confirmed.
 pub fn transcribe<K: PassSink>(
     tracks: &[TrackAudio],
     mut read: impl FnMut(&SegmentRow) -> Result<Vec<i16>, ReadSegmentError>,
@@ -179,8 +175,13 @@ pub fn transcribe<K: PassSink>(
         if stop() {
             return PassEnd::Stopped;
         }
-        if let Err((row, e)) = feed.send(&mut engine, &mut read, config) {
-            return PassEnd::Segment(row, e);
+        feed.send(&mut engine, &mut read, config);
+        while let Some(range) = feed.unread_due() {
+            if let Err(e) = sink.confirmed(feed.track, range.end(), Vec::new(), vec![range]) {
+                return PassEnd::Sink(e);
+            }
+            last_progress = clock.now();
+            feed.confirmed(range.end());
         }
         if feed.done() {
             work.pop();
@@ -217,9 +218,12 @@ pub fn transcribe<K: PassSink>(
             // before its end is now dealt with.
             EngineEvent::Skipped { track, range } => (track, range.end(), vec![range]),
         };
+        // The supervisor passes a track's text on only with the
+        // confirmation that covers it, so all the track's text is this
+        // confirmation's.
         let (mine, others): (Vec<Transcript>, Vec<Transcript>) = std::mem::take(&mut texts)
             .into_iter()
-            .partition(|t| t.track() == track && t.range().end() <= up_to);
+            .partition(|t| t.track() == track);
         texts = others;
         if let Err(e) = sink.confirmed(track, up_to, mine, skipped) {
             return PassEnd::Sink(e);
@@ -247,6 +251,9 @@ struct Feed {
     previous: Option<SegmentRow>,
     /// Sent and not yet confirmed, in order.
     sent: VecDeque<SampleRange>,
+    /// Segments that couldn't be read, to be skipped once everything sent
+    /// before them is confirmed, in order.
+    unread: VecDeque<SampleRange>,
     /// Everything before this is confirmed.
     confirmed: SampleIndex,
     /// The last published sample's end.
@@ -270,6 +277,7 @@ impl Feed {
             audio: None,
             previous: None,
             sent: VecDeque::new(),
+            unread: VecDeque::new(),
             confirmed: track.from,
             end,
         })
@@ -277,7 +285,18 @@ impl Feed {
 
     /// Whether every published sample is confirmed.
     fn done(&self) -> bool {
-        self.segments.is_empty() && self.confirmed >= self.end
+        self.segments.is_empty() && self.unread.is_empty() && self.confirmed >= self.end
+    }
+
+    /// The first unreadable segment's samples, taken, once nothing sent
+    /// before them is still unconfirmed.
+    fn unread_due(&mut self) -> Option<SampleRange> {
+        let next = *self.unread.front()?;
+        let clear = self
+            .sent
+            .front()
+            .is_none_or(|sent| sent.start() >= next.end());
+        clear.then(|| self.unread.pop_front()).flatten()
     }
 
     fn in_flight(&self) -> SampleCount {
@@ -307,10 +326,10 @@ impl Feed {
         engine: &mut EngineSupervisor,
         read: &mut impl FnMut(&SegmentRow) -> Result<Vec<i16>, ReadSegmentError>,
         config: &PassConfig,
-    ) -> Result<(), (SegmentRow, ReadSegmentError)> {
+    ) {
         while self.in_flight() < config.in_flight {
             let Some(&row) = self.segments.front() else {
-                return Ok(());
+                return;
             };
             // A new run (after a gap, or in a new epoch): the one before it
             // ends here, once, before any of this segment is sent.
@@ -320,16 +339,24 @@ impl Feed {
             if new_run && self.audio.is_none() {
                 engine.flush(self.track);
             }
-            let audio = match &self.audio {
-                Some(audio) => audio,
-                None => self.audio.insert(read(&row).map_err(|e| (row, e))?),
+            if self.audio.is_none() {
+                let Ok(read) = read(&row) else {
+                    self.skip_unread(engine, row);
+                    continue;
+                };
+                self.audio = Some(read);
+            }
+            let Some(audio) = &self.audio else {
+                continue;
             };
             let start = self.next.max(row.range().start());
             let frame = config.frame.get().max(1);
             let boundary = (start.get() / frame)
                 .saturating_add(1)
                 .saturating_mul(frame);
-            let end = SampleIndex::new(boundary).min(row.range().end());
+            // Never before `start`: a row overlapping the one before it
+            // (the store refuses those) is passed over, not looped on.
+            let end = SampleIndex::new(boundary).min(row.range().end()).max(start);
             let at = |sample: SampleIndex| {
                 usize::try_from(sample.saturating_count_since(row.range().start()).get())
                     .unwrap_or(usize::MAX)
@@ -355,6 +382,20 @@ impl Feed {
                 }
             }
         }
-        Ok(())
+    }
+
+    /// Passes over `row`, which couldn't be read: the run before it ends
+    /// there, and its samples (from where the pass is) are skipped once
+    /// everything before them is confirmed.
+    fn skip_unread(&mut self, engine: &EngineSupervisor, row: SegmentRow) {
+        engine.flush(self.track);
+        if let Some(range) = SampleRange::new(self.next.max(row.range().start()), row.range().end())
+            .filter(|range| !range.is_empty())
+        {
+            self.unread.push_back(range);
+        }
+        self.next = row.range().end();
+        self.segments.pop_front();
+        self.previous = Some(row);
     }
 }

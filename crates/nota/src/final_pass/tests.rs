@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 
 use nota_core::{EpochId, SystemClock};
+use nota_recorder::fs::Fs as _;
 use nota_store::{JobState, NewSession, Sha256Digest};
 
 use super::*;
@@ -199,4 +200,46 @@ fn a_full_disk_waits_and_other_store_errors_fail() {
         stored(&StoreError::NoSession(SESSION)),
         JobEnd::Failed(why) if why.contains("is not in the library")
     ));
+}
+
+/// The final pass waits while its session still has journals to publish
+/// (salvage does that at the next start), so it covers their audio.
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test scaffolding: a journal-named file"
+)]
+fn the_final_pass_waits_for_journals_to_be_published() {
+    let dir = TestDir::new("journals");
+    let library = Library::open(&dir.0).unwrap();
+    let job = db(&dir)
+        .with(|db| {
+            db.finish_recording(SESSION, None)?;
+            db.jobs()
+        })
+        .unwrap()
+        .remove(0);
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock::start().unwrap());
+    let paths = library.session(SESSION);
+    let audio = paths.audio();
+    StdFs.create_dir(&paths.dir).unwrap();
+    StdFs.create_dir(&audio).unwrap();
+    let engine = Engine {
+        command: EngineCommand {
+            program: PathBuf::from("nota"),
+            args: Vec::new(),
+        },
+        heard_by: heard_by(),
+    };
+    let jobs = Jobs::new(library, Some(engine), clock);
+    assert_eq!(jobs.lacks(&job), None);
+    drop(StdFs.create(&audio.join("journal-000003")).unwrap());
+    assert_eq!(jobs.lacks(&job), Some(Wait::Audio));
+    // A journal set aside as damaged isn't one.
+    std::fs::rename(
+        audio.join("journal-000003"),
+        audio.join("journal-000003.unreadable"),
+    )
+    .unwrap();
+    assert_eq!(jobs.lacks(&job), None);
 }

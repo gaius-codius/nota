@@ -9,7 +9,10 @@
 //! pass's, beside the heard text and never in it
 //! ([`nota_store::final_text`]), with how far each track has got, so a
 //! pass stopped for a recording, or by a crash, carries on from there and
-//! covers each published sample once. Its progress counts samples.
+//! covers each published sample once. A segment that can't be read back
+//! (its file gone or not matching its row) is stored as text-less, as
+//! audio the engine couldn't transcribe is, and the rest goes on. Its
+//! progress counts samples.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -20,7 +23,8 @@ use nota_core::{Clock, SampleIndex, SampleRange, SessionId, TrackId};
 use nota_recorder::engine::EngineCommand;
 use nota_recorder::engine::pass::{PassConfig, PassEnd, PassSink, TrackAudio, transcribe};
 use nota_recorder::fs::StdFs;
-use nota_recorder::segment::read_segment;
+use nota_recorder::segment::{needs_salvage, read_segment};
+use nota_recorder::session::SessionDir;
 use nota_store::{
     FinalText, HeardBy, Job, JobEnd, JobKind, Progress, SegmentRow, StoreError, Wait, Writer,
 };
@@ -75,7 +79,24 @@ impl Worker for Jobs {
 
     fn lacks(&self, job: &Job) -> Option<Wait> {
         match job.kind {
-            JobKind::FinalPass => self.engine.is_none().then_some(Wait::Engine),
+            // Journals left unpublished (a crash, a disk error at the
+            // stop) hold audio the rows don't have yet: salvage publishes
+            // them at the next start, and the pass waits so it covers
+            // them. One whose directory can't be read is taken to have
+            // some; one that's gone has none (and no audio to pass over).
+            JobKind::FinalPass => {
+                let paths = self.library.session(job.session);
+                let dir = SessionDir::new(job.session, StdFs, &paths.audio());
+                let journals = match needs_salvage(&dir) {
+                    Ok(journals) => journals,
+                    Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+                };
+                if journals {
+                    Some(Wait::Audio)
+                } else {
+                    self.engine.is_none().then_some(Wait::Engine)
+                }
+            }
         }
     }
 }
@@ -117,9 +138,7 @@ fn final_pass(
         PassEnd::Done => JobEnd::Done,
         PassEnd::Stopped => JobEnd::Waiting(None),
         PassEnd::Sink(e) => stored(&e),
-        end @ (PassEnd::Stalled(_) | PassEnd::Segment(..) | PassEnd::Engine(_)) => {
-            JobEnd::Failed(end.to_string())
-        }
+        end @ (PassEnd::Stalled(_) | PassEnd::Engine(_)) => JobEnd::Failed(end.to_string()),
     }
 }
 

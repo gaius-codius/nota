@@ -2,19 +2,24 @@
 //! in the order they were queued (see [`nota_store::jobs`]).
 //!
 //! **Capture first.** No job starts while a recording is going, in this
-//! nota or another one, and a job running when one starts is stopped at
-//! once: it waits, keeping what it committed, and carries on once the
-//! recording has stopped. Only the live pass runs while recording.
+//! nota or another one, and a job running when one starts is stopped: at
+//! once for this nota's recording, within a second or two for another's
+//! (seen once it has written its first journal). It waits, keeping what
+//! it committed, and carries on once the recording has stopped. Only the
+//! live pass runs while recording.
 //!
 //! **One runner for the library.** The runner holds a lock in the data
 //! directory (`jobs/`) for as long as it runs, so a second nota open on
-//! the same library runs no jobs of its own. Holding it, the runner first
+//! the same library runs no jobs of its own: its runner waits for the
+//! lock, and takes the queue over once the first nota closes or dies.
+//! Holding it, the runner first
 //! takes back the jobs a runner that died left running: they wait to run
 //! again, and run on from what they committed. A job that nota has died
 //! running [`MAX_ATTEMPTS`] times fails rather than taking nota down again.
 //!
 //! **Nothing holds the queue up.** A job runs only once what it waits for
-//! is there ([`Wait`]): space, after a full disk, or a speech engine. The
+//! is there ([`Wait`]): space, after a full disk; a speech engine; its
+//! session's audio, all published. The
 //! queue moves on past one that's waiting, and past one that fails (it
 //! keeps its reason), to the next session's.
 
@@ -36,7 +41,7 @@ pub(crate) const MAX_ATTEMPTS: u32 = 3;
 const IDLE: Duration = Duration::from_secs(5);
 
 /// How often a runner held off by a recording checks whether it has
-/// stopped.
+/// stopped, and one waiting for another nota's runner tries its lock.
 const HELD: Duration = Duration::from_secs(1);
 
 /// What a job is given while it runs.
@@ -56,7 +61,8 @@ pub(crate) trait Worker: Send + 'static {
     fn run(&mut self, job: &Job, running: &Running<'_>) -> JobEnd;
 
     /// What `job` would wait for if it were run now, if anything: the
-    /// final pass without a speech engine waits for one.
+    /// final pass waits for a speech engine, and for its session's
+    /// journals to be published.
     fn lacks(&self, job: &Job) -> Option<Wait>;
 }
 
@@ -131,37 +137,42 @@ pub(crate) struct Runner {
 
 impl Runner {
     /// Starts the runner for the library whose data directory is `data`
-    /// and database `db`, unless another nota runs its jobs already
-    /// (`None` then).
+    /// and database `db`. While another nota runs the library's jobs, it
+    /// waits, and takes over when that one stops.
     ///
     /// # Errors
     ///
-    /// If the lock can't be made or taken for another reason, or the
-    /// thread can't be started.
+    /// If the lock's directory can't be made, or the thread can't be
+    /// started.
     pub(crate) fn spawn(
         data: &Path,
         db: Writer,
         worker: impl Worker,
         capture: impl Capture,
         room: impl Room,
-    ) -> io::Result<Option<Self>> {
+    ) -> io::Result<Self> {
         let dir = data.join("jobs");
         match StdFs.create_dir(&dir) {
             Ok(()) => StdFs.sync_dir(data)?,
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(e),
         }
-        let lock = match StdFs.lock_dir(&dir) {
-            Ok(lock) => lock,
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(None),
-            Err(e) => return Err(e),
-        };
         let shared = Arc::new(Shared::default());
         let looping = Arc::clone(&shared);
         let thread = thread::Builder::new()
             .name("nota-jobs".into())
             .spawn(move || {
-                let _lock = lock;
+                // Another nota's runner, or a lock that can't be taken now
+                // (the directory replaced, say): try again in a moment.
+                let _lock = loop {
+                    if looping.stopping() {
+                        return;
+                    }
+                    match StdFs.lock_dir(&dir) {
+                        Ok(lock) => break lock,
+                        Err(_) => looping.sleep(HELD),
+                    }
+                };
                 Loop {
                     db,
                     worker,
@@ -171,10 +182,10 @@ impl Runner {
                 }
                 .run();
             })?;
-        Ok(Some(Self {
+        Ok(Self {
             shared,
             thread: Some(thread),
-        }))
+        })
     }
 
     /// Asks the runner to look at the queue now: a job was queued, or a
@@ -240,26 +251,29 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
             let JobState::Waiting(waits) = job.state else {
                 continue;
             };
+            // A job waiting for space keeps waiting for it until there's
+            // room, whatever else it lacks meanwhile.
+            if waits == Some(Wait::Space) && !self.room.room() {
+                continue;
+            }
             if let Some(lacks) = self.worker.lacks(&job) {
-                if waits != Some(lacks) {
+                if waits != Some(lacks) && waits != Some(Wait::Space) {
                     self.db
                         .with(|db| db.end_job(job.id, &JobEnd::Waiting(Some(lacks))))?;
                 }
                 continue;
             }
-            // An engine it waited for is here now; space is checked.
-            if waits != Some(Wait::Space) || self.room.room() {
-                return Ok(Some(job));
-            }
+            return Ok(Some(job));
         }
         Ok(None)
     }
 
     fn run_one(&mut self, job: &Job) {
-        match self.db.with(|db| db.start_job(job.id)) {
-            Ok(true) => {}
-            // Taken, or ended, meanwhile; or the database is away.
-            Ok(false) | Err(_) => return,
+        // Taken, or ended, meanwhile; or the database can't be written (a
+        // full disk): look again in a while, not at once.
+        if !matches!(self.db.with(|db| db.start_job(job.id)), Ok(true)) {
+            self.shared.sleep(IDLE);
+            return;
         }
         let shared = Arc::clone(&self.shared);
         let capture = &self.capture;
@@ -285,6 +299,11 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
                 // it committed.
                 return;
             }
+            self.shared.sleep(IDLE);
+        }
+        // Out of space by SQLite's count though the disk check finds room
+        // (a quota, a full temp store): don't start it again at once.
+        if end == JobEnd::Waiting(Some(Wait::Space)) {
             self.shared.sleep(IDLE);
         }
     }

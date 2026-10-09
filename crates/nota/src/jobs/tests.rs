@@ -182,7 +182,6 @@ fn spawn(dir: &TestDir, db: &Writer, worker: &Fake, capture: &Switch, room: &Swi
         room.clone(),
     )
     .unwrap()
-    .unwrap()
 }
 
 /// Acceptance (GAI-316): three sessions' jobs run in order, and a failed
@@ -285,36 +284,37 @@ fn a_full_disk_sessions_jobs_wait_for_space_without_holding_others_up() {
 }
 
 /// Acceptance (GAI-316): a job a runner died while running runs again,
-/// with the death counted, from where it got to. Only one runner runs a
-/// library's jobs.
+/// with the death counted, from where it got to.
 #[test]
 fn a_job_left_running_by_a_dead_runner_runs_again() {
     let (dir, db) = library("recover", &[(S1, None)]);
     let id = db.with(|db| db.jobs()).unwrap()[0].id;
     db.with(|db| db.start_job(id)).unwrap();
     let worker = Fake::default();
-    let runner = spawn(&dir, &db, &worker, &Switch::default(), &Switch::on());
-    assert!(
-        Runner::spawn(
-            &dir.0,
-            db.clone(),
-            Fake::default(),
-            Switch::default(),
-            Switch::on()
-        )
-        .unwrap()
-        .is_none()
-    );
+    let _runner = spawn(&dir, &db, &worker, &Switch::default(), &Switch::on());
     until_states(&db, &[(S1, JobState::Done)]);
     assert_eq!(worker.ran(), [S1]);
     assert_eq!(db.with(|db| db.jobs()).unwrap()[0].attempts, 1);
-    drop(runner);
-    // Its lock went with it.
-    assert!(
-        Runner::spawn(&dir.0, db, Fake::default(), Switch::default(), Switch::on())
-            .unwrap()
-            .is_some()
-    );
+}
+
+/// Only one runner runs a library's jobs; a second waits, and takes the
+/// queue over once the first stops.
+#[test]
+fn a_second_runner_takes_over_when_the_first_stops() {
+    let (dir, db) = library("take-over", &[(S1, None)]);
+    let idle = Fake {
+        no_engine: true,
+        ..Fake::default()
+    };
+    let first = spawn(&dir, &db, &idle, &Switch::default(), &Switch::on());
+    until_states(&db, &[(S1, JobState::Waiting(Some(Wait::Engine)))]);
+    let worker = Fake::default();
+    let _second = spawn(&dir, &db, &worker, &Switch::default(), &Switch::on());
+    pause(Duration::from_millis(1_500));
+    assert!(worker.ran().is_empty());
+    drop(first);
+    until_states(&db, &[(S1, JobState::Done)]);
+    assert_eq!(worker.ran(), [S1]);
 }
 
 /// Without a speech engine, a job that needs one waits for it, saying so,

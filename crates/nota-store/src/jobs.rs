@@ -55,6 +55,9 @@ pub enum Wait {
     Space,
     /// A speech engine: nota was started without its models.
     Engine,
+    /// The session's audio: journals it still has are published (by
+    /// salvage, at the next start) before its audio is worked on.
+    Audio,
 }
 
 impl Wait {
@@ -62,6 +65,7 @@ impl Wait {
         match self {
             Self::Space => "space",
             Self::Engine => "engine",
+            Self::Audio => "audio",
         }
     }
 
@@ -69,6 +73,7 @@ impl Wait {
         match text {
             "space" => Ok(Self::Space),
             "engine" => Ok(Self::Engine),
+            "audio" => Ok(Self::Audio),
             other => Err(StoreError::Corrupt(format!("unknown job wait {other:?}"))),
         }
     }

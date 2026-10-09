@@ -231,7 +231,7 @@ fn the_final_pass_config() {
     assert_eq!(config.engine.poison_skip.get(), 25 * S);
     assert_eq!(config.engine.request_timeout, Duration::from_mins(1));
     assert_eq!(config.engine.idle_flush, Duration::from_hours(24));
-    assert_eq!(config.engine.shutdown_wait, Duration::from_secs(2));
+    assert_eq!(config.engine.shutdown_wait, Duration::ZERO);
 }
 
 /// Audio goes no further ahead of what's confirmed than the config says:
@@ -282,13 +282,6 @@ fn a_pass_says_how_it_ended() {
     assert_eq!(
         said(PassEnd::Stalled(None)),
         "the transcriber stopped answering"
-    );
-    assert_eq!(
-        said(PassEnd::Segment(
-            row(SYSTEM, 0, 5, 9),
-            ReadSegmentError::Hash
-        )),
-        "the segment of track 1 from sample 5 doesn't match its row's SHA-256"
     );
     assert_eq!(
         said(PassEnd::Sink("the disk is full".into())),
@@ -351,10 +344,11 @@ fn a_pass_that_gets_no_answers_gives_up() {
     assert!(sink.texts.is_empty());
 }
 
-/// A segment that can't be read ends the pass, naming it; what came
-/// before it was committed.
+/// A segment that can't be read is skipped, once everything before it is
+/// confirmed, and the rest of the session is transcribed as before.
 #[test]
-fn a_segment_that_cant_be_read_ends_the_pass() {
+fn a_segment_that_cant_be_read_is_skipped_and_the_rest_done() {
+    let reference = uninterrupted();
     let tracks = tracks(&BTreeMap::new());
     let bad = tracks[0].segments[1];
     let mut sink = Committed::default();
@@ -367,16 +361,25 @@ fn a_segment_that_cant_be_read_ends_the_pass() {
                 Ok(audio(row))
             }
         },
-        &config(&["echo"]),
+        &config(ECHO),
         &clock(),
         &mut sink,
         &|| false,
     );
-    match end {
-        PassEnd::Segment(row, ReadSegmentError::Hash) => assert_eq!(row, bad),
-        other => panic!("{other:?}"),
-    }
-    assert!(sink.progress.get(&MIC).is_none_or(|&p| p <= 5 * S));
+    assert!(matches!(end, PassEnd::Done), "{end:?}");
+    assert_eq!(sink.skipped, [(MIC, 5 * S, 12 * S + S / 2)]);
+    // Everything else as the uninterrupted pass has it, but the run ends
+    // where the unreadable segment starts.
+    let kept: Vec<_> = reference
+        .texts
+        .iter()
+        .filter(|t| t.0 != MIC || t.2 <= 4 * S || t.1 >= 20 * S)
+        .cloned()
+        .collect();
+    let mut want = kept;
+    want.insert(2, (MIC, 4 * S, 5 * S, format!("{}-{}", 4 * S, 5 * S)));
+    assert_eq!(sink.texts, want);
+    assert_eq!(sink.progress, reference.progress);
 }
 
 /// A pass with nothing left to do is done without starting an engine.
@@ -391,4 +394,81 @@ fn a_pass_with_nothing_left_starts_no_engine() {
     let end = run(&config, &mut sink, &|| false);
     assert!(matches!(end, PassEnd::Done), "{end:?}");
     assert_eq!(sink.calls.get(), 0);
+}
+
+/// Rows that overlap (the store refuses them, but the pass takes any)
+/// don't hang or panic the pass: each sample is sent once.
+#[test]
+fn overlapping_rows_send_each_sample_once() {
+    let tracks = [TrackAudio {
+        track: MIC,
+        segments: vec![row(MIC, 0, 0, 3 * S), row(MIC, 0, 2 * S, 4 * S)],
+        from: SampleIndex::ZERO,
+    }];
+    let mut sink = Committed::default();
+    let end = transcribe(
+        &tracks,
+        |row| Ok(audio(row)),
+        &config(&["echo"]),
+        &clock(),
+        &mut sink,
+        &|| false,
+    );
+    assert!(matches!(end, PassEnd::Done), "{end:?}");
+    assert_eq!(
+        covered(&sink.texts),
+        BTreeMap::from([(MIC, vec![(0, 4 * S)])])
+    );
+}
+
+/// Audio that kills every engine is skipped (25 s at most, here what's
+/// left of its run), stored as skipped, and the pass goes on to the end.
+#[test]
+fn audio_that_keeps_killing_the_engine_is_skipped_and_the_rest_done() {
+    let reference = uninterrupted();
+    let tracks = tracks(&BTreeMap::new());
+    // The system track's first second holds the sample value the fake
+    // dies on.
+    let mut sink = Committed::default();
+    let end = transcribe(
+        &tracks,
+        |row| {
+            let mut samples = audio(row);
+            if row.track() == SYSTEM && row.range().start().get() == 0 {
+                samples[100] = 1_002;
+            }
+            Ok(samples)
+        },
+        &config(&["echo", "--every", "2", "--poison", "1002"]),
+        &clock(),
+        &mut sink,
+        &|| false,
+    );
+    assert!(matches!(end, PassEnd::Done), "{end:?}");
+    // One 25 s skip takes everything queued from the poison on: the
+    // system track's whole 9 s, across its epoch change.
+    assert_eq!(sink.skipped, [(SYSTEM, 0, 9 * S)]);
+    let rest: Vec<_> = reference
+        .texts
+        .iter()
+        .filter(|t| t.0 == MIC)
+        .cloned()
+        .collect();
+    assert_eq!(sink.texts, rest);
+    assert_eq!(sink.progress, reference.progress);
+}
+
+/// An engine that hangs partway is killed at the request timeout and
+/// restarted, and the pass resumes to the uninterrupted pass's text.
+#[test]
+fn an_engine_that_hangs_mid_pass_is_restarted_and_matches_an_uninterrupted_pass() {
+    let reference = uninterrupted();
+    let mut config = config(&["hang-after", "--after", "9", "--every", "2"]);
+    config.engine.request_timeout = Duration::from_millis(300);
+    let mut sink = Committed::default();
+    let end = run(&config, &mut sink, &|| false);
+    assert!(matches!(end, PassEnd::Done), "{end:?}");
+    assert!(sink.skipped.is_empty());
+    assert_eq!(sink.texts, reference.texts);
+    assert_eq!(sink.progress, reference.progress);
 }

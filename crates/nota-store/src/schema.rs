@@ -265,8 +265,10 @@ BEGIN SELECT RAISE(ABORT, 'a revision is never added to'); END;
 ///
 /// A job gains its progress (`progress` of `total`, in whatever units its
 /// kind counts) and what a waiting job waits for (`waits_for`: `space`
-/// after a full disk, `engine` without the speech models); a session has
-/// at most one job of each kind.
+/// after a full disk, `engine` without the speech models, `audio` while
+/// the session still has journals to publish); a session has at most one
+/// job of each kind. Sessions stopped before version 5 get no jobs from
+/// it: their audio has no final pass unless one is queued for them.
 ///
 /// The final pass's text is kept apart from the heard text: its own rows,
 /// located by track and sample as the engine gives them, not in

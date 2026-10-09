@@ -108,8 +108,6 @@ fn run_on(input: &[u8]) -> (Result<(), EngineError>, Vec<Frame<FromEngine>>) {
     (result, frames)
 }
 
-/// `speech` samples of speech framed by `silence` samples of silence each
-/// side, 16 kHz.
 fn live() -> ChunkerConfig {
     ChunkerConfig::live(SampleRate::SPEECH)
 }
@@ -151,6 +149,8 @@ fn the_chunking_given_is_the_one_used() {
     assert_eq!(final_pass[0], 22 * 16_000);
 }
 
+/// `speech` samples of speech framed by `silence` samples of silence each
+/// side, 16 kHz.
 fn speech_between_silence(silence: usize, speech: usize) -> Vec<i16> {
     let mut samples = vec![0_i16; silence];
     samples.extend(std::iter::repeat_n(1_000, speech));

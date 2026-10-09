@@ -47,7 +47,7 @@ use crate::terminal::Screen;
 const STOPPING: &str = "finishing the recording";
 
 /// How often the runner looks for a recording in another nota, at most.
-const ELSEWHERE: Duration = Duration::from_secs(2);
+const ELSEWHERE: Duration = Duration::from_secs(1);
 
 /// How often Home lists the sessions again while it's open, so a status
 /// another nota changes (a recording stopping, a salvage finishing) shows.
@@ -120,7 +120,7 @@ fn run_app(args: &RecordArgs, said: &mut Vec<String>) -> Result<(), BoxError> {
 
 /// The jobs that run after each stop, and whether this nota is recording.
 struct Background {
-    /// `None` if they can't run, or another nota runs them.
+    /// `None` if they can't run.
     runner: Option<Runner>,
     here: Arc<AtomicBool>,
 }
@@ -150,7 +150,7 @@ fn start_jobs(
         capture,
         FreeSpace(args.data.clone()),
     ) {
-        Ok(runner) => (runner, None),
+        Ok(runner) => (Some(runner), None),
         Err(e) => (None, Some(cant(e))),
     }
 }
