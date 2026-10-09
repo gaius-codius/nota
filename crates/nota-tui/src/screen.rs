@@ -3,13 +3,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use nota_core::{Clock, SessionTime};
+use nota_core::recorder::{Command, Event, Mark, Note};
+use nota_core::{Clock, SessionTime, Utterance};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::annotation::{Annotation, Mark, Note};
+use crate::annotation::Annotation;
 use crate::band::LevelHistory;
-use crate::level::Level;
-use crate::text::{Utterance, has_visible_text, is_drawn};
+use crate::text::{has_visible_text, is_drawn};
 use crate::theme::Theme;
 
 /// How far ahead of the clock a level may be stamped. Levels stamped later
@@ -25,27 +25,6 @@ const MAX_NOTE_CHARS: usize = 500;
 /// than an answer. A word typed without `n` first, like "system", opens the
 /// question with its `s` and would confirm it with the `y` straight after.
 pub(crate) const STOP_GUARD: Duration = Duration::from_millis(500);
-
-/// News from the rest of nota for the screen.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Update {
-    /// The level heard at a moment of the session. Send one at least every
-    /// 250 ms while capturing: a stretch with no level draws as a gap in the
-    /// band. A level stamped more than 5 s ahead of the clock is dropped.
-    Level {
-        /// When it was heard.
-        at: SessionTime,
-        /// How loud it was.
-        level: Level,
-    },
-    /// New live text.
-    Text(Utterance),
-    /// Whether a chunk of speech is with the engine, not yet text (drawn as
-    /// `░░░` after the transcript).
-    Transcribing(bool),
-    /// How much of the recording is on disk so far, in bytes.
-    Recorded(u64),
-}
 
 /// The Recording screen (the UI spec's `Main`).
 #[derive(Debug)]
@@ -113,10 +92,12 @@ impl Recording {
         }
     }
 
-    /// Applies news from the rest of nota.
-    pub fn update(&mut self, update: Update) {
-        match update {
-            Update::Level { at, level } => {
+    /// Applies what the recorder reports. A level stamped more than 5 s
+    /// ahead of the clock is dropped. Closing on [`Event::Stopping`] and
+    /// [`Event::Stopped`] is [`run`](crate::run())'s business.
+    pub fn update(&mut self, event: Event) {
+        match event {
+            Event::Level { at, level, .. } => {
                 let limit = self.clock.now().checked_add(LEVEL_LEAD);
                 if limit.is_none_or(|limit| at <= limit) {
                     self.levels.record(at, level);
@@ -124,8 +105,8 @@ impl Recording {
             }
             // Nothing to draw, and it would take the margin from the
             // utterance before it.
-            Update::Text(utterance) if !has_visible_text(utterance.text()) => {}
-            Update::Text(utterance) => {
+            Event::Text(utterance) if !has_visible_text(utterance.text()) => {}
+            Event::Text(utterance) => {
                 // Two tracks' text can arrive out of order; keep it sorted by
                 // start, after any that started at the same time.
                 let index = self
@@ -133,13 +114,26 @@ impl Recording {
                     .partition_point(|other| other.start() <= utterance.start());
                 self.utterances.insert(index, utterance);
             }
-            Update::Transcribing(transcribing) => self.transcribing = transcribing,
-            Update::Recorded(bytes) => self.recorded_bytes = bytes,
+            Event::Transcribing(transcribing) => self.transcribing = transcribing,
+            Event::Recorded(bytes) => self.recorded_bytes = bytes,
+            // Not shown yet. Warnings, device changes, the disk and the
+            // transcriber's state get their words and their place on the
+            // band with the UI spec's pending changes; durable progress,
+            // epochs and gaps go on the band with them.
+            Event::Engine(_)
+            | Event::Warning(_)
+            | Event::Device { .. }
+            | Event::Disk(_)
+            | Event::Durable { .. }
+            | Event::Epoch { .. }
+            | Event::Gap { .. }
+            | Event::Stopping
+            | Event::Stopped(_) => {}
         }
     }
 
-    /// Handles a key press, as if it was pressed now. Returns the mark or
-    /// note it added, to be stored.
+    /// Handles a key press, as if it was pressed now. Returns the command
+    /// it gives the recorder: a mark or note to store, or the stop.
     ///
     /// - `m` adds a mark at once, never asking.
     /// - `n` starts a note pinned to this moment. Typing fills it, `⏎` saves
@@ -153,13 +147,13 @@ impl Recording {
     ///   neither answers nor dismisses it.
     ///
     /// All of them work with Caps Lock on.
-    pub fn handle_key(&mut self, key: KeyEvent) -> Option<Annotation> {
+    pub fn handle_key(&mut self, key: KeyEvent) -> Option<Command> {
         self.handle_key_at(key, self.clock.now())
     }
 
     /// Handles a key pressed at session time `at`, which a mark or a new
     /// note is pinned to. See [`Recording::handle_key`].
-    pub fn handle_key_at(&mut self, key: KeyEvent, at: SessionTime) -> Option<Annotation> {
+    pub fn handle_key_at(&mut self, key: KeyEvent, at: SessionTime) -> Option<Command> {
         if key.kind != KeyEventKind::Press {
             return None;
         }
@@ -188,7 +182,7 @@ impl Recording {
                     KeyCode::Modifier(_) => self.stop,
                     _ => Stop::No,
                 };
-                return None;
+                return (self.stop == Stop::Confirmed).then_some(Command::Stop);
             }
             // The screen is closing: nothing more to add.
             Stop::Confirmed => return None,
@@ -218,9 +212,9 @@ impl Recording {
         }
         match key.code {
             KeyCode::Char('m' | 'M') => {
-                let mark = Annotation::Mark(Mark { at });
-                self.annotations.push(mark.clone());
-                Some(mark)
+                let mark = Mark { at };
+                self.annotations.push(Annotation::Mark(mark));
+                Some(Command::Mark(mark))
             }
             KeyCode::Char('n' | 'N') => {
                 self.draft = Some(Draft {
@@ -238,8 +232,8 @@ impl Recording {
     }
 
     /// The marks and notes added so far, in session-time order.
-    #[must_use]
-    pub fn annotations(&self) -> &[Annotation] {
+    #[cfg(test)]
+    pub(crate) fn annotations(&self) -> &[Annotation] {
         &self.annotations
     }
 
@@ -264,11 +258,11 @@ impl Recording {
 
     /// Saves the note being typed, if there is one and it isn't blank, as if
     /// `⏎` had been pressed. For when the screen closes mid-note.
-    pub fn save_draft(&mut self) -> Option<Annotation> {
+    pub fn save_draft(&mut self) -> Option<Command> {
         let draft = self.draft.take()?;
-        let note = Annotation::Note(Note::new(draft.at, &draft.text)?);
-        self.annotations.push(note.clone());
-        Some(note)
+        let note = Note::new(draft.at, &draft.text)?;
+        self.annotations.push(Annotation::Note(note.clone()));
+        Some(Command::Note(note))
     }
 }
 
@@ -278,10 +272,12 @@ fn is_ctrl_c(key: KeyEvent) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use nota_core::FakeClock;
+    use nota_core::recorder::Level;
+    use nota_core::{FakeClock, TrackId};
     use ratatui::crossterm::event::{KeyEventState, ModifierKeyCode};
 
     use super::*;
+    use crate::text::heard;
 
     fn secs(s: u64) -> SessionTime {
         SessionTime::from_elapsed(Duration::from_secs(s)).unwrap()
@@ -324,11 +320,11 @@ mod tests {
     fn m_marks_the_moment_it_is_pressed() {
         let (mut screen, clock) = screen_at(secs(90));
         let mark = screen.handle_key(press(KeyCode::Char('m')));
-        assert_eq!(mark, Some(Annotation::Mark(Mark { at: secs(90) })));
+        assert_eq!(mark, Some(Command::Mark(Mark { at: secs(90) })));
         clock.advance(Duration::from_millis(1_500));
         let mark = screen.handle_key(press(KeyCode::Char('m')));
         let later = secs(90).checked_add(Duration::from_millis(1_500)).unwrap();
-        assert_eq!(mark, Some(Annotation::Mark(Mark { at: later })));
+        assert_eq!(mark, Some(Command::Mark(Mark { at: later })));
         assert_eq!(
             screen.annotations(),
             [
@@ -348,9 +344,9 @@ mod tests {
         type_text(&mut screen, "ask about mn");
         clock.advance(Duration::from_secs(5));
         let note = screen.handle_key(press(KeyCode::Enter));
-        let expected = Annotation::Note(Note::new(secs(600), "ask about mn").unwrap());
-        assert_eq!(note, Some(expected.clone()));
-        assert_eq!(screen.annotations(), [expected]);
+        let expected = Note::new(secs(600), "ask about mn").unwrap();
+        assert_eq!(note, Some(Command::Note(expected.clone())));
+        assert_eq!(screen.annotations(), [Annotation::Note(expected)]);
         assert!(!screen.is_typing_note());
     }
 
@@ -363,7 +359,7 @@ mod tests {
         type_text(&mut screen, "c ");
         assert_eq!(
             screen.handle_key(press(KeyCode::Enter)),
-            Some(Annotation::Note(Note::new(secs(1), "abc").unwrap()))
+            Some(Command::Note(Note::new(secs(1), "abc").unwrap()))
         );
 
         screen.handle_key(press(KeyCode::Char('n')));
@@ -387,7 +383,7 @@ mod tests {
         screen.handle_key(press(KeyCode::Char('\u{7}')));
         screen.handle_key(KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::SHIFT));
         type_text(&mut screen, &"a".repeat(MAX_NOTE_CHARS + 10));
-        let Some(Annotation::Note(note)) = screen.handle_key(press(KeyCode::Enter)) else {
+        let Some(Command::Note(note)) = screen.handle_key(press(KeyCode::Enter)) else {
             panic!("no note");
         };
         assert_eq!(note.text().chars().count(), MAX_NOTE_CHARS);
@@ -417,14 +413,11 @@ mod tests {
     fn keys_carry_their_own_time() {
         let (mut screen, _clock) = screen_at(secs(100));
         let mark = screen.handle_key_at(press(KeyCode::Char('M')), secs(40));
-        assert_eq!(mark, Some(Annotation::Mark(Mark { at: secs(40) })));
+        assert_eq!(mark, Some(Command::Mark(Mark { at: secs(40) })));
         screen.handle_key_at(press(KeyCode::Char('N')), secs(41));
         type_text(&mut screen, "x");
         let note = screen.handle_key_at(press(KeyCode::Enter), secs(99));
-        assert_eq!(
-            note,
-            Some(Annotation::Note(Note::new(secs(41), "x").unwrap()))
-        );
+        assert_eq!(note, Some(Command::Note(Note::new(secs(41), "x").unwrap())));
     }
 
     fn ctrl_c() -> KeyEvent {
@@ -439,7 +432,10 @@ mod tests {
         assert!(!screen.stop_confirmed());
         assert!(screen.annotations().is_empty());
         clock.advance(STOP_GUARD);
-        assert_eq!(screen.handle_key(press(KeyCode::Char('y'))), None);
+        assert_eq!(
+            screen.handle_key(press(KeyCode::Char('y'))),
+            Some(Command::Stop)
+        );
         assert!(screen.stop_confirmed());
         assert!(!screen.is_confirming_stop());
         // It stays stopped, and takes no more keys.
@@ -456,7 +452,10 @@ mod tests {
         screen.handle_key(press(KeyCode::Char('S')));
         assert!(screen.is_confirming_stop());
         clock.advance(STOP_GUARD);
-        screen.handle_key(press(KeyCode::Char('Y')));
+        assert_eq!(
+            screen.handle_key(press(KeyCode::Char('Y'))),
+            Some(Command::Stop)
+        );
         assert!(screen.stop_confirmed());
     }
 
@@ -593,7 +592,7 @@ mod tests {
         type_text(&mut screen, " done");
         assert_eq!(
             screen.handle_key(press(KeyCode::Enter)),
-            Some(Annotation::Note(Note::new(secs(5), "half done").unwrap()))
+            Some(Command::Note(Note::new(secs(5), "half done").unwrap()))
         );
     }
 
@@ -605,7 +604,7 @@ mod tests {
         assert!(!screen.is_confirming_stop());
         assert_eq!(
             screen.handle_key(press(KeyCode::Enter)),
-            Some(Annotation::Note(Note::new(secs(5), "sS").unwrap()))
+            Some(Command::Note(Note::new(secs(5), "sS").unwrap()))
         );
     }
 
@@ -632,8 +631,7 @@ mod tests {
     fn blank_text_is_not_kept() {
         let (mut screen, _clock) = screen_at(secs(1));
         for text in ["", "  ", "\u{202e}\u{7}"] {
-            let utterance = Utterance::new(secs(1), secs(2), text.into()).unwrap();
-            screen.update(Update::Text(utterance));
+            screen.update(Event::Text(heard(1, 2, text)));
         }
         assert!(screen.utterances.is_empty());
     }
@@ -641,9 +639,7 @@ mod tests {
     #[test]
     fn text_is_kept_in_start_order() {
         let (mut screen, _clock) = screen_at(secs(1));
-        let at = |start, text: &str| {
-            Update::Text(Utterance::new(secs(start), secs(start + 1), text.into()).unwrap())
-        };
+        let at = |start, text: &str| Event::Text(heard(start, start + 1, text));
         screen.update(at(10, "b"));
         screen.update(at(5, "a"));
         screen.update(at(20, "d"));
@@ -659,9 +655,9 @@ mod tests {
         screen.handle_key(press(KeyCode::Char('n')));
         type_text(&mut screen, " half typed ");
         clock.advance(Duration::from_secs(3));
-        let note = Annotation::Note(Note::new(secs(30), "half typed").unwrap());
-        assert_eq!(screen.save_draft(), Some(note.clone()));
-        assert_eq!(screen.annotations(), [note]);
+        let note = Note::new(secs(30), "half typed").unwrap();
+        assert_eq!(screen.save_draft(), Some(Command::Note(note.clone())));
+        assert_eq!(screen.annotations(), [Annotation::Note(note)]);
         assert!(!screen.is_typing_note());
         screen.handle_key(press(KeyCode::Char('n')));
         assert_eq!(screen.save_draft(), None);
@@ -672,15 +668,18 @@ mod tests {
     fn levels_far_ahead_of_the_clock_are_dropped() {
         let (mut screen, _clock) = screen_at(secs(10));
         let level = Level::from_peak(100);
-        screen.update(Update::Level {
+        screen.update(Event::Level {
+            track: TrackId::new(0),
             at: secs(15),
             level,
         });
-        screen.update(Update::Level {
+        screen.update(Event::Level {
+            track: TrackId::new(0),
             at: SessionTime::from_nanos(u64::MAX),
             level,
         });
-        screen.update(Update::Level {
+        screen.update(Event::Level {
+            track: TrackId::new(0),
             at: secs(15).checked_add(Duration::from_nanos(1)).unwrap(),
             level,
         });
@@ -693,11 +692,11 @@ mod tests {
     #[test]
     fn updates_set_state() {
         let (mut screen, _clock) = screen_at(secs(1));
-        screen.update(Update::Transcribing(true));
-        screen.update(Update::Recorded(42));
+        screen.update(Event::Transcribing(true));
+        screen.update(Event::Recorded(42));
         assert!(screen.transcribing);
         assert_eq!(screen.recorded_bytes, 42);
-        screen.update(Update::Transcribing(false));
+        screen.update(Event::Transcribing(false));
         assert!(!screen.transcribing);
     }
 }

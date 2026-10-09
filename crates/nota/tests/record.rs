@@ -333,12 +333,13 @@ fn assert_saved(data: &Path, session: u64, tracks: &[u32], ms: u64) -> Vec<(u32,
     let mut ends = Vec::new();
     let (rows, left) = published(data, session);
     assert!(!left, "journals left after the stop");
-    // The session stopped, with its title and the tracks it recorded.
+    // The session stopped, with the title its start command gave and the
+    // tracks it recorded.
     let store = Store::open(&data.join("library.db")).unwrap();
     let id = SessionId::new(session);
     let row = store.session(id).unwrap().unwrap();
     assert_eq!(row.state, SessionState::Stopped);
-    assert!(row.title.is_some());
+    assert_eq!(row.title.as_deref(), Some("Workshop"));
     let recorded: Vec<u32> = store
         .tracks(id)
         .unwrap()

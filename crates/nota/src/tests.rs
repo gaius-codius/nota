@@ -95,11 +95,16 @@ fn parses_record() {
         "speakers.monitor",
     ])
     .unwrap();
-    assert_eq!(r.title, "Pharmacy workshop");
+    assert_eq!(
+        r.start,
+        recorder::Command::Start(Setup {
+            title: "Pharmacy workshop".into(),
+            mic: Input::Device("usb-mic".into()),
+            system: Input::Device("speakers.monitor".into()),
+        })
+    );
     assert_eq!(r.data, PathBuf::from("/d"));
     assert_eq!(r.models, Some((PathBuf::from("p"), PathBuf::from("v"))));
-    assert_eq!(r.mic, Source::Device("usb-mic".into()));
-    assert_eq!(r.system, Source::Device("speakers.monitor".into()));
     assert!(!r.tone);
 }
 
@@ -116,10 +121,15 @@ fn record_logs_latency_only_when_asked() {
 #[test]
 fn record_defaults_to_the_default_devices_and_no_engine() {
     let r = record(&["record", "--data", "/d"]).unwrap();
-    assert_eq!(r.title, "Recording");
+    assert_eq!(
+        r.start,
+        recorder::Command::Start(Setup {
+            title: "Recording".into(),
+            mic: Input::Default,
+            system: Input::Default,
+        })
+    );
     assert_eq!(r.models, None);
-    assert_eq!(r.mic, Source::Microphone);
-    assert_eq!(r.system, Source::SystemAudio);
 }
 
 #[test]

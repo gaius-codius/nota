@@ -1,5 +1,5 @@
-//! The screen's loop, on threads and channels: events in, marks and notes
-//! out.
+//! The screen's loop, on threads and channels: keys and the recorder's
+//! events in, commands to the recorder out.
 
 use std::io;
 use std::sync::Arc;
@@ -8,13 +8,13 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use nota_core::recorder::{self, Command};
 use nota_core::{Clock, SessionTime};
 use ratatui::Terminal;
 use ratatui::backend::Backend;
 use ratatui::crossterm::event::{self, KeyEvent};
 
-use crate::annotation::Annotation;
-use crate::screen::{Recording, Update};
+use crate::screen::Recording;
 
 /// How often the screen redraws with nothing new, so the elapsed time and
 /// the REC dot keep moving.
@@ -46,16 +46,13 @@ pub enum Event {
         /// however long the event waits in the channel.
         at: SessionTime,
     },
-    /// News from the rest of nota.
-    Update(Update),
+    /// What the recorder reports.
+    Recorder(recorder::Event),
     /// The terminal changed size.
     Resize,
     /// Reading the terminal failed and the input thread has stopped: no more
     /// keys will come.
     InputLost(io::ErrorKind),
-    /// The rest of nota is closing the screen (the recording is stopping,
-    /// say on a signal).
-    Close,
 }
 
 /// Why the screen closed.
@@ -63,8 +60,9 @@ pub enum Event {
 pub enum Ended {
     /// The stop was confirmed on the screen: `s` or Ctrl+C, then `y`.
     Stopped,
-    /// The rest of nota closed it, by [`Event::Close`] or by dropping every
-    /// sender of its events.
+    /// The recorder closed it, by [`recorder::Event::Stopping`] or
+    /// [`recorder::Event::Stopped`], or by dropping every sender of its
+    /// events.
     Closed,
 }
 
@@ -76,9 +74,9 @@ pub enum RunError<E> {
     /// Reading keys from the terminal failed, so marks and notes can't be
     /// added any more.
     InputLost(io::ErrorKind),
-    /// A mark or note was made but nothing is receiving them any more, so it
-    /// couldn't be stored. It's handed back rather than lost.
-    AnnotationsClosed(Annotation),
+    /// A command was given but nothing receives commands any more: a mark
+    /// or note couldn't be stored. It's handed back rather than lost.
+    CommandsClosed(Command),
 }
 
 impl<E: std::fmt::Display> std::fmt::Display for RunError<E> {
@@ -86,15 +84,21 @@ impl<E: std::fmt::Display> std::fmt::Display for RunError<E> {
         match self {
             Self::Terminal(err) => write!(f, "drawing the screen failed: {err}"),
             Self::InputLost(kind) => write!(f, "reading keys from the terminal failed: {kind}"),
-            Self::AnnotationsClosed(annotation) => write!(
-                f,
-                "a {} at {:?} couldn't be stored: nothing receives marks and notes",
-                match annotation {
-                    Annotation::Mark(_) => "mark",
-                    Annotation::Note(_) => "note",
-                },
-                annotation.at().elapsed()
-            ),
+            Self::CommandsClosed(command) => match command {
+                Command::Mark(mark) => write!(
+                    f,
+                    "a mark at {:?} couldn't be stored: nothing receives commands",
+                    mark.at.elapsed()
+                ),
+                Command::Note(note) => write!(
+                    f,
+                    "a note at {:?} couldn't be stored: nothing receives commands",
+                    note.at().elapsed()
+                ),
+                Command::Start(_) | Command::Stop => {
+                    f.write_str("a command couldn't be given: nothing receives commands")
+                }
+            },
         }
     }
 }
@@ -103,37 +107,39 @@ impl<E: std::error::Error + 'static> std::error::Error for RunError<E> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Terminal(err) => Some(err),
-            Self::InputLost(_) | Self::AnnotationsClosed(_) => None,
+            Self::InputLost(_) | Self::CommandsClosed(_) => None,
         }
     }
 }
 
 /// Runs `screen` on `terminal` until it ends: draws it, applies each event,
-/// and sends each new mark and note to `annotations` to be stored. Redraws
-/// at least every 250 ms, applying at most 1 000 events in between. A note
-/// still being typed when the loop ends is saved, unless it's blank.
+/// and sends each command the screen gives to `commands`: each new mark and
+/// note to be stored, and the stop. Redraws at least every 250 ms, applying
+/// at most 1 000 events in between. A note still being typed when the loop
+/// ends is saved, unless it's blank.
 ///
 /// It ends with [`Ended::Stopped`] as soon as a stop is confirmed on the
-/// screen; events after that key are left unapplied. It ends with
-/// [`Ended::Closed`] on [`Event::Close`], or once every sender of `events`
-/// is gone. Either way the caller then stops its [`InputThread`].
+/// screen, once [`Command::Stop`] is sent; events after that key are left
+/// unapplied. It ends with [`Ended::Closed`] when the recorder says it's
+/// stopping or has stopped, or once every sender of `events` is gone.
+/// Either way the caller then stops its [`InputThread`].
 ///
 /// # Errors
 ///
 /// - [`RunError::Terminal`] if drawing fails.
 /// - [`RunError::InputLost`] if the input thread reports that reading the
 ///   terminal failed.
-/// - [`RunError::AnnotationsClosed`] if a mark or note can't be sent on.
+/// - [`RunError::CommandsClosed`] if a command can't be sent on.
 pub fn run<B: Backend>(
     terminal: &mut Terminal<B>,
     screen: &mut Recording,
     events: &Receiver<Event>,
-    annotations: &Sender<Annotation>,
+    commands: &Sender<Command>,
 ) -> Result<Ended, RunError<B::Error>> {
-    let send = |annotation| {
-        annotations
-            .send(annotation)
-            .map_err(|err| RunError::AnnotationsClosed(err.0))
+    let send = |command| {
+        commands
+            .send(command)
+            .map_err(|err| RunError::CommandsClosed(err.0))
     };
     // A note half typed is kept: it's already pinned to a moment.
     let save_draft = |screen: &mut Recording| match screen.save_draft() {
@@ -157,10 +163,14 @@ pub fn run<B: Backend>(
         let waiting = events.try_iter().take(MAX_BATCH - 1);
         for event in std::iter::once(first).chain(waiting) {
             let was_asking = screen.is_confirming_stop();
-            let added = match event {
+            let given = match event {
                 Event::Key { key, at } => screen.handle_key_at(key, at),
-                Event::Update(update) => {
-                    screen.update(update);
+                Event::Recorder(recorder::Event::Stopping | recorder::Event::Stopped(_)) => {
+                    save_draft(screen)?;
+                    return Ok(Ended::Closed);
+                }
+                Event::Recorder(event) => {
+                    screen.update(event);
                     None
                 }
                 Event::Resize => None,
@@ -168,16 +178,16 @@ pub fn run<B: Backend>(
                     save_draft(screen)?;
                     return Err(RunError::InputLost(kind));
                 }
-                Event::Close => {
-                    save_draft(screen)?;
-                    return Ok(Ended::Closed);
-                }
             };
-            if let Some(annotation) = added {
-                send(annotation)?;
+            if screen.stop_confirmed() {
+                // A note half typed goes before the stop: nothing after the
+                // stop is stored.
+                save_draft(screen)?;
+            }
+            if let Some(command) = given {
+                send(command)?;
             }
             if screen.stop_confirmed() {
-                save_draft(screen)?;
                 return Ok(Ended::Stopped);
             }
             // Draw the question before applying another key, so a `y`
@@ -378,9 +388,10 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
+    use nota_core::recorder::{Mark, Note};
+
     use super::*;
-    use crate::annotation::{Mark, Note};
-    use crate::text::Utterance;
+    use crate::text::heard;
     use crate::theme::Theme;
 
     /// A key read at the session time `at` nanoseconds.
@@ -411,14 +422,8 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(62, 20)).unwrap();
         let (event_tx, event_rx) = mpsc::channel();
         let (note_tx, note_rx) = mpsc::channel();
-        let text = Utterance::new(
-            SessionTime::from_nanos(1),
-            SessionTime::from_nanos(5),
-            "loop text".into(),
-        )
-        .unwrap();
         for event in [
-            Event::Update(Update::Text(text)),
+            Event::Recorder(recorder::Event::Text(heard(0, 1, "loop text"))),
             key('m'),
             key('n'),
             key('h'),
@@ -436,8 +441,8 @@ mod tests {
         assert_eq!(
             sent,
             [
-                Annotation::Mark(Mark { at }),
-                Annotation::Note(Note::new(at, "hi").unwrap())
+                Command::Mark(Mark { at }),
+                Command::Note(Note::new(at, "hi").unwrap())
             ]
         );
         // The last draw shows the text with its mark.
@@ -461,7 +466,7 @@ mod tests {
         let sent: Vec<_> = note_rx.try_iter().collect();
         // Pinned to when `n` was read (7 ns), not the clock's 11 ns.
         let at = SessionTime::from_nanos(7);
-        assert_eq!(sent, [Annotation::Note(Note::new(at, "ok").unwrap())]);
+        assert_eq!(sent, [Command::Note(Note::new(at, "ok").unwrap())]);
     }
 
     #[test]
@@ -470,16 +475,16 @@ mod tests {
         let mut screen = screen(&clock);
         let mut terminal = Terminal::new(TestBackend::new(62, 20)).unwrap();
         let (event_tx, event_rx) = mpsc::channel();
-        let (note_tx, note_rx) = mpsc::channel::<Annotation>();
+        let (note_tx, note_rx) = mpsc::channel::<Command>();
         drop(note_rx);
         event_tx.send(key('m')).unwrap();
         let err = run(&mut terminal, &mut screen, &event_rx, &note_tx).unwrap_err();
-        let RunError::AnnotationsClosed(annotation) = &err else {
+        let RunError::CommandsClosed(command) = &err else {
             panic!("{err}");
         };
         assert_eq!(
-            *annotation,
-            Annotation::Mark(Mark {
+            *command,
+            Command::Mark(Mark {
                 at: SessionTime::from_nanos(7)
             })
         );
@@ -509,7 +514,7 @@ mod tests {
         assert!(err.to_string().contains("keys"));
         let sent: Vec<_> = note_rx.try_iter().collect();
         let at = SessionTime::from_nanos(7);
-        assert_eq!(sent, [Annotation::Note(Note::new(at, "a").unwrap())]);
+        assert_eq!(sent, [Command::Note(Note::new(at, "a").unwrap())]);
         drop(event_tx);
     }
 
@@ -535,7 +540,11 @@ mod tests {
         assert_eq!(ended, Ended::Stopped);
         let sent: Vec<_> = note_rx.try_iter().collect();
         let at = SessionTime::from_nanos(7);
-        assert_eq!(sent, [Annotation::Note(Note::new(at, "o").unwrap())]);
+        // The note goes first: nothing after the stop is stored.
+        assert_eq!(
+            sent,
+            [Command::Note(Note::new(at, "o").unwrap()), Command::Stop]
+        );
         assert_eq!(event_rx.try_iter().count(), 2);
         drop(event_tx);
     }
@@ -553,26 +562,118 @@ mod tests {
         }
         let ended = run(&mut terminal, &mut screen, &event_rx, &note_tx).unwrap();
         assert_eq!(ended, Ended::Stopped);
-        assert_eq!(note_rx.try_iter().count(), 0);
+        assert_eq!(note_rx.try_iter().collect::<Vec<_>>(), [Command::Stop]);
         drop(event_tx);
     }
 
     #[test]
-    fn close_ends_the_loop_and_keeps_the_draft() {
-        let clock = Arc::new(FakeClock::new(SessionTime::from_nanos(20)));
+    fn the_recorder_stopping_ends_the_loop_and_keeps_the_draft() {
+        for stopping in [
+            recorder::Event::Stopping,
+            recorder::Event::Stopped(recorder::Outcome::default()),
+        ] {
+            let clock = Arc::new(FakeClock::new(SessionTime::from_nanos(20)));
+            let mut screen = screen(&clock);
+            let mut terminal = Terminal::new(TestBackend::new(62, 20)).unwrap();
+            let (event_tx, event_rx) = mpsc::channel();
+            let (note_tx, note_rx) = mpsc::channel();
+            for event in [key('n'), key('k'), Event::Recorder(stopping), key('m')] {
+                event_tx.send(event).unwrap();
+            }
+            let ended = run(&mut terminal, &mut screen, &event_rx, &note_tx).unwrap();
+            assert_eq!(ended, Ended::Closed);
+            let sent: Vec<_> = note_rx.try_iter().collect();
+            let at = SessionTime::from_nanos(7);
+            assert_eq!(sent, [Command::Note(Note::new(at, "k").unwrap())]);
+            drop(event_tx);
+        }
+    }
+
+    /// Every event the recorder sends reaches the screen through the loop.
+    /// Those it shows change what's drawn; the rest, not shown yet, leave
+    /// the screen open and taking keys.
+    #[test]
+    fn every_recorder_event_reaches_the_screen() {
+        use nota_core::recorder::{
+            Cause, DeviceChange, Disk, EngineState, Level, Warning, WarningState,
+        };
+        use nota_core::{EpochId, SampleIndex, SampleRate, TrackId, TrackTimeline};
+
+        let track = TrackId::new(1);
+        let mut timeline = TrackTimeline::new(track);
+        let secs = |s: u64| SessionTime::from_nanos(s * 1_000_000_000);
+        timeline
+            .open_epoch(SessionTime::ZERO, SampleIndex::ZERO, SampleRate::SPEECH)
+            .unwrap();
+        timeline
+            .open_epoch(secs(3), SampleIndex::new(16_000), SampleRate::SPEECH)
+            .unwrap();
+        let epoch = *timeline.epochs().last().unwrap();
+        assert_eq!(epoch.id(), EpochId::new(1));
+        let gap = timeline.gaps().next().unwrap();
+        let unshown = [
+            recorder::Event::Engine(EngineState::Offline("exited".into())),
+            recorder::Event::Engine(EngineState::Online),
+            recorder::Event::Warning(Warning {
+                cause: Cause::Stalled,
+                track: Some(track),
+                at: secs(1),
+                state: WarningState::Raised,
+            }),
+            recorder::Event::Device {
+                track,
+                change: DeviceChange::Lost,
+                at: secs(1),
+            },
+            recorder::Event::Disk(Disk {
+                free_bytes: 1 << 30,
+                left: None,
+            }),
+            recorder::Event::Durable {
+                track,
+                up_to: secs(1),
+            },
+            recorder::Event::Epoch { track, epoch },
+            recorder::Event::Gap { track, gap },
+        ];
+        let shown = [
+            recorder::Event::Level {
+                track,
+                at: secs(1),
+                level: Level::FULL_SCALE,
+            },
+            recorder::Event::Text(heard(0, 1, "heard it")),
+            recorder::Event::Transcribing(true),
+            recorder::Event::Recorded(42),
+        ];
+        let clock = Arc::new(FakeClock::new(secs(4)));
         let mut screen = screen(&clock);
         let mut terminal = Terminal::new(TestBackend::new(62, 20)).unwrap();
         let (event_tx, event_rx) = mpsc::channel();
-        let (note_tx, note_rx) = mpsc::channel();
-        for event in [key('n'), key('k'), Event::Close, key('m')] {
-            event_tx.send(event).unwrap();
+        let (command_tx, command_rx) = mpsc::channel();
+        for event in unshown.into_iter().chain(shown) {
+            event_tx.send(Event::Recorder(event)).unwrap();
         }
-        let ended = run(&mut terminal, &mut screen, &event_rx, &note_tx).unwrap();
-        assert_eq!(ended, Ended::Closed);
-        let sent: Vec<_> = note_rx.try_iter().collect();
-        let at = SessionTime::from_nanos(7);
-        assert_eq!(sent, [Annotation::Note(Note::new(at, "k").unwrap())]);
+        event_tx.send(key('m')).unwrap();
         drop(event_tx);
+        let ended = run(&mut terminal, &mut screen, &event_rx, &command_tx).unwrap();
+        assert_eq!(ended, Ended::Closed);
+        // Still taking keys after every event that isn't shown.
+        let at = SessionTime::from_nanos(7);
+        assert_eq!(
+            command_rx.try_iter().collect::<Vec<_>>(),
+            [Command::Mark(Mark { at })]
+        );
+        assert_eq!(screen.utterances.len(), 1);
+        assert!(screen.transcribing);
+        assert_eq!(screen.recorded_bytes, 42);
+        let levels: Vec<_> = screen
+            .levels
+            .columns(secs(4), 17)
+            .into_iter()
+            .flatten()
+            .collect();
+        assert_eq!(levels, [Level::FULL_SCALE]);
     }
 
     /// Terminal events in two lots: those already waiting when the input

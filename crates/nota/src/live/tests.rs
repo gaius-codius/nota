@@ -29,11 +29,11 @@ fn heard(track: TrackId, start: u64, end: u64, text: &str) -> EngineEvent {
     EngineEvent::Transcript(Transcript::new(track, range, text.to_owned()).unwrap())
 }
 
-fn texts(updates: &[Update]) -> Vec<(SessionTime, SessionTime, String)> {
+fn texts(updates: &[Event]) -> Vec<(SessionTime, SessionTime, String)> {
     updates
         .iter()
         .filter_map(|u| match u {
-            Update::Text(t) => Some((t.start(), t.end(), t.text().to_owned())),
+            Event::Text(t) => Some((t.start(), t.end(), t.text().to_owned())),
             _ => None,
         })
         .collect()
@@ -49,11 +49,12 @@ fn audio_goes_to_the_engine_and_levels_to_the_screen() {
     assert_eq!(
         actions.updates,
         [
-            Update::Level {
+            Event::Level {
+                track: MIC,
                 at: ms(3),
                 level: Level::from_peak(300)
             },
-            Update::Recorded(6)
+            Event::Recorded(6)
         ]
     );
 }
@@ -72,8 +73,8 @@ fn levels_are_sent_every_100_ms_with_the_peak_between() {
         );
         for u in actions.updates {
             match u {
-                Update::Level { at, level } => levels.push((at, level.peak())),
-                Update::Recorded(b) => recorded.push(b),
+                Event::Level { at, level, .. } => levels.push((at, level.peak())),
+                Event::Recorded(b) => recorded.push(b),
                 other => panic!("{other:?}"),
             }
         }
@@ -92,7 +93,8 @@ fn each_track_keeps_its_own_meter() {
     );
     assert_eq!(
         a.updates[0],
-        Update::Level {
+        Event::Level {
+            track: MIC,
             at: ms(10),
             level: Level::from_peak(5)
         }
@@ -100,11 +102,12 @@ fn each_track_keeps_its_own_meter() {
     assert_eq!(
         b.updates,
         [
-            Update::Level {
+            Event::Level {
+                track: SYSTEM,
                 at: ms(10),
                 level: Level::from_peak(7)
             },
-            Update::Recorded(40)
+            Event::Recorded(40)
         ]
     );
 }

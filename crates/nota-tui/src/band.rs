@@ -5,8 +5,7 @@ use std::ops::Range;
 use std::time::Duration;
 
 use nota_core::SessionTime;
-
-use crate::level::Level;
+use nota_core::recorder::Level;
 
 /// How finely levels are kept: the loudest level in each 250 ms of the
 /// session. A three-hour session is about 43 000 bins.
