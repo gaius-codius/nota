@@ -8,7 +8,7 @@
 //!
 //! The screen owns no threads and reads no devices. The rest of nota sends it
 //! [`Update`]s (levels, text, bytes written) and key presses as [`Event`]s
-//! over a channel, and [`run`] draws it and sends each new mark and note out
+//! over a channel, and [`run()`] draws it and sends each new mark and note out
 //! over another channel, until the stop is confirmed or nota closes it.
 //! Time comes only from the session [`Clock`], so marks and notes are stamped
 //! in session time and tests run on a fake clock.

@@ -163,7 +163,7 @@ proptest! {
         }
         prop_assert!(merged.found().iter().all(|f| a.found().contains(f) || b.contains(f)));
         prop_assert!(merged.found().windows(2).all(|w| w[0].key() < w[1].key()));
-        prop_assert_eq!(merged.merged(&b, Verification::Done), merged.clone());
+        prop_assert_eq!(merged.merged(&b, Verification::Done), merged);
     }
 }
 

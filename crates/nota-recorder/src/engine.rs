@@ -27,9 +27,9 @@
 //! The engine still ends with the recorder however the recorder dies: its
 //! stdin closes, and on Linux the kernel kills it, even while it loads or
 //! decodes (see [`nota_core::lifeline`]; the supervisor names the recorder
-//! in [`RECORDER_PID_VAR`](nota_core::lifeline::RECORDER_PID_VAR)). The
-//! kernel acts when the thread that started the engine ends, so only the
-//! supervisor thread, which outlives every engine it starts, starts them.
+//! in [`RECORDER_PID_VAR`]). The kernel acts when the thread that started
+//! the engine ends, so only the supervisor thread, which outlives every
+//! engine it starts, starts them.
 //!
 //! Audio goes to the journal separately and never through here, so the
 //! recording carries on whatever the engine does.

@@ -366,6 +366,8 @@ mod tests {
             woken.join().unwrap(),
             Received::Event(MIC, CaptureEvent::Stopped)
         ));
+        // The first sender is still alive: the wake came from the clone.
+        drop(sender);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! The session clock: the only place nota reads the time.
 //!
 //! Everything else takes a [`Clock`], so timing code runs against a
-//! [`FakeClock`] in tests. Clippy's `disallowed-methods` bans
+//! `FakeClock` in tests. Clippy's `disallowed-methods` bans
 //! `Instant::now`, `SystemTime::now`, their `elapsed` shortcuts and
 //! `rustix::time::clock_gettime` elsewhere.
 //!

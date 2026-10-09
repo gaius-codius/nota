@@ -490,7 +490,7 @@ fn in_a_bad_window(findings: &[Finding], segment: &PlannedSegment, length: Segme
         .any(|r| r.track() == segment.track && r.range().start() < to && from < r.range().end())
 }
 
-const fn overlap(a: nota_core::SampleRange, b: nota_core::SampleRange) -> bool {
+const fn overlap(a: SampleRange, b: SampleRange) -> bool {
     a.start().get() < b.end().get() && b.start().get() < a.end().get()
 }
 

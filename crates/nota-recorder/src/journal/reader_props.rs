@@ -167,7 +167,7 @@ proptest! {
     fn valid_journals_read_back_whole(j in journal()) {
         let read = read_journal(&j.bytes);
         check_contract(&j.bytes, &read)?;
-        prop_assert_eq!(specs(&read), j.frames.clone());
+        prop_assert_eq!(specs(&read), j.frames);
         prop_assert_eq!(read.end(), ReadEnd::Complete);
         prop_assert_eq!(read.header(), Some(j.header));
     }
@@ -386,7 +386,7 @@ proptest! {
         input.extend_from_slice(&noise);
         let read = read_journal(&input);
         check_contract(&input, &read)?;
-        prop_assert_eq!(specs(&read), j.frames.clone());
+        prop_assert_eq!(specs(&read), j.frames);
         // The scan finds no frame in the noise either, magic or not.
         prop_assert_eq!(scanned(&input, read.valid_len(), j.header.track()), Vec::new());
     }

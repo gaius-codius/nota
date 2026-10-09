@@ -47,6 +47,11 @@ unsafe_code = "forbid"
 missing_debug_implementations = "warn"
 unreachable_pub = "warn"
 rust_2018_idioms = { level = "warn", priority = -1 }
+# Adopted from conspector's lint trial (GAI-232). `trivial_casts` was dropped
+# there and is not adopted here.
+unused_qualifications = "warn"
+trivial_numeric_casts = "warn"
+unused_lifetimes = "warn"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
@@ -64,6 +69,19 @@ print_stdout = "warn"
 print_stderr = "warn"
 allow_attributes_without_reason = "warn"
 undocumented_unsafe_blocks = "warn"
+# Lint exceptions are #[expect(...)], so one that no longer fires is reported.
+allow_attributes = "warn"
+str_to_string = "warn"
+clone_on_ref_ptr = "warn"
+# Modules are `foo.rs` with a `foo/` folder; no `mod.rs` files.
+mod_module_files = "warn"
+# From `nursery`, which can change between toolchains; check these when the
+# toolchain is bumped. `redundant_clone` catches a clone of a value that is not
+# used again. `use_self` asks for `Self` inside an impl, instead of repeating
+# the type's name. A false positive gets #[expect(clippy::..., reason = "...")];
+# if those pile up, drop the lint.
+redundant_clone = "warn"
+use_self = "warn"
 
 # The crash tests encode thousands of short FLAC segments; unoptimised, the
 # encoder and its hashes dominate the test run.

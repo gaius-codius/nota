@@ -136,8 +136,8 @@ fn killed_mid_chunk_the_real_engine_resumes_without_losing_audio() {
     let samples = read_wav(&root.join("fixtures/invented-lecture.wav"));
     let track = TrackId::new(0);
     let config = engine_config(&root);
-    let clock = Arc::new(SystemClock::start().unwrap());
-    let (mut supervisor, events) = EngineSupervisor::start(config, clock.clone()).unwrap();
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock::start().unwrap());
+    let (mut supervisor, events) = EngineSupervisor::start(config, Arc::clone(&clock)).unwrap();
     let mut seen = Vec::new();
     let mut next_event = |within: Duration| {
         let event = events

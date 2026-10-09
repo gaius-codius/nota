@@ -75,7 +75,7 @@ fn chunk(k: u64) -> AudioChunk {
 /// Events as they arrive, with the session time each was seen.
 struct Events {
     rx: Receiver<EngineEvent>,
-    clock: Arc<SystemClock>,
+    clock: Arc<dyn Clock>,
     seen: Vec<(SessionTime, EngineEvent)>,
 }
 
@@ -229,8 +229,8 @@ impl Events {
 }
 
 fn start(config: EngineConfig) -> (EngineSupervisor, Events) {
-    let clock = Arc::new(SystemClock::start().unwrap());
-    let (supervisor, rx) = EngineSupervisor::start(config, clock.clone()).unwrap();
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock::start().unwrap());
+    let (supervisor, rx) = EngineSupervisor::start(config, Arc::clone(&clock)).unwrap();
     let events = Events {
         rx,
         clock,
