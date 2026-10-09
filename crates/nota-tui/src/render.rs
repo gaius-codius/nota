@@ -12,6 +12,17 @@
 //! │   ░░░                                                      │  still transcribing
 //! ╰─ m mark  n note  s stop ─────────────────── <source · size> ─╯  keys, status
 //! ```
+//!
+//! From 100 columns (`MainWide`), the marks-and-notes panel takes the
+//! right 32, after a gap of 2; the main panel keeps its layout in the rest:
+//!
+//! ```text
+//! ╭─ marks & notes ────────── 5 ─╮  how many
+//! │ ◆ 0:12:06                    │  each in time order, with its time
+//! │   care plan changes go to t… │  a mark's text heard then, a note's own
+//! │                              │
+//! ╰─ j/k move ─────── 3 ◆ · 2 ◇ ─╯
+//! ```
 
 use nota_core::Utterance;
 use ratatui::Frame;
@@ -31,6 +42,17 @@ pub(crate) const MIN_WIDTH: u16 = 60;
 /// See [`MIN_WIDTH`].
 pub(crate) const MIN_HEIGHT: u16 = 20;
 
+/// The narrowest screen with the marks-and-notes panel (the spec's "about
+/// 100 columns"): the main panel then has 66.
+pub(crate) const WIDE_MIN_WIDTH: u16 = 100;
+/// The marks-and-notes panel's width, its frame included.
+const PANEL_WIDTH: u16 = 32;
+/// The columns between the main panel and the marks-and-notes panel.
+const PANEL_GAP: u16 = 2;
+/// Rows each entry of the marks-and-notes panel takes: its glyph and time,
+/// its text, and a blank between it and the next.
+const ENTRY_ROWS: usize = 3;
+
 /// Rows inside the frame above the transcript: marks, levels, a blank.
 const BAND_ROWS: u16 = 3;
 /// Columns left of the transcript: a space, the ◆/◇ margin, a space.
@@ -45,13 +67,36 @@ const NOTE: &str = "◇";
 const TRANSCRIBING: &str = "░░░";
 
 impl Recording {
-    /// Draws the screen over the whole frame.
-    pub fn draw(&self, frame: &mut Frame<'_>) {
+    /// Draws the screen over the whole frame: the main panel, and beside it
+    /// the marks-and-notes panel from [`WIDE_MIN_WIDTH`] columns.
+    pub fn draw(&mut self, frame: &mut Frame<'_>) {
         let area = frame.area();
         if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
             self.draw_too_small(area, frame.buffer_mut());
             return;
         }
+        if area.width < WIDE_MIN_WIDTH {
+            self.draw_main(area, frame);
+            return;
+        }
+        let side = PANEL_WIDTH + PANEL_GAP;
+        self.draw_main(
+            Rect {
+                width: area.width - side,
+                ..area
+            },
+            frame,
+        );
+        let panel = Rect {
+            x: area.right() - PANEL_WIDTH,
+            width: PANEL_WIDTH,
+            ..area
+        };
+        self.draw_panel(panel, frame.buffer_mut());
+    }
+
+    /// The main panel, over `area`.
+    fn draw_main(&self, area: Rect, frame: &mut Frame<'_>) {
         let buf = frame.buffer_mut();
         // The wax panel, inside the frame.
         buf.set_style(
@@ -235,34 +280,63 @@ impl Recording {
     /// The transcript, newest at the bottom of what fits. `area` spans the
     /// frame's inside, margins included.
     fn draw_transcript(&self, area: Rect, buf: &mut Buffer) {
-        let text_width = usize::from(area.width.saturating_sub(MARGIN + 1));
-        let newest = self.utterances.len();
-        let mut lines: Vec<Line<'_>> = Vec::new();
-        for (index, utterance) in self.utterances.iter().enumerate() {
-            let style = self.age_style(newest - 1 - index);
-            let next_start = self.utterances.get(index + 1).map(Utterance::start);
-            let mut margin = self.margin_of(utterance.start(), next_start);
-            for text in wrap(utterance.text(), text_width) {
-                // Only the first line of the utterance carries the glyph.
-                let glyph = margin.take().unwrap_or_else(|| Span::raw(" "));
-                lines.push(Line::from(vec![
-                    Span::raw(" "),
-                    glyph,
-                    Span::raw(" "),
-                    Span::styled(text, style),
-                ]));
-            }
+        let lines = self.transcript_lines(
+            self.utterances.iter().rev(),
+            usize::from(area.height),
+            usize::from(area.width.saturating_sub(MARGIN + 1)),
+        );
+        let skip = lines.len().saturating_sub(usize::from(area.height));
+        for (y, line) in (area.y..area.bottom()).zip(lines.iter().skip(skip)) {
+            buf.set_line(area.x, y, line, area.width);
         }
+    }
+
+    /// The transcript's last lines, oldest first: at least `rows` of them
+    /// if there are that many, with text wrapped to `text_width`. Built from
+    /// `newest_first`, the utterances newest first, taking only as many as
+    /// fill the rows, so a draw costs what's on screen, not the length of
+    /// the lecture.
+    fn transcript_lines<'u>(
+        &self,
+        newest_first: impl Iterator<Item = &'u Utterance>,
+        rows: usize,
+        text_width: usize,
+    ) -> Vec<Line<'static>> {
+        // Built bottom up, then turned over.
+        let mut lines: Vec<Line<'static>> = Vec::new();
         if self.transcribing {
             lines.push(Line::from(vec![
                 Span::raw(" ".repeat(usize::from(MARGIN))),
                 Span::styled(TRANSCRIBING, self.theme.text_secondary),
             ]));
         }
-        let skip = lines.len().saturating_sub(usize::from(area.height));
-        for (y, line) in (area.y..area.bottom()).zip(lines.iter().skip(skip)) {
-            buf.set_line(area.x, y, line, area.width);
+        let mut next_start = None;
+        let mut newest_first = newest_first.enumerate();
+        while lines.len() < rows {
+            let Some((age, utterance)) = newest_first.next() else {
+                break;
+            };
+            let style = self.age_style(age);
+            let mut margin = self.margin_of(utterance.start(), next_start);
+            let mut wrapped: Vec<Line<'static>> = wrap(utterance.text(), text_width)
+                .into_iter()
+                .map(|text| {
+                    // Only the first line of the utterance carries the glyph.
+                    let glyph = margin.take().unwrap_or_else(|| Span::raw(" "));
+                    Line::from(vec![
+                        Span::raw(" "),
+                        glyph,
+                        Span::raw(" "),
+                        Span::styled(text, style),
+                    ])
+                })
+                .collect();
+            wrapped.reverse();
+            lines.append(&mut wrapped);
+            next_start = Some(utterance.start());
         }
+        lines.reverse();
+        lines
     }
 
     /// The ◆ or ◇ for the line of the utterance that starts at `start`: a
@@ -274,15 +348,119 @@ impl Recording {
         start: nota_core::SessionTime,
         next_start: Option<nota_core::SessionTime>,
     ) -> Option<Span<'static>> {
-        let mine = |at| at >= start && next_start.is_none_or(|next| at < next);
-        let mut found = None;
-        for annotation in self.annotations.iter().filter(|a| mine(a.at())) {
-            match annotation {
-                Annotation::Mark(_) => return Some(Span::styled(MARK, self.theme.accent)),
-                Annotation::Note(_) => found = Some(Span::styled(NOTE, self.theme.gold)),
+        // The annotations are in time order: find this utterance's by
+        // halving, not by checking them all.
+        let from = self.annotations.partition_point(|a| a.at() < start);
+        let to = next_start.map_or(self.annotations.len(), |next| {
+            self.annotations.partition_point(|a| a.at() < next)
+        });
+        let mine = self.annotations.get(from..to).unwrap_or_default();
+        if mine.iter().any(|a| matches!(a, Annotation::Mark(_))) {
+            Some(Span::styled(MARK, self.theme.accent))
+        } else if mine.is_empty() {
+            None
+        } else {
+            Some(Span::styled(NOTE, self.theme.gold))
+        }
+    }
+
+    /// The marks-and-notes panel (`MainWide`), over `area`: each in time
+    /// order, the selected one highlighted and kept in view, or the newest
+    /// in view while none is selected.
+    fn draw_panel(&mut self, area: Rect, buf: &mut Buffer) {
+        let marks = self
+            .annotations
+            .iter()
+            .filter(|a| matches!(a, Annotation::Mark(_)))
+            .count();
+        let notes = self.annotations.len() - marks;
+        frame_row(
+            Rect { height: 1, ..area },
+            ('╭', '╮'),
+            vec![Span::styled("marks & notes", self.theme.text_secondary)],
+            vec![Span::styled(
+                self.annotations.len().to_string(),
+                self.theme.text_hint,
+            )],
+            Keep::Left,
+            self.theme.border,
+            buf,
+        );
+        frame_row(
+            Rect::new(area.x, area.bottom() - 1, area.width, 1),
+            ('╰', '╯'),
+            vec![
+                Span::styled("j/k", self.theme.text),
+                Span::styled(" move", self.theme.text_hint),
+            ],
+            vec![Span::styled(
+                format!("{marks} {MARK} · {notes} {NOTE}"),
+                self.theme.text_hint,
+            )],
+            Keep::Left,
+            self.theme.border,
+            buf,
+        );
+        let inside = Rect::new(area.x + 1, area.y + 1, area.width - 2, area.height - 2);
+        for y in inside.y..inside.bottom() {
+            buf.set_string(area.x, y, "│", self.theme.border);
+            buf.set_string(area.right() - 1, y, "│", self.theme.border);
+        }
+        // The last entry needs no blank row after it.
+        let shown = (usize::from(inside.height) + 1) / ENTRY_ROWS;
+        let last_top = self.annotations.len().saturating_sub(shown);
+        self.panel_top = match self.selected {
+            None => last_top,
+            Some(selected) if selected < self.panel_top => selected,
+            Some(selected) if selected >= self.panel_top + shown => selected + 1 - shown,
+            Some(_) => self.panel_top,
+        }
+        .min(last_top);
+        // A column of padding each side, and the text indented by two.
+        let text_width = usize::from(inside.width.saturating_sub(4));
+        let rows = (inside.y..inside.bottom()).step_by(ENTRY_ROWS);
+        for (y, index) in rows.zip(self.panel_top..self.annotations.len()) {
+            let Some(annotation) = self.annotations.get(index) else {
+                break;
+            };
+            let (glyph, text) = match annotation {
+                Annotation::Mark(mark) => (
+                    Span::styled(MARK, self.theme.accent),
+                    Span::styled(self.heard_at(mark.at), self.theme.text_hint),
+                ),
+                Annotation::Note(note) => (
+                    Span::styled(NOTE, self.theme.gold),
+                    Span::styled(one_line(note.text()), self.theme.text_secondary),
+                ),
+            };
+            if self.selected == Some(index) {
+                let rows = 2.min(inside.bottom() - y);
+                buf.set_style(
+                    Rect::new(inside.x, y, inside.width, rows),
+                    self.theme.highlight,
+                );
+            }
+            let time = Line::from(vec![
+                Span::raw(" "),
+                glyph,
+                Span::styled(format!(" {}", clock_time(annotation.at())), self.theme.text),
+            ]);
+            buf.set_line(inside.x, y, &time, inside.width);
+            if y + 1 < inside.bottom() {
+                let text = Line::from(truncate(vec![text], text_width));
+                buf.set_line(inside.x + 3, y + 1, &text, inside.width - 3);
             }
         }
-        found
+    }
+
+    /// What was being heard at `at`, as one line: the text of the latest
+    /// utterance that started at or before it, or nothing if none had.
+    fn heard_at(&self, at: nota_core::SessionTime) -> String {
+        let index = self.utterances.partition_point(|u| u.start() <= at);
+        index
+            .checked_sub(1)
+            .and_then(|index| self.utterances.get(index))
+            .map_or_else(String::new, |utterance| one_line(utterance.text()))
     }
 
     /// The text style for the utterance `age` places from the newest (0).
@@ -415,6 +593,17 @@ fn tail_within(text: &str, room: usize) -> &str {
     &text[start..]
 }
 
+/// `text` on one line: whitespace collapsed, and only what is drawn kept.
+fn one_line(text: &str) -> String {
+    wrap(text, usize::MAX).concat()
+}
+
+/// A session time as the panel shows it, `H:MM:SS`.
+fn clock_time(at: nota_core::SessionTime) -> String {
+    let secs = at.elapsed().as_secs();
+    format!("{}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
+}
+
 /// Bytes as whole megabytes (10⁶), or gigabytes to one place from 1 GB.
 fn megabytes(bytes: u64) -> String {
     const MB: u64 = 1_000_000;
@@ -472,7 +661,7 @@ mod tests {
         screen
     }
 
-    fn draw(screen: &Recording, width: u16) -> Buffer {
+    fn draw(screen: &mut Recording, width: u16) -> Buffer {
         let mut terminal = Terminal::new(TestBackend::new(width, 20)).unwrap();
         terminal.draw(|frame| screen.draw(frame)).unwrap();
         terminal.backend().buffer().clone()
@@ -486,13 +675,9 @@ mod tests {
     fn colour_roles() {
         let theme = Theme::default();
         let mut screen = screen("Mic", 8);
-        screen
-            .annotations
-            .push(Annotation::Mark(Mark { at: secs(10) }));
-        screen
-            .annotations
-            .push(Annotation::Note(Note::new(secs(30), "n").unwrap()));
-        let buf = draw(&screen, 62);
+        screen.add(Annotation::Mark(Mark { at: secs(10) }));
+        screen.add(Annotation::Note(Note::new(secs(30), "n").unwrap()));
+        let buf = draw(&mut screen, 62);
         // REC (100 s is even, so the dot is bright) and the live end.
         assert_eq!(buf[(45, 0)].symbol(), "●");
         assert_eq!(buf[(45, 0)].fg, theme.accent.fg.unwrap());
@@ -521,8 +706,8 @@ mod tests {
     fn the_rec_dot_pulses() {
         let theme = Theme::default();
         let clock = Arc::new(FakeClock::new(secs(101)));
-        let screen = Recording::new("T".into(), "S".into(), clock as Arc<dyn Clock>, theme);
-        let buf = draw(&screen, 62);
+        let mut screen = Recording::new("T".into(), "S".into(), clock as Arc<dyn Clock>, theme);
+        let buf = draw(&mut screen, 62);
         assert_eq!(buf[(45, 0)].fg, theme.text_hint.fg.unwrap());
     }
 
@@ -531,17 +716,11 @@ mod tests {
         let mut screen = screen("Mic", 2);
         // Both in the second utterance and in the same band column, the note
         // first in time.
-        screen
-            .annotations
-            .push(Annotation::Note(Note::new(secs(21), "n").unwrap()));
-        screen
-            .annotations
-            .push(Annotation::Mark(Mark { at: secs(22) }));
+        screen.add(Annotation::Note(Note::new(secs(21), "n").unwrap()));
+        screen.add(Annotation::Mark(Mark { at: secs(22) }));
         // And a note alone on the first.
-        screen
-            .annotations
-            .push(Annotation::Note(Note::new(secs(11), "n").unwrap()));
-        let buf = draw(&screen, 62);
+        screen.add(Annotation::Note(Note::new(secs(11), "n").unwrap()));
+        let buf = draw(&mut screen, 62);
         assert_eq!(row(&buf, 1).matches('◆').count(), 1);
         assert_eq!(row(&buf, 1).matches('◇').count(), 1);
         assert!(
@@ -560,7 +739,7 @@ mod tests {
     fn a_long_source_gives_way_to_the_keys_and_the_note() {
         let source = "alsa_input.usb-Focusrite_Scarlett_2i2_USB_Y8ABCDEF-00.analog-stereo";
         let mut screen = screen(source, 0);
-        let bottom = row(&draw(&screen, 60), 19);
+        let bottom = row(&draw(&mut screen, 60), 19);
         assert_eq!(
             bottom,
             "╰─ m mark  n note  s stop ─ alsa_input.usb-Focusrite_Sca… ─╯"
@@ -569,14 +748,14 @@ mod tests {
             at: secs(1),
             text: "typed".into(),
         });
-        let bottom = row(&draw(&screen, 60), 19);
+        let bottom = row(&draw(&mut screen, 60), 19);
         assert_eq!(
             bottom,
             "╰─ ◇ typed  ⏎ save  esc cancel ─ alsa_input.usb-Focusrit… ─╯"
         );
         // The top row keeps its state and cuts the title instead.
         screen.title = "a very long title ".repeat(5);
-        let top = row(&draw(&screen, 60), 0);
+        let top = row(&draw(&mut screen, 60), 0);
         assert!(top.ends_with("─ ● REC 00:01:40 ─╮"), "{top}");
         assert!(
             top.starts_with("╭─ ≈ nota · a very long title a very lo… ─ ●"),
@@ -592,7 +771,7 @@ mod tests {
         screen.stop = crate::screen::Stop::Asking {
             since: SessionTime::ZERO,
         };
-        let buf = draw(&screen, 62);
+        let buf = draw(&mut screen, 62);
         assert_eq!(
             row(&buf, 19),
             "╰─ stop recording?  y stop  n keep recording ── Mic · 14 MB ─╯"
@@ -655,5 +834,229 @@ mod tests {
         assert_eq!(tail_within("abc", 3), "abc");
         assert_eq!(tail_within("ab日本", 3), "本");
         assert_eq!(tail_within("abc", 0), "");
+    }
+
+    /// The transcript's lines as they were built before the draw walked
+    /// back from the newest: every utterance wrapped, every annotation
+    /// checked against each, then the last `rows` kept.
+    fn every_line(screen: &Recording, rows: usize, text_width: usize) -> Vec<Line<'static>> {
+        let newest = screen.utterances.len();
+        let mut lines = Vec::new();
+        for (index, utterance) in screen.utterances.iter().enumerate() {
+            let style = screen.age_style(newest - 1 - index);
+            let next = screen.utterances.get(index + 1).map(Utterance::start);
+            let mine = |at| at >= utterance.start() && next.is_none_or(|next| at < next);
+            let mut glyph = None;
+            for annotation in screen.annotations.iter().filter(|a| mine(a.at())) {
+                glyph = match annotation {
+                    Annotation::Mark(_) => Some(Span::styled(MARK, screen.theme.accent)),
+                    Annotation::Note(_) => {
+                        glyph.or_else(|| Some(Span::styled(NOTE, screen.theme.gold)))
+                    }
+                };
+                if matches!(annotation, Annotation::Mark(_)) {
+                    break;
+                }
+            }
+            for text in wrap(utterance.text(), text_width) {
+                let glyph = glyph.take().unwrap_or_else(|| Span::raw(" "));
+                lines.push(Line::from(vec![
+                    Span::raw(" "),
+                    glyph,
+                    Span::raw(" "),
+                    Span::styled(text, style),
+                ]));
+            }
+        }
+        if screen.transcribing {
+            lines.push(Line::from(vec![
+                Span::raw("   "),
+                Span::styled(TRANSCRIBING, screen.theme.text_secondary),
+            ]));
+        }
+        let skip = lines.len().saturating_sub(rows);
+        lines.split_off(skip)
+    }
+
+    #[test]
+    fn a_draw_reads_only_the_utterances_it_shows() {
+        let mut screen = screen("Mic", 10_000);
+        screen.add(Annotation::Mark(Mark { at: secs(100_001) }));
+        let read = std::cell::Cell::new(0);
+        let newest_first = screen
+            .utterances
+            .iter()
+            .rev()
+            .inspect(|_| read.set(read.get() + 1));
+        let lines = screen.transcript_lines(newest_first, 14, 58);
+        // One line each, so 14 fill the rows.
+        assert_eq!(read.get(), 14);
+        assert_eq!(lines, every_line(&screen, 14, 58));
+        // The whole screen draws the same, at any width.
+        for width in [62, 100, 160] {
+            let rows = (0..20)
+                .map(|y| row(&draw(&mut screen, width), y))
+                .collect::<Vec<_>>();
+            assert!(rows[18].contains("◆ utterance 10000"), "{}", rows[18]);
+            assert!(rows[4].contains("  utterance 9986 "), "{}", rows[4]);
+        }
+    }
+
+    proptest::proptest! {
+        /// Walking back from the newest gives the lines the whole transcript
+        /// would, whatever the utterances, their marks and notes, and the
+        /// room.
+        #[test]
+        fn walking_back_gives_the_same_lines(
+            utterances in proptest::collection::vec(
+                (0_u64..400, 0_usize..40),
+                0..30,
+            ),
+            annotations in proptest::collection::vec((0_u64..420, proptest::bool::ANY), 0..12),
+            transcribing in proptest::bool::ANY,
+            rows in 1_usize..20,
+            text_width in 1_usize..40,
+        ) {
+            let clock = Arc::new(FakeClock::new(secs(500)));
+            let mut screen = Recording::new(
+                "T".into(),
+                "S".into(),
+                clock as Arc<dyn Clock>,
+                Theme::default(),
+            );
+            for (start, words) in utterances {
+                let text = (0..words).map(|w| "w".repeat(w % 7 + 1)).collect::<Vec<_>>().join(" ");
+                screen.update(Event::Text(heard(start, start + 1, &text)));
+            }
+            for (at, mark) in annotations {
+                screen.add(if mark {
+                    Annotation::Mark(Mark { at: secs(at) })
+                } else {
+                    Annotation::Note(Note::new(secs(at), "n").unwrap())
+                });
+            }
+            screen.update(Event::Transcribing(transcribing));
+            let walked = screen.transcript_lines(screen.utterances.iter().rev(), rows, text_width);
+            let skip = walked.len().saturating_sub(rows);
+            proptest::prop_assert_eq!(&walked[skip..], &every_line(&screen, rows, text_width)[..]);
+        }
+    }
+
+    #[test]
+    fn the_panel_appears_at_100_columns() {
+        let mut screen = screen("Mic", 3);
+        screen.add(Annotation::Mark(Mark { at: secs(12) }));
+        let narrow = draw(&mut screen, WIDE_MIN_WIDTH - 1);
+        assert!(!row(&narrow, 0).contains("marks & notes"));
+        assert!(
+            row(&narrow, 0).ends_with("REC 00:01:40 ─╮"),
+            "{}",
+            row(&narrow, 0)
+        );
+        assert!(row(&narrow, 10).ends_with('│'));
+        let wide = draw(&mut screen, WIDE_MIN_WIDTH);
+        // The main panel ends at 66 columns, two blank, then the panel.
+        let top = row(&wide, 0);
+        assert!(top.starts_with("╭─ ≈ nota · Styles"), "{top}");
+        assert_eq!(top.chars().nth(65), Some('╮'), "{top}");
+        assert!(
+            top.ends_with("─╮  ╭─ marks & notes ────────── 1 ─╮"),
+            "{top}"
+        );
+        assert_eq!(
+            row(&wide, 19).chars().skip(68).collect::<String>(),
+            "╰─ j/k move ─────── 1 ◆ · 0 ◇ ─╯"
+        );
+        // The main panel's layout is the narrow one's, at its width.
+        let main_only = draw(&mut screen, 66);
+        for y in 0..20 {
+            let wide_row: String = row(&wide, y).chars().take(66).collect();
+            assert_eq!(wide_row, row(&main_only, y), "row {y}");
+        }
+    }
+
+    #[test]
+    fn the_panel_lists_each_with_its_time_and_text() {
+        let theme = Theme::default();
+        let mut screen = screen("Mic", 3);
+        screen.utterances.clear();
+        screen.update(Event::Text(heard(
+            10,
+            15,
+            "a mark shows what was being said when it was made, cut short",
+        )));
+        screen.add(Annotation::Mark(Mark { at: secs(5) }));
+        screen.add(Annotation::Mark(Mark { at: secs(3_725) }));
+        screen.add(Annotation::Note(
+            Note::new(secs(12), "bring\u{202e} clamps").unwrap(),
+        ));
+        screen.add(Annotation::Mark(Mark { at: secs(13) }));
+        let buf = draw(&mut screen, 100);
+        let panel = |y| row(&buf, y).chars().skip(68).collect::<String>();
+        assert_eq!(panel(0), "╭─ marks & notes ────────── 4 ─╮");
+        // Before any text: the time alone.
+        assert_eq!(panel(1), "│ ◆ 0:00:05                    │");
+        assert_eq!(panel(2), "│                              │");
+        assert_eq!(panel(4), "│ ◇ 0:00:12                    │");
+        assert_eq!(panel(5), "│   bring clamps               │");
+        assert_eq!(panel(7), "│ ◆ 0:00:13                    │");
+        assert_eq!(panel(8), "│   a mark shows what was bei… │");
+        assert_eq!(panel(10), "│ ◆ 1:02:05                    │");
+        assert_eq!(panel(11), "│   a mark shows what was bei… │");
+        assert_eq!(panel(19), "╰─ j/k move ─────── 3 ◆ · 1 ◇ ─╯");
+        assert_eq!(buf[(70, 1)].fg, theme.accent.fg.unwrap());
+        assert_eq!(buf[(70, 4)].fg, theme.gold.fg.unwrap());
+        assert_eq!(buf[(72, 4)].fg, theme.text.fg.unwrap());
+        assert_eq!(buf[(72, 5)].fg, theme.text_secondary.fg.unwrap());
+        assert_eq!(buf[(72, 8)].fg, theme.text_hint.fg.unwrap());
+        // Nothing selected, nothing highlighted.
+        let reversed = ratatui::style::Modifier::REVERSED;
+        assert_eq!(theme.highlight.add_modifier, reversed);
+        assert!((0..20).all(|y| !buf[(70, y)].modifier.contains(reversed)));
+    }
+
+    #[test]
+    fn the_selection_is_highlighted_and_kept_in_view() {
+        let theme = Theme::from_colors_toml("selection = \"#272539\"\n").unwrap();
+        let mut screen = screen("Mic", 0);
+        screen.theme = theme;
+        for s in 1..=10 {
+            screen.add(Annotation::Mark(Mark { at: secs(s) }));
+        }
+        let shown = |screen: &mut Recording| {
+            let buf = draw(screen, 100);
+            let times: Vec<String> = (1..19)
+                .map(|y| row(&buf, y).chars().skip(72).take(7).collect::<String>())
+                .filter(|time| time.starts_with("0:"))
+                .collect();
+            let lit: Vec<String> = (1..19)
+                .filter(|&y| buf[(70, y)].bg == theme.highlight.bg.unwrap())
+                .map(|y| row(&buf, y).chars().skip(72).take(7).collect::<String>())
+                .collect();
+            (times, lit)
+        };
+        // Six fit; with none selected, the newest are shown.
+        let (times, lit) = shown(&mut screen);
+        assert_eq!(times.first().map(String::as_str), Some("0:00:05"));
+        assert_eq!(times.len(), 6);
+        assert!(lit.is_empty());
+        // `k` selects the newest, both its rows lit.
+        screen.handle_key(ratatui::crossterm::event::KeyEvent::from(
+            ratatui::crossterm::event::KeyCode::Char('k'),
+        ));
+        let (_, lit) = shown(&mut screen);
+        assert_eq!(lit, ["0:00:10", ""].map(|s| format!("{s:7}")));
+        // Up to the top: the view follows the selection, and stays put
+        // while it's in view.
+        screen.selected = Some(0);
+        let (times, _) = shown(&mut screen);
+        assert_eq!(times.first().map(String::as_str), Some("0:00:01"));
+        screen.selected = Some(5);
+        let (times, lit) = shown(&mut screen);
+        assert_eq!(times.first().map(String::as_str), Some("0:00:01"));
+        assert_eq!(lit[0], "0:00:06");
+        screen.selected = Some(6);
+        let (times, _) = shown(&mut screen);
+        assert_eq!(times.first().map(String::as_str), Some("0:00:02"));
     }
 }

@@ -140,7 +140,7 @@ fn main_screen_in(theme: Theme) -> Recording {
     screen
 }
 
-fn draw(screen: &Recording, width: u16, height: u16) -> Terminal<TestBackend> {
+fn draw(screen: &mut Recording, width: u16, height: u16) -> Terminal<TestBackend> {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal.draw(|frame| screen.draw(frame)).unwrap();
     terminal
@@ -148,8 +148,56 @@ fn draw(screen: &Recording, width: u16, height: u16) -> Terminal<TestBackend> {
 
 #[test]
 fn main() {
-    let terminal = draw(&main_screen(), 62, 20);
+    let terminal = draw(&mut main_screen(), 62, 20);
     insta::assert_snapshot!(terminal.backend());
+}
+
+/// `MainWide`: from 100 columns, the marks-and-notes panel beside the main
+/// panel, which keeps its layout.
+#[test]
+fn main_wide() {
+    let mut screen = main_screen();
+    // Earlier speech, which the first marks show.
+    for (start, end, text) in [
+        (
+            660,
+            690,
+            "Plane with the grain, never across it, or the surface tears out.",
+        ),
+        (
+            2_470,
+            2_500,
+            "Mark the face side first so every cut starts from one edge.",
+        ),
+    ] {
+        screen.update(Event::Text(heard(start, end, text)));
+    }
+    let terminal = draw(&mut screen, 100, 20);
+    insta::assert_snapshot!(terminal.backend());
+}
+
+/// The breakpoint: one column below 100 is the narrow layout, stretched.
+#[test]
+fn one_column_narrower_has_no_panel() {
+    let terminal = draw(&mut main_screen(), 99, 20);
+    let text = format!("{}", terminal.backend());
+    assert!(!text.contains("marks & notes"), "{text}");
+    assert!(text.contains("──── Brave · 14 MB ─╯\""), "{text}");
+}
+
+/// A selected entry is drawn on the highlight.
+#[test]
+fn main_wide_with_a_selection() {
+    let mut screen = main_screen();
+    press(&mut screen, KeyCode::Char('k'));
+    press(&mut screen, KeyCode::Char('k'));
+    let terminal = draw(&mut screen, 100, 20);
+    let buffer = terminal.backend().buffer();
+    let lit: Vec<u16> = (0..20)
+        .filter(|&y| buffer[(70, y)].modifier.contains(Modifier::REVERSED))
+        .collect();
+    // The fifth of six entries: its time and its text.
+    assert_eq!(lit, [13, 14]);
 }
 
 #[test]
@@ -159,7 +207,7 @@ fn main_while_typing_a_note() {
     for c in "check the glue".chars() {
         press(&mut screen, KeyCode::Char(c));
     }
-    let mut terminal = draw(&screen, 62, 20);
+    let mut terminal = draw(&mut screen, 62, 20);
     insta::assert_snapshot!(terminal.backend());
     // The cursor sits after the typed text in the bottom border.
     let cursor = terminal.get_cursor_position().unwrap();
@@ -171,13 +219,13 @@ fn main_confirming_stop() {
     let mut screen = main_screen();
     press(&mut screen, KeyCode::Char('s'));
     assert!(screen.is_confirming_stop());
-    let terminal = draw(&screen, 62, 20);
+    let terminal = draw(&mut screen, 62, 20);
     insta::assert_snapshot!(terminal.backend());
 }
 
 #[test]
 fn too_small() {
-    let terminal = draw(&main_screen(), 59, 20);
+    let terminal = draw(&mut main_screen(), 59, 20);
     insta::assert_snapshot!(terminal.backend());
 }
 
@@ -185,7 +233,7 @@ fn too_small() {
 fn too_small_confirming_stop() {
     let mut screen = main_screen();
     press(&mut screen, KeyCode::Char('s'));
-    let terminal = draw(&screen, 30, 8);
+    let terminal = draw(&mut screen, 30, 8);
     insta::assert_snapshot!(terminal.backend());
 }
 
@@ -195,7 +243,7 @@ fn too_small_confirming_stop() {
 #[test]
 fn no_color_draws_no_colour() {
     let mut screen = main_screen_in(Theme::no_color());
-    let check = |screen: &Recording| {
+    let check = |screen: &mut Recording| {
         let terminal = draw(screen, 62, 20);
         let buffer = terminal.backend().buffer();
         for cell in &buffer.content {
@@ -204,12 +252,12 @@ fn no_color_draws_no_colour() {
             assert_eq!(cell.modifier, Modifier::empty(), "{cell:?}");
         }
     };
-    check(&screen);
+    check(&mut screen);
     press(&mut screen, KeyCode::Char('n'));
     press(&mut screen, KeyCode::Char('x'));
-    check(&screen);
+    check(&mut screen);
     press(&mut screen, KeyCode::Char('s'));
-    check(&screen);
+    check(&mut screen);
 }
 
 /// The wax panel (the theme's `lighter_background`) fills the frame's
@@ -220,7 +268,7 @@ fn the_panel_is_behind_the_content_not_the_border() {
         Theme::from_colors_toml("lighter_background = \"#10121A\"\nforeground = \"#EDE3D6\"\n")
             .unwrap();
     let panel = Color::Rgb(0x10, 0x12, 0x1A);
-    let terminal = draw(&main_screen_in(theme), 62, 20);
+    let terminal = draw(&mut main_screen_in(theme), 62, 20);
     let buffer = terminal.backend().buffer();
     for y in 0..20 {
         for x in 0..62 {

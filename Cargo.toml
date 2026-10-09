@@ -43,10 +43,9 @@ thread-priority = { version = "3.1", default-features = false }
 # The Omarchy theme's colours (`colors.toml`), read by the screens. Already in
 # the tree as a build dependency of PipeWire's bindings.
 toml = { version = "1.1", default-features = false, features = ["std", "serde", "parse"] }
-# Grapheme clusters and their display width, measured the way ratatui draws
-# them, for wrapping and cutting text on the screen.
+# Grapheme clusters, for wrapping and cutting text on the screen (their
+# widths come from ratatui, measured the way it draws them).
 unicode-segmentation = "1.12"
-unicode-width = { version = "0.2", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

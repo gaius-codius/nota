@@ -1,7 +1,7 @@
 //! Live text, wrapped to the screen.
 
+use ratatui::buffer::CellWidth;
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 
 /// Whether `c` is drawn as text: not a control character, and not one of
 /// the bidirectional formatting characters, which could make the terminal
@@ -17,9 +17,11 @@ pub(crate) fn has_visible_text(text: &str) -> bool {
 }
 
 /// The grapheme clusters of `text` with the columns each takes, measured as
-/// ratatui measures them when it draws.
+/// ratatui measures them when it draws: a halfwidth (han)dakuten takes a
+/// column of its own, though it joins the cluster before it.
 pub(crate) fn graphemes(text: &str) -> impl DoubleEndedIterator<Item = (&str, usize)> {
-    text.graphemes(true).map(|g| (g, g.width()))
+    text.graphemes(true)
+        .map(|g| (g, usize::from(g.cell_width())))
 }
 
 /// The columns `text` takes when drawn.
@@ -158,5 +160,19 @@ mod tests {
         );
         // "e" and a combining acute accent stay together.
         assert_eq!(wrap("e\u{301}e\u{301}", 1), ["e\u{301}", "e\u{301}"]);
+    }
+
+    #[test]
+    fn halfwidth_sound_marks_take_a_column_as_drawn() {
+        // Halfwidth ka with a halfwidth dakuten: one cluster, two columns.
+        let ga = "\u{ff76}\u{ff9e}";
+        assert_eq!(display_width(ga), 2);
+        assert_eq!(display_width("\u{ff8a}\u{ff9f}x"), 3);
+        assert_eq!(wrap(&ga.repeat(3), 4), [ga.repeat(2), ga.to_owned()]);
+        // Drawn, each cluster takes the columns measured for it.
+        let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 5, 1));
+        buf.set_string(0, 0, format!("{ga}{ga}"), ratatui::style::Style::default());
+        assert_eq!(buf[(2u16, 0u16)].symbol(), ga);
+        assert_eq!(buf[(4u16, 0u16)].symbol(), " ");
     }
 }
