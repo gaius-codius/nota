@@ -285,3 +285,71 @@ fn a_notice_shows_until_the_next_key() {
     let buf = draw(&mut home, 20);
     assert_eq!(row(&buf, 10).trim_matches(['│', ' ']), "");
 }
+
+#[test]
+fn a_new_list_keeps_the_selection_and_the_open_page_on_their_session() {
+    let mut home = home_of(
+        vec![
+            session(1, Status::NeedsYou),
+            session(2, Status::Ready),
+            session(3, Status::Ready),
+        ],
+        Theme::default(),
+    );
+    press(&mut home, KeyCode::Down);
+    press(&mut home, KeyCode::Down);
+    assert_eq!(home.selected(), Some(2));
+    press(&mut home, KeyCode::Enter);
+    // Session 1 no longer needs you, so it moves below 2; session 2's
+    // detail changes, and its page shows the new one.
+    let mut two = session(2, Status::Ready);
+    two.detail = Some("recovered".into());
+    home.set_sessions(vec![
+        session(1, Status::Ready),
+        two,
+        session(3, Status::Ready),
+    ]);
+    assert_eq!(ids(&home), [3, 2, 1]);
+    assert_eq!(home.selected(), Some(2));
+    assert!(home.is_open());
+    let page: String = (0..20).map(|y| row(&draw(&mut home, 20), y)).collect();
+    assert!(page.contains("recovered"), "{page}");
+    // Text is cleaned as it is by `new`.
+    home.set_sessions(vec![Session {
+        title: "a\u{202e}b".into(),
+        ..session(2, Status::Ready)
+    }]);
+    assert_eq!(home.sessions()[0].title, "ab");
+}
+
+#[test]
+fn a_new_list_without_the_selected_session_closes_its_page() {
+    let mut home = home_of(
+        vec![
+            session(1, Status::Ready),
+            session(2, Status::Ready),
+            session(3, Status::Ready),
+        ],
+        Theme::default(),
+    );
+    press(&mut home, KeyCode::Down);
+    press(&mut home, KeyCode::Enter);
+    assert_eq!(home.selected(), Some(2));
+    // Session 2 has gone: the selection stays at the second row.
+    home.set_sessions(vec![
+        session(1, Status::Ready),
+        session(3, Status::Ready),
+        session(4, Status::Ready),
+    ]);
+    assert_eq!(home.selected(), Some(3));
+    assert!(!home.is_open());
+    // Past the end of a shorter list: the last row.
+    press(&mut home, KeyCode::Down);
+    press(&mut home, KeyCode::Down);
+    home.set_sessions(vec![session(4, Status::Ready)]);
+    assert_eq!(home.selected(), Some(4));
+    home.set_sessions(Vec::new());
+    assert_eq!(home.selected(), None);
+    home.set_sessions(vec![session(5, Status::Ready)]);
+    assert_eq!(home.selected(), Some(5));
+}

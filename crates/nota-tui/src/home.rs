@@ -106,16 +106,9 @@ impl Home {
     /// newest first. Control and bidirectional formatting characters in the
     /// text are dropped, so they can't reorder or break a row.
     #[must_use]
-    pub fn new(mut sessions: Vec<Session>, engines: &str, theme: Theme) -> Self {
-        let drawn = |text: &str| text.chars().filter(|&c| is_drawn(c)).collect::<String>();
-        for session in &mut sessions {
-            session.title = drawn(&session.title);
-            session.date = session.date.as_deref().map(drawn);
-            session.detail = session.detail.as_deref().map(drawn);
-        }
-        sessions.sort_by_key(|s| (s.status != Status::NeedsYou, std::cmp::Reverse(s.id)));
+    pub fn new(sessions: Vec<Session>, engines: &str, theme: Theme) -> Self {
         Self {
-            sessions,
+            sessions: listed(sessions),
             selected: 0,
             scroll: 0,
             engines: drawn(engines),
@@ -124,6 +117,21 @@ impl Home {
             busy: None,
             notice: None,
         }
+    }
+
+    /// Lists `sessions` instead, in the order [`Home::new`] gives them. The
+    /// selection stays on the same session, and so does an open page; if
+    /// that session has gone, the selection stays at the same place in the
+    /// list (or the last row) and its page closes.
+    pub fn set_sessions(&mut self, sessions: Vec<Session>) {
+        let selected = self.selected();
+        let opened = self.opened.and_then(|i| self.sessions.get(i)).map(|s| s.id);
+        self.sessions = listed(sessions);
+        let at = |id| self.sessions.iter().position(|s| s.id == id);
+        self.selected = selected
+            .and_then(at)
+            .unwrap_or_else(|| self.selected.min(self.sessions.len().saturating_sub(1)));
+        self.opened = opened.and_then(at);
     }
 
     /// The sessions in the order they're listed.
@@ -151,7 +159,7 @@ impl Home {
 
     /// Shows `problem` above the list, until the next key, or nothing.
     pub fn set_notice(&mut self, problem: Option<String>) {
-        self.notice = problem.map(|text| text.chars().filter(|&c| is_drawn(c)).collect());
+        self.notice = problem.map(|text| drawn(&text));
     }
 
     /// Handles a key press. Returns what Home asks for, if anything.
@@ -472,6 +480,24 @@ impl Home {
             buf,
         );
     }
+}
+
+/// `sessions` as Home lists them: those that need the user first, then
+/// the rest, each group newest first, with control and bidirectional
+/// formatting characters dropped from their text.
+fn listed(mut sessions: Vec<Session>) -> Vec<Session> {
+    for session in &mut sessions {
+        session.title = drawn(&session.title);
+        session.date = session.date.as_deref().map(drawn);
+        session.detail = session.detail.as_deref().map(drawn);
+    }
+    sessions.sort_by_key(|s| (s.status != Status::NeedsYou, std::cmp::Reverse(s.id)));
+    sessions
+}
+
+/// `text` without the characters that would reorder or break a row.
+fn drawn(text: &str) -> String {
+    text.chars().filter(|&c| is_drawn(c)).collect()
 }
 
 /// A session's length as Home shows it: `58m`, `2h 42m`, `1h 05m`; under a
