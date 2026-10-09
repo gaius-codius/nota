@@ -8,7 +8,7 @@
 use std::error::Error;
 
 use nota_core::SessionId;
-use nota_store::SegmentRow;
+use nota_store::{RowKey, SegmentRow};
 
 use super::publish::DurableSegment;
 
@@ -44,6 +44,29 @@ pub trait SegmentStore {
     fn is_disk_full(error: &Self::Error) -> bool {
         caused_by_a_full_disk(error)
     }
+
+    /// The row `error` says doesn't parse, if it says that: publishing
+    /// names it in the findings file. By default, the row of the first
+    /// [`StoreError::CorruptRow`](nota_store::StoreError::CorruptRow) in
+    /// its chain of sources, itself included.
+    fn unparsable_row(error: &Self::Error) -> Option<RowKey> {
+        corrupt_row(error)
+    }
+}
+
+/// The row of the first `CorruptRow` store error in `error`'s chain of
+/// sources, itself included.
+fn corrupt_row(error: &(dyn Error + 'static)) -> Option<RowKey> {
+    let mut next = Some(error);
+    while let Some(e) = next {
+        if let Some(nota_store::StoreError::CorruptRow { key, .. }) =
+            e.downcast_ref::<nota_store::StoreError>()
+        {
+            return Some(*key);
+        }
+        next = e.source();
+    }
+    None
 }
 
 /// Whether `error`, or any error in its chain of sources, is an I/O error
@@ -111,6 +134,10 @@ impl<T: SegmentStore + ?Sized> SegmentStore for &mut T {
     fn is_disk_full(error: &Self::Error) -> bool {
         T::is_disk_full(error)
     }
+
+    fn unparsable_row(error: &Self::Error) -> Option<RowKey> {
+        T::unparsable_row(error)
+    }
 }
 
 #[cfg(any(test, feature = "fake-fs"))]
@@ -122,14 +149,16 @@ mod fake {
     use std::path::{Path, PathBuf};
 
     use nota_core::{EpochId, SampleIndex, SampleRange, SessionId, TrackId};
-    use nota_store::{SegmentRow, Sha256Digest};
+    use nota_store::{AudioDigest, SegmentRow, Sha256Digest};
 
     use super::{DurableSegment, SegmentStore};
     use crate::fs::fake::FakeFs;
     use crate::fs::{Fs, FsFile};
 
-    /// Bytes in a row file: session, track, epoch, start, end, SHA-256, CRC-32.
-    const ROW_LEN: usize = 8 + 4 + 4 + 8 + 8 + 32 + 4;
+    /// Bytes in a row file: session, track, epoch, start, end, SHA-256,
+    /// whether it has an audio digest (0 or 1), the digest (zeros if not),
+    /// CRC-32.
+    const ROW_LEN: usize = 8 + 4 + 4 + 8 + 8 + 32 + 1 + 32 + 4;
 
     /// Segment rows as files on a [`FakeFs`], one per row, each published
     /// by temp file, fsync, rename and directory fsync: a commit that's
@@ -159,6 +188,20 @@ mod fake {
         }
     }
 
+    #[cfg(test)]
+    impl<S: Fs> FakeStore<S> {
+        /// Commits `row` for `session` as it is, with no file behind it:
+        /// for tests that plant a row a store could hold (a restored one,
+        /// one from before audio digests).
+        pub(crate) fn plant(&self, session: SessionId, row: &SegmentRow) {
+            let path = self.row_path(session, row);
+            let mut file = self.fs.create(&path).unwrap();
+            file.write_all(&encode(session, row)).unwrap();
+            file.sync().unwrap();
+            self.fs.sync_dir(&self.dir).unwrap();
+        }
+    }
+
     impl<S> FakeStore<S> {
         fn row_path(&self, session: SessionId, row: &SegmentRow) -> PathBuf {
             self.dir.join(format!(
@@ -178,6 +221,13 @@ mod fake {
         out.extend_from_slice(&row.range().start().get().to_le_bytes());
         out.extend_from_slice(&row.range().end().get().to_le_bytes());
         out.extend_from_slice(row.sha256().as_bytes());
+        if let Some(audio) = row.audio() {
+            out.push(1);
+            out.extend_from_slice(audio.as_bytes());
+        } else {
+            out.push(0);
+            out.extend_from_slice(&[0; 32]);
+        }
         let crc = crc32fast::hash(&out);
         out.extend_from_slice(&crc.to_le_bytes());
         out
@@ -200,6 +250,12 @@ mod fake {
             range,
             Sha256Digest::new(body.get(32..64)?.try_into().ok()?),
         )?;
+        let audio: [u8; 32] = body.get(65..97)?.try_into().ok()?;
+        let row = match body.get(64)? {
+            0 if audio == [0; 32] => row,
+            1 => row.with_audio(AudioDigest::new(audio)),
+            _ => return None,
+        };
         Some((SessionId::new(u64_at(0)?), row))
     }
 
@@ -294,6 +350,7 @@ mod fake {
                 EpochId::new(0),
                 range,
                 b"flac",
+                AudioDigest::new([0; 32]),
             )
             .unwrap()
             .sync()
@@ -326,6 +383,7 @@ mod fake {
                     EpochId::new(0),
                     range,
                     b"flac",
+                    AudioDigest::new([0; 32]),
                 )
                 .unwrap()
                 .sync()
@@ -387,6 +445,7 @@ mod fake {
                     EpochId::new(0),
                     range,
                     body,
+                    AudioDigest::new([0; 32]),
                 )
                 .unwrap()
                 .sync()
@@ -423,6 +482,16 @@ mod fake {
             .unwrap();
             let bytes = encode(SESSION, &row);
             assert_eq!(decode(&bytes), Some((SESSION, row)));
+            let audio = row.with_audio(AudioDigest::new([5; 32]));
+            assert_eq!(decode(&encode(SESSION, &audio)), Some((SESSION, audio)));
+            // A digest without its flag, or a flag past 1, isn't a row.
+            for (at, value) in [(64, 2), (65, 1)] {
+                let mut odd = bytes.clone();
+                odd[at] = value;
+                let crc = crc32fast::hash(&odd[..ROW_LEN - 4]);
+                odd[ROW_LEN - 4..].copy_from_slice(&crc.to_le_bytes());
+                assert_eq!(decode(&odd), None, "{at}");
+            }
             for cut in 0..bytes.len() {
                 assert_eq!(decode(&bytes[..cut]), None);
             }
@@ -454,6 +523,7 @@ mod tests {
             EpochId::new(0),
             range,
             b"flac",
+            nota_store::AudioDigest::new([0; 32]),
         )
         .unwrap()
         .sync()
@@ -547,6 +617,66 @@ mod tests {
         assert!(!<FakeStore as SegmentStore>::is_disk_full(
             &io::Error::other(Wrapped(io::Error::other("deep")))
         ));
+    }
+
+    /// Each store names a row that doesn't parse from its error, or from an
+    /// error that caused it.
+    #[test]
+    fn stores_name_a_row_that_doesnt_parse() {
+        use std::io;
+
+        use nota_store::{RowKey, StoreError};
+
+        use crate::segment::FakeStore;
+
+        let key = RowKey {
+            track: 3,
+            start: -2,
+        };
+        let corrupt = || StoreError::CorruptRow {
+            session: SessionId::new(1),
+            key,
+            why: "odd".into(),
+        };
+        assert_eq!(
+            <Store as SegmentStore>::unparsable_row(&corrupt()),
+            Some(key)
+        );
+        assert_eq!(
+            <Writer as SegmentStore>::unparsable_row(&corrupt()),
+            Some(key)
+        );
+        assert_eq!(
+            <&mut Store as SegmentStore>::unparsable_row(&corrupt()),
+            Some(key)
+        );
+        for other in [StoreError::OutOfRange, StoreError::Corrupt("x".into())] {
+            assert_eq!(<Store as SegmentStore>::unparsable_row(&other), None);
+        }
+        // Any store whose error was caused by one.
+        let caused = io::Error::other(WrappedStore(corrupt()));
+        assert_eq!(
+            <FakeStore as SegmentStore>::unparsable_row(&caused),
+            Some(key)
+        );
+        let plain = io::Error::other("broken");
+        assert_eq!(<FakeStore as SegmentStore>::unparsable_row(&plain), None);
+    }
+
+    /// A store error, as the cause of another.
+    #[derive(Debug)]
+    struct WrappedStore(nota_store::StoreError);
+
+    impl std::fmt::Display for WrappedStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("wrapped store error")
+        }
+    }
+
+    impl std::error::Error for WrappedStore {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
     }
 
     /// An error caused by another.

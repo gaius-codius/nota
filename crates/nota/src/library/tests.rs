@@ -500,9 +500,13 @@ fn an_m1b_session_directory_is_adopted_and_salvaged() {
         matches!(done[..], [Salvaged::Done(id, _)] if id == old.id),
         "{done:?}"
     );
-    // Its rows came over, and salvage published the rest after them.
+    // Its rows came over (an M1 store kept no audio digests), and salvage
+    // published the rest after them.
     let after = segments(&library, old.id);
-    assert!(rows.iter().all(|r| after.contains(r)), "{after:?}");
+    assert!(
+        as_m1_kept(&rows).iter().all(|r| after.contains(r)),
+        "{after:?}"
+    );
     assert_eq!(covered(&after), [(0, 5_500)]);
     let row = library.db().with(|db| db.session(old.id)).unwrap().unwrap();
     assert_eq!(row.state, SessionState::Stopped);
@@ -672,7 +676,15 @@ fn a_session_directory_that_cant_be_listed_is_adopted_later() {
     // Listed again, the old store's rows come over.
     let done = library.salvage_all(length()).unwrap();
     assert!(matches!(done[..], [Salvaged::Done(..)]), "{done:?}");
-    assert!(rows.iter().all(|r| segments(&library, old.id).contains(r)));
+    let after = segments(&library, old.id);
+    assert!(as_m1_kept(&rows).iter().all(|r| after.contains(r)));
+}
+
+/// `rows` as an M1 per-session store keeps them: without audio digests.
+fn as_m1_kept(rows: &[SegmentRow]) -> Vec<SegmentRow> {
+    rows.iter()
+        .map(|r| SegmentRow::new(r.track(), r.epoch(), r.range(), r.sha256()).unwrap())
+        .collect()
 }
 
 /// A row of `samples` samples on `track`, from `start`.
@@ -981,4 +993,151 @@ fn a_kept_row_that_cant_be_read_yet_is_read_at_a_later_start() {
         .unwrap()
         .unwrap();
     assert_eq!(adopted.title.as_deref(), Some("lecture 1"));
+}
+
+/// A row whose file goes, with no journals left to rebuild it, is found by
+/// the next start's scan and shown until the file is back.
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test scaffolding outside the recorder's write path"
+)]
+fn a_row_whose_file_is_gone_needs_you_until_it_is_back() {
+    use nota_recorder::segment::segment_file_name;
+    use nota_store::{IndexedFinding, Problem, Status};
+
+    let tmp = TestDir::new("gone");
+    let library = Library::open(&tmp.0).unwrap();
+    let session = library.create().unwrap();
+    leave_a_journal(&session);
+    library.salvage_all(length()).unwrap();
+    let [row] = segments(&library, session.id)[..] else {
+        panic!("one row expected");
+    };
+    let rate = SampleRate::SPEECH;
+    let needs = |library: &Library| library.listing(rate).unwrap()[0].needs.clone();
+    assert_eq!(needs(&library), Needs::Nothing);
+
+    let path = session
+        .audio()
+        .join(segment_file_name(row.track(), row.range()));
+    let bytes = std::fs::read(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    // Nothing to salvage: the scan finds it.
+    assert!(library.salvage_all(length()).unwrap().is_empty());
+    assert_eq!(
+        needs(&library),
+        Needs::Attention("1 segment missing or changed · only its file brings it back".into())
+    );
+    let indexed = |library: &Library| library.db().with(|db| db.findings(session.id)).unwrap();
+    assert_eq!(
+        indexed(&library),
+        [IndexedFinding::Row {
+            row,
+            problem: Problem::Missing,
+            status: Status::Unresolved
+        }]
+    );
+    // Found again at the next start: still one.
+    library.salvage_all(length()).unwrap();
+    assert_eq!(indexed(&library).len(), 1);
+
+    std::fs::write(&path, bytes).unwrap();
+    library.salvage_all(length()).unwrap();
+    assert_eq!(needs(&library), Needs::Nothing);
+    assert_eq!(
+        indexed(&library),
+        [IndexedFinding::Row {
+            row,
+            problem: Problem::Missing,
+            status: Status::SinceVerified
+        }]
+    );
+}
+
+#[test]
+fn new_rows_name_a_row_that_doesnt_parse() {
+    let key = nota_store::RowKey {
+        track: 2,
+        start: -1,
+    };
+    let corrupt = StoreError::CorruptRow {
+        session: SessionId::new(1),
+        key,
+        why: "odd".into(),
+    };
+    assert_eq!(
+        <NewSessionRows as SegmentStore>::unparsable_row(&corrupt),
+        Some(key)
+    );
+    assert_eq!(
+        <NewSessionRows as SegmentStore>::unparsable_row(&StoreError::OutOfRange),
+        None
+    );
+}
+
+/// A session whose audio directory was emptied (every file lost) is still
+/// checked at start: the database holds its rows.
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test scaffolding outside the recorder's write path"
+)]
+fn a_session_whose_files_are_all_gone_needs_you() {
+    let tmp = TestDir::new("all-gone");
+    let library = Library::open(&tmp.0).unwrap();
+    let session = library.create().unwrap();
+    leave_a_journal(&session);
+    library.salvage_all(length()).unwrap();
+    assert_eq!(segments(&library, session.id).len(), 1);
+    for path in StdFs.list(&session.audio()).unwrap() {
+        std::fs::remove_file(path).unwrap();
+    }
+    for path in StdFs.list(&session.dir).unwrap() {
+        if path != session.audio() {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+    library.salvage_all(length()).unwrap();
+    let listed = library.listing(SampleRate::SPEECH).unwrap();
+    assert_eq!(
+        listed[0].needs,
+        Needs::Attention("1 segment missing or changed · only its file brings it back".into())
+    );
+}
+
+/// One session's row that doesn't parse doesn't stop the listing: that
+/// session is listed without its length, and every other as usual.
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "plants a row the schema's checks refuse, past nota-store, as a damaged database could hold"
+)]
+fn a_row_that_doesnt_parse_is_one_sessions_problem_in_the_listing() {
+    let tmp = TestDir::new("unparsable-listing");
+    let library = Library::open(&tmp.0).unwrap();
+    let (one, two) = (library.create().unwrap(), library.create().unwrap());
+    let hz = u64::from(SampleRate::SPEECH.hz());
+    library
+        .db()
+        .with(|db| {
+            db.create_session(&NewSession::bare(one.id))?;
+            db.create_session(&NewSession::bare(two.id))?;
+            db.insert_segment(two.id, &listed_row(0, 0, 60 * hz))
+        })
+        .unwrap();
+    let raw = rusqlite::Connection::open(library.db_path()).unwrap();
+    raw.execute_batch("PRAGMA ignore_check_constraints = ON")
+        .unwrap();
+    raw.execute(
+        "INSERT INTO segment (session_id, track, epoch, start_sample, end_sample, sha256) \
+         VALUES (?1, 0, 0, 0, 10, zeroblob(3))",
+        [i64::try_from(one.id.get()).unwrap()],
+    )
+    .unwrap();
+    let listed = library.listing(SampleRate::SPEECH).unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[0].recorded, None);
+    assert_eq!(listed[1].recorded, Some(Duration::from_secs(60)));
+    assert_eq!(listed[1].needs, Needs::Nothing);
 }

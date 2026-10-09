@@ -107,7 +107,8 @@ pub enum Op {
         /// How many bytes were written.
         len: usize,
     },
-    /// [`FsFile::sync`] of the file created at the path.
+    /// [`FsFile::sync`] of the file created at the path, or
+    /// [`Fs::sync_file`] of the file at the path.
     Sync(PathBuf),
     /// [`Fs::rename`].
     Rename {
@@ -758,6 +759,38 @@ fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
     state.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+impl FakeFs {
+    /// [`Fs::rename`], or with `replace` false [`Fs::rename_new`].
+    fn rename_maybe_replacing(&self, from: &Path, to: &Path, replace: bool) -> io::Result<()> {
+        same_directory(from, to)?;
+        let mut state = self.lock();
+        state.admit()?;
+        state.fault(Fault::Rename, from)?;
+        state.fault(Fault::Rename, to)?;
+        if state.names.dirs.contains(from) {
+            return Err(is_a_directory());
+        }
+        let id = *state.names.files.get(from).ok_or_else(not_found)?;
+        if !replace && (state.names.dirs.contains(to) || state.names.files.contains_key(to)) {
+            return Err(exists());
+        }
+        if state.names.dirs.contains(to) {
+            return Err(is_a_directory());
+        }
+
+        state.names.files.remove(from);
+        state.names.files.insert(to.to_path_buf(), id);
+        state
+            .pending
+            .push(NameOp::Rename(from.to_path_buf(), to.to_path_buf()));
+        state.log.push(Op::Rename {
+            from: from.to_path_buf(),
+            to: to.to_path_buf(),
+        });
+        Ok(())
+    }
+}
+
 impl Fs for FakeFs {
     type File = FakeFile;
     type Lock = FakeLock;
@@ -799,28 +832,11 @@ impl Fs for FakeFs {
     }
 
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
-        same_directory(from, to)?;
-        let mut state = self.lock();
-        state.admit()?;
-        state.fault(Fault::Rename, from)?;
-        state.fault(Fault::Rename, to)?;
-        if state.names.dirs.contains(from) {
-            return Err(is_a_directory());
-        }
-        let id = *state.names.files.get(from).ok_or_else(not_found)?;
-        if state.names.dirs.contains(to) {
-            return Err(is_a_directory());
-        }
-        state.names.files.remove(from);
-        state.names.files.insert(to.to_path_buf(), id);
-        state
-            .pending
-            .push(NameOp::Rename(from.to_path_buf(), to.to_path_buf()));
-        state.log.push(Op::Rename {
-            from: from.to_path_buf(),
-            to: to.to_path_buf(),
-        });
-        Ok(())
+        self.rename_maybe_replacing(from, to, true)
+    }
+
+    fn rename_new(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.rename_maybe_replacing(from, to, false)
     }
 
     fn sync_dir(&self, dir: &Path) -> io::Result<()> {
@@ -869,6 +885,21 @@ impl Fs for FakeFs {
         let data = state.inode(id)?.data.clone();
         state.log.push(Op::Read(path.to_path_buf()));
         Ok(data)
+    }
+
+    fn sync_file(&self, path: &Path) -> io::Result<()> {
+        valid_path(path)?;
+        let id = {
+            let state = self.lock();
+            if state.crashed {
+                return Err(crashed());
+            }
+            if state.names.dirs.contains(path) {
+                return Err(is_a_directory());
+            }
+            *state.names.files.get(path).ok_or_else(not_found)?
+        };
+        sync_file(&self.state, id, path).map(|_| ())
     }
 
     fn list(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
@@ -1083,6 +1114,59 @@ mod tests {
             after_crash(&fs, CrashOutcome::LoseUnsynced, "/s/journal"),
             Some(Vec::new())
         );
+    }
+
+    #[test]
+    fn syncing_a_file_by_name_makes_its_data_durable() {
+        let fs = FakeFs::with_dirs(["/s"]);
+        let mut f = fs.create(&p("/s/kept")).unwrap();
+        fs.sync_dir(&p("/s")).unwrap();
+        f.write_all(b"abc").unwrap();
+        fs.sync_file(&p("/s/kept")).unwrap();
+        assert_eq!(fs.ops().last(), Some(&Op::Sync(p("/s/kept"))));
+        assert_eq!(
+            fs.sync_file(&p("/s/none")).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            fs.sync_file(&p("/s")).unwrap_err().kind(),
+            io::ErrorKind::IsADirectory
+        );
+        for outcome in CrashOutcome::standard() {
+            assert_eq!(
+                after_crash(&fs, outcome, "/s/kept"),
+                Some(b"abc".to_vec()),
+                "{outcome:?}"
+            );
+        }
+        // After the crash the process is dead.
+        assert!(fs.sync_file(&p("/s/kept")).is_err());
+    }
+
+    #[test]
+    fn renaming_without_replacing_refuses_a_taken_name_and_changes_nothing() {
+        let fs = FakeFs::with_dirs(["/s", "/s/dir"]);
+        for (name, body) in [("a", b"a"), ("b", b"b")] {
+            let mut f = fs.create(&p(&format!("/s/{name}"))).unwrap();
+            f.write_all(body).unwrap();
+        }
+        let before = fs.ops().len();
+        for taken in ["/s/b", "/s/dir"] {
+            assert_eq!(
+                fs.rename_new(&p("/s/a"), &p(taken)).unwrap_err().kind(),
+                io::ErrorKind::AlreadyExists,
+                "{taken}"
+            );
+        }
+        assert_eq!(fs.ops().len(), before);
+        assert_eq!(fs.read(&p("/s/a")).unwrap(), b"a");
+        assert_eq!(fs.read(&p("/s/b")).unwrap(), b"b");
+        // A free name: renamed, durable once the directory is synced.
+        fs.rename_new(&p("/s/a"), &p("/s/c")).unwrap();
+        fs.sync_dir(&p("/s")).unwrap();
+        assert_eq!(after_crash(&fs, CrashOutcome::LoseUnsynced, "/s/a"), None);
+        assert!(fs.paths().contains(&p("/s/c")));
+        assert!(!fs.paths().contains(&p("/s/a")));
     }
 
     #[test]

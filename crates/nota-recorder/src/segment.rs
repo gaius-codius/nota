@@ -11,7 +11,8 @@
 //! 2. fsync it;
 //! 3. rename it to `seg-….flac`;
 //! 4. fsync the directory;
-//! 5. commit the segment's row (sample range, epoch, SHA-256) to the store;
+//! 5. commit the segment's row (sample range, epoch, SHA-256, and the digest
+//!    of its decoded audio: see `flac`) to the store;
 //! 6. only then delete the journals whose audio it holds.
 //!
 //! So a row never exists without its file, and a journal is never deleted
@@ -25,15 +26,19 @@
 //! for the journals the [`SessionWriter`] has finished; salvage calls it for
 //! every journal left in a session's directory. The rules:
 //! - Committed rows claim their samples first, but only a row whose file is
-//!   in the session directory, can be read, and matches it (its SHA-256, and
-//!   the number of samples its FLAC header declares). A row whose file is
-//!   missing, can't be read or doesn't match claims nothing, and nothing is
-//!   published over its samples, so its file, if any, stays and so do the
-//!   journals holding them; every other segment is published. Such rows are
-//!   findings, kept in the session directory for the app to show (see
-//!   `findings`). Then journals claim theirs in descending [`JournalId`]
-//!   order: after a crash a broken journal's unsynced tail can survive
-//!   alongside its replacement, and the replacement, started later, wins.
+//!   in the session directory, can be read, and proves it: its SHA-256 and
+//!   the number of samples its FLAC header declares, or the digest of the
+//!   audio it decodes to (so a re-encoded file still proves its row). A row
+//!   whose file is missing, can't be read or doesn't prove it is a finding,
+//!   kept in the session directory for the app to show (see `findings`).
+//!   It's repaired if the journals hold all of its audio, provably: a file
+//!   under its name is kept aside first, never deleted (see `repair`).
+//!   Otherwise it claims nothing, and nothing is published over its
+//!   window, so its file, if any, stays and so do the journals holding its
+//!   samples; every other segment is published. Then journals claim theirs
+//!   in descending [`JournalId`] order: after a crash a broken journal's
+//!   unsynced tail can survive alongside its replacement, and the
+//!   replacement, started later, wins.
 //! - What's left is split at window boundaries and grouped by epoch; each
 //!   continuous run in a group is one segment.
 //! - A journal is deleted once every sample it holds is claimed by
@@ -66,6 +71,7 @@ mod plan;
 mod publish;
 mod publisher;
 mod read;
+mod repair;
 mod salvage;
 mod store;
 
@@ -79,14 +85,17 @@ use nota_core::{SampleCount, SampleIndex, SampleRange, SampleRate, TrackId};
 use crate::fs::Fs;
 
 pub use findings::{
-    FILE_NAME as FINDINGS_FILE_NAME, Finding, Findings, FindingsError, Problem, ReadFailure,
-    Status, Verification, read_findings,
+    FILE_NAME as FINDINGS_FILE_NAME, Finding, Findings, FindingsError, UnparsableRow, Verification,
+    read_findings,
 };
 pub use flac::FlacError;
+pub use nota_store::{Problem, ReadFailure, Status};
 pub use publish::DurableSegment;
 pub use publisher::{PublishQueue, PublishReport, Publisher, PublisherPanicked, Stopped};
 pub use read::{ReadSegmentError, read_segment};
-pub use salvage::{PublishError, Published, needs_salvage, publish_journals, salvage};
+pub use salvage::{
+    Depth, Integrity, PublishError, Published, needs_salvage, publish_journals, salvage, scan,
+};
 #[cfg(any(test, feature = "fake-fs"))]
 pub use store::FakeStore;
 pub use store::SegmentStore;
@@ -225,11 +234,19 @@ pub(crate) fn durable_for_test<S: Fs>(
     track: TrackId,
     range: SampleRange,
 ) -> DurableSegment {
-    publish::TempSegment::write(fs, dir, track, nota_core::EpochId::new(0), range, b"flac")
-        .and_then(|t| t.sync().map_err(publish::StepError::Io))
-        .and_then(|t| t.rename(fs))
-        .and_then(|t| t.sync_dir(fs).map_err(publish::StepError::Io))
-        .unwrap_or_else(|e| panic!("{e:?}"))
+    publish::TempSegment::write(
+        fs,
+        dir,
+        track,
+        nota_core::EpochId::new(0),
+        range,
+        b"flac",
+        nota_store::AudioDigest::new([0; 32]),
+    )
+    .and_then(|t| t.sync().map_err(publish::StepError::Io))
+    .and_then(|t| t.rename(fs))
+    .and_then(|t| t.sync_dir(fs).map_err(publish::StepError::Io))
+    .unwrap_or_else(|e| panic!("{e:?}"))
 }
 
 #[cfg(test)]

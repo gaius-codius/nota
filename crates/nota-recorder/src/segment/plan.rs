@@ -131,6 +131,52 @@ pub(super) fn plan(
     Plan { segments, needs }
 }
 
+/// The segment holding exactly `row`'s samples, from `journals`, to rebuild
+/// its file: `None` unless they hold every one of its samples in its epoch.
+/// As in [`plan`], the newest journal wins a sample several hold; if the
+/// winner of any sample is of another epoch or rate than the rest, there's
+/// no segment either. Whether its audio is the row's is for the caller to
+/// prove.
+pub(super) fn cover(row: &SegmentRow, journals: &[JournalSummary]) -> Option<PlannedSegment> {
+    let want = row.range();
+    let mut mine: Vec<_> = journals.iter().filter(|j| j.track == row.track()).collect();
+    mine.sort_by_key(|j| std::cmp::Reverse(j.id));
+    let mut claimed = Claimed::default();
+    let mut parts: BTreeMap<SampleIndex, Part> = BTreeMap::new();
+    let mut rate = None;
+    for journal in mine {
+        let Some(range) = journal.range else {
+            continue;
+        };
+        let Some(inside) =
+            SampleRange::new(range.start().max(want.start()), range.end().min(want.end()))
+                .filter(|r| !r.is_empty())
+        else {
+            continue;
+        };
+        for piece in claimed.subtract(inside) {
+            if journal.epoch != row.epoch() || *rate.get_or_insert(journal.rate) != journal.rate {
+                return None;
+            }
+            parts.insert(
+                piece.start(),
+                Part {
+                    journal: journal.id,
+                    range: piece,
+                },
+            );
+        }
+        claimed.add(inside);
+    }
+    let mut runs = continuous_runs(parts.into_values());
+    let run = runs.pop()?;
+    if !runs.is_empty() {
+        return None;
+    }
+    let segment = segment_of(row.track(), row.epoch(), rate?, run)?;
+    (segment.range == want).then_some(segment)
+}
+
 /// Splits parts, in sample order, wherever one doesn't start where the last
 /// ended.
 fn continuous_runs(parts: impl Iterator<Item = Part>) -> Vec<Vec<Part>> {
@@ -270,6 +316,76 @@ mod tests {
 
     fn len(n: u64) -> SegmentLength {
         SegmentLength::new(SampleCount::new(n)).unwrap()
+    }
+
+    /// The parts `cover` finds for `row`, as (journal, start, end).
+    fn covered(row: &SegmentRow, journals: &[JournalSummary]) -> Option<Vec<(u64, u64, u64)>> {
+        cover(row, journals).map(|s| {
+            assert_eq!(
+                (s.track, s.epoch, s.range),
+                (row.track(), row.epoch(), row.range())
+            );
+            s.parts
+                .iter()
+                .map(|p| (p.journal.get(), p.range.start().get(), p.range.end().get()))
+                .collect()
+        })
+    }
+
+    #[test]
+    fn cover_takes_exactly_a_rows_samples_newest_journal_first() {
+        let r = row(0, 100, 300);
+        // One journal holding more than the row: just the row's part.
+        assert_eq!(
+            covered(&r, &[journal(1, 0, 0, Some((0, 500)))]),
+            Some(vec![(1, 100, 300)])
+        );
+        // Two journals meeting inside it; another track's is ignored.
+        let two = [
+            journal(1, 0, 0, Some((0, 200))),
+            journal(2, 0, 0, Some((200, 400))),
+            journal(3, 1, 0, Some((0, 400))),
+        ];
+        assert_eq!(covered(&r, &two), Some(vec![(1, 100, 200), (2, 200, 300)]));
+        // Overlapping: the newer one wins what they share.
+        let overlapping = [
+            journal(1, 0, 0, Some((0, 250))),
+            journal(2, 0, 0, Some((150, 400))),
+        ];
+        assert_eq!(
+            covered(&r, &overlapping),
+            Some(vec![(1, 100, 150), (2, 150, 300)])
+        );
+        // A gap, a short end, or nothing: no segment.
+        for journals in [
+            vec![
+                journal(1, 0, 0, Some((0, 150))),
+                journal(2, 0, 0, Some((160, 400))),
+            ],
+            vec![journal(1, 0, 0, Some((0, 299)))],
+            vec![journal(1, 0, 0, Some((101, 400)))],
+            vec![journal(1, 0, 0, None)],
+            vec![],
+        ] {
+            assert_eq!(covered(&r, &journals), None, "{journals:?}");
+        }
+        // Another epoch anywhere it wins: no segment, even if an older
+        // journal of the row's epoch holds the samples.
+        let other_epoch = [
+            journal(1, 0, 0, Some((0, 400))),
+            journal(2, 0, 1, Some((250, 260))),
+        ];
+        assert_eq!(covered(&r, &other_epoch), None);
+        // An older journal of another epoch that loses everything is fine.
+        let lost = [
+            journal(1, 0, 1, Some((150, 200))),
+            journal(2, 0, 0, Some((0, 400))),
+        ];
+        assert_eq!(covered(&r, &lost), Some(vec![(2, 100, 300)]));
+        // Two rates: no segment.
+        let mut fast = journal(2, 0, 0, Some((200, 400)));
+        fast.rate = SampleRate::new(48_000).unwrap();
+        assert_eq!(covered(&r, &[journal(1, 0, 0, Some((0, 200))), fast]), None);
     }
 
     /// A segment as (track, epoch, start, end, parts as (journal, start, end)).
