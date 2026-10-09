@@ -27,9 +27,14 @@ required-features = ["fake-engine"]
 name = "hangup"
 required-features = ["fake-engine"]
 
+[[test]]
+name = "pass"
+required-features = ["fake-engine"]
+
 [dependencies]
-# Decodes a segment's FLAC to prove its audio against its row's digest,
-# whatever encoder wrote it. Pure Rust, like the encoder.
+# Decodes published segments: for the final pass, and to prove a segment's
+# audio against its row's digest, whatever encoder wrote it (pure Rust,
+# Apache-2.0, like the encoder).
 claxon.workspace = true
 crc32fast.workspace = true
 flacenc.workspace = true

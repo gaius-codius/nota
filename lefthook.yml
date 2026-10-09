@@ -14,6 +14,9 @@ pre-commit:
       run: typos --force-exclude {staged_files}
     files:
       run: scripts/check-files.sh --staged
+    clippy-bans:
+      # Every crate in the lock files is classified in clippy-crates.txt.
+      run: scripts/check-clippy-bans.sh
     secrets:
       run: gitleaks git --pre-commit --staged --no-banner --redact .
     workflows:

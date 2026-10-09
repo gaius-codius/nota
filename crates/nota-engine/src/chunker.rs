@@ -20,8 +20,9 @@
 
 use nota_core::{SampleCount, SampleIndex, SampleRange, SampleRate};
 
-/// Where and how the chunker cuts. Build with [`ChunkerConfig::new`] or
-/// [`ChunkerConfig::live`]; the fields can't be set out of range.
+/// Where and how the chunker cuts. Build with [`ChunkerConfig::new`],
+/// [`ChunkerConfig::live`] or [`ChunkerConfig::final_pass`]; the fields
+/// can't be set out of range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChunkerConfig {
     min_pause: SampleCount,
@@ -44,6 +45,24 @@ impl ChunkerConfig {
             min_pause: SampleCount::new((hz * 15 / 100).max(3)),
             target: SampleCount::new((hz * 3).max(4)),
             cap: SampleCount::new((hz * 10).max(5)),
+            fallback_window: SampleCount::new((hz * 8).max(5)),
+            frame: SampleCount::new((hz * 3 / 100).max(1)),
+        }
+    }
+
+    /// The final pass at `rate`: pauses of 0.15 s, a 15 s target, a 25 s
+    /// cap, and a fallback cut at the quietest 30 ms in the last 8 s. Long
+    /// chunks give the recogniser more context than the live pass's; the
+    /// cap keeps every request well under the 30 s the engine is never
+    /// sent (tech stack, "Chunking and transcription").
+    #[must_use]
+    pub fn final_pass(rate: SampleRate) -> Self {
+        let hz = u64::from(rate.hz());
+        // In range for every rate, as the live config.
+        Self {
+            min_pause: SampleCount::new((hz * 15 / 100).max(3)),
+            target: SampleCount::new((hz * 15).max(4)),
+            cap: SampleCount::new((hz * 25).max(5)),
             fallback_window: SampleCount::new((hz * 8).max(5)),
             frame: SampleCount::new((hz * 3 / 100).max(1)),
         }

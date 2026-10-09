@@ -33,7 +33,11 @@
 //!
 //! Audio goes to the journal separately and never through here, so the
 //! recording carries on whatever the engine does.
+//!
+//! [`pass`] runs the same supervision over audio already published: the
+//! final pass after a recording stops.
 
+pub mod pass;
 mod replay;
 
 use std::collections::BTreeMap;
@@ -104,13 +108,18 @@ pub struct EngineConfig {
     /// killed, as while recording; one with nothing left to confirm gets
     /// 3 s to exit.
     pub shutdown_wait: Duration,
+    /// How much audio is skipped when engines keep failing on it: one
+    /// chunk at the engine's cap, the most it decodes at once (10 s for
+    /// the live pass, 25 s for the final pass).
+    pub poison_skip: SampleCount,
 }
 
 impl EngineConfig {
     /// The defaults: 60 s to start, 20 s per request, backoff from 250 ms to
     /// 30 s, a flush after 5 s without audio, 10 minutes of audio at
-    /// 16 kHz kept while down, and up to 30 s at shutdown for the last
-    /// text.
+    /// 16 kHz kept while down, up to 30 s at shutdown for the last text,
+    /// and 10 s of audio skipped when engines keep failing on it (the live
+    /// pass's cap).
     #[must_use]
     pub const fn new(command: EngineCommand) -> Self {
         Self {
@@ -122,6 +131,7 @@ impl EngineConfig {
             idle_flush: Duration::from_secs(5),
             max_unconfirmed: SampleCount::new(16_000 * 600),
             shutdown_wait: Duration::from_secs(30),
+            poison_skip: SampleCount::new(160_000),
         }
     }
 }
@@ -457,10 +467,6 @@ const POISON_STRIKES: u32 = 3;
 /// from a stalled machine, so it takes more of them; but audio that always
 /// hangs the engine mustn't keep it offline for the rest of the session.
 const HANG_STRIKES: u32 = 5;
-
-/// How much of that audio is skipped: one chunk at the live cap, 10 s at
-/// 16 kHz, the most the engine decodes at once.
-const POISON_SKIP: SampleCount = SampleCount::new(160_000);
 
 impl Supervisor {
     fn new(
@@ -799,7 +805,7 @@ impl Supervisor {
             let skipped = self
                 .tracks
                 .get_mut(&track)
-                .map(|replay| replay.skip(POISON_SKIP))
+                .map(|replay| replay.skip(self.config.poison_skip))
                 .unwrap_or_default();
             for range in skipped {
                 self.emit(EngineEvent::Skipped { track, range });

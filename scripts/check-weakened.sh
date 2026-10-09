@@ -29,7 +29,7 @@ findings=()
 while IFS= read -r f; do
   [[ -n $f ]] && findings+=("check config changed: $f")
 done < <(git diff --name-only "$mb" "$head" -- \
-  rust-toolchain.toml rustfmt.toml clippy.toml typos.toml deny.toml \
+  rust-toolchain.toml rustfmt.toml clippy.toml clippy-crates.txt typos.toml deny.toml \
   .config/nextest.toml .cargo/config.toml .cargo/mutants.toml lefthook.yml \
   .github/workflows 'scripts/check-*' \
   | sort -u)

@@ -409,6 +409,10 @@ fn the_scan_needs_the_session_to_itself() {
 
 /// A session recorded on the fake disk, with its rows in a real library
 /// database holding one row that doesn't parse.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "plants a row the schema's checks refuse, past nota-store, as a damaged database could hold"
+)]
 fn with_an_unparsable_row(dir: &TestDir) -> (FakeFs, nota_store::Store) {
     let (fs, _) = clean_run(Recording {
         steps: 4,
@@ -433,6 +437,10 @@ fn with_an_unparsable_row(dir: &TestDir) -> (FakeFs, nota_store::Store) {
 }
 
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "plants a row the schema's checks refuse, past nota-store, as a damaged database could hold"
+)]
 fn an_unparsable_row_stops_its_session_and_is_named() {
     let dir = TestDir::new("unparsable-row");
     let (fs, store) = with_an_unparsable_row(&dir);

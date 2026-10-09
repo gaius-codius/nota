@@ -70,6 +70,7 @@ mod flac;
 mod plan;
 mod publish;
 mod publisher;
+mod read;
 mod repair;
 mod salvage;
 mod store;
@@ -91,6 +92,7 @@ pub use flac::FlacError;
 pub use nota_store::{Problem, ReadFailure, Status};
 pub use publish::DurableSegment;
 pub use publisher::{PublishQueue, PublishReport, Publisher, PublisherPanicked, Stopped};
+pub use read::{ReadSegmentError, read_segment};
 pub use salvage::{
     Depth, Integrity, PublishError, Published, needs_salvage, publish_journals, salvage, scan,
 };

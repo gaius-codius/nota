@@ -451,6 +451,7 @@ fn a_resumed_session_records_without_the_database_and_publishes_once_it_is_back(
 
 /// Makes the per-session store an M1b recording kept, at `path`, holding
 /// `rows`.
+#[expect(clippy::disallowed_methods, reason = "test scaffolding")]
 fn per_session_store(path: &Path, rows: &[SegmentRow]) {
     let conn = rusqlite::Connection::open(path).unwrap();
     let mode: String = conn
@@ -1108,6 +1109,10 @@ fn a_session_whose_files_are_all_gone_needs_you() {
 /// One session's row that doesn't parse doesn't stop the listing: that
 /// session is listed without its length, and every other as usual.
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "plants a row the schema's checks refuse, past nota-store, as a damaged database could hold"
+)]
 fn a_row_that_doesnt_parse_is_one_sessions_problem_in_the_listing() {
     let tmp = TestDir::new("unparsable-listing");
     let library = Library::open(&tmp.0).unwrap();

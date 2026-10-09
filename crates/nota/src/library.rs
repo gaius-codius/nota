@@ -152,6 +152,48 @@ impl Library {
         self.root.join(SESSIONS)
     }
 
+    /// Where session `id` lives on disk, whether or not it's there.
+    pub(crate) fn session(&self, id: SessionId) -> SessionPaths {
+        SessionPaths {
+            id,
+            dir: self.sessions().join(id.get().to_string()),
+        }
+    }
+
+    /// Whether a session is being recorded, by this nota or another: its
+    /// directory is locked and it has journals. Sessions the database
+    /// holds as stopped aren't looked at. Only sessions with journals are
+    /// tried, as [`Library::listing`] does: a recording takes its lock
+    /// before it makes its first journal, so trying the lock never gets in
+    /// the way of a recording starting. (Between the two, a recording isn't
+    /// seen here; the app knows of its own before it starts.)
+    pub(crate) fn recording(&self) -> bool {
+        let stopped: Vec<SessionId> = self
+            .db
+            .with(|db| db.sessions())
+            .map(|sessions| {
+                sessions
+                    .into_iter()
+                    .filter(|s| s.state == SessionState::Stopped)
+                    .map(|s| s.id)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let Ok(sessions) = self.existing() else {
+            return false;
+        };
+        sessions
+            .iter()
+            .filter(|session| !stopped.contains(&session.id))
+            .any(|session| {
+                let dir = SessionDir::new(session.id, StdFs, &session.audio());
+                needs_salvage(&dir).unwrap_or(false)
+                    && dir
+                        .lock()
+                        .is_err_and(|e| e.kind() == io::ErrorKind::WouldBlock)
+            })
+    }
+
     /// Every session on disk, in number order.
     pub(crate) fn existing(&self) -> io::Result<Vec<SessionPaths>> {
         let mut found: Vec<SessionPaths> = StdFs

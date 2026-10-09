@@ -3,8 +3,9 @@
 //! One SQLite database in the data directory holds every session: its
 //! title, tracks and state, the rows for the audio segments the recorder
 //! has published, the heard text and its revisions ([`transcript`]), the
-//! marks and notes made while recording ([`annotations`]), and the tables
-//! later work fills (jobs, the timeline). The tables are in [`schema`]; versions
+//! marks and notes made while recording ([`annotations`]), the work queued
+//! after a stop ([`jobs`]) and the final pass's text ([`final_text`]), and
+//! the tables later work fills (the timeline). The tables are in [`schema`]; versions
 //! and the import of the per-session stores that came before are in
 //! [`migrate`].
 //!
@@ -33,11 +34,13 @@ use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
-use nota_core::SessionId;
+use nota_core::{SampleIndex, SessionId, TrackId};
 use rusqlite::{Connection, OpenFlags};
 
 pub mod annotations;
+pub mod final_text;
 mod findings;
+pub mod jobs;
 pub mod migrate;
 pub mod schema;
 mod segments;
@@ -46,7 +49,9 @@ pub mod transcript;
 mod writer;
 
 pub use annotations::Annotation;
+pub use final_text::{FinalText, FinalWord, HeardBy};
 pub use findings::{IndexedFinding, Problem, ReadFailure, Status};
+pub use jobs::{Job, JobEnd, JobId, JobKind, JobState, Progress, Wait};
 pub use migrate::Adopted;
 pub use segments::{AudioDigest, Inserted, RowKey, SegmentRow, Sha256Digest};
 pub use sessions::{NewSession, Session, SessionState, Track, TrackKind};
@@ -92,6 +97,16 @@ pub enum StoreError {
     NoRevision(SessionId, u32),
     /// The session has no utterance with this number.
     NoUtterance(SessionId, i64),
+    /// There's no job with this number.
+    NoJob(i64),
+    /// Final-pass text that overlaps text stored for the track already,
+    /// or ends past the point it's stored up to.
+    FinalOverlap {
+        /// The track.
+        track: TrackId,
+        /// Where the text that doesn't fit starts.
+        start: SampleIndex,
+    },
     /// A stored row doesn't parse: a negative or inverted range, a
     /// wrong-length hash, a number out of its type's range, an unknown
     /// state or kind.
@@ -139,6 +154,14 @@ impl fmt::Display for StoreError {
             Self::NoUtterance(id, n) => {
                 write!(f, "session {} has no utterance {n}", id.get())
             }
+            Self::NoJob(id) => write!(f, "there is no job {id}"),
+            Self::FinalOverlap { track, start } => write!(
+                f,
+                "final-pass text on track {} from sample {} overlaps text already stored, \
+                 or ends past the point it was given up to",
+                track.get(),
+                start.get()
+            ),
             Self::Corrupt(why) => write!(f, "corrupt row: {why}"),
             Self::CorruptRow { session, key, why } => write!(
                 f,
@@ -226,6 +249,10 @@ fn create_private(_path: &Path) -> Result<(), StoreError> {
 
 /// Opens the SQLite file at `path`, never through a symlink, with a busy
 /// timeout for another process's writes.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the one place nota opens a database file: the library, and the M1 stores it migrates"
+)]
 fn connect(path: &Path, flags: OpenFlags) -> Result<Connection, StoreError> {
     let conn = Connection::open_with_flags(path, flags.union(OpenFlags::SQLITE_OPEN_NOFOLLOW))?;
     conn.busy_timeout(BUSY_TIMEOUT)?;

@@ -15,15 +15,16 @@
 //! |---|---|---|
 //! | `session` | number, title, language, state, when it started (V3) | `nota record`, and adopting a session found on disk |
 //! | `track` | each track's kind and source | `nota record`, and adopting a session found on disk with its row kept |
-//! | `segment` | each published segment: its track, epoch, samples, SHA-256, decoded-audio digest (V5) | the recorder's publish step and salvage |
+//! | `segment` | each published segment: its track, epoch, samples, SHA-256, decoded-audio digest (V6) | the recorder's publish step and salvage |
 //! | `epoch` | each epoch's first sample, rate and session-time anchor | the epochs package |
 //! | `utterance`, `word` | the heard text, as the engine confirmed it, with word times; never changed (V4's triggers) | `nota record`'s live text ([`crate::transcript`]) |
 //! | `revision`, `revision_text` | the displayed text: revision 0 is the heard text, each later one a new row holding only what it changes; never changed | revision 0 with the first utterance, later ones by term clean-up |
 //! | `proposal` | a proposed fix, with the revision, model, pack and thresholds it came from | term clean-up |
 //! | `mark`, `note` | marks and notes made while recording, in session time | `nota record`, as each is made ([`crate::annotations`]) |
-//! | `job` | work queued after a stop | the job queue |
+//! | `job` | work queued after a stop: its kind, state, progress and what it waits for (V5) | the job queue ([`crate::jobs`]) |
+//! | `final_text`, `final_word`, `final_progress` | the final pass's text, by track and sample, beside the heard text and never in it; how far it has got on each track (V5) | the final pass ([`crate::final_text`]) |
 //! | `event` | the timeline: device changes, warnings, gaps | the detectors |
-//! | `finding` | an index of each session's findings file: rows whose file didn't prove them, and rows that don't parse (V5) | the app, from the findings files ([`Store::index_findings`](crate::Store::index_findings)) |
+//! | `finding` | an index of each session's findings file: rows whose file didn't prove them, and rows that don't parse (V6) | the app, from the findings files ([`Store::index_findings`](crate::Store::index_findings)) |
 //!
 //! Session times are nanoseconds from the session's start
 //! ([`SessionTime`](nota_core::SessionTime)); samples are indices at the
@@ -261,7 +262,62 @@ WHEN NEW.revision = 0
 BEGIN SELECT RAISE(ABORT, 'a revision is never added to'); END;
 ";
 
-/// Version 5: each segment row's decoded-audio digest
+/// Version 5: the job queue and the final pass.
+///
+/// A job gains its progress (`progress` of `total`, in whatever units its
+/// kind counts) and what a waiting job waits for (`waits_for`: `space`
+/// after a full disk, `engine` without the speech models, `audio` while
+/// the session still has journals to publish); a session has at most one
+/// job of each kind. Sessions stopped before version 5 get no jobs from
+/// it: their audio has no final pass unless one is queued for them.
+///
+/// The final pass's text is kept apart from the heard text: its own rows,
+/// located by track and sample as the engine gives them, not in
+/// `utterance`, so a revision never shows the two passes mixed. (Placing
+/// it in session time needs each epoch's anchor, which nothing stores
+/// yet.) A row with no text is audio the engine couldn't transcribe.
+/// `final_progress` says how far each track has got: every published
+/// sample before `up_to` is covered, so a pass stopped partway resumes
+/// there.
+pub(crate) const V5: &str = "
+ALTER TABLE job ADD COLUMN progress INTEGER NOT NULL DEFAULT 0 CHECK (progress >= 0);
+ALTER TABLE job ADD COLUMN total INTEGER NOT NULL DEFAULT 0 CHECK (total >= 0);
+ALTER TABLE job ADD COLUMN waits_for TEXT;
+CREATE UNIQUE INDEX job_once ON job (session_id, kind);
+
+CREATE TABLE final_text (
+    session_id INTEGER NOT NULL REFERENCES session(id),
+    track INTEGER NOT NULL CHECK (track BETWEEN 0 AND 4294967295),
+    start_sample INTEGER NOT NULL CHECK (start_sample >= 0),
+    end_sample INTEGER NOT NULL CHECK (end_sample > start_sample),
+    text TEXT,
+    engine TEXT NOT NULL,
+    model TEXT NOT NULL,
+    PRIMARY KEY (session_id, track, start_sample)
+) STRICT;
+
+CREATE TABLE final_word (
+    session_id INTEGER NOT NULL,
+    track INTEGER NOT NULL,
+    start_sample INTEGER NOT NULL,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    text TEXT NOT NULL,
+    word_start INTEGER NOT NULL CHECK (word_start >= 0),
+    word_end INTEGER NOT NULL CHECK (word_end >= word_start),
+    PRIMARY KEY (session_id, track, start_sample, position),
+    FOREIGN KEY (session_id, track, start_sample)
+        REFERENCES final_text(session_id, track, start_sample)
+) STRICT;
+
+CREATE TABLE final_progress (
+    session_id INTEGER NOT NULL REFERENCES session(id),
+    track INTEGER NOT NULL CHECK (track BETWEEN 0 AND 4294967295),
+    up_to INTEGER NOT NULL CHECK (up_to >= 0),
+    PRIMARY KEY (session_id, track)
+) STRICT;
+";
+
+/// Version 6: each segment row's decoded-audio digest
 /// ([`AudioDigest`](crate::AudioDigest)), null for rows committed before it
 /// (their SHA-256 alone proves their file); and `finding`, an index of the
 /// findings file each session's directory keeps, so the library can list
@@ -271,7 +327,7 @@ BEGIN SELECT RAISE(ABORT, 'a revision is never added to'); END;
 /// A finding names its row by track and first sample, as stored, which a
 /// row that doesn't parse still has; the rest of the row (end, epoch,
 /// hashes) is null for one that doesn't.
-pub(crate) const V5: &str = "
+pub(crate) const V6: &str = "
 ALTER TABLE segment ADD COLUMN audio_digest BLOB
     CHECK (audio_digest IS NULL OR length(audio_digest) = 32);
 
