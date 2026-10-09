@@ -739,6 +739,36 @@ fn audio_that_keeps_killing_the_engine_is_skipped() {
     );
 }
 
+/// How much poisoned audio is skipped is the config's: a longer skip (the
+/// final pass's 25 s chunk, here 1.5 chunks) takes more of what follows.
+#[test]
+fn the_skip_is_as_long_as_the_config_says() {
+    let mut config = fake(&["echo", "--poison", "1002"]);
+    config.poison_skip = SampleCount::new(CHUNK * 3 / 2);
+    let (mut supervisor, mut events) = start(config);
+    events.online();
+    supervisor.send_audio(poisoned(TRACK, 0)).unwrap();
+    send(&mut supervisor, 1..4);
+    let skipped = events.until(Duration::from_secs(20), |e| {
+        matches!(e, EngineEvent::Skipped { .. })
+    });
+    let EngineEvent::Skipped { range, .. } = skipped else {
+        unreachable!()
+    };
+    // The poisoned chunk and half the next.
+    let half = CHUNK * 3 / 2;
+    assert_eq!((range.start().get(), range.end().get()), (0, half));
+    events.confirmed_to(4 * CHUNK, Duration::from_secs(10));
+    assert_eq!(
+        events.transcripts(),
+        [
+            (half, 2 * CHUNK),
+            (2 * CHUNK, 3 * CHUNK),
+            (3 * CHUNK, 4 * CHUNK)
+        ]
+    );
+}
+
 /// Poison on one track doesn't cost another track its audio.
 #[test]
 fn poison_on_one_track_spares_the_others() {

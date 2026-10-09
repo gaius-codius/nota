@@ -1,4 +1,4 @@
-//! Encoding a segment's samples as FLAC.
+//! Encoding a segment's samples as FLAC, and decoding them again.
 //!
 //! Segments are published as FLAC files. The encoder is `flacenc`, which is pure Rust: no native
 //! code, so the recorder keeps building without a C toolchain and nothing outside Rust's safety
@@ -160,6 +160,31 @@ pub(super) fn stream_len(bytes: &[u8]) -> Option<u64> {
         0 => None,
         n => Some(n),
     }
+}
+
+/// The rate and samples of a mono 16-bit FLAC file, decoded with claxon
+/// (pure Rust). Anything else, or a file that doesn't decode, is an error
+/// saying why.
+pub(super) fn decode(bytes: &[u8]) -> Result<(SampleRate, Vec<i16>), String> {
+    let mut reader =
+        claxon::FlacReader::new(std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
+    let info = reader.streaminfo();
+    if (info.channels, info.bits_per_sample) != (1, 16) {
+        return Err(format!(
+            "{} channels of {} bits, not mono 16-bit",
+            info.channels, info.bits_per_sample
+        ));
+    }
+    let rate = SampleRate::new(info.sample_rate)
+        .ok_or_else(|| format!("a sampling rate of {} Hz", info.sample_rate))?;
+    let samples = reader
+        .samples()
+        .map(|s| {
+            let s = s.map_err(|e| e.to_string())?;
+            i16::try_from(s).map_err(|_| format!("sample {s} out of 16-bit range"))
+        })
+        .collect::<Result<Vec<i16>, String>>()?;
+    Ok((rate, samples))
 }
 
 #[cfg(test)]
