@@ -79,6 +79,9 @@ fn the_schema_has_exactly_these_tables() {
         [
             "epoch",
             "event",
+            "final_progress",
+            "final_text",
+            "final_word",
             "job",
             "mark",
             "note",
@@ -385,29 +388,84 @@ fn marks_and_notes_read_back() {
 #[test]
 fn jobs_read_back() {
     let (_dir, store) = store("job");
-    let columns = "id, session_id, kind, state, attempts, detail";
-    let jobs = [vec![
-        int(1),
-        int(1),
-        text("final pass"),
-        text("queued"),
-        int(0),
-        Value::Null,
-    ]];
+    let columns = "id, session_id, kind, state, attempts, detail, progress, total, waits_for";
+    let job = |id, session, kind, attempts, progress, total| {
+        vec![
+            int(id),
+            int(session),
+            text(kind),
+            text("waiting"),
+            int(attempts),
+            Value::Null,
+            int(progress),
+            int(total),
+            text("space"),
+        ]
+    };
+    let jobs = [job(1, 1, "final-pass", 0, 5, 10)];
     write(&store, "job", columns, &jobs[0]);
     assert_eq!(read(&store, "job"), jobs);
-    refused(
+    for bad in [
+        job(2, 1, "k", -1, 0, 0),
+        job(2, 2, "k", 0, 0, 0),
+        job(2, 1, "k", 0, -1, 0),
+        job(2, 1, "k", 0, 0, -1),
+        // One job of each kind a session.
+        job(2, 1, "final-pass", 0, 0, 0),
+    ] {
+        refused(&store, "job", columns, &bad);
+    }
+}
+
+#[test]
+fn final_text_keeps_its_track_and_samples() {
+    let (_dir, store) = store("final");
+    let columns = "session_id, track, start_sample, end_sample, text, engine, model";
+    let row = |track, start, end| {
+        vec![
+            int(1),
+            int(track),
+            int(start),
+            int(end),
+            Value::Null,
+            text("e"),
+            text("m"),
+        ]
+    };
+    write(&store, "final_text", columns, &row(0, 0, 10));
+    write(&store, "final_text", columns, &row(1, 0, 10));
+    for bad in [row(0, 0, 20), row(0, 5, 5), row(0, -1, 2), row(-1, 0, 1)] {
+        refused(&store, "final_text", columns, &bad);
+    }
+    let words = "session_id, track, start_sample, position, text, word_start, word_end";
+    write(
         &store,
-        "job",
-        columns,
-        &[int(2), int(1), text("k"), text("s"), int(-1), Value::Null],
+        "final_word",
+        words,
+        &[int(1), int(0), int(0), int(0), text("w"), int(2), int(4)],
     );
-    refused(
+    for bad in [
+        // No such text.
+        [int(1), int(0), int(3), int(0), text("w"), int(2), int(4)],
+        [int(1), int(0), int(0), int(1), text("w"), int(4), int(2)],
+        [int(1), int(0), int(0), int(-1), text("w"), int(2), int(4)],
+    ] {
+        refused(&store, "final_word", words, &bad);
+    }
+    let progress = "session_id, track, up_to";
+    write(
         &store,
-        "job",
-        columns,
-        &[int(2), int(2), text("k"), text("s"), int(0), Value::Null],
+        "final_progress",
+        progress,
+        &[int(1), int(0), int(10)],
     );
+    for bad in [
+        [int(1), int(0), int(20)],
+        [int(1), int(1), int(-1)],
+        [int(9), int(1), int(1)],
+    ] {
+        refused(&store, "final_progress", progress, &bad);
+    }
 }
 
 #[test]

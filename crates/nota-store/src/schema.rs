@@ -21,7 +21,8 @@
 //! | `revision`, `revision_text` | the displayed text: revision 0 is the heard text, each later one a new row holding only what it changes; never changed | revision 0 with the first utterance, later ones by term clean-up |
 //! | `proposal` | a proposed fix, with the revision, model, pack and thresholds it came from | term clean-up |
 //! | `mark`, `note` | marks and notes made while recording, in session time | `nota record`, as each is made ([`crate::annotations`]) |
-//! | `job` | work queued after a stop | the job queue |
+//! | `job` | work queued after a stop: its kind, state, progress and what it waits for (V5) | the job queue ([`crate::jobs`]) |
+//! | `final_text`, `final_word`, `final_progress` | the final pass's text, by track and sample, beside the heard text and never in it; how far it has got on each track (V5) | the final pass ([`crate::final_text`]) |
 //! | `event` | the timeline: device changes, warnings, gaps | the detectors |
 //!
 //! Session times are nanoseconds from the session's start
@@ -258,6 +259,59 @@ CREATE TRIGGER revision_text_only_in_the_newest BEFORE INSERT ON revision_text
 WHEN NEW.revision = 0
   OR NEW.revision IS NOT (SELECT max(number) FROM revision WHERE session_id = NEW.session_id)
 BEGIN SELECT RAISE(ABORT, 'a revision is never added to'); END;
+";
+
+/// Version 5: the job queue and the final pass.
+///
+/// A job gains its progress (`progress` of `total`, in whatever units its
+/// kind counts) and what a waiting job waits for (`waits_for`: `space`
+/// after a full disk, `engine` without the speech models); a session has
+/// at most one job of each kind.
+///
+/// The final pass's text is kept apart from the heard text: its own rows,
+/// located by track and sample as the engine gives them, not in
+/// `utterance`, so a revision never shows the two passes mixed. (Placing
+/// it in session time needs each epoch's anchor, which nothing stores
+/// yet.) A row with no text is audio the engine couldn't transcribe.
+/// `final_progress` says how far each track has got: every published
+/// sample before `up_to` is covered, so a pass stopped partway resumes
+/// there.
+pub(crate) const V5: &str = "
+ALTER TABLE job ADD COLUMN progress INTEGER NOT NULL DEFAULT 0 CHECK (progress >= 0);
+ALTER TABLE job ADD COLUMN total INTEGER NOT NULL DEFAULT 0 CHECK (total >= 0);
+ALTER TABLE job ADD COLUMN waits_for TEXT;
+CREATE UNIQUE INDEX job_once ON job (session_id, kind);
+
+CREATE TABLE final_text (
+    session_id INTEGER NOT NULL REFERENCES session(id),
+    track INTEGER NOT NULL CHECK (track BETWEEN 0 AND 4294967295),
+    start_sample INTEGER NOT NULL CHECK (start_sample >= 0),
+    end_sample INTEGER NOT NULL CHECK (end_sample > start_sample),
+    text TEXT,
+    engine TEXT NOT NULL,
+    model TEXT NOT NULL,
+    PRIMARY KEY (session_id, track, start_sample)
+) STRICT;
+
+CREATE TABLE final_word (
+    session_id INTEGER NOT NULL,
+    track INTEGER NOT NULL,
+    start_sample INTEGER NOT NULL,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    text TEXT NOT NULL,
+    word_start INTEGER NOT NULL CHECK (word_start >= 0),
+    word_end INTEGER NOT NULL CHECK (word_end >= word_start),
+    PRIMARY KEY (session_id, track, start_sample, position),
+    FOREIGN KEY (session_id, track, start_sample)
+        REFERENCES final_text(session_id, track, start_sample)
+) STRICT;
+
+CREATE TABLE final_progress (
+    session_id INTEGER NOT NULL REFERENCES session(id),
+    track INTEGER NOT NULL CHECK (track BETWEEN 0 AND 4294967295),
+    up_to INTEGER NOT NULL CHECK (up_to >= 0),
+    PRIMARY KEY (session_id, track)
+) STRICT;
 ";
 
 #[cfg(test)]

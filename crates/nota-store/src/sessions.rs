@@ -20,7 +20,7 @@ pub enum SessionState {
 }
 
 impl SessionState {
-    const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Recording => "recording",
             Self::Stopped => "stopped",
@@ -281,9 +281,12 @@ impl Store {
         Ok(())
     }
 
-    /// Marks the session stopped if the library says it's recording, and
-    /// says whether it did. A session that isn't recording, or isn't in the
-    /// library, is only read, so this takes no write lock for it.
+    /// Marks the session stopped, and queues its jobs (as
+    /// [`Store::finish_recording`] does), if the library says it's
+    /// recording, and says whether it did: a recording that never finished
+    /// (a crash, a killed process) stops here. A session that isn't
+    /// recording, or isn't in the library, is only read, so this takes no
+    /// write lock for it.
     ///
     /// # Errors
     ///
@@ -292,7 +295,7 @@ impl Store {
     pub fn stop_recording(&mut self, id: SessionId) -> Result<bool, StoreError> {
         match self.session(id)? {
             Some(s) if s.state == SessionState::Recording => {
-                self.set_state(id, SessionState::Stopped)?;
+                self.finish_recording(id, None)?;
                 Ok(true)
             }
             _ => Ok(false),

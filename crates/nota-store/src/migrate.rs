@@ -14,6 +14,7 @@
 //! | 2 | the first library schema ([`crate::schema`]) |
 //! | 3 | each session's start time, `session.started_at` |
 //! | 4 | triggers that keep the heard text and its revisions append-only |
+//! | 5 | the job queue's progress and waits, and the final pass's text |
 //!
 //! # The per-session stores
 //!
@@ -34,7 +35,7 @@ use crate::sessions::{NewSession, SessionState, insert_session, insert_tracks};
 use crate::{Store, StoreError, session_key};
 
 /// The schema version this code writes and understands.
-pub const VERSION: i64 = 4;
+pub const VERSION: i64 = 5;
 
 /// The first library version: what [`STEPS`]' first step makes.
 const FIRST: i64 = 2;
@@ -43,9 +44,9 @@ const FIRST: i64 = 2;
 const PER_SESSION: i64 = 1;
 
 /// The SQL that makes each version from the one before, in order: version
-/// 2 (from an empty file), then 3 and 4. There's no step from 1, which is never
+/// 2 (from an empty file), then 3, 4 and 5. There's no step from 1, which is never
 /// a library. [`upgrade`] runs the steps above the file's version.
-const STEPS: &[&str] = &[schema::V2, schema::V3, schema::V4];
+const STEPS: &[&str] = &[schema::V2, schema::V3, schema::V4, schema::V5];
 
 fn version(conn: &Connection) -> Result<i64, StoreError> {
     Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
