@@ -54,6 +54,9 @@ claxon.workspace = true
 nota-recorder = { path = ".", features = ["fake-engine"] }
 nota-core = { path = "../nota-core", features = ["fake-clock"] }
 proptest.workspace = true
+# Builds SQLite's SQLITE_FULL, to test that the store's full-disk error is
+# told apart (already in the tree through nota-store).
+rusqlite.workspace = true
 
 # The hangup test: a recorder in a process group of its own that catches
 # SIGHUP as `nota record` does, and signals to send it.

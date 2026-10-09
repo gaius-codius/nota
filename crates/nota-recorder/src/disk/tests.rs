@@ -190,6 +190,75 @@ fn a_large_ballast_is_fsynced_every_few_megabytes() {
     assert_eq!(writes_before(syncs[0]), 8);
     assert_eq!(writes_before(syncs[1]), 16);
     assert_eq!(writes_before(syncs[2]), 20);
+
+    // A whole number of 8 MiB: the last fsync isn't doubled.
+    let fs = FakeFs::with_dirs(["/data"]);
+    Ballast::keep(&fs, &p("/data"), 16 << 20, || false)
+        .unwrap()
+        .unwrap();
+    let syncs = fs
+        .ops()
+        .iter()
+        .filter(|op| matches!(op, Op::Sync(_)))
+        .count();
+    assert_eq!(syncs, 2);
+}
+
+#[test]
+fn removing_leftovers_is_durable_even_without_room_for_a_ballast() {
+    let fs = FakeFs::with_dirs(["/data"]);
+    let mut small = fs.create(&p("/data/ballast-7")).unwrap();
+    small.write_all(b"1234567").unwrap();
+    small.sync().unwrap();
+    fs.sync_dir(&p("/data")).unwrap();
+    fs.set_capacity(Some(100));
+    assert_eq!(
+        Ballast::keep(&fs, &p("/data"), 100, || false).unwrap(),
+        None
+    );
+    let survivor = fs.crash(CrashOutcome::LoseUnsynced);
+    assert!(survivor.paths().is_empty(), "{:?}", survivor.paths());
+}
+
+/// A filesystem whose directory locks fail, other than by being held.
+#[derive(Debug, Clone)]
+struct BadLocks(FakeFs);
+
+impl Fs for BadLocks {
+    type File = crate::fs::fake::FakeFile;
+    type Lock = crate::fs::fake::FakeLock;
+
+    fn create(&self, path: &Path) -> io::Result<Self::File> {
+        self.0.create(path)
+    }
+    fn create_dir(&self, path: &Path) -> io::Result<()> {
+        self.0.create_dir(path)
+    }
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.0.rename(from, to)
+    }
+    fn sync_dir(&self, dir: &Path) -> io::Result<()> {
+        self.0.sync_dir(dir)
+    }
+    fn remove(&self, path: &Path) -> io::Result<()> {
+        self.0.remove(path)
+    }
+    fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        self.0.read(path)
+    }
+    fn list(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
+        self.0.list(dir)
+    }
+    fn lock_dir(&self, _dir: &Path) -> io::Result<Self::Lock> {
+        Err(io::Error::new(io::ErrorKind::PermissionDenied, "no"))
+    }
+}
+
+#[test]
+fn a_lock_that_fails_for_another_reason_is_an_error() {
+    let fs = BadLocks(FakeFs::with_dirs(["/data"]));
+    let err = Ballast::keep(&fs, &p("/data"), 100, || false).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
 }
 
 #[test]
@@ -432,6 +501,11 @@ fn a_row_commit_that_meets_a_full_disk_frees_the_ballast() {
     fs.fail_after(4, io::ErrorKind::StorageFull);
     let err = store.insert(session, &segment).unwrap_err();
     assert!(<WatchedStore<FakeStore, FakeFs> as SegmentStore>::is_disk_full(&err));
+    assert!(
+        !<WatchedStore<FakeStore, FakeFs> as SegmentStore>::is_disk_full(&io::Error::other(
+            "not space"
+        ))
+    );
     assert_eq!(
         watch.full(),
         Some(Full {
@@ -675,6 +749,13 @@ fn a_check_that_finds_the_floor_crossed_while_recording_fills_the_disk() {
             ballast: Freed::Freed,
         }
     );
+    assert_eq!(monitor.full(), Some(full.clone()));
+    // The checks go on after a full disk.
+    loop {
+        if let DiskReport::Space(_) = reports.recv_timeout(WAIT).unwrap() {
+            break;
+        }
+    }
     assert_eq!(monitor.stop().unwrap().full, Some(full));
 }
 
@@ -754,6 +835,12 @@ fn the_ballast_s_noise_doesn_t_repeat_or_lean() {
     assert_eq!(bytes.len(), 1 << 16);
     assert_eq!(noise(13).len(), 13);
     assert_eq!(noise(13), bytes[..13]);
+    // The documented xorshift (13, 7, 17) from its seed.
+    let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    assert_eq!(bytes[..8], x.to_le_bytes());
     // Every 8-byte word distinct: nothing for a compressor to find.
     let words: BTreeSet<&[u8]> = bytes.chunks(8).collect();
     assert_eq!(words.len(), (1 << 16) / 8);

@@ -126,26 +126,28 @@ impl Fs for StdFs {
 /// `statvfs(2)`: the blocks free to an unprivileged user (`f_bavail`, not
 /// `f_bfree`, which counts the blocks kept for root) times the fragment
 /// size they're counted in. A filesystem that reports no blocks at all (a
-/// FUSE one without `statfs`) can't tell.
-#[cfg(unix)]
+/// FUSE one without `statfs`) can't tell. Elsewhere than Unix nota can't
+/// tell yet, and the disk check reports no figure.
 fn free_space(dir: &Path) -> io::Result<u64> {
-    let stat = rustix::fs::statvfs(dir)?;
-    if stat.f_blocks == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "the filesystem doesn't say how much space it has",
-        ));
+    #[cfg(unix)]
+    {
+        let stat = rustix::fs::statvfs(dir)?;
+        if stat.f_blocks == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "the filesystem doesn't say how much space it has",
+            ));
+        }
+        Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
     }
-    Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
-}
-
-/// Elsewhere nota can't tell yet: the disk check reports no figure.
-#[cfg(not(unix))]
-fn free_space(_dir: &Path) -> io::Result<u64> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "free space isn't read on this platform yet",
-    ))
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "free space isn't read on this platform yet",
+        ))
+    }
 }
 
 /// [`Fs::read`], refusing a file longer than `limit`.
