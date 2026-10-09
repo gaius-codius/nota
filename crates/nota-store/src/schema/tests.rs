@@ -82,6 +82,7 @@ fn the_schema_has_exactly_these_tables() {
             "final_progress",
             "final_text",
             "final_word",
+            "finding",
             "job",
             "mark",
             "note",

@@ -39,6 +39,7 @@ use rusqlite::{Connection, OpenFlags};
 
 pub mod annotations;
 pub mod final_text;
+mod findings;
 pub mod jobs;
 pub mod migrate;
 pub mod schema;
@@ -49,9 +50,10 @@ mod writer;
 
 pub use annotations::Annotation;
 pub use final_text::{FinalText, FinalWord, HeardBy};
+pub use findings::{IndexedFinding, Problem, ReadFailure, Status};
 pub use jobs::{Job, JobEnd, JobId, JobKind, JobState, Progress, Wait};
 pub use migrate::Adopted;
-pub use segments::{Inserted, SegmentRow, Sha256Digest};
+pub use segments::{AudioDigest, Inserted, RowKey, SegmentRow, Sha256Digest};
 pub use sessions::{NewSession, Session, SessionState, Track, TrackKind};
 pub use transcript::{Heard, Line, RevisionNumber, StoredUtterance, UtteranceId, Word};
 pub use writer::Writer;
@@ -109,6 +111,18 @@ pub enum StoreError {
     /// wrong-length hash, a number out of its type's range, an unknown
     /// state or kind.
     Corrupt(String),
+    /// A stored segment row doesn't parse: a negative or inverted range, a
+    /// wrong-length hash or audio digest, a track or epoch that isn't a
+    /// `u32`. The schema's checks refuse such a row, so only an outside edit
+    /// or a damaged database makes one. Named, so the user can find it.
+    CorruptRow {
+        /// The session the row is in.
+        session: SessionId,
+        /// Where it is in the session.
+        key: RowKey,
+        /// What's wrong with it.
+        why: String,
+    },
 }
 
 impl fmt::Display for StoreError {
@@ -149,6 +163,13 @@ impl fmt::Display for StoreError {
                 start.get()
             ),
             Self::Corrupt(why) => write!(f, "corrupt row: {why}"),
+            Self::CorruptRow { session, key, why } => write!(
+                f,
+                "session {}'s segment row at track {}, sample {} doesn't parse: {why}",
+                session.get(),
+                key.track,
+                key.start
+            ),
         }
     }
 }

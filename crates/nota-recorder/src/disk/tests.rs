@@ -387,10 +387,14 @@ fn errors_that_arent_for_space_free_nothing() {
 #[test]
 fn every_kind_of_operation_is_watched_and_passed_on() {
     type Op = fn(&WatchedFs<FakeFs>) -> io::Result<()>;
-    let ops: [(&str, Op); 6] = [
+    let ops: [(&str, Op); 8] = [
         ("create", |fs| fs.create(&p("/data/s/new")).map(drop)),
         ("create_dir", |fs| fs.create_dir(&p("/data/s/dir"))),
         ("rename", |fs| fs.rename(&p("/data/s/a"), &p("/data/s/b"))),
+        ("rename_new", |fs| {
+            fs.rename_new(&p("/data/s/a"), &p("/data/s/b"))
+        }),
+        ("sync_file", |fs| fs.sync_file(&p("/data/s/a"))),
         ("sync_dir", |fs| fs.sync_dir(&p("/data/s"))),
         ("remove", |fs| fs.remove(&p("/data/s/a"))),
         ("syncer", |fs| {
@@ -955,4 +959,28 @@ fn the_monitor_waits_its_interval_between_checks_before_and_after_a_full_disk() 
         Err(mpsc::RecvTimeoutError::Timeout)
     );
     monitor.stop().unwrap();
+}
+
+/// A watched store names a row that doesn't parse as the store it wraps
+/// does.
+#[test]
+fn a_watched_store_names_a_row_that_doesnt_parse() {
+    use crate::segment::SegmentStore;
+    use nota_store::{RowKey, StoreError};
+    type Watched = WatchedStore<nota_store::Store, FakeFs>;
+
+    let key = RowKey { track: 1, start: 2 };
+    let corrupt = StoreError::CorruptRow {
+        session: nota_core::SessionId::new(1),
+        key,
+        why: "odd".into(),
+    };
+    assert_eq!(
+        <Watched as SegmentStore>::unparsable_row(&corrupt),
+        Some(key)
+    );
+    assert_eq!(
+        <Watched as SegmentStore>::unparsable_row(&StoreError::OutOfRange),
+        None
+    );
 }

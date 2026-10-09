@@ -1758,6 +1758,7 @@ fn a_row_without_its_file_here_claims_nothing() {
         EpochId::new(0),
         SampleRange::new(SampleIndex::ZERO, SampleIndex::new(1_000)).unwrap(),
         b"not this session's",
+        nota_store::AudioDigest::new([0; 32]),
     )
     .unwrap()
     .sync()
@@ -2083,7 +2084,8 @@ fn a_corrupt_journal_in_a_bad_window_keeps_its_name_until_it_publishes() {
     file.write_all(&bytes).unwrap();
     file.sync().unwrap();
     let range = SampleRange::new(SampleIndex::new(100), SampleIndex::new(200)).unwrap();
-    let flac = flac_of(MIC, 100, 100);
+    // Audio the journal doesn't hold, so the row can't be repaired from it.
+    let flac = flac_of(SYSTEM, 100, 100);
     let missing = plant_row(&fs, MIC, range, &flac, &flac);
     let row_path = durable_path(MIC, range);
     fs.remove(&row_path).unwrap();
@@ -2172,7 +2174,8 @@ fn a_journal_break_while_publishing_live_loses_nothing_at_any_crash() {
 }
 
 /// Plants a committed row on `fs` for `range` of `track`, hashed over
-/// `hashed`, and leaves `file` (durably) under the row's name.
+/// `hashed` (with the digest of the audio it decodes to, if it does), and
+/// leaves `file` (durably) under the row's name.
 fn plant_row(
     fs: &FakeFs,
     track: TrackId,
@@ -2180,14 +2183,23 @@ fn plant_row(
     hashed: &[u8],
     file: &[u8],
 ) -> SegmentRow {
-    let durable = TempSegment::write(fs, &session(), track, EpochId::new(0), range, hashed)
-        .unwrap()
-        .sync()
-        .unwrap()
-        .rename(fs)
-        .unwrap()
-        .sync_dir(fs)
-        .unwrap();
+    let durable = TempSegment::write(
+        fs,
+        &session(),
+        track,
+        EpochId::new(0),
+        range,
+        hashed,
+        flac::decoded_audio_digest(hashed, track, range)
+            .unwrap_or(nota_store::AudioDigest::new([0; 32])),
+    )
+    .unwrap()
+    .sync()
+    .unwrap()
+    .rename(fs)
+    .unwrap()
+    .sync_dir(fs)
+    .unwrap();
     let row = *durable.row();
     FakeStore::new(fs, &db()).insert(SESSION, &durable).unwrap();
     if file != hashed {
@@ -2238,11 +2250,13 @@ fn rows_that_claim_nothing_never_let_a_journal_go_at_any_crash() {
         // A wrong hash: the file under the row's name holds other audio
         // (another session's, or a store restored out of step). It ends
         // where the next window's segment starts.
+        // The row's audio isn't what the journals hold either (other
+        // samples), so it can't be repaired from them.
         let wrong_hash = plant_row(
             &disk,
             MIC,
             range(0, 1_500),
-            &flac_of(MIC, 0, 1_500),
+            &flac_of(SYSTEM, 0, 1_500),
             &flac::encode(rate(), &[&[0; 1_500]]).unwrap(),
         );
         // The same name with a different range: the file's hash is the
@@ -2582,12 +2596,14 @@ fn findings_survive_any_later_failure_and_their_own_never_stops_publishing() {
             Some(_) => {
                 assert!(present, "failing op {at} lost the findings");
                 // A journal's unlink that fails is reported and the run
-                // goes on; anything else here stops it (`Other` isn't about
-                // one name, so a segment's temp or rename failing with it
-                // stops the run too).
+                // goes on, and so is a journal read failing while a row's
+                // repair rebuilds its audio; anything else here stops it
+                // (`Other` isn't about one name, so a segment's temp or
+                // rename failing with it stops the run too).
                 let reported = result.as_ref().is_ok_and(|done| {
                     let kinds = done.not_deleted().iter().map(|&(_, k)| k);
                     let kinds = kinds.chain(done.blocked().iter().map(|&(_, k)| k));
+                    let kinds = kinds.chain(done.not_repaired().iter().map(|&(_, k)| k));
                     kinds
                         .inspect(|&k| assert_eq!(k, io::ErrorKind::Other))
                         .count()
@@ -2802,7 +2818,7 @@ fn an_unreadable_segment_file_claims_nothing_until_it_reads_and_matches() {
         // The read fails: the row claims nothing and is recorded, and
         // every segment outside its window is published.
         let done = salvage(&mut session_store(&run), length()).unwrap();
-        let expected = [(row, Problem::Unreadable(ReadFailure::of(kind)))];
+        let expected = [(row, Problem::Unreadable(findings::read_failure(kind)))];
         assert_eq!(as_found(done.findings()), expected, "{kind:?}");
         assert_eq!(done.findings_unsaved(), None);
         for track in [MIC, SYSTEM] {
@@ -4086,3 +4102,4 @@ fn a_set_aside_is_reported_whatever_fails_after_it() {
 }
 
 mod disk_full;
+mod repair;

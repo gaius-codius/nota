@@ -18,6 +18,14 @@
 //! have, with the row kept there if it has one, importing its M1
 //! per-session store (`sessions/<number>/nota.db`) if it has one, and
 //! salvages it.
+//!
+//! **Findings.** Each start also checks every row of every session by name
+//! (the recorder's integrity scan), so a row whose file is gone is found
+//! even with no journals left, and copies each session's findings file
+//! into the database's findings index. The file, in the session's audio
+//! directory, is the record, and what Home reads, so findings recorded
+//! since the start show; the index is as of the last start, for queries
+//! across the library.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -29,7 +37,7 @@ use nota_core::{SampleCount, SampleRate, SessionId, TrackId, WallTime};
 use nota_recorder::fs::{Fs, StdFs};
 use nota_recorder::journal::JournalId;
 use nota_recorder::segment::{
-    DurableSegment, SegmentLength, SegmentStore, needs_salvage, read_findings, salvage,
+    Depth, DurableSegment, SegmentLength, SegmentStore, needs_salvage, read_findings, salvage, scan,
 };
 use nota_recorder::session::{SessionDir, SessionStore};
 use nota_store::{NewSession, SegmentRow, SessionState, StoreError, Writer};
@@ -268,13 +276,16 @@ impl Library {
             .collect())
     }
 
-    /// Adds `session` to the library database and salvages it if it has
-    /// journals left. `None` if there was nothing to report.
+    /// Adds `session` to the library database, salvages it if it has
+    /// journals left, checks its rows by name, and indexes its findings.
+    /// `None` if there was nothing to report.
     ///
     /// The session is locked first, so a session another nota is
     /// recording is never adopted or marked stopped under it.
     fn salvage_one(&self, session: &SessionPaths, length: SegmentLength) -> Option<Salvaged> {
-        if is_empty(session) {
+        // Nothing in it yet, as `create` leaves it, unless the database
+        // holds rows for it: then its files are gone, and the scan says so.
+        if is_empty(session) && !self.has_rows(session.id) {
             return None;
         }
         let dir = SessionDir::new(session.id, StdFs, &session.audio());
@@ -300,11 +311,8 @@ impl Library {
         // No one is recording it: whatever the database says, it stopped.
         // If this fails, the next start tries again.
         let _stopped = self.db.with(|db| db.stop_recording(session.id));
-        if !journals {
-            return None;
-        }
         let mut bound = SessionStore::new(lock, self.db.clone());
-        Some(match salvage(&mut bound, length) {
+        let salvaged = journals.then(|| match salvage(&mut bound, length) {
             Ok(published) => {
                 let aside = published.quarantined().to_vec();
                 if needs_salvage(&dir).unwrap_or(true) {
@@ -314,7 +322,28 @@ impl Library {
                 }
             }
             Err(e) => Salvaged::Failed(session.id, e.to_string()),
-        })
+        });
+        // Salvage checks only the rows its journals overlap: a row whose
+        // file is gone with no journals left is found here. Both record
+        // what they find in the findings file, which is then indexed. Each
+        // is tried again at the next start if it fails.
+        let _scanned = scan(&mut bound, Depth::Names);
+        if let Ok(findings) = read_findings(&dir) {
+            let _indexed = self
+                .db
+                .with(|db| db.index_findings(session.id, &findings.indexed()));
+        }
+        salvaged
+    }
+
+    /// Whether the library database holds segment rows for `id`, or can't
+    /// say (a row that doesn't parse).
+    fn has_rows(&self, id: SessionId) -> bool {
+        match self.db.with(|db| db.segments(id)) {
+            Ok(rows) => !rows.is_empty(),
+            Err(StoreError::CorruptRow { .. }) => true,
+            Err(_) => false,
+        }
     }
 
     /// Every session, as Home lists it, in number order: each one in the
@@ -328,7 +357,13 @@ impl Library {
             db.sessions()?
                 .into_iter()
                 .map(|session| {
-                    let rows = db.segments(session.id)?;
+                    // A session with a row that doesn't parse is listed
+                    // without its length; its findings file names the row.
+                    let rows = match db.segments(session.id) {
+                        Ok(rows) => Some(rows),
+                        Err(StoreError::CorruptRow { .. }) => None,
+                        Err(e) => return Err(e),
+                    };
                     Ok((session.id, session.title, session.started_at, rows))
                 })
                 .collect::<Result<Vec<_>, StoreError>>()
@@ -337,7 +372,7 @@ impl Library {
         let db_error = match in_db {
             Ok(sessions) => {
                 for (id, title, started_at, rows) in sessions {
-                    let recorded = longest_track(&rows, rate);
+                    let recorded = rows.as_deref().and_then(|rows| longest_track(rows, rate));
                     listed.insert(
                         id.get(),
                         Listed {
@@ -354,7 +389,8 @@ impl Library {
             Err(e) => Some(format!("the library database can't be read: {e}")),
         };
         for session in &on_disk {
-            if is_empty(session) {
+            // One the database holds is listed whatever its directory has.
+            if is_empty(session) && !listed.contains_key(&session.id.get()) {
                 continue;
             }
             let needs = match (&db_error, needs(session)) {
@@ -415,25 +451,28 @@ impl Library {
     }
 }
 
-/// Whether `session`'s directory shows it needs the user: rows whose
-/// files didn't match them when they were last checked, or journals
-/// left unpublished. Journals another nota is still writing are a
-/// recording, not a problem.
+/// Whether `session`'s directory shows it needs the user: rows whose files
+/// didn't prove them (or that didn't parse) when they were last checked,
+/// still unresolved, or journals left unpublished. Journals another nota is
+/// still writing are a recording, not a problem.
 fn needs(session: &SessionPaths) -> Needs {
     let dir = SessionDir::new(session.id, StdFs, &session.audio());
-    match read_findings(&dir) {
-        Ok(findings) if !findings.found().is_empty() => {
-            let n = findings.found().len();
-            let rows = if n == 1 {
-                "segment doesn't"
+    match read_findings(&dir).map(|f| f.unresolved()) {
+        Ok(0) => {}
+        Ok(n) => {
+            let (rows, verb, files) = if n == 1 {
+                ("segment", "doesn't", "its file brings it")
             } else {
-                "segments don't"
+                ("segments", "don't", "their files bring them")
             };
-            return Needs::Attention(format!(
-                "{n} {rows} match the library · their audio is kept"
-            ));
+            // With journals left, salvage keeps their audio and repairs what
+            // they hold; with none, only the user can bring the files back.
+            return Needs::Attention(if needs_salvage(&dir).unwrap_or(true) {
+                format!("{n} {rows} {verb} match the library · nothing is deleted")
+            } else {
+                format!("{n} {rows} missing or changed · only {files} back")
+            });
         }
-        Ok(_) => {}
         Err(e) => return Needs::Attention(e.to_string()),
     }
     match set_aside(&session.audio()) {

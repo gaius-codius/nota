@@ -32,7 +32,9 @@ name = "pass"
 required-features = ["fake-engine"]
 
 [dependencies]
-# Decodes published segments for the final pass (pure Rust, Apache-2.0).
+# Decodes published segments: for the final pass, and to prove a segment's
+# audio against its row's digest, whatever encoder wrote it (pure Rust,
+# Apache-2.0, like the encoder).
 claxon.workspace = true
 crc32fast.workspace = true
 flacenc.workspace = true
