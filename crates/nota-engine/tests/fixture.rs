@@ -131,6 +131,29 @@ fn the_fixture_transcribes() {
                     t.range().len().get() <= 160_000,
                     "a chunk over the 10 s cap"
                 );
+                // Its words, in order, inside its range, spelling its text.
+                let words = t.words();
+                assert!(!words.is_empty(), "no words for {:?}", t.text());
+                let mut from = t.range().start();
+                for word in words {
+                    assert!(word.range().start() >= from, "{words:?}");
+                    assert!(word.range().end() <= t.range().end(), "{words:?}");
+                    from = word.range().end();
+                }
+                let spelt: Vec<&str> = words
+                    .iter()
+                    .map(nota_core::messages::HeardWord::text)
+                    .collect();
+                assert_eq!(spelt.join(" "), t.text());
+                // Timed through the chunk, not bunched at its start: the
+                // last word ends in the second half of the speech.
+                let last = words[words.len() - 1].range();
+                let first_word = words[0].range().start();
+                assert!(
+                    last.end().get() - first_word.get()
+                        >= (t.range().end().get() - first_word.get()) / 2,
+                    "{words:?}"
+                );
                 texts.push(t.into_text());
             }
             Frame::Message(FromEngine::Confirmed { up_to, .. }) => confirmed = up_to.get(),

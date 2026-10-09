@@ -8,9 +8,11 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 
-use nota_core::messages::{AudioChunk, FromEngine, ProtocolVersion, ToEngine, Transcript};
+use nota_core::messages::{
+    AudioChunk, FromEngine, HeardWord, ProtocolVersion, ToEngine, Transcript,
+};
 use nota_core::protocol::{Frame, FrameReader, write_frame};
-use nota_core::{SampleIndex, SampleRate, TrackId};
+use nota_core::{SampleCount, SampleIndex, SampleRange, SampleRate, TrackId};
 
 use crate::EngineError;
 use crate::chunker::{Chunk, Chunker, ChunkerConfig, Labels};
@@ -24,10 +26,31 @@ pub trait Detector {
     fn flush(&mut self) -> Labels;
 }
 
+/// What a recogniser heard in some audio.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Heard {
+    /// The text, trimmed; empty if none.
+    pub text: String,
+    /// Its words in order, each located from the start of the audio;
+    /// empty if the recogniser doesn't time them.
+    pub words: Vec<TimedWord>,
+}
+
+/// A word, and where in the audio it was said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimedWord {
+    /// The word.
+    pub text: String,
+    /// Its first sample, from the start of the audio.
+    pub from: SampleCount,
+    /// The sample after its last.
+    pub to: SampleCount,
+}
+
 /// A speech recogniser.
 pub trait Transcriber {
-    /// The text in `audio` (16 kHz, in -1..1), trimmed; empty if none.
-    fn transcribe(&mut self, audio: &[f32]) -> String;
+    /// What was said in `audio` (16 kHz, in -1..1).
+    fn transcribe(&mut self, audio: &[f32]) -> Heard;
 }
 
 /// The loaded models.
@@ -153,9 +176,10 @@ fn answer(
 ) -> Result<(), EngineError> {
     for chunk in chunks {
         if chunk.has_speech() {
-            let text = transcriber.transcribe(chunk.audio());
+            let heard = transcriber.transcribe(chunk.audio());
             // A chunk is never empty, so the transcript always builds.
-            let transcript = Transcript::new(track, chunk.range(), text);
+            let transcript = Transcript::new(track, chunk.range(), heard.text)
+                .map(|t| with_words(t, heard.words));
             if let Some(transcript) = transcript.filter(|t| !t.text().is_empty()) {
                 send(output, &Frame::Message(FromEngine::Transcript(transcript)))?;
             }
@@ -167,6 +191,28 @@ fn answer(
         send(output, &Frame::Message(confirmed))?;
     }
     Ok(())
+}
+
+/// `transcript` with `words`, located from its start. If they don't fit
+/// it (a word with no text, outside the audio, or out of order), it goes
+/// without them: the text is what matters, and the recogniser's timing is
+/// then not to be trusted.
+fn with_words(transcript: Transcript, words: Vec<TimedWord>) -> Transcript {
+    let start = transcript.range().start();
+    let words: Option<Vec<HeardWord>> = words
+        .into_iter()
+        .map(|word| {
+            let from = start.checked_add(word.from)?;
+            let to = start.checked_add(word.to)?;
+            HeardWord::new(word.text, SampleRange::new(from, to)?)
+        })
+        .collect();
+    match words {
+        Some(words) => transcript
+            .with_words(words)
+            .unwrap_or_else(|without| without),
+        None => transcript,
+    }
 }
 
 fn send(output: &mut impl Write, frame: &Frame<FromEngine>) -> Result<(), EngineError> {

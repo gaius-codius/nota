@@ -4,15 +4,15 @@
 //!
 //! It runs the real child loop and chunker ([`nota_engine::child::run`]):
 //! a sample louder than [`LOUD`] is speech, and the text of a chunk is how
-//! many samples it holds, so a test can check the text covers the audio.
+//! many samples it holds, so a test can check the text covers the audio,
+//! with a word over the whole chunk and one at its end.
 
 use std::io;
 
-use nota_core::SampleIndex;
-use nota_core::SampleRange;
 use nota_core::lifeline::{self, Tie};
+use nota_core::{SampleCount, SampleIndex, SampleRange};
 use nota_engine::EngineError;
-use nota_engine::child::{Detector, Models, Transcriber, run as run_child};
+use nota_engine::child::{Detector, Heard, Models, TimedWord, Transcriber, run as run_child};
 use nota_engine::chunker::{ChunkerConfig, Labels};
 
 /// The loudness above which a sample is speech.
@@ -55,7 +55,7 @@ impl Detector for Loudness {
                 }
                 _ => {}
             }
-            self.next = self.next.saturating_add(nota_core::SampleCount::new(1));
+            self.next = self.next.saturating_add(SampleCount::new(1));
         }
         labels.silent_until = self.since.unwrap_or(self.next);
         labels
@@ -72,8 +72,22 @@ impl Detector for Loudness {
 }
 
 impl Transcriber for Stand {
-    fn transcribe(&mut self, audio: &[f32]) -> String {
-        format!("{} samples", audio.len())
+    /// "N samples", N the chunk's length, as two words: "N" over the whole
+    /// chunk and "samples" at its end.
+    fn transcribe(&mut self, audio: &[f32]) -> Heard {
+        let len = SampleCount::new(audio.len() as u64);
+        let word = |text: String, from| TimedWord {
+            text,
+            from,
+            to: len,
+        };
+        Heard {
+            text: format!("{} samples", audio.len()),
+            words: vec![
+                word(audio.len().to_string(), SampleCount::ZERO),
+                word("samples".to_owned(), len),
+            ],
+        }
     }
 }
 

@@ -26,7 +26,8 @@ use nota_recorder::fs::StdFs;
 use nota_recorder::segment::{needs_salvage, read_segment};
 use nota_recorder::session::SessionDir;
 use nota_store::{
-    FinalText, HeardBy, Job, JobEnd, JobKind, Progress, SegmentRow, StoreError, Wait, Writer,
+    FinalText, FinalWord, HeardBy, Job, JobEnd, JobKind, Progress, SegmentRow, StoreError, Wait,
+    Writer,
 };
 
 use crate::jobs::{Running, Worker};
@@ -229,13 +230,22 @@ impl PassSink for Stored<'_> {
         texts: Vec<Transcript>,
         skipped: Vec<SampleRange>,
     ) -> Result<(), StoreError> {
-        let heard = texts.into_iter().map(|text| FinalText {
-            track,
-            range: text.range(),
-            text: Some(text.into_text()),
-            // The engine gives no word times yet.
-            words: Vec::new(),
-            heard_by: self.heard_by.clone(),
+        let heard = texts.into_iter().map(|text| {
+            let range = text.range();
+            let (text, words) = text.into_text_and_words();
+            FinalText {
+                track,
+                range,
+                text: Some(text),
+                words: words
+                    .into_iter()
+                    .map(|word| FinalWord {
+                        text: word.text().to_owned(),
+                        range: word.range(),
+                    })
+                    .collect(),
+                heard_by: self.heard_by.clone(),
+            }
         });
         let lost = skipped.into_iter().map(|range| FinalText {
             track,

@@ -5,6 +5,7 @@ use proptest::prelude::*;
 use super::*;
 use crate::epoch::EpochError;
 use crate::ids::EpochId;
+use crate::messages::HeardWord;
 use crate::time::{SampleIndex, SampleRange, SampleRate};
 
 const MIC: TrackId = TrackId::new(0);
@@ -25,6 +26,64 @@ fn range(start: u64, end: u64) -> SampleRange {
 
 fn heard(track: TrackId, start: u64, end: u64, text: &str) -> Transcript {
     Transcript::new(track, range(start, end), text.to_owned()).unwrap()
+}
+
+fn word(text: &str, start: u64, end: u64) -> HeardWord {
+    HeardWord::new(text.to_owned(), range(start, end)).unwrap()
+}
+
+/// The placed words as (text, start, end).
+fn timed(words: &[Word]) -> Vec<(&str, SessionTime, SessionTime)> {
+    words
+        .iter()
+        .map(|w| (w.text(), w.start(), w.end()))
+        .collect()
+}
+
+#[test]
+fn words_are_placed_through_the_epochs_within_their_utterance() {
+    let timeline = with_gap(MIC);
+    // Across the gap: a word either side of it, and an instant at the end.
+    let t = heard(MIC, 1_900, 2_100, "before after")
+        .with_words(vec![
+            word("before", 1_900, 2_000),
+            word("after", 2_000, 2_100),
+            word(".", 2_100, 2_100),
+        ])
+        .unwrap();
+    let (u, words) = Utterance::place_with_words(t.clone(), &timeline).unwrap();
+    assert_eq!((u.start(), u.end()), (ms(1_900), ms(5_100)));
+    assert_eq!(u.text(), "before after");
+    assert_eq!(
+        timed(&words),
+        [
+            ("before", ms(1_900), ms(2_000)),
+            ("after", ms(5_000), ms(5_100)),
+            (".", ms(5_100), ms(5_100)),
+        ]
+    );
+    // Placing without words gives the same utterance.
+    assert_eq!(Utterance::place(t, &timeline), Some(u));
+    // An instant at the start, and no words at all.
+    let t = heard(MIC, 500, 600, "a")
+        .with_words(vec![word("a", 500, 500)])
+        .unwrap();
+    let (_, words) = Utterance::place_with_words(t, &timeline).unwrap();
+    assert_eq!(timed(&words), [("a", ms(500), ms(500))]);
+    let (_, words) = Utterance::place_with_words(heard(MIC, 500, 600, "a"), &timeline).unwrap();
+    assert!(words.is_empty());
+    // Another track's timeline places nothing.
+    assert_eq!(
+        Utterance::place_with_words(heard(SYSTEM, 500, 600, "a"), &timeline),
+        None
+    );
+}
+
+#[test]
+fn a_word_is_rebuilt_unless_it_ends_before_it_starts() {
+    let w = Word::new("x".to_owned(), ms(5), ms(5)).unwrap();
+    assert_eq!((w.text(), w.start(), w.end()), ("x", ms(5), ms(5)));
+    assert_eq!(Word::new("x".to_owned(), ms(5), ms(4)), None);
 }
 
 /// `track` opened at 0 ms from sample 0, then reopened at 5 s after 2 s of
@@ -270,13 +329,21 @@ fn gen_epoch() -> impl Strategy<Value = GenEpoch> {
         })
 }
 
+/// What a transcript's words were, and when each was really spoken.
+type Said = Vec<(String, SessionTime, SessionTime)>;
+
 /// A recorded track: the recorder's timeline, its transcripts, and when
-/// each was really spoken, worked out from the generated epochs alone.
+/// each was really spoken, worked out from the generated epochs alone. Each
+/// transcript has two words, split at its middle, and an instant at its
+/// end.
 fn record(
     track: TrackId,
     first_start_ms: u64,
     epochs: &[GenEpoch],
-) -> (TrackTimeline, Vec<(Transcript, SessionTime, SessionTime)>) {
+) -> (
+    TrackTimeline,
+    Vec<(Transcript, SessionTime, SessionTime, Said)>,
+) {
     let mut timeline = TrackTimeline::new(track);
     let mut said = Vec::new();
     let mut next_sample = 0;
@@ -291,13 +358,26 @@ fn record(
             .open_epoch(ms(start_ms), SampleIndex::new(next_sample), rate())
             .unwrap();
         for &(from, to) in &epoch.speech {
+            let mid = from + (to - from) / 2;
+            let at = |x: u64| next_sample + x;
             let t = heard(
                 track,
-                next_sample + from,
-                next_sample + to,
+                at(from),
+                at(to),
                 &format!("{}:{}", track.get(), said.len()),
-            );
-            said.push((t, ms(start_ms + from), ms(start_ms + to)));
+            )
+            .with_words(vec![
+                word("a", at(from), at(mid)),
+                word("b", at(mid), at(to)),
+                word(".", at(to), at(to)),
+            ])
+            .unwrap();
+            let words = vec![
+                ("a".to_owned(), ms(start_ms + from), ms(start_ms + mid)),
+                ("b".to_owned(), ms(start_ms + mid), ms(start_ms + to)),
+                (".".to_owned(), ms(start_ms + to), ms(start_ms + to)),
+            ];
+            said.push((t, ms(start_ms + from), ms(start_ms + to), words));
         }
         next_sample += epoch.len;
         audio_end_ms = start_ms + epoch.len;
@@ -336,25 +416,42 @@ proptest! {
             }
             let (t, ..) = pending.remove(pick.index(pending.len()));
             let follower = &followers[usize::from(t.track() == SYSTEM)];
-            placed.push(Utterance::place(t, follower).unwrap());
+            placed.push(Utterance::place_with_words(t, follower).unwrap());
         }
         for (t, ..) in pending {
             let follower = &followers[usize::from(t.track() == SYSTEM)];
-            placed.push(Utterance::place(t, follower).unwrap());
+            placed.push(Utterance::place_with_words(t, follower).unwrap());
         }
-        placed.sort();
+        placed.sort_by(|a, b| a.0.cmp(&b.0));
 
         let mut expected: Vec<_> = mic_said
             .iter()
             .chain(&system_said)
-            .map(|(t, start, end)| (*start, *end, t.track(), t.text().to_owned()))
+            .map(|(t, start, end, words)| {
+                (*start, *end, t.track(), t.text().to_owned(), words.clone())
+            })
             .collect();
         expected.sort();
         let got: Vec<_> = placed
             .iter()
-            .map(|u| (u.start(), u.end(), u.track(), u.text().to_owned()))
+            .map(|(u, words)| {
+                let words = words
+                    .iter()
+                    .map(|w| (w.text().to_owned(), w.start(), w.end()))
+                    .collect::<Vec<_>>();
+                (u.start(), u.end(), u.track(), u.text().to_owned(), words)
+            })
             .collect();
         prop_assert_eq!(got, expected);
+        // Each utterance's words lie within it, in order.
+        for (u, words) in &placed {
+            let mut from = u.start();
+            for w in words {
+                prop_assert!(from <= w.start() && w.start() <= w.end() && w.end() <= u.end());
+                from = w.end();
+            }
+        }
+        let placed: Vec<Utterance> = placed.into_iter().map(|(u, _)| u).collect();
         for pair in placed.windows(2) {
             prop_assert!(pair[0].start() <= pair[1].start());
         }

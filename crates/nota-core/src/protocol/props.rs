@@ -33,6 +33,41 @@ fn any_chunk() -> impl Strategy<Value = AudioChunk> {
         })
 }
 
+/// A transcript with up to 6 words, cut at sorted points inside its range
+/// (so some touch, and some are instants).
+fn any_transcript() -> impl Strategy<Value = Transcript> {
+    (
+        any::<u32>(),
+        any::<u64>(),
+        any::<u64>(),
+        ".{0,40}",
+        prop::collection::vec((any::<u64>(), any::<u64>(), "\\PC{1,8}"), 0..6),
+    )
+        .prop_filter("a transcript covers some audio", |(_, a, b, _, _)| a != b)
+        .prop_map(|(track, a, b, text, words)| {
+            let (lo, hi) = (a.min(b), a.max(b));
+            let span = u128::from(hi - lo) + 1;
+            let at = |x: u64| lo + u64::try_from(u128::from(x) % span).unwrap();
+            let mut points: Vec<u64> = words.iter().flat_map(|&(x, y, _)| [at(x), at(y)]).collect();
+            points.sort_unstable();
+            let words = points
+                .chunks(2)
+                .zip(words)
+                .map(|(pair, (_, _, word))| {
+                    let range =
+                        SampleRange::new(SampleIndex::new(pair[0]), SampleIndex::new(pair[1]))
+                            .unwrap();
+                    HeardWord::new(word, range).unwrap()
+                })
+                .collect();
+            let range = SampleRange::new(SampleIndex::new(lo), SampleIndex::new(hi)).unwrap();
+            Transcript::new(TrackId::new(track), range, text)
+                .unwrap()
+                .with_words(words)
+                .unwrap()
+        })
+}
+
 fn to_engine() -> impl Strategy<Value = Frame<ToEngine>> {
     prop_oneof![
         any::<u16>().prop_map(|v| Frame::Hello(ProtocolVersion::new(v))),
@@ -46,15 +81,7 @@ fn to_engine() -> impl Strategy<Value = Frame<ToEngine>> {
 fn from_engine() -> impl Strategy<Value = Frame<FromEngine>> {
     prop_oneof![
         any::<u16>().prop_map(|v| Frame::Hello(ProtocolVersion::new(v))),
-        (any::<u32>(), any::<u64>(), any::<u64>(), ".{0,40}")
-            .prop_filter("a transcript covers some audio", |(_, a, b, _)| a != b)
-            .prop_map(|(track, a, b, text)| {
-                let range =
-                    SampleRange::new(SampleIndex::new(a.min(b)), SampleIndex::new(a.max(b)))
-                        .unwrap();
-                let transcript = Transcript::new(TrackId::new(track), range, text).unwrap();
-                Frame::Message(FromEngine::Transcript(transcript))
-            }),
+        any_transcript().prop_map(|t| Frame::Message(FromEngine::Transcript(t))),
         (any::<u32>(), any::<u64>()).prop_map(|(track, up_to)| Frame::Message(
             FromEngine::Confirmed {
                 track: TrackId::new(track),

@@ -7,15 +7,16 @@
 //! first: 16 kHz audio only, model files that exist.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use nota_core::{SampleCount, SampleIndex, SampleRange};
+use nota_core::{SampleCount, SampleIndex, SampleRange, SampleRate};
 use sherpa_onnx::{
     OfflineRecognizer, OfflineRecognizerConfig, SileroVadModelConfig, VadModelConfig,
     VoiceActivityDetector,
 };
 
 use crate::EngineError;
-use crate::child::{Detector, Models, Transcriber};
+use crate::child::{Detector, Heard, Models, TimedWord, Transcriber};
 use crate::chunker::Labels;
 
 /// The only rate the models take.
@@ -162,15 +163,102 @@ impl std::fmt::Debug for Parakeet {
 }
 
 impl Transcriber for Parakeet {
-    fn transcribe(&mut self, audio: &[f32]) -> String {
+    fn transcribe(&mut self, audio: &[f32]) -> Heard {
         let stream = self.recognizer.create_stream();
         stream.accept_waveform(RATE_HZ, audio);
         self.recognizer.decode(&stream);
-        stream
-            .get_result()
-            .map(|result| result.text.trim().to_owned())
-            .unwrap_or_default()
+        let Some(result) = stream.get_result() else {
+            return Heard::default();
+        };
+        let len = SampleCount::new(audio.len() as u64);
+        let words = match (&result.timestamps, &result.durations) {
+            (Some(starts), durations) => {
+                words_of(&result.tokens, starts, durations.as_deref(), len)
+            }
+            (None, _) => Vec::new(),
+        };
+        Heard {
+            text: result.text.trim().to_owned(),
+            words,
+        }
     }
+}
+
+/// The words in a recogniser's `tokens`, each started at its first token's
+/// time and ended at its last token's time plus its duration (both in
+/// seconds from the start of `len` samples of audio), or, without
+/// durations, where the next word starts. A token after a space (its own,
+/// or a token that is only a space) starts a word; punctuation stays with
+/// the word before. Words are kept
+/// inside the audio, in order and not overlapping. Empty if the times
+/// don't match the tokens one for one.
+fn words_of(
+    tokens: &[String],
+    starts: &[f32],
+    durations: Option<&[f32]>,
+    len: SampleCount,
+) -> Vec<TimedWord> {
+    if starts.len() != tokens.len() || durations.is_some_and(|d| d.len() != tokens.len()) {
+        return Vec::new();
+    }
+    let sample = |seconds: f32| {
+        if seconds.is_nan() || seconds <= 0.0 {
+            SampleCount::ZERO
+        } else {
+            at_seconds(seconds).unwrap_or(len).min(len)
+        }
+    };
+    let mut words: Vec<TimedWord> = Vec::new();
+    // Whether the next token with text starts a word: the first does, and
+    // so does any after a space, even a space on its own (Parakeet's lone
+    // `▁`, before a number's digits).
+    let mut new_word = true;
+    for (k, token) in tokens.iter().enumerate() {
+        new_word |= token.starts_with(char::is_whitespace);
+        let trimmed = token.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let end = durations.map(|d| sample(starts[k] + d[k]));
+        match words.last_mut() {
+            Some(word) if !new_word => {
+                word.text.push_str(trimmed);
+                if let Some(end) = end {
+                    word.to = word.to.max(end);
+                }
+            }
+            last => {
+                let floor = last.map_or(SampleCount::ZERO, |word| word.to);
+                let from = sample(starts[k]).max(floor);
+                words.push(TimedWord {
+                    text: trimmed.to_owned(),
+                    from,
+                    to: end.unwrap_or(from).max(from),
+                });
+            }
+        }
+        new_word = false;
+    }
+    // Without durations, each word runs on to the next, and the last to
+    // the end of the audio.
+    if durations.is_none() {
+        let mut next = len;
+        for word in words.iter_mut().rev() {
+            word.to = next.max(word.from);
+            next = word.from;
+        }
+    }
+    words
+}
+
+/// The sample `seconds` into the audio, to the nearest; `None` if negative,
+/// not a number, or too far for a [`Duration`].
+fn at_seconds(seconds: f32) -> Option<SampleCount> {
+    let half_sample = Duration::from_nanos(31_250);
+    let elapsed = Duration::try_from_secs_f32(seconds)
+        .ok()?
+        .checked_add(half_sample)?;
+    SampleCount::started_within(elapsed, SampleRate::SPEECH)
 }
 
 /// Silero VAD over one track, reporting in track samples.
@@ -438,6 +526,102 @@ mod tests {
             );
         }
         assert!(plain_silent.abs_diff(reset_silent) <= 2 * WINDOW as u64);
+    }
+
+    fn tokens(tokens: &[&str]) -> Vec<String> {
+        tokens.iter().map(|&t| t.to_owned()).collect()
+    }
+
+    /// The words as (text, from, to) in samples.
+    fn spans(words: &[TimedWord]) -> Vec<(&str, u64, u64)> {
+        words
+            .iter()
+            .map(|w| (w.text.as_str(), w.from.get(), w.to.get()))
+            .collect()
+    }
+
+    #[test]
+    fn words_are_grouped_from_parakeets_tokens() {
+        // As Parakeet gives them for "Today we look at the sea. When".
+        let t = tokens(&[
+            " Toda", "y", " we", " look", " at", " the", " se", "a", ".", " W", "hen",
+        ]);
+        let starts = [
+            0.4, 0.72, 0.96, 1.2, 1.44, 1.6, 1.76, 2.08, 2.24, 2.48, 2.64,
+        ];
+        let durations = [
+            0.32, 0.24, 0.24, 0.24, 0.16, 0.16, 0.32, 0.16, 0.24, 0.16, 0.08,
+        ];
+        let len = SampleCount::new(48_000);
+        let words = words_of(&t, &starts, Some(&durations), len);
+        assert_eq!(
+            spans(&words),
+            [
+                ("Today", 6_400, 15_360),
+                ("we", 15_360, 19_200),
+                ("look", 19_200, 23_040),
+                ("at", 23_040, 25_600),
+                ("the", 25_600, 28_160),
+                ("sea.", 28_160, 39_680),
+                ("When", 39_680, 43_520),
+            ]
+        );
+        // Without durations, each word runs to the next, the last to the
+        // end of the audio.
+        let words = words_of(&t[..4], &starts[..4], None, len);
+        assert_eq!(
+            spans(&words),
+            [
+                ("Today", 6_400, 15_360),
+                ("we", 15_360, 19_200),
+                ("look", 19_200, 48_000)
+            ]
+        );
+    }
+
+    #[test]
+    fn words_stay_in_the_audio_in_order() {
+        let len = SampleCount::new(16_000);
+        // A first token without a space starts a word; a token of only
+        // space is skipped; times before the start, past the end, or going
+        // back are kept in place.
+        let t = tokens(&["Hi", " ", " there", " now", " end"]);
+        let starts = [-0.5, 0.1, 0.2, 0.05, 2.0];
+        let durations = [0.7, 0.0, 0.3, 0.1, 1.0];
+        let words = words_of(&t, &starts, Some(&durations), len);
+        assert_eq!(
+            spans(&words),
+            [
+                ("Hi", 0, 3_200),
+                ("there", 3_200, 8_000),
+                ("now", 8_000, 8_000),
+                ("end", 16_000, 16_000),
+            ]
+        );
+        // A space on its own, as Parakeet gives one before a number's
+        // digits, starts a word too.
+        let t = tokens(&[" in", " ", "1", "9", "9", "0", "."]);
+        let starts = [0.1, 0.3, 0.3, 0.4, 0.5, 0.6, 0.7];
+        let words = words_of(&t, &starts, None, len);
+        assert_eq!(
+            spans(&words),
+            [("in", 1_600, 4_800), ("1990.", 4_800, 16_000)]
+        );
+        // A time that isn't a number is the start.
+        let words = words_of(&tokens(&[" a", " b"]), &[f32::NAN, 0.5], None, len);
+        assert_eq!(spans(&words), [("a", 0, 8_000), ("b", 8_000, 16_000)]);
+        // Times that don't match the tokens give no words.
+        assert!(words_of(&t, &starts[..4], None, len).is_empty());
+        assert!(words_of(&t, &starts, Some(&durations[..2]), len).is_empty());
+        assert!(words_of(&[], &[], None, len).is_empty());
+        // A huge time is the end of the audio.
+        assert_eq!(at_seconds(f32::MAX), None);
+        let words = words_of(&tokens(&[" x"]), &[f32::MAX], None, len);
+        assert_eq!(spans(&words), [("x", 16_000, 16_000)]);
+        // Seconds to the nearest sample, whatever f32 makes of them.
+        assert_eq!(at_seconds(0.72), Some(SampleCount::new(11_520)));
+        assert_eq!(at_seconds(0.0), Some(SampleCount::ZERO));
+        assert_eq!(at_seconds(-1.0), None);
     }
 
     #[test]
