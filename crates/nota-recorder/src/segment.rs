@@ -46,6 +46,11 @@
 //!   the rest as further segments of that window. Both copies of an overlap
 //!   hold the same samples (the replacement replays them), so nothing is
 //!   lost either way.
+//! - A name a run can't use (a directory or an immutable file under a
+//!   segment's temp or own name, a journal that can't be unlinked, a
+//!   journal's aside name already taken) is left as it is and reported in
+//!   [`Published`]; it holds up only what needs that name, and the run goes
+//!   on.
 //!
 //! Publishing and salvage take a [`SessionStore`], which binds a session's
 //! directory to the store holding its rows, so neither can be given a store
@@ -198,12 +203,15 @@ fn temp_path(dir: &Path, track: TrackId, range: SampleRange) -> PathBuf {
     dir.join(format!("{}.tmp", segment_file_name(track, range)))
 }
 
-/// Whether `path` is a segment temp file: never the only copy of anything
-/// (its journals are kept until after the rename), so salvage removes it.
+/// Whether `path` is a segment temp file: exactly the name [`temp_path`]
+/// gives some segment, never the only copy of anything (its journals are
+/// kept until after the rename), so salvage removes it. Other names that
+/// only look like one are left alone: nota never wrote them.
 fn is_temp_segment(path: &Path) -> bool {
     path.file_name()
         .and_then(|n| n.to_str())
-        .is_some_and(|n| n.starts_with("seg-") && n.ends_with(".flac.tmp"))
+        .and_then(|n| n.strip_suffix(".tmp"))
+        .is_some_and(|n| segment_in_file_name(OsStr::new(n)).is_some())
 }
 
 #[cfg(test)]

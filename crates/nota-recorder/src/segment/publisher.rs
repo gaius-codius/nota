@@ -3,6 +3,7 @@
 
 use std::fmt;
 use std::io;
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
@@ -15,9 +16,10 @@ use crate::session::{FinishedJournal, SessionError, SessionStore, SessionWriter}
 /// A thread that publishes each batch of finished journals sent to it, in
 /// order, as [`publish_journals`] does.
 ///
-/// A journal still on disk after a publish run (the run failed, the
-/// journal couldn't be read, or a committed segment that doesn't match its
-/// file holds it back) is kept and tried again with the next batch, and
+/// A journal still on disk under its name after a publish run (the run
+/// failed; the journal couldn't be read, deleted or set aside; a name its
+/// segment needs couldn't be used; or a committed segment that doesn't match
+/// its file holds it back) is kept and tried again with the next batch, and
 /// once more when the publisher finishes; what still fails is left on disk for
 /// the next start's salvage, which loses nothing (see the
 /// [`segment`](super) module). Recording never waits for it: sending a
@@ -51,6 +53,7 @@ pub struct PublishReport {
     rows: Vec<SegmentRow>,
     errors: Vec<PublishError>,
     left: Vec<FinishedJournal>,
+    set_aside: Vec<PathBuf>,
 }
 
 impl PublishReport {
@@ -71,7 +74,9 @@ impl PublishReport {
 
     /// The journals still on disk after the last try: its run failed,
     /// they couldn't be read (see
-    /// [`Published::unread`](super::Published::unread)), or a finding
+    /// [`Published::unread`](super::Published::unread)), deleted or set
+    /// aside, a name their segment needs couldn't be used (see
+    /// [`Published::blocked`](super::Published::blocked)), or a finding
     /// holds their audio back (see
     /// [`Published::findings`](super::Published::findings)). They're left
     /// for salvage at the next start.
@@ -80,11 +85,20 @@ impl PublishReport {
         &self.left
     }
 
+    /// The journal files set aside as damaged, under their new names (see
+    /// [`Published::quarantined`](super::Published::quarantined)): what of
+    /// each read was published, but audio after the damage wasn't, and no
+    /// later run publishes it. The files are kept.
+    #[must_use]
+    pub fn set_aside(&self) -> &[PathBuf] {
+        &self.set_aside
+    }
+
     /// Whether every journal sent was published: nothing is left for
-    /// salvage.
+    /// salvage, and nothing was set aside as damaged.
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        self.left.is_empty()
+        self.left.is_empty() && self.set_aside.is_empty()
     }
 }
 
@@ -234,7 +248,16 @@ fn publish_pending<S: Fs, T: SegmentStore>(
     report: &mut PublishReport,
 ) {
     match publish_journals(session, length, pending) {
-        Ok(published) => report.rows.extend_from_slice(published.segments()),
+        Ok(published) => {
+            report.rows.extend_from_slice(published.segments());
+            report.set_aside.extend_from_slice(published.quarantined());
+            if let Some(kind) = published.set_aside_unsynced() {
+                report.errors.push(PublishError::Io(io::Error::new(
+                    kind,
+                    "syncing the directory after setting journals aside failed",
+                )));
+            }
+        }
         Err(error) => report.errors.push(error),
     }
     let dir = session.session();

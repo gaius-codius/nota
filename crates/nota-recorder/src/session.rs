@@ -174,6 +174,11 @@ pub enum SessionError {
     },
     /// The session ran out of journal ids or a track out of sample numbers.
     Overflow,
+    /// A file in the session directory is named for the last journal id
+    /// (`journal-18446744073709551615`, or that set aside), so no journal
+    /// can come after it. Nothing was done; moving the file out lets the
+    /// session open.
+    LastJournalId(PathBuf),
 }
 
 impl fmt::Display for SessionError {
@@ -200,6 +205,11 @@ impl fmt::Display for SessionError {
                 first_free.get()
             ),
             Self::Overflow => f.write_str("ran out of journal ids or sample numbers"),
+            Self::LastJournalId(path) => write!(
+                f,
+                "{} takes the last journal id, so no journal can follow it",
+                path.display()
+            ),
         }
     }
 }
@@ -340,7 +350,9 @@ impl<S: Fs> SessionWriter<S> {
     /// ends, and then record alongside publishing); [`SessionError::Io`] if the directory, a
     /// journal still to publish or the marks can't be read (damaged marks
     /// are [`std::io::ErrorKind::InvalidData`]);
-    /// [`SessionError::Overflow`] if the journal ids have run out.
+    /// [`SessionError::LastJournalId`], naming the file, if one takes the
+    /// last journal id; [`SessionError::Overflow`] if the marks have used
+    /// them all.
     pub fn open(
         session: &SessionLock<S>,
         rate: SampleRate,
@@ -377,7 +389,10 @@ impl<S: Fs> SessionWriter<S> {
             let Some(journal) = path.file_name().and_then(journal_id_in_name) else {
                 continue;
             };
-            next_id = next_id.max(journal.next().ok_or(SessionError::Overflow)?);
+            let after = journal
+                .next()
+                .ok_or_else(|| SessionError::LastJournalId(path.clone()))?;
+            next_id = next_id.max(after);
             let bytes = match fs.read(path) {
                 Ok(bytes) => bytes,
                 // One salvage set aside is never published again: its name
@@ -1179,7 +1194,7 @@ fn journal_id_in_name(name: &std::ffi::OsStr) -> Option<JournalId> {
 }
 
 /// The suffix salvage gives a journal it sets aside.
-const SET_ASIDE: &str = ".unreadable";
+pub(crate) const SET_ASIDE: &str = ".unreadable";
 
 /// Whether `path` is a journal salvage set aside.
 fn is_set_aside(path: &std::path::Path) -> bool {

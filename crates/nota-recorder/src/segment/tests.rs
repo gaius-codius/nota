@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use super::publish::TempSegment;
 use super::*;
 use crate::fs::crash::{CrashCase, CrashTest};
-use crate::fs::fake::{CrashOutcome, FakeFs, Op};
+use crate::fs::fake::{CrashOutcome, FakeFs, Fault, Op};
 use crate::fs::{Fs, FsFile, StdFs};
 use crate::journal::format::{FRAME_HEADER_LEN, HEADER_LEN, encode_frame};
 use crate::journal::{JournalHeader, JournalId, JournalWriter, read_journal};
@@ -2531,6 +2531,7 @@ fn findings_survive_any_later_failure_and_their_own_never_stops_publishing() {
     let mut unsaved = 0;
     let mut row_reads = 0;
     let mut journal_reads = 0;
+    let mut carried_on = 0;
     let unreadable = [(expected[0].0, Problem::Unreadable(ReadFailure::Other))];
     for at in 0..ops {
         let run = fs.copy_disk();
@@ -2579,7 +2580,23 @@ fn findings_survive_any_later_failure_and_their_own_never_stops_publishing() {
             None => assert!(on_disk.found().is_empty(), "failing op {at}"),
             Some(_) => {
                 assert!(present, "failing op {at} lost the findings");
-                assert!(result.is_err(), "failing op {at} went unnoticed");
+                // A journal's unlink that fails is reported and the run
+                // goes on; anything else here stops it (`Other` isn't about
+                // one name, so a segment's temp or rename failing with it
+                // stops the run too).
+                let reported = result.as_ref().is_ok_and(|done| {
+                    let kinds = done.not_deleted().iter().map(|&(_, k)| k);
+                    let kinds = kinds.chain(done.blocked().iter().map(|&(_, k)| k));
+                    kinds
+                        .inspect(|&k| assert_eq!(k, io::ErrorKind::Other))
+                        .count()
+                        == 1
+                });
+                assert!(
+                    result.is_err() || reported,
+                    "failing op {at} went unnoticed"
+                );
+                carried_on += usize::from(reported);
             }
         }
         if let Ok(done) = &result
@@ -2601,6 +2618,8 @@ fn findings_survive_any_later_failure_and_their_own_never_stops_publishing() {
     // Publishing comes after the findings, so failures there were tried.
     assert!(ops - durable_from > 20, "{durable_from} of {ops}");
     assert!(unsaved >= 4, "{unsaved}");
+    // Each journal's unlink.
+    assert!(carried_on >= 4, "{carried_on}");
     assert_eq!(row_reads, 1);
     let journals = fs.paths().into_iter().filter(|p| is_journal(p)).count();
     assert!(journals >= 4, "{journals}");
@@ -3645,6 +3664,14 @@ fn a_set_aside_journal_keeps_its_id_and_samples_from_reuse_even_unread() {
 /// A system-track journal, id 90, holding frames 0 to 100, a damaged
 /// frame, then frames 200 to 300.
 fn journal_with_damage() -> Vec<u8> {
+    journal_damaged_before(200)
+}
+
+/// A system-track journal, id 90, holding frames 0 to 100, a damaged
+/// frame, then a frame of 100 samples starting at `later`. From 950 on
+/// (past the sync budget) that frame must have been synced: corruption,
+/// which salvage sets aside.
+fn journal_damaged_before(later: u64) -> Vec<u8> {
     let fs = FakeFs::with_dirs([session()]);
     let (clock, dyn_clock) = fake_clock();
     let header = JournalHeader::new(JournalId::new(90), SYSTEM, EpochId::new(0), rate());
@@ -3655,18 +3682,18 @@ fn journal_with_damage() -> Vec<u8> {
     let valid = fs
         .read(&session().join(JournalId::new(90).file_name()))
         .unwrap();
-    // A second journal supplies well-formed frames for 200 to 300.
+    // A second journal supplies a well-formed frame for the later samples.
     let fs2 = FakeFs::with_dirs([session()]);
-    let mut later = JournalWriter::create(
+    let mut second = JournalWriter::create(
         &fs2,
         &session(),
         header,
-        SampleIndex::new(200),
+        SampleIndex::new(later),
         clock as Arc<dyn Clock>,
     )
     .unwrap();
-    later.append(&samples(SYSTEM, 200, 100)).unwrap();
-    later.sync().unwrap();
+    second.append(&samples(SYSTEM, later, 100)).unwrap();
+    second.sync().unwrap();
     let tail = fs2
         .read(&session().join(JournalId::new(90).file_name()))
         .unwrap();
@@ -3708,4 +3735,351 @@ fn a_journal_still_to_publish_that_cant_be_read_stops_a_writer_opening() {
         matches!(&err, SessionError::Io(e) if e.kind() == io::ErrorKind::IsADirectory),
         "{err}"
     );
+}
+
+/// Writes `bytes` to a new file at `path` on `fs`, durably.
+fn plant_file(fs: &FakeFs, path: &Path, bytes: &[u8]) {
+    let mut file = fs.create(path).unwrap();
+    file.write_all(bytes).unwrap();
+    file.sync().unwrap();
+    fs.sync_dir(path.parent().unwrap()).unwrap();
+}
+
+/// Salvages a copy of `disk` uninterrupted, then again; then salvage crashed
+/// after every operation under every crash outcome, and run once more.
+/// `check` must hold of every report but a crashed run's, every run after
+/// the first must end on the disk the first left, and every sample
+/// `promised` durable must be in a row or a journal kept. Returns the first
+/// run's report.
+fn sweep_salvage(
+    disk: &FakeFs,
+    promised: &Promised,
+    check: impl Fn(&Published) -> Result<(), String>,
+) -> Published {
+    let probe = disk.copy_disk();
+    let done = salvage(&mut session_store(&probe), length()).unwrap();
+    check(&done).unwrap();
+    let ops = probe.attempted();
+    let settled = observe(&probe);
+    let held = row_samples(&settled)
+        .unwrap()
+        .union(&journal_samples(&settled).unwrap());
+    check_durable(promised, &held).unwrap();
+    let again = salvage(&mut session_store(&probe), length()).unwrap();
+    check(&again).unwrap_or_else(|e| panic!("second run: {e}"));
+    assert!(again.segments().is_empty() && again.deleted().is_empty());
+    assert!(
+        observe(&probe) == settled,
+        "a second salvage changed the disk"
+    );
+    assert!(ops > 30, "{ops}");
+    for after in 0..=ops {
+        for crash in CrashOutcome::standard() {
+            let run = disk.copy_disk();
+            run.crash_after(after);
+            let _ = salvage(&mut session_store(&run), length());
+            let survived = run.crash(crash);
+            let rerun = salvage(&mut session_store(&survived), length())
+                .unwrap_or_else(|e| panic!("after {after} ops, {crash:?}: {e}"));
+            check(&rerun).unwrap_or_else(|e| panic!("after {after} ops, {crash:?}: {e}"));
+            assert!(
+                observe(&survived) == settled,
+                "salvage crashed after {after} ops, {crash:?}, ended differently"
+            );
+        }
+    }
+    done
+}
+
+/// A recording's journals, as a crash left them, and the rows an
+/// uninterrupted salvage of them commits.
+fn unsalvaged() -> (FakeFs, Promised, Vec<SegmentRow>) {
+    let (fs, promised) = clean_run(Recording {
+        steps: 4,
+        publish: false,
+        fail_at: None,
+    });
+    let disk = fs.crash(CrashOutcome::KeepAll);
+    let probe = disk.copy_disk();
+    let rows = salvage(&mut session_store(&probe), length())
+        .unwrap()
+        .segments()
+        .to_vec();
+    assert!(rows.len() >= 4, "{rows:?}");
+    (disk, promised, rows)
+}
+
+#[test]
+fn a_directory_under_a_segment_temp_name_blocks_only_that_segment_at_any_crash() {
+    let (disk, promised, rows) = unsalvaged();
+    let row = rows[1];
+    let temp = temp_path(&session(), row.track(), row.range());
+    disk.create_dir(&temp).unwrap();
+    disk.sync_dir(&session()).unwrap();
+    // A name that only looks like a segment temp's isn't one nota wrote:
+    // it's left alone.
+    let odd = session().join("seg-t0-7.flac.tmp");
+    plant_file(&disk, &odd, b"not nota's");
+    let blocked = [(temp, io::ErrorKind::IsADirectory)];
+
+    let done = sweep_salvage(&disk, &promised, |done| {
+        if done.temps_kept() != blocked || done.blocked() != blocked {
+            return Err(format!(
+                "kept {:?}, blocked {:?}",
+                done.temps_kept(),
+                done.blocked()
+            ));
+        }
+        Ok(())
+    });
+    let others: Vec<_> = rows.iter().filter(|r| **r != row).copied().collect();
+    assert_eq!(done.segments(), others);
+    // The segment's journals are kept, holding its samples.
+    let after = disk.copy_disk();
+    salvage(&mut session_store(&after), length()).unwrap();
+    let held = journal_samples(&observe(&after)).unwrap();
+    let r = row.range();
+    assert_eq!(
+        held.first_missing(row.track(), r.start().get(), r.end().get()),
+        None
+    );
+    assert_eq!(after.read(&odd).unwrap(), b"not nota's");
+}
+
+#[test]
+fn a_directory_under_a_segments_own_name_blocks_only_that_segment_at_any_crash() {
+    let (disk, promised, rows) = unsalvaged();
+    let row = rows[2];
+    let path = durable_path(row.track(), row.range());
+    disk.create_dir(&path).unwrap();
+    disk.sync_dir(&session()).unwrap();
+    let blocked = [(path, io::ErrorKind::IsADirectory)];
+
+    let done = sweep_salvage(&disk, &promised, |done| {
+        if done.blocked() != blocked || !done.temps_kept().is_empty() {
+            return Err(format!("blocked {:?}", done.blocked()));
+        }
+        Ok(())
+    });
+    let others: Vec<_> = rows.iter().filter(|r| **r != row).copied().collect();
+    assert_eq!(done.segments(), others);
+    // The temp file it wrote is gone again.
+    let after = disk.copy_disk();
+    salvage(&mut session_store(&after), length()).unwrap();
+    assert!(!after.paths().iter().any(|p| is_temp_segment(p)));
+}
+
+#[test]
+fn a_directory_under_a_journals_aside_name_keeps_it_in_place_at_any_crash() {
+    let (disk, promised, rows) = unsalvaged();
+    // Journal 90 of the system track: frames 0 to 100, damage, then synced
+    // frames 1,000 to 1,100 that can't be read. Salvage would set it aside.
+    let damaged = session().join(JournalId::new(90).file_name());
+    let bytes = journal_damaged_before(1_000);
+    plant_file(&disk, &damaged, &bytes);
+    let aside = session().join(format!("{}.unreadable", JournalId::new(90).file_name()));
+    disk.create_dir(&aside).unwrap();
+    disk.sync_dir(&session()).unwrap();
+    let kept = [(damaged.clone(), io::ErrorKind::AlreadyExists)];
+
+    let done = sweep_salvage(&disk, &promised, |done| {
+        if done.not_set_aside() != kept || !done.quarantined().is_empty() {
+            return Err(format!("not set aside {:?}", done.not_set_aside()));
+        }
+        Ok(())
+    });
+    // What reads of it is published, with everything else.
+    let readable = done
+        .segments()
+        .iter()
+        .find(|r| r.track() == SYSTEM && r.range().start() == SampleIndex::ZERO)
+        .unwrap();
+    assert_eq!(readable.range().end(), SampleIndex::new(100));
+    assert_eq!(done.segments().len(), rows.len() + 1);
+    let after = disk.copy_disk();
+    salvage(&mut session_store(&after), length()).unwrap();
+    assert_eq!(after.read(&damaged).unwrap(), bytes);
+}
+
+#[test]
+fn a_file_under_a_journals_aside_name_is_never_replaced() {
+    let fs = FakeFs::with_dirs([session(), db()]);
+    let damaged = session().join(JournalId::new(90).file_name());
+    let bytes = journal_damaged_before(1_000);
+    plant_file(&fs, &damaged, &bytes);
+    let aside = session().join(format!("{}.unreadable", JournalId::new(90).file_name()));
+    plant_file(&fs, &aside, b"an earlier journal set aside");
+
+    let done = salvage(&mut session_store(&fs), length()).unwrap();
+    assert_eq!(
+        done.not_set_aside(),
+        [(damaged.clone(), io::ErrorKind::AlreadyExists)]
+    );
+    assert!(done.quarantined().is_empty());
+    assert_eq!(done.segments().len(), 1);
+    assert_eq!(fs.read(&aside).unwrap(), b"an earlier journal set aside");
+    assert_eq!(fs.read(&damaged).unwrap(), bytes);
+
+    // Once the name is free, the next run sets it aside.
+    fs.remove(&aside).unwrap();
+    let done = salvage(&mut session_store(&fs), length()).unwrap();
+    assert_eq!(done.quarantined(), std::slice::from_ref(&aside));
+    assert!(done.not_set_aside().is_empty() && done.segments().is_empty());
+    assert_eq!(fs.read(&aside).unwrap(), bytes);
+}
+
+#[test]
+fn a_journal_whose_set_aside_rename_fails_is_reported_not_an_error() {
+    let fs = FakeFs::with_dirs([session(), db()]);
+    let damaged = session().join(JournalId::new(90).file_name());
+    let bytes = journal_damaged_before(1_000);
+    plant_file(&fs, &damaged, &bytes);
+    fs.fail_on(&damaged, Fault::Rename, io::ErrorKind::PermissionDenied);
+
+    let done = salvage(&mut session_store(&fs), length()).unwrap();
+    assert_eq!(
+        done.not_set_aside(),
+        [(damaged.clone(), io::ErrorKind::PermissionDenied)]
+    );
+    assert_eq!(done.segments().len(), 1);
+    assert_eq!(fs.read(&damaged).unwrap(), bytes);
+}
+
+#[test]
+fn a_journal_that_cant_be_unlinked_is_reported_and_the_rest_published() {
+    let (disk, _, rows) = unsalvaged();
+    let fs = disk.copy_disk();
+    let journals: Vec<PathBuf> = fs.paths().into_iter().filter(|p| is_journal(p)).collect();
+    let stuck = journals[0].clone();
+    fs.fail_on(&stuck, Fault::Remove, io::ErrorKind::PermissionDenied);
+
+    let done = salvage(&mut session_store(&fs), length()).unwrap();
+    let id = journal_id(&stuck);
+    assert_eq!(done.not_deleted(), [(id, io::ErrorKind::PermissionDenied)]);
+    assert_eq!(done.segments(), rows);
+    assert_eq!(done.deleted().len(), journals.len() - 1);
+    assert!(!done.deleted().contains(&id));
+    let left: Vec<_> = fs.paths().into_iter().filter(|p| is_journal(p)).collect();
+    assert_eq!(left, std::slice::from_ref(&stuck));
+
+    // Failing again, it's reported again, and the directory isn't synced:
+    // nothing in it changed.
+    let still = fs.copy_disk();
+    still.fail_on(&stuck, Fault::Remove, io::ErrorKind::PermissionDenied);
+    let done = salvage(&mut session_store(&still), length()).unwrap();
+    assert_eq!(done.not_deleted(), [(id, io::ErrorKind::PermissionDenied)]);
+    assert!(!still.ops().iter().any(|op| matches!(op, Op::SyncDir(_))));
+    // Gone by the time it's unlinked: that's deleted, not kept.
+    let gone = fs.copy_disk();
+    gone.fail_on(&stuck, Fault::Remove, io::ErrorKind::NotFound);
+    let done = salvage(&mut session_store(&gone), length()).unwrap();
+    assert_eq!(done.deleted(), [id]);
+    assert!(done.not_deleted().is_empty());
+
+    // Once it can be, the next run deletes it, and publishes nothing again.
+    let fs = fs.copy_disk();
+    let done = salvage(&mut session_store(&fs), length()).unwrap();
+    assert_eq!(done.deleted(), [id]);
+    assert!(done.segments().is_empty() && done.not_deleted().is_empty());
+}
+
+#[test]
+fn a_segment_temp_that_cant_be_removed_blocks_only_its_segment() {
+    let (disk, _, rows) = unsalvaged();
+    let fs = disk.copy_disk();
+    let row = rows[0];
+    let temp = temp_path(&session(), row.track(), row.range());
+    plant_file(&fs, &temp, b"a crashed run's temp");
+    fs.fail_on(&temp, Fault::Remove, io::ErrorKind::PermissionDenied);
+
+    let done = salvage(&mut session_store(&fs), length()).unwrap();
+    let blocked = [(temp.clone(), io::ErrorKind::PermissionDenied)];
+    assert_eq!(done.temps_kept(), blocked);
+    assert_eq!(done.blocked(), blocked);
+    assert_eq!(done.segments(), &rows[1..]);
+    assert_eq!(fs.read(&temp).unwrap(), b"a crashed run's temp");
+
+    // A temp that's gone by the time it's removed is nothing to report.
+    let fs = disk.copy_disk();
+    let unplanned = session().join("seg-t5-000000000000.flac.tmp");
+    plant_file(&fs, &unplanned, b"x");
+    fs.fail_on(&unplanned, Fault::Remove, io::ErrorKind::NotFound);
+    let done = salvage(&mut session_store(&fs), length()).unwrap();
+    assert!(done.temps_kept().is_empty(), "{:?}", done.temps_kept());
+    assert_eq!(done.segments(), rows);
+}
+
+#[test]
+fn a_segment_whose_temp_cant_be_created_blocks_only_itself_live() {
+    let (disk, _, rows) = unsalvaged();
+    let fs = disk.copy_disk();
+    let row = rows[1];
+    let temp = temp_path(&session(), row.track(), row.range());
+    fs.fail_on(&temp, Fault::Create, io::ErrorKind::PermissionDenied);
+    let ids: Vec<FinishedJournal> = fs
+        .paths()
+        .iter()
+        .filter(|p| is_journal(p))
+        .map(|p| FinishedJournal::new(SESSION, journal_id(p)))
+        .collect();
+
+    let done = publish_journals(&mut session_store(&fs), length(), &ids).unwrap();
+    assert_eq!(
+        done.blocked(),
+        [(temp.clone(), io::ErrorKind::PermissionDenied)]
+    );
+    let others: Vec<_> = rows.iter().filter(|r| **r != row).copied().collect();
+    assert_eq!(done.segments(), others);
+    // The blocked segment's samples are all still in journals.
+    let held = journal_samples(&observe(&fs)).unwrap();
+    let r = row.range();
+    assert_eq!(
+        held.first_missing(row.track(), r.start().get(), r.end().get()),
+        None
+    );
+
+    // A failure of the whole disk isn't one name's: it stops the run, and
+    // says why.
+    let full = disk.copy_disk();
+    full.fail_on(&temp, Fault::Create, io::ErrorKind::StorageFull);
+    let stopped = publish_journals(&mut session_store(&full), length(), &ids).unwrap_err();
+    assert!(
+        matches!(&stopped, PublishError::Io(e) if e.kind() == io::ErrorKind::StorageFull),
+        "{stopped}"
+    );
+}
+
+/// A journal set aside whose directory sync then fails is still reported as
+/// set aside: wherever a failure lands, a run that returns names every
+/// journal it renamed aside.
+#[test]
+fn a_set_aside_is_reported_whatever_fails_after_it() {
+    let disk = FakeFs::with_dirs([session(), db()]);
+    let damaged = session().join(JournalId::new(90).file_name());
+    plant_file(&disk, &damaged, &journal_damaged_before(1_000));
+    let aside = session().join(format!("{}.unreadable", JournalId::new(90).file_name()));
+    let probe = disk.copy_disk();
+    salvage(&mut session_store(&probe), length()).unwrap();
+    let ops = probe.attempted();
+
+    let mut unsynced = 0;
+    for at in 0..ops {
+        let run = disk.copy_disk();
+        run.fail_after(at, io::ErrorKind::Other);
+        let Ok(done) = salvage(&mut session_store(&run), length()) else {
+            continue;
+        };
+        let renamed = run.paths().contains(&aside);
+        assert_eq!(
+            done.quarantined() == std::slice::from_ref(&aside),
+            renamed,
+            "failing op {at}"
+        );
+        if done.set_aside_unsynced().is_some() {
+            assert_eq!(done.set_aside_unsynced(), Some(io::ErrorKind::Other));
+            assert!(renamed, "failing op {at}");
+            unsynced += 1;
+        }
+    }
+    assert_eq!(unsynced, 1);
 }

@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use nota_core::{Clock, EpochId, FakeClock, SampleIndex, SampleRate, SessionTime, TrackId};
+use nota_core::{
+    Clock, EpochId, FakeClock, SampleCount, SampleIndex, SampleRate, SessionTime, TrackId,
+};
 use nota_recorder::fs::FsFile as _;
 use nota_recorder::segment::publish_journals;
 use nota_recorder::session::{FinishedJournal, SessionLock, SessionWriter};
@@ -105,7 +107,7 @@ fn salvage_at_start_publishes_what_was_left_once() {
 
     let done = library.salvage_all(length()).unwrap();
     assert!(
-        matches!(done[..], [Salvaged::Done(id)] if id == crashed.id),
+        matches!(done[..], [Salvaged::Done(id, _)] if id == crashed.id),
         "{done:?}"
     );
     assert!(!needs_salvage(&dir).unwrap());
@@ -140,7 +142,7 @@ fn a_session_in_use_is_left_alone() {
     drop(held);
     assert!(matches!(
         library.salvage_all(length()).unwrap()[..],
-        [Salvaged::Done(_)]
+        [Salvaged::Done(..)]
     ));
 }
 
@@ -195,9 +197,62 @@ fn salvage_that_leaves_journals_says_so() {
     StdFs.create_dir(&session.audio().join(journal)).unwrap();
     let done = library.salvage_all(length()).unwrap();
     assert!(
-        matches!(done[..], [Salvaged::Left(id)] if id == session.id),
+        matches!(done[..], [Salvaged::Left(id, _)] if id == session.id),
         "{done:?}"
     );
+}
+
+/// Records twenty 50-sample frames into `session` and damages the third
+/// frame's samples, so two frames read and seventeen with synced audio
+/// follow the damage, at a rate where they fill a whole segment window.
+/// Returns the journal's file name.
+fn leave_a_journal_damaged_in_the_middle(session: &SessionPaths, window: SegmentLength) -> String {
+    use nota_recorder::journal::format::{FRAME_HEADER_LEN, HEADER_LEN};
+
+    let lock = SessionDir::new(session.id, StdFs, &session.audio())
+        .lock()
+        .unwrap();
+    let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let mut writer =
+        SessionWriter::open(&lock, SampleRate::new(1_000).unwrap(), window, clock).unwrap();
+    writer
+        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .unwrap();
+    for k in 0..20_i16 {
+        let audio: Vec<i16> = (0..50).map(|i| k * 50 + i).collect();
+        writer.append(MIC, &audio).unwrap();
+    }
+    let journals = writer.finish().unwrap();
+    assert_eq!(journals.len(), 1);
+    let name = journals[0].id().file_name();
+    let path = session.audio().join(&name);
+    let mut bytes = StdFs.read(&path).unwrap();
+    bytes[HEADER_LEN + 2 * (FRAME_HEADER_LEN + 100) + FRAME_HEADER_LEN + 7] ^= 0x40;
+    StdFs.remove(&path).unwrap();
+    StdFs.create(&path).unwrap().write_all(&bytes).unwrap();
+    name
+}
+
+#[test]
+fn salvage_at_start_names_a_journal_it_sets_aside() {
+    let tmp = TestDir::new("set-aside");
+    let library = Library::open(&tmp.0).unwrap();
+    let session = library.create().unwrap();
+    let window = SegmentLength::new(SampleCount::new(1_000)).unwrap();
+    let name = leave_a_journal_damaged_in_the_middle(&session, window);
+
+    let done = library.salvage_all(window).unwrap();
+    let [Salvaged::Done(id, aside)] = &done[..] else {
+        panic!("{done:?}");
+    };
+    assert_eq!(*id, session.id);
+    let kept = session.audio().join(format!("{name}.unreadable"));
+    assert_eq!(aside, std::slice::from_ref(&kept));
+    assert!(kept.exists());
+    assert!(!session.audio().join(&name).exists());
+    // What read before the damage was published.
+    assert_eq!(covered(&segments(&library, session.id)), [(0, 100)]);
+    assert_eq!(kept.file_name().unwrap(), "journal-000000.unreadable");
 }
 
 const MIC: TrackId = TrackId::new(0);
@@ -440,7 +495,7 @@ fn an_m1b_session_directory_is_adopted_and_salvaged() {
     let library = Library::open(&tmp.0).unwrap();
     let done = library.salvage_all(length()).unwrap();
     assert!(
-        matches!(done[..], [Salvaged::Done(id)] if id == old.id),
+        matches!(done[..], [Salvaged::Done(id, _)] if id == old.id),
         "{done:?}"
     );
     // Its rows came over, and salvage published the rest after them.
@@ -588,6 +643,6 @@ fn a_session_directory_that_cant_be_listed_is_adopted_later() {
     assert_eq!(library.db().with(|db| db.session(old.id)).unwrap(), None);
     // Listed again, the old store's rows come over.
     let done = library.salvage_all(length()).unwrap();
-    assert!(matches!(done[..], [Salvaged::Done(_)]), "{done:?}");
+    assert!(matches!(done[..], [Salvaged::Done(..)]), "{done:?}");
     assert!(rows.iter().all(|r| segments(&library, old.id).contains(r)));
 }
