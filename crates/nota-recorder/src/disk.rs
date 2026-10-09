@@ -281,12 +281,14 @@ fn write_ballast<S: Fs>(
     len: u64,
     give_up: &impl Fn() -> bool,
 ) -> io::Result<bool> {
-    const CHUNK: usize = 1 << 20;
+    /// A megabyte. Written out, and the loop counted in whole chunks, so
+    /// no change to either can make the loop run forever.
+    const CHUNK: usize = 1_048_576;
     let chunk = noise(CHUNK);
     let mut file = fs.create(temp)?;
     let mut left = len;
     let mut unsynced = 0;
-    while left > 0 {
+    for _ in 0..len.div_ceil(CHUNK as u64) {
         if give_up() {
             return Ok(false);
         }
@@ -750,8 +752,10 @@ fn monitor<S: Fs + Clone>(
             reported_full = true;
             report(DiskReport::Full(full));
         }
-        // Woken at once by a full disk not yet reported, or a stop.
-        if watch.wait(config.interval, !reported_full) {
+        // Woken at once by a full disk not yet reported, or a stop. The
+        // stop is read again, so a wait that returns early never keeps a
+        // stopped monitor running.
+        if watch.wait(config.interval, !reported_full) || watch.stopping() {
             break;
         }
         if !reported_full && watch.full().is_some() {

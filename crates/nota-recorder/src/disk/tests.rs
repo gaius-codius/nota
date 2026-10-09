@@ -567,13 +567,19 @@ fn until_ballast(reports: &mpsc::Receiver<DiskReport>) -> (Vec<DiskReport>, Resu
     }
 }
 
+/// The most reports a test keeps: a monitor that checked without waiting
+/// would otherwise fill memory before the test failed.
+const MOST_REPORTS: usize = 4_096;
+
 fn spawn_monitor(
     watch: &Arc<DiskWatch<FakeFs>>,
     config: MonitorConfig,
 ) -> (DiskMonitor<FakeFs>, mpsc::Receiver<DiskReport>) {
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = mpsc::sync_channel(MOST_REPORTS);
     let monitor = DiskMonitor::spawn(Arc::clone(watch), config, move |report| {
-        let _ = tx.send(report);
+        // Dropped when full: the test has stopped reading, or the monitor
+        // is running away.
+        let _ = tx.try_send(report);
     })
     .unwrap();
     (monitor, rx)
