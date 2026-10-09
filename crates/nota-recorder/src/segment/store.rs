@@ -102,23 +102,29 @@ mod fake {
     /// `synchronous=FULL`, and that a simulated crash can interrupt. Like
     /// SQLite, it keeps rows by session, and refuses a row whose samples
     /// overlap another row of the same session and track.
+    ///
+    /// It writes through any [`Fs`], a [`FakeFs`] by default: through one
+    /// that wraps a fake (a [`WatchedFs`](crate::disk::WatchedFs), say),
+    /// its commits meet what the wrapper does.
     #[derive(Debug, Clone)]
-    pub struct FakeStore {
-        fs: FakeFs,
+    pub struct FakeStore<S = FakeFs> {
+        fs: S,
         dir: PathBuf,
     }
 
-    impl FakeStore {
+    impl<S: Fs + Clone> FakeStore<S> {
         /// A store keeping its rows in `dir` on `fs`. The directory must
         /// exist.
         #[must_use]
-        pub fn new(fs: &FakeFs, dir: &Path) -> Self {
+        pub fn new(fs: &S, dir: &Path) -> Self {
             Self {
                 fs: fs.clone(),
                 dir: dir.to_path_buf(),
             }
         }
+    }
 
+    impl<S> FakeStore<S> {
         fn row_path(&self, session: SessionId, row: &SegmentRow) -> PathBuf {
             self.dir.join(format!(
                 "s{}-t{}-{:020}.row",
@@ -169,7 +175,7 @@ mod fake {
         )
     }
 
-    impl SegmentStore for FakeStore {
+    impl<S: Fs> SegmentStore for FakeStore<S> {
         type Error = io::Error;
 
         fn rows(&mut self, session: SessionId) -> io::Result<Vec<SegmentRow>> {

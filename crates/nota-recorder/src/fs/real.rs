@@ -116,6 +116,29 @@ impl Fs for StdFs {
             Err(std::fs::TryLockError::Error(e)) => Err(e),
         }
     }
+
+    fn free_space(&self, dir: &Path) -> io::Result<u64> {
+        valid_dir(dir)?;
+        free_space(dir)
+    }
+}
+
+/// `statvfs(2)`: the blocks free to an unprivileged user (`f_bavail`, not
+/// `f_bfree`, which counts the blocks kept for root) times the fragment
+/// size they're counted in.
+#[cfg(unix)]
+fn free_space(dir: &Path) -> io::Result<u64> {
+    let stat = rustix::fs::statvfs(dir)?;
+    Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
+}
+
+/// Elsewhere nota can't tell yet: the disk check reports no figure.
+#[cfg(not(unix))]
+fn free_space(_dir: &Path) -> io::Result<u64> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "free space isn't read on this platform yet",
+    ))
 }
 
 /// [`Fs::read`], refusing a file longer than `limit`.
@@ -274,6 +297,23 @@ mod tests {
 
         fs.remove(&done).unwrap();
         assert_eq!(fs.read(&done).unwrap_err().kind(), io::ErrorKind::NotFound);
+    }
+
+    /// `statvfs` on a real directory: some space, and shrinking by about
+    /// what a written file takes. Other processes write too, so only
+    /// roughly.
+    #[cfg(unix)]
+    #[test]
+    fn free_space_reads_statvfs() {
+        let dir = TestDir::new("free");
+        let fs = StdFs;
+        let before = fs.free_space(&dir.0).unwrap();
+        assert!(before > 0);
+        assert_eq!(
+            fs.free_space(&dir.0.join("missing")).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        assert!(fs.free_space(Path::new("journal")).is_err());
     }
 
     #[test]

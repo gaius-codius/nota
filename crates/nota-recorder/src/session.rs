@@ -28,6 +28,15 @@
 //! the durable position to the end of the failed call are a gap; the next
 //! call starts a new journal.
 //!
+//! # A full disk
+//!
+//! A journal that can't start for want of space (`ENOSPC`, `EDQUOT`), new
+//! or a replacement, gets one more try. Through a
+//! [`WatchedFs`](crate::disk::WatchedFs) the first such failure has freed
+//! the ballast by then, so a full disk costs no audio: the write that met
+//! it breaks its journal, and the replacement takes over its samples in
+//! the ballast's room (see [`disk`](crate::disk)).
+//!
 //! # Fsyncs on other threads
 //!
 //! With [`Syncing::Threads`] each track's fsyncs run on a thread of its
@@ -210,6 +219,20 @@ impl fmt::Display for SessionError {
                 "{} takes the last journal id, so no journal can follow it",
                 path.display()
             ),
+        }
+    }
+}
+
+impl SessionError {
+    /// Whether it failed for want of space (`ENOSPC` or `EDQUOT`; see
+    /// [`is_disk_full`](crate::fs::is_disk_full)).
+    #[must_use]
+    pub fn is_disk_full(&self) -> bool {
+        match self {
+            Self::Journal(JournalError::Io(e)) | Self::Io(e) | Self::Marks(e) => {
+                crate::fs::is_disk_full(e)
+            }
+            _ => false,
         }
     }
 }
@@ -943,6 +966,12 @@ impl<S: Fs> SessionWriter<S> {
     /// within one sync budget), and returns it. If any of that fails, the
     /// samples are a gap, and the journals in `held`, with this one if it
     /// was made, are handed out.
+    ///
+    /// A start that fails for want of space (see
+    /// [`SessionError::is_disk_full`]) is tried once more, with the next
+    /// id: the failure has freed the ballast, if the recording keeps one
+    /// (see [`disk`](crate::disk)), so the second try finds room. A journal
+    /// the first try made and couldn't fill is handed out with the rest.
     fn start_journal(
         &mut self,
         track: TrackId,
@@ -951,32 +980,18 @@ impl<S: Fs> SessionWriter<S> {
         replay: Vec<i16>,
         mut held: Vec<FinishedJournal>,
     ) -> Result<Open<S::File>, SessionError> {
-        let id = self.next_id.ok_or(SessionError::Overflow)?;
-        if let Err(e) = self.mark(id, track, epoch) {
-            hand_out(self.session, &mut held, &mut self.finished, None);
-            return Err(e);
-        }
-        self.next_id = id.next();
-        let header = JournalHeader::new(id, track, epoch, self.rate);
-        let created =
-            JournalWriter::create(&self.fs, &self.dir, header, at, Arc::clone(&self.clock));
-        let mut writer = match created {
-            Ok(writer) => writer,
-            Err(e) => {
-                hand_out(self.session, &mut held, &mut self.finished, None);
-                return Err(SessionError::Journal(e));
+        let mut tried = false;
+        let writer = loop {
+            match self.try_start(track, at, epoch, &replay, &mut held) {
+                Ok(writer) => break writer,
+                Err(e) if !tried && e.is_disk_full() => tried = true,
+                Err(e) => {
+                    // Give up on these samples.
+                    hand_out(self.session, &mut held, &mut self.finished, None);
+                    return Err(e);
+                }
             }
         };
-        // Within one sync budget, so it all fits; its fsync is started
-        // like any other.
-        let written = writer.append_within(&replay);
-        if !matches!(written, Ok(n) if n == replay.len()) {
-            // A replacement broke too: give up on these samples.
-            hand_out(self.session, &mut held, &mut self.finished, Some(id));
-            return Err(SessionError::Journal(
-                written.err().unwrap_or(JournalError::Broken),
-            ));
-        }
         let fresh = !held.is_empty();
         let mut open = Open {
             writer,
@@ -987,6 +1002,36 @@ impl<S: Fs> SessionWriter<S> {
         };
         open.trim();
         Ok(open)
+    }
+
+    /// One try at [`Self::start_journal`]: reserves the next id, creates the
+    /// journal and writes `replay` to it. A journal made but not filled is
+    /// added to `held`, to be handed out.
+    fn try_start(
+        &mut self,
+        track: TrackId,
+        at: SampleIndex,
+        epoch: EpochId,
+        replay: &[i16],
+        held: &mut Vec<FinishedJournal>,
+    ) -> Result<JournalWriter<S::File>, SessionError> {
+        let id = self.next_id.ok_or(SessionError::Overflow)?;
+        self.mark(id, track, epoch)?;
+        self.next_id = id.next();
+        let header = JournalHeader::new(id, track, epoch, self.rate);
+        let mut writer =
+            JournalWriter::create(&self.fs, &self.dir, header, at, Arc::clone(&self.clock))
+                .map_err(SessionError::Journal)?;
+        // Within one sync budget, so it all fits; its fsync is started
+        // like any other.
+        let written = writer.append_within(replay);
+        if !matches!(written, Ok(n) if n == replay.len()) {
+            held.push(FinishedJournal::new(self.session, id));
+            return Err(SessionError::Journal(
+                written.err().unwrap_or(JournalError::Broken),
+            ));
+        }
+        Ok(writer)
     }
 
     /// Starts `track`'s journal at `at` (see [`Self::start_journal`]), as

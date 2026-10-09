@@ -501,7 +501,7 @@ fn a_marks_write_that_fails_is_a_gap_and_the_track_moves_on() {
     let fs = FakeFs::with_dirs([dir()]);
     // Lets the listing at open through, then fails creating the marks'
     // temp file once: the first audio has no journal to go to.
-    fs.fail_after(1, io::ErrorKind::StorageFull);
+    fs.fail_after(1, io::ErrorKind::PermissionDenied);
     let script = (0..3).map(|i| Step::Audio(samples(i * 10, 10))).collect();
     let run = run(&fs, script, Vec::new(), |_| {});
     run.result.unwrap();
@@ -518,6 +518,32 @@ fn a_marks_write_that_fails_is_a_gap_and_the_track_moves_on() {
     let bytes = fs.read(&dir().join(finished[0].id().file_name())).unwrap();
     let (range, _) = read_journal(&bytes).audio().unwrap();
     assert_eq!(range.start(), SampleIndex::new(10));
+}
+
+/// The same failure for want of space is tried again at once: the first
+/// failure has freed the ballast, if the recording keeps one, so nothing
+/// is lost.
+#[test]
+fn a_marks_write_that_meets_a_full_disk_once_is_tried_again() {
+    let fs = FakeFs::with_dirs([dir()]);
+    fs.fail_after(1, io::ErrorKind::StorageFull);
+    let script = (0..3).map(|i| Step::Audio(samples(i * 10, 10))).collect();
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    assert!(
+        !run.reported
+            .iter()
+            .any(|e| matches!(e, RecorderEvent::JournalFailed(_))),
+        "{:?}",
+        run.reported
+    );
+    let finished = run.writer.finish().unwrap();
+    let bytes = fs.read(&dir().join(finished[0].id().file_name())).unwrap();
+    let (range, _) = read_journal(&bytes).audio().unwrap();
+    assert_eq!(
+        (range.start(), range.end()),
+        (SampleIndex::ZERO, SampleIndex::new(30))
+    );
 }
 
 #[test]

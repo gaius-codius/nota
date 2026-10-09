@@ -6,10 +6,14 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
-use nota_core::recorder::{self, Input, Setup};
+use nota_core::recorder::{self, Cause, Input, Setup, Warning, WarningState};
 use nota_core::{Clock, EpochId, SessionId, TrackId, TrackTimeline};
 use nota_recorder::capture::{
     Capture, CaptureBackend, RecordError, RecorderEvent, Source, record_tracks, start_tracks,
+};
+use nota_recorder::disk::{
+    BALLAST_LEN, CHECK_INTERVAL, DiskMonitor, DiskReport, DiskWatch, MonitorConfig, Usage,
+    WatchedFs,
 };
 use nota_recorder::engine::{EngineCommand, EngineConfig, EngineSupervisor};
 use nota_recorder::fs::StdFs;
@@ -38,6 +42,15 @@ pub(super) struct Screening {
     pub(super) listening: String,
 }
 
+/// The filesystem a recording writes through: the real one, watched for a
+/// full disk (see [`nota_recorder::disk`]).
+pub(super) type RecordFs = WatchedFs<StdFs>;
+
+/// The ballast a tone recording keeps: nota's tests record many short
+/// sessions, each into a data directory of its own, and needn't write
+/// 256 MB for each.
+const TONE_BALLAST_LEN: u64 = 1024 * 1024;
+
 /// What stopping needs of what was started.
 pub(super) struct Started<B: CaptureBackend> {
     pub(super) outcome: Outcome,
@@ -45,8 +58,11 @@ pub(super) struct Started<B: CaptureBackend> {
     pub(super) draws: Option<DrawEnds>,
     pub(super) library: Library,
     pub(super) session: SessionId,
-    pub(super) lock: SessionLock<StdFs>,
+    pub(super) lock: SessionLock<RecordFs>,
     pub(super) captures: Vec<Capture<B::Stream>>,
+    /// Checks the disk and keeps the ballast; stopped after publishing, so
+    /// a full disk then is still in the summary.
+    pub(super) disk: DiskMonitor<StdFs>,
     pub(super) publisher: Publisher,
     pub(super) live_inputs: Sender<LiveInput>,
     pub(super) live: JoinHandle<Option<LatencyLog>>,
@@ -56,7 +72,7 @@ pub(super) struct Started<B: CaptureBackend> {
 /// The recorder thread's result: the writer, how recording ended, how
 /// many journal failures it reported, and the streams that failed.
 pub(super) type Recorded = (
-    SessionWriter<StdFs>,
+    SessionWriter<RecordFs>,
     Result<(), RecordError>,
     usize,
     Vec<String>,
@@ -86,7 +102,10 @@ pub(super) fn start<B: CaptureBackend>(
     note_salvaged(&library, &mut outcome)?;
     let session = library.create()?;
     outcome.session.clone_from(&session.dir);
-    let lock = SessionDir::new(session.id, StdFs, &session.audio()).lock()?;
+    // Every write of the recording, the publisher's too, goes through the
+    // watch: the first to meet a full disk frees the ballast.
+    let watch = DiskWatch::new(StdFs);
+    let lock = SessionDir::new(session.id, watch.fs(), &session.audio()).lock()?;
     // A track's fsyncs on a thread of its own: neither track's audio waits
     // for the other's disk.
     let mut writer = SessionWriter::open(&lock, RATE, segment_length(), Arc::clone(clock))?
@@ -111,6 +130,10 @@ pub(super) fn start<B: CaptureBackend>(
     // Each track's first epoch starts when its own stream did: a stream
     // opened later doesn't push the first one's audio later.
     let mut timelines = open_timelines(&mut writer, &captures)?;
+
+    // The disk is checked at once, before the first audio is journaled,
+    // and then while recording; a full disk stops the recording.
+    let disk = watch_disk(args, &session.audio(), captures.len(), watch, &ui, clock)?;
 
     // The session's row is added by the publisher, before its first
     // segment's: recording never waits on the database.
@@ -172,6 +195,7 @@ pub(super) fn start<B: CaptureBackend>(
         session: session.id,
         lock,
         captures,
+        disk,
         publisher,
         live_inputs,
         live,
@@ -186,9 +210,63 @@ pub(super) fn start<B: CaptureBackend>(
     Ok((started, screening))
 }
 
+/// Starts the disk monitor for a recording of `tracks` tracks into
+/// `audio`, with the ballast in the data directory.
+fn watch_disk(
+    args: &RecordArgs,
+    audio: &std::path::Path,
+    tracks: usize,
+    watch: Arc<DiskWatch<StdFs>>,
+    ui: &Sender<Event>,
+    clock: &Arc<dyn Clock>,
+) -> std::io::Result<DiskMonitor<StdFs>> {
+    let config = MonitorConfig {
+        data_dir: args.data.clone(),
+        audio_dir: audio.to_path_buf(),
+        usage: Usage::new(tracks, RATE, segment_length()),
+        ballast_len: if args.tone {
+            TONE_BALLAST_LEN
+        } else {
+            BALLAST_LEN
+        },
+        interval: CHECK_INTERVAL,
+    };
+    DiskMonitor::spawn(watch, config, disk_reports(ui.clone(), Arc::clone(clock)))
+}
+
+/// Turns what the disk monitor reports into the screens' events: the
+/// space, the low-disk warning, and on a full disk its warning and the
+/// stop.
+fn disk_reports(ui: Sender<Event>, clock: Arc<dyn Clock>) -> impl FnMut(DiskReport) + Send {
+    move |report| {
+        let warning = |cause, state| {
+            recorder::Event::Warning(Warning {
+                cause,
+                track: None,
+                at: clock.now(),
+                state,
+            })
+        };
+        let events = match report {
+            DiskReport::Space(disk) => vec![recorder::Event::Disk(disk)],
+            DiskReport::Low(state) => vec![warning(Cause::DiskLow, state)],
+            DiskReport::Full(_) => vec![
+                warning(Cause::DiskFull, WarningState::Raised),
+                recorder::Event::Stopping,
+            ],
+            // In the summary.
+            DiskReport::Unchecked(_) | DiskReport::Ballast(_) => Vec::new(),
+        };
+        for event in events {
+            // The screen may have closed already.
+            let _ = ui.send(Event::Recorder(event));
+        }
+    }
+}
+
 /// Starts each track in the writer and opens its timeline's first epoch.
 fn open_timelines<S>(
-    writer: &mut SessionWriter<StdFs>,
+    writer: &mut SessionWriter<RecordFs>,
     captures: &[Capture<S>],
 ) -> Result<Vec<TrackTimeline>, BoxError> {
     let mut timelines = Vec::new();

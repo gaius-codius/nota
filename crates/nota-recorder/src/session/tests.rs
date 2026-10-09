@@ -254,9 +254,9 @@ fn when_the_replacement_fails_too_the_samples_are_a_gap_and_recording_goes_on() 
     fs.refuse.store(false, Ordering::SeqCst);
     w.append(MIC, &samples(700, 600)).unwrap();
     let ended = w.finish().unwrap();
-    // Id 1 went to the journal that couldn't be created: ids are in order,
-    // not dense.
-    assert_eq!(ended, finished(&[0, 2, 3]));
+    // Ids 1 and 2 went to the journal that couldn't be created, tried twice
+    // for want of space: ids are in order, not dense.
+    assert_eq!(ended, finished(&[0, 3, 4]));
     // 300..500 was written but never synced: kept by salvage if it
     // survives, lost if the crash drops it.
     let kept = inner.copy_disk();

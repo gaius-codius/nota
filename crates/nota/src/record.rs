@@ -15,6 +15,9 @@
 //! - **Live:** feeds the engine, flushes it at each new epoch, and turns
 //!   levels and text into screen updates (see [`crate::live`]).
 //! - **Engine events:** passes the supervisor's events to the live thread.
+//! - **Disk:** checks the free space at once and every few seconds, keeps
+//!   the ballast, and sends the screen the space left, the low-disk
+//!   warning, and a full disk (see [`nota_recorder::disk`]).
 //! - **Signals:** turns SIGHUP, SIGTERM and SIGINT into a request to close
 //!   the screen, and notes SIGXCPU (see below).
 //!
@@ -28,9 +31,9 @@
 //!
 //! # Stopping
 //!
-//! The screen closes when `s` is confirmed with `y`, when a signal arrives
-//! or every stream has ended (both send it `Stopping`), or when the
-//! terminal fails (it's gone after a hangup). Whichever it is,
+//! The screen closes when `s` is confirmed with `y`, when a signal arrives,
+//! every stream has ended or the disk is full (each sends it `Stopping`),
+//! or when the terminal fails (it's gone after a hangup). Whichever it is,
 //! the same steps follow: the terminal is restored, the streams stop, the
 //! recorder records what they had sent and returns, the writer finishes
 //! (a last fsync of every journal), the publisher publishes the last
@@ -38,6 +41,17 @@
 //! meanwhile: the default action would kill the process before the last
 //! segments are published. Anything left unpublished (a disk error, say) is
 //! salvaged at the next start.
+//!
+//! # A full disk
+//!
+//! Every write of the recording goes through a
+//! [`WatchedFs`](nota_recorder::disk::WatchedFs). The first to fail for want
+//! of space frees the ballast (256 MB kept in the data directory), so the
+//! journal it broke is replaced without losing audio, and the recording
+//! stops: the warning and `Stopping` go to the screen, the last segments
+//! are published into the ballast's room, and the summary says the
+//! recording stopped early. A low disk never stops a start: nota records
+//! what fits, with the warning from the start.
 //!
 //! # SIGXCPU
 //!
