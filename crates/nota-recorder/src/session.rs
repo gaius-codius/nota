@@ -90,6 +90,7 @@ mod marks;
 mod syncs;
 
 use handle::InUse;
+pub(crate) use handle::Rows;
 pub use handle::{SessionDir, SessionLock, SessionStore, Use};
 use marks::Marks;
 pub(crate) use marks::is_temp as is_marks_temp;

@@ -1579,6 +1579,7 @@ dependencies = [
  "nota-store",
  "nota-tui",
  "ratatui",
+ "rusqlite",
  "rustix",
  "signal-hook",
 ]

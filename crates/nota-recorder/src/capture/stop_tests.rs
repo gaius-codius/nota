@@ -282,7 +282,7 @@ fn disk(fs: &FakeFs) -> Result<Disk, String> {
         files.insert(path.clone(), fs.read(&path).map_err(|e| e.to_string())?);
     }
     let rows = FakeStore::new(fs, &db())
-        .rows()
+        .rows(SESSION)
         .map_err(|e| e.to_string())?;
     Ok(Disk { files, rows })
 }

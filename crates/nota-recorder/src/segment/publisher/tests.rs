@@ -119,11 +119,11 @@ impl std::error::Error for BrokenError {}
 impl SegmentStore for Broken {
     type Error = BrokenError;
 
-    fn rows(&mut self) -> Result<Vec<SegmentRow>, BrokenError> {
+    fn rows(&mut self, _: SessionId) -> Result<Vec<SegmentRow>, BrokenError> {
         Ok(Vec::new())
     }
 
-    fn insert(&mut self, _: &DurableSegment) -> Result<(), BrokenError> {
+    fn insert(&mut self, _: SessionId, _: &DurableSegment) -> Result<(), BrokenError> {
         Err(BrokenError)
     }
 }
@@ -184,17 +184,17 @@ struct FailsOnce {
 impl SegmentStore for FailsOnce {
     type Error = BrokenError;
 
-    fn rows(&mut self) -> Result<Vec<SegmentRow>, BrokenError> {
-        self.store.rows().map_err(|_| BrokenError)
+    fn rows(&mut self, session: SessionId) -> Result<Vec<SegmentRow>, BrokenError> {
+        self.store.rows(session).map_err(|_| BrokenError)
     }
 
-    fn insert(&mut self, segment: &DurableSegment) -> Result<(), BrokenError> {
+    fn insert(&mut self, session: SessionId, segment: &DurableSegment) -> Result<(), BrokenError> {
         let n = self.commits;
         self.commits += 1;
         if n == self.fail_at {
             return Err(BrokenError);
         }
-        self.store.insert(segment).map_err(|_| BrokenError)
+        self.store.insert(session, segment).map_err(|_| BrokenError)
     }
 }
 

@@ -1,48 +1,66 @@
 //! Where segment rows are committed.
 //!
-//! The real store is SQLite ([`nota_store::Store`]). Crash tests use
-//! `FakeStore`, which keeps rows as files on a `FakeFs`, so a simulated
-//! crash covers the rows and the segments together.
+//! The real store is SQLite ([`nota_store::Store`]), one library database
+//! holding every session's rows. Crash tests use `FakeStore`, which keeps
+//! rows as files on a `FakeFs`, so a simulated crash covers the rows and the
+//! segments together.
 
 use std::error::Error;
 
+use nota_core::SessionId;
 use nota_store::SegmentRow;
 
 use super::publish::DurableSegment;
 
-/// A store of segment rows.
+/// A store of segment rows, scoped by session.
 pub trait SegmentStore {
     /// Why an operation failed.
     type Error: Error + Send + Sync + 'static;
 
-    /// Every committed row.
+    /// Every committed row of `session`.
     ///
     /// # Errors
     ///
     /// The store's error.
-    fn rows(&mut self) -> Result<Vec<SegmentRow>, Self::Error>;
+    fn rows(&mut self, session: SessionId) -> Result<Vec<SegmentRow>, Self::Error>;
 
-    /// Commits `segment`'s row, durably, before returning. Committing the
-    /// same row again is fine. Takes a [`DurableSegment`], so a row can only
-    /// be committed for a file that's durable under its final name.
+    /// Commits `segment`'s row for `session`, durably, before returning.
+    /// Committing the same row again is fine. Takes a [`DurableSegment`], so
+    /// a row can only be committed for a file that's durable under its final
+    /// name.
     ///
     /// # Errors
     ///
-    /// The store's error, including a different row for the same track and
-    /// first sample, and a row of the same track whose samples overlap this
-    /// one's.
-    fn insert(&mut self, segment: &DurableSegment) -> Result<(), Self::Error>;
+    /// The store's error, including a different row of the session for the
+    /// same track and first sample, a row of the same session and track
+    /// whose samples overlap this one's, and a session the store doesn't
+    /// hold.
+    fn insert(&mut self, session: SessionId, segment: &DurableSegment) -> Result<(), Self::Error>;
 }
 
 impl SegmentStore for nota_store::Store {
     type Error = nota_store::StoreError;
 
-    fn rows(&mut self) -> Result<Vec<SegmentRow>, Self::Error> {
-        self.segments()
+    fn rows(&mut self, session: SessionId) -> Result<Vec<SegmentRow>, Self::Error> {
+        self.segments(session)
     }
 
-    fn insert(&mut self, segment: &DurableSegment) -> Result<(), Self::Error> {
-        self.insert_segment(segment.row()).map(|_| ())
+    fn insert(&mut self, session: SessionId, segment: &DurableSegment) -> Result<(), Self::Error> {
+        self.insert_segment(session, segment.row()).map(|_| ())
+    }
+}
+
+/// A shared handle on the library database, opened on first use.
+impl SegmentStore for nota_store::Writer {
+    type Error = nota_store::StoreError;
+
+    fn rows(&mut self, session: SessionId) -> Result<Vec<SegmentRow>, Self::Error> {
+        self.with(|store| store.segments(session))
+    }
+
+    fn insert(&mut self, session: SessionId, segment: &DurableSegment) -> Result<(), Self::Error> {
+        self.with(|store| store.insert_segment(session, segment.row()))
+            .map(|_| ())
     }
 }
 
@@ -51,12 +69,12 @@ impl SegmentStore for nota_store::Store {
 impl<T: SegmentStore + ?Sized> SegmentStore for &mut T {
     type Error = T::Error;
 
-    fn rows(&mut self) -> Result<Vec<SegmentRow>, Self::Error> {
-        (**self).rows()
+    fn rows(&mut self, session: SessionId) -> Result<Vec<SegmentRow>, Self::Error> {
+        (**self).rows(session)
     }
 
-    fn insert(&mut self, segment: &DurableSegment) -> Result<(), Self::Error> {
-        (**self).insert(segment)
+    fn insert(&mut self, session: SessionId, segment: &DurableSegment) -> Result<(), Self::Error> {
+        (**self).insert(session, segment)
     }
 }
 
@@ -68,22 +86,22 @@ mod fake {
     use std::io;
     use std::path::{Path, PathBuf};
 
-    use nota_core::{EpochId, SampleIndex, SampleRange, TrackId};
+    use nota_core::{EpochId, SampleIndex, SampleRange, SessionId, TrackId};
     use nota_store::{SegmentRow, Sha256Digest};
 
     use super::{DurableSegment, SegmentStore};
     use crate::fs::fake::FakeFs;
     use crate::fs::{Fs, FsFile};
 
-    /// Bytes in a row file: track, epoch, start, end, SHA-256, CRC-32.
-    const ROW_LEN: usize = 4 + 4 + 8 + 8 + 32 + 4;
+    /// Bytes in a row file: session, track, epoch, start, end, SHA-256, CRC-32.
+    const ROW_LEN: usize = 8 + 4 + 4 + 8 + 8 + 32 + 4;
 
     /// Segment rows as files on a [`FakeFs`], one per row, each published
     /// by temp file, fsync, rename and directory fsync: a commit that's
     /// atomic and durable when it returns, as SQLite's with
     /// `synchronous=FULL`, and that a simulated crash can interrupt. Like
-    /// SQLite, it refuses a row whose samples overlap another row of the
-    /// same track.
+    /// SQLite, it keeps rows by session, and refuses a row whose samples
+    /// overlap another row of the same session and track.
     #[derive(Debug, Clone)]
     pub struct FakeStore {
         fs: FakeFs,
@@ -101,17 +119,19 @@ mod fake {
             }
         }
 
-        fn row_path(&self, row: &SegmentRow) -> PathBuf {
+        fn row_path(&self, session: SessionId, row: &SegmentRow) -> PathBuf {
             self.dir.join(format!(
-                "t{}-{:020}.row",
+                "s{}-t{}-{:020}.row",
+                session.get(),
                 row.track().get(),
                 row.range().start().get()
             ))
         }
     }
 
-    fn encode(row: &SegmentRow) -> Vec<u8> {
+    fn encode(session: SessionId, row: &SegmentRow) -> Vec<u8> {
         let mut out = Vec::with_capacity(ROW_LEN);
+        out.extend_from_slice(&session.get().to_le_bytes());
         out.extend_from_slice(&row.track().get().to_le_bytes());
         out.extend_from_slice(&row.epoch().get().to_le_bytes());
         out.extend_from_slice(&row.range().start().get().to_le_bytes());
@@ -122,7 +142,7 @@ mod fake {
         out
     }
 
-    fn decode(bytes: &[u8]) -> Option<SegmentRow> {
+    fn decode(bytes: &[u8]) -> Option<(SessionId, SegmentRow)> {
         if bytes.len() != ROW_LEN {
             return None;
         }
@@ -132,13 +152,14 @@ mod fake {
         }
         let u32_at = |at: usize| Some(u32::from_le_bytes(body.get(at..at + 4)?.try_into().ok()?));
         let u64_at = |at: usize| Some(u64::from_le_bytes(body.get(at..at + 8)?.try_into().ok()?));
-        let range = SampleRange::new(SampleIndex::new(u64_at(8)?), SampleIndex::new(u64_at(16)?))?;
-        SegmentRow::new(
-            TrackId::new(u32_at(0)?),
-            EpochId::new(u32_at(4)?),
+        let range = SampleRange::new(SampleIndex::new(u64_at(16)?), SampleIndex::new(u64_at(24)?))?;
+        let row = SegmentRow::new(
+            TrackId::new(u32_at(8)?),
+            EpochId::new(u32_at(12)?),
             range,
-            Sha256Digest::new(body.get(24..56)?.try_into().ok()?),
-        )
+            Sha256Digest::new(body.get(32..64)?.try_into().ok()?),
+        )?;
+        Some((SessionId::new(u64_at(0)?), row))
     }
 
     fn corrupt(path: &Path) -> io::Error {
@@ -151,23 +172,26 @@ mod fake {
     impl SegmentStore for FakeStore {
         type Error = io::Error;
 
-        fn rows(&mut self) -> io::Result<Vec<SegmentRow>> {
+        fn rows(&mut self, session: SessionId) -> io::Result<Vec<SegmentRow>> {
             let mut rows = Vec::new();
             for path in self.fs.list(&self.dir)? {
                 if path.extension().is_some_and(|e| e == "row") {
                     let bytes = self.fs.read(&path)?;
-                    rows.push(decode(&bytes).ok_or_else(|| corrupt(&path))?);
+                    let (owner, row) = decode(&bytes).ok_or_else(|| corrupt(&path))?;
+                    if owner == session {
+                        rows.push(row);
+                    }
                 }
             }
             rows.sort_by_key(|r| (r.track(), r.range().start()));
             Ok(rows)
         }
 
-        fn insert(&mut self, segment: &DurableSegment) -> io::Result<()> {
+        fn insert(&mut self, session: SessionId, segment: &DurableSegment) -> io::Result<()> {
             let row = segment.row();
-            let path = self.row_path(row);
+            let path = self.row_path(session, row);
             match self.fs.read(&path) {
-                Ok(bytes) if decode(&bytes).as_ref() == Some(row) => return Ok(()),
+                Ok(bytes) if decode(&bytes) == Some((session, *row)) => return Ok(()),
                 Ok(_) => {
                     return Err(io::Error::new(
                         io::ErrorKind::AlreadyExists,
@@ -178,7 +202,7 @@ mod fake {
                 Err(e) => return Err(e),
             }
             let range = row.range();
-            let overlaps = self.rows()?.iter().any(|other| {
+            let overlaps = self.rows(session)?.iter().any(|other| {
                 other.track() == row.track()
                     && other.range().start() < range.end()
                     && other.range().end() > range.start()
@@ -196,7 +220,7 @@ mod fake {
                 Err(e) => return Err(e),
             }
             let mut file = self.fs.create(&temp)?;
-            file.write_all(&encode(row))?;
+            file.write_all(&encode(session, row))?;
             file.sync()?;
             self.fs.rename(&temp, &path)?;
             if let Err(e) = self.fs.sync_dir(&self.dir) {
@@ -212,6 +236,8 @@ mod fake {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        const SESSION: SessionId = SessionId::new(1);
 
         #[test]
         fn a_lent_store_is_the_store() {
@@ -237,10 +263,10 @@ mod fake {
             .unwrap();
             let mut store = FakeStore::new(&fs, Path::new("/db"));
             let mut lent = &mut store;
-            SegmentStore::insert(&mut lent, &durable).unwrap();
-            let rows = SegmentStore::rows(&mut lent).unwrap();
+            SegmentStore::insert(&mut lent, SESSION, &durable).unwrap();
+            let rows = SegmentStore::rows(&mut lent, SESSION).unwrap();
             assert_eq!(rows, [*durable.row()]);
-            assert_eq!(store.rows().unwrap(), rows);
+            assert_eq!(store.rows(SESSION).unwrap(), rows);
         }
 
         #[test]
@@ -270,15 +296,15 @@ mod fake {
             };
             let mut store = FakeStore::new(&fs, Path::new("/db"));
             let a = make(1, 10, 20);
-            store.insert(&a).unwrap();
-            store.insert(&a).unwrap();
+            store.insert(SESSION, &a).unwrap();
+            store.insert(SESSION, &a).unwrap();
             let before = fs.paths();
 
             for (start, end) in [(15, 25), (5, 11), (12, 18)] {
-                let err = store.insert(&make(1, start, end)).unwrap_err();
+                let err = store.insert(SESSION, &make(1, start, end)).unwrap_err();
                 assert_eq!(err.kind(), io::ErrorKind::AlreadyExists, "{start}..{end}");
             }
-            assert_eq!(store.rows().unwrap(), [*a.row()]);
+            assert_eq!(store.rows(SESSION).unwrap(), [*a.row()]);
             let db_files = |paths: &[PathBuf]| -> Vec<PathBuf> {
                 paths
                     .iter()
@@ -291,11 +317,11 @@ mod fake {
             let touching_after = make(1, 20, 30);
             let touching_before = make(1, 0, 10);
             let other_track = make(2, 10, 20);
-            store.insert(&touching_after).unwrap();
-            store.insert(&touching_before).unwrap();
-            store.insert(&other_track).unwrap();
+            store.insert(SESSION, &touching_after).unwrap();
+            store.insert(SESSION, &touching_before).unwrap();
+            store.insert(SESSION, &other_track).unwrap();
             assert_eq!(
-                store.rows().unwrap(),
+                store.rows(SESSION).unwrap(),
                 [
                     *touching_before.row(),
                     *a.row(),
@@ -303,6 +329,46 @@ mod fake {
                     *other_track.row()
                 ]
             );
+        }
+
+        #[test]
+        fn sessions_with_the_same_coordinates_coexist_and_read_only_their_own() {
+            use crate::fs::fake::FakeFs;
+            use crate::segment::publish::TempSegment;
+
+            let fs = FakeFs::with_dirs(["/s", "/db"]);
+            let make = |body: &[u8]| {
+                let range = SampleRange::new(SampleIndex::new(10), SampleIndex::new(20)).unwrap();
+                TempSegment::write(
+                    &fs,
+                    Path::new("/s"),
+                    TrackId::new(1),
+                    EpochId::new(0),
+                    range,
+                    body,
+                )
+                .unwrap()
+                .sync()
+                .unwrap()
+                .rename(&fs)
+                .unwrap()
+                .sync_dir(&fs)
+                .unwrap()
+            };
+            let (one, two) = (SessionId::new(1), SessionId::new(2));
+            let (a, b) = (make(b"flac a"), make(b"flac b"));
+            assert_ne!(a.row(), b.row());
+            let mut store = FakeStore::new(&fs, Path::new("/db"));
+            store.insert(one, &a).unwrap();
+            store.insert(two, &b).unwrap();
+            // Same session, same coordinates, different row: refused.
+            assert_eq!(
+                store.insert(one, &b).unwrap_err().kind(),
+                io::ErrorKind::AlreadyExists
+            );
+            assert_eq!(store.rows(one).unwrap(), [*a.row()]);
+            assert_eq!(store.rows(two).unwrap(), [*b.row()]);
+            assert!(store.rows(SessionId::new(3)).unwrap().is_empty());
         }
 
         #[test]
@@ -314,14 +380,91 @@ mod fake {
                 Sha256Digest::new([7; 32]),
             )
             .unwrap();
-            let bytes = encode(&row);
-            assert_eq!(decode(&bytes), Some(row));
+            let bytes = encode(SESSION, &row);
+            assert_eq!(decode(&bytes), Some((SESSION, row)));
             for cut in 0..bytes.len() {
                 assert_eq!(decode(&bytes[..cut]), None);
             }
             let mut flipped = bytes;
-            flipped[9] ^= 1;
+            flipped[17] ^= 1;
             assert_eq!(decode(&flipped), None);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use nota_core::{EpochId, SampleIndex, SampleRange, SessionId, TrackId};
+    use nota_store::{NewSession, Store, Writer};
+
+    use super::SegmentStore;
+    use crate::fs::fake::FakeFs;
+    use crate::segment::publish::{DurableSegment, TempSegment};
+    use crate::test_dir::TestDir;
+
+    fn durable(fs: &FakeFs, start: u64) -> DurableSegment {
+        let range = SampleRange::new(SampleIndex::new(start), SampleIndex::new(start + 4)).unwrap();
+        TempSegment::write(
+            fs,
+            Path::new("/s"),
+            TrackId::new(1),
+            EpochId::new(0),
+            range,
+            b"flac",
+        )
+        .unwrap()
+        .sync()
+        .unwrap()
+        .rename(fs)
+        .unwrap()
+        .sync_dir(fs)
+        .unwrap()
+    }
+
+    fn session(id: u64) -> NewSession {
+        NewSession {
+            id: SessionId::new(id),
+            title: None,
+            language: None,
+            tracks: vec![],
+        }
+    }
+
+    /// Commits a row for session 1 through `store`, and reads each
+    /// session's rows back: only session 1 holds it.
+    fn round_trip(store: &mut impl SegmentStore) {
+        let fs = FakeFs::with_dirs(["/s"]);
+        let segment = durable(&fs, 5);
+        store.insert(SessionId::new(1), &segment).unwrap();
+        assert_eq!(store.rows(SessionId::new(1)).unwrap(), [*segment.row()]);
+        assert_eq!(store.rows(SessionId::new(2)).unwrap(), []);
+        // A session the database doesn't hold is refused.
+        assert!(store.insert(SessionId::new(3), &durable(&fs, 20)).is_err());
+    }
+
+    #[test]
+    fn the_library_database_is_a_store_scoped_by_session() {
+        let dir = TestDir::new("sqlite-store");
+        let mut store = Store::open(&dir.0.join("library.db")).unwrap();
+        store.create_session(&session(1)).unwrap();
+        store.create_session(&session(2)).unwrap();
+        round_trip(&mut store);
+    }
+
+    #[test]
+    fn a_shared_writer_is_the_same_store() {
+        let dir = TestDir::new("writer-store");
+        let mut writer = Writer::new(&dir.0.join("library.db"));
+        writer
+            .with(|db| {
+                db.create_session(&session(1))?;
+                db.create_session(&session(2))
+            })
+            .unwrap();
+        round_trip(&mut writer);
+        // Through a clone, the same rows.
+        assert_eq!(writer.clone().rows(SessionId::new(1)).unwrap().len(), 1);
     }
 }

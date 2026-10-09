@@ -31,7 +31,7 @@ use nota_core::{Clock, SessionId, SystemClock};
 use nota_recorder::fs::{Fs, StdFs};
 use nota_recorder::segment::needs_salvage;
 use nota_recorder::session::SessionDir;
-use nota_store::Store;
+use nota_store::{SessionState, Store};
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::fs::{Mode, OFlags};
 use rustix::process::{Pid, Signal, kill_process, kill_process_group};
@@ -300,9 +300,9 @@ fn published(data: &Path, session: u64) -> (Vec<(u32, u64, u64)>, bool) {
     let dir = data.join("sessions").join(session.to_string());
     let audio = dir.join("audio");
     let left = needs_salvage(&SessionDir::new(SessionId::new(session), StdFs, &audio)).unwrap();
-    let rows = Store::open(&dir.join("nota.db"))
+    let rows = Store::open(&data.join("library.db"))
         .unwrap()
-        .segments()
+        .segments(SessionId::new(session))
         .unwrap();
     for row in &rows {
         let name = format!(
@@ -333,6 +333,19 @@ fn assert_saved(data: &Path, session: u64, tracks: &[u32], ms: u64) -> Vec<(u32,
     let mut ends = Vec::new();
     let (rows, left) = published(data, session);
     assert!(!left, "journals left after the stop");
+    // The session stopped, with its title and the tracks it recorded.
+    let store = Store::open(&data.join("library.db")).unwrap();
+    let id = SessionId::new(session);
+    let row = store.session(id).unwrap().unwrap();
+    assert_eq!(row.state, SessionState::Stopped);
+    assert!(row.title.is_some());
+    let recorded: Vec<u32> = store
+        .tracks(id)
+        .unwrap()
+        .iter()
+        .map(|t| t.track.get())
+        .collect();
+    assert_eq!(recorded, tracks);
     for track in [0, 1] {
         let mut ranges: Vec<(u64, u64)> = rows
             .iter()

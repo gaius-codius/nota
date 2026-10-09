@@ -302,7 +302,7 @@ fn publish<S: Fs, T: SegmentStore>(
     length: SegmentLength,
     journals: &[FinishedJournal],
 ) -> Result<Published, PublishError> {
-    let (session, store) = session.parts();
+    let (session, mut store) = session.parts();
     if let Some(foreign) = journals.iter().find(|j| j.session() != session.id()) {
         return Err(PublishError::OtherSession(FinishedJournal::new(
             foreign.session(),
@@ -403,7 +403,7 @@ fn publish<S: Fs, T: SegmentStore>(
                 .sync()?
                 .rename(fs)?
                 .sync_dir(fs)?;
-        let done = durable.commit(store).map_err(store_error)?;
+        let done = durable.commit(&mut store).map_err(store_error)?;
         committed.add(&done);
         published.segments.push(*done.row());
         release(

@@ -57,11 +57,11 @@ use nota_recorder::engine::{
 use nota_recorder::fs::StdFs;
 use nota_recorder::segment::{PublishReport, Publisher, SegmentLength};
 use nota_recorder::session::{SessionDir, SessionStore, SessionWriter, Syncing};
-use nota_store::Store;
+use nota_store::{NewSession, SessionState, StoreError, Track, TrackKind};
 use nota_tui::{Annotation, Ended, Event, InputThread, Recording, RunError, Theme, Update};
 
 use crate::latency::{DrawEnds, LatencyLog, Problem};
-use crate::library::{Library, Salvaged};
+use crate::library::{Library, NewSessionRows, Salvaged};
 use crate::live::{Actions, Live};
 use crate::terminal::Screen;
 
@@ -190,7 +190,6 @@ fn record_with<B: CaptureBackend>(
     let session = library.create()?;
     outcome.session.clone_from(&session.dir);
     let lock = SessionDir::new(session.id, StdFs, &session.audio()).lock()?;
-    let store = Store::open(&session.store())?;
     // A track's fsyncs on a thread of its own: neither track's audio waits
     // for the other's disk.
     let mut writer = SessionWriter::open(&lock, RATE, segment_length(), Arc::clone(clock))?
@@ -224,7 +223,26 @@ fn record_with<B: CaptureBackend>(
         timelines.push(timeline);
     }
 
-    let publisher = Publisher::spawn(SessionStore::new(lock.clone(), store), segment_length())?;
+    // The session's row is added by the publisher, before its first
+    // segment's: recording never waits on the database.
+    let rows = NewSessionRows::new(
+        library.db().clone(),
+        NewSession {
+            id: session.id,
+            title: Some(args.title.clone()),
+            language: None,
+            tracks: sources
+                .iter()
+                .filter(|(track, _)| captures.iter().any(|c| c.track() == *track))
+                .map(|(track, source)| Track {
+                    track: *track,
+                    kind: track_kind(*track),
+                    source: Some(source_name(source)),
+                })
+                .collect(),
+        },
+    );
+    let publisher = Publisher::spawn(SessionStore::new(lock.clone(), rows), segment_length())?;
     let (live_inputs, live_received) = mpsc::channel::<LiveInput>();
     let engine = match &args.models {
         Some((parakeet, vad)) => Some(start_engine(parakeet, vad, clock, &live_inputs)?),
@@ -309,6 +327,21 @@ fn record_with<B: CaptureBackend>(
         outcome.notes.push(format!("finishing the recording: {e}"));
     }
     note_published(&mut outcome, &stopped.published?);
+    match library
+        .db()
+        .with(|db| db.set_state(session.id, SessionState::Stopped))
+    {
+        Ok(()) => {}
+        Err(StoreError::NoSession(_)) => outcome.notes.push(
+            "the library database couldn't take this session; the next start adds it, \
+             without its title"
+                .to_owned(),
+        ),
+        Err(e) => outcome.notes.push(format!(
+            "marking the session stopped in the library database failed ({e}); \
+             the next start does it"
+        )),
+    }
     if signals.close() {
         outcome.notes.push(
             "the capture thread ran past its real-time budget at least once \
@@ -630,6 +663,15 @@ fn track_name(track: Option<TrackId>) -> &'static str {
     }
 }
 
+/// What a track records.
+const fn track_kind(track: TrackId) -> TrackKind {
+    if track.get() == SYSTEM.get() {
+        TrackKind::System
+    } else {
+        TrackKind::Microphone
+    }
+}
+
 /// How the footer names a source.
 fn source_name(source: &Source) -> String {
     match source {
@@ -646,6 +688,12 @@ mod tests {
     use signal_hook::low_level::raise;
 
     use super::*;
+
+    #[test]
+    fn each_track_is_named_for_what_it_records() {
+        assert_eq!(track_kind(MIC), TrackKind::Microphone);
+        assert_eq!(track_kind(SYSTEM), TrackKind::System);
+    }
 
     /// A raised signal reaches every `Signals` registered for it, so tests
     /// that raise one take turns (if run as threads of one process).

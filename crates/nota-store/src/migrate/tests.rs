@@ -1,0 +1,221 @@
+use std::path::Path;
+
+use nota_core::SessionId;
+use rusqlite::params;
+
+use super::*;
+use crate::test_dir::TestDir;
+use crate::tests::{new_session, raw, row};
+use crate::{SegmentRow, SessionState};
+
+/// A per-session store at `path`, as M1 made one, holding `rows`.
+fn per_session_store(path: &Path, rows: &[SegmentRow]) {
+    let conn = raw(path);
+    let mode: String = conn
+        .query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    conn.execute_batch(schema::V1).unwrap();
+    conn.pragma_update(None, "user_version", 1).unwrap();
+    for r in rows {
+        conn.execute(
+            "INSERT INTO segment VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                r.track().get(),
+                r.epoch().get(),
+                i64::try_from(r.range().start().get()).unwrap(),
+                i64::try_from(r.range().end().get()).unwrap(),
+                r.sha256().as_bytes().as_slice()
+            ],
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn a_new_file_gets_the_current_schema() {
+    let dir = TestDir::new("fresh");
+    let store = Store::open(&dir.db()).unwrap();
+    assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
+    assert_eq!(STEPS.len(), 1);
+    // Opening again changes nothing.
+    drop(store);
+    let again = Store::open(&dir.db()).unwrap();
+    assert_eq!(again.pragma_text("user_version"), VERSION.to_string());
+}
+
+#[test]
+fn unknown_versions_are_refused_and_left_alone() {
+    for version in [3, 7, -1] {
+        let dir = TestDir::new(&format!("version{version}"));
+        raw(&dir.db())
+            .pragma_update(None, "user_version", version)
+            .unwrap();
+        assert!(
+            matches!(Store::open(&dir.db()), Err(StoreError::UnknownSchema(v)) if v == version),
+            "{version}"
+        );
+        let found: i64 = raw(&dir.db())
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(found, version);
+        // Not even switched to a write-ahead log.
+        let mode: String = raw(&dir.db())
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+    }
+}
+
+#[test]
+fn a_file_with_tables_but_no_version_is_refused() {
+    let dir = TestDir::new("foreign");
+    raw(&dir.db())
+        .execute_batch("CREATE TABLE notes (body TEXT)")
+        .unwrap();
+    assert!(matches!(
+        Store::open(&dir.db()),
+        Err(StoreError::UnknownSchema(0))
+    ));
+}
+
+#[test]
+fn a_per_session_store_is_not_opened_as_the_library() {
+    let dir = TestDir::new("notlibrary");
+    let path = dir.0.join("nota.db");
+    per_session_store(&path, &[row(0, 0, 0, 480, 1)]);
+    assert!(matches!(
+        Store::open(&path),
+        Err(StoreError::PerSessionStore)
+    ));
+    // And it's left as it was.
+    assert_eq!(read_per_session(&path).unwrap(), [row(0, 0, 0, 480, 1)]);
+}
+
+#[test]
+fn adopting_imports_a_per_session_store_once() {
+    let dir = TestDir::new("import");
+    let old = dir.0.join("nota.db");
+    let rows = [
+        row(0, 0, 0, 480, 1),
+        row(0, 1, 480, 960, 2),
+        row(1, 0, 0, 480, 3),
+    ];
+    per_session_store(&old, &rows);
+    let mut store = Store::open(&dir.db()).unwrap();
+    let three = SessionId::new(3);
+    assert_eq!(
+        store.adopt_session(three, Some(&old)).unwrap(),
+        Adopted::Imported(3)
+    );
+    assert_eq!(store.segments(three).unwrap(), rows);
+    let session = store.session(three).unwrap().unwrap();
+    assert_eq!(session.state, SessionState::Stopped);
+    assert_eq!(session.title, None);
+
+    // Adopted once: a later change to the old store isn't read.
+    raw(&old).execute("DELETE FROM segment", []).unwrap();
+    assert_eq!(
+        store.adopt_session(three, Some(&old)).unwrap(),
+        Adopted::Known
+    );
+    assert_eq!(store.segments(three).unwrap(), rows);
+}
+
+#[test]
+fn adopting_a_session_without_a_store_adds_it_empty() {
+    let dir = TestDir::new("nostore");
+    let mut store = Store::open(&dir.db()).unwrap();
+    let id = SessionId::new(4);
+    assert_eq!(store.adopt_session(id, None).unwrap(), Adopted::Added);
+    assert_eq!(store.segments(id).unwrap(), vec![]);
+    assert_eq!(store.adopt_session(id, None).unwrap(), Adopted::Known);
+    // A session made by `nota record` is known too.
+    store
+        .create_session(&new_session(SessionId::new(5)))
+        .unwrap();
+    assert_eq!(
+        store.adopt_session(SessionId::new(5), None).unwrap(),
+        Adopted::Known
+    );
+}
+
+#[test]
+fn a_store_created_but_never_given_its_schema_imports_nothing() {
+    let dir = TestDir::new("empty");
+    let old = dir.0.join("nota.db");
+    drop(raw(&old));
+    let mut store = Store::open(&dir.db()).unwrap();
+    assert_eq!(
+        store.adopt_session(SessionId::new(1), Some(&old)).unwrap(),
+        Adopted::Imported(0)
+    );
+}
+
+#[test]
+fn a_bad_per_session_store_adopts_nothing() {
+    let dir = TestDir::new("bad");
+    let mut store = Store::open(&dir.db()).unwrap();
+    let id = SessionId::new(6);
+
+    let wrong_version = dir.0.join("v2.db");
+    per_session_store(&wrong_version, &[]);
+    raw(&wrong_version)
+        .pragma_update(None, "user_version", 2)
+        .unwrap();
+    assert!(matches!(
+        store.adopt_session(id, Some(&wrong_version)),
+        Err(StoreError::UnknownSchema(2))
+    ));
+
+    let corrupt = dir.0.join("corrupt.db");
+    per_session_store(&corrupt, &[row(0, 0, 0, 480, 1)]);
+    raw(&corrupt)
+        .execute("UPDATE segment SET epoch = -3", [])
+        .unwrap();
+    assert!(matches!(
+        store.adopt_session(id, Some(&corrupt)),
+        Err(StoreError::Corrupt(m)) if m.contains("epoch")
+    ));
+
+    #[cfg(unix)]
+    {
+        let link = dir.0.join("link.db");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "test scaffolding: a symlinked store"
+        )]
+        std::os::unix::fs::symlink(&wrong_version, &link).unwrap();
+        assert!(matches!(
+            store.adopt_session(id, Some(&link)),
+            Err(StoreError::Sqlite(_))
+        ));
+    }
+
+    let missing = dir.0.join("missing.db");
+    assert!(matches!(
+        store.adopt_session(id, Some(&missing)),
+        Err(StoreError::Sqlite(_))
+    ));
+    // Opening it didn't create it.
+    assert!(std::fs::metadata(&missing).is_err());
+
+    // Nothing was added, so a later try can still import it.
+    assert_eq!(store.session(id).unwrap(), None);
+    assert_eq!(store.segments(id).unwrap(), vec![]);
+}
+
+#[test]
+fn imported_sessions_with_the_same_coordinates_coexist() {
+    let dir = TestDir::new("twosessions");
+    let rows = [row(0, 0, 0, 480, 1), row(1, 0, 0, 480, 2)];
+    let other = [row(0, 0, 0, 480, 7), row(1, 0, 0, 480, 8)];
+    let (a, b) = (dir.0.join("a.db"), dir.0.join("b.db"));
+    per_session_store(&a, &rows);
+    per_session_store(&b, &other);
+    let mut store = Store::open(&dir.db()).unwrap();
+    store.adopt_session(SessionId::new(1), Some(&a)).unwrap();
+    store.adopt_session(SessionId::new(2), Some(&b)).unwrap();
+    assert_eq!(store.segments(SessionId::new(1)).unwrap(), rows);
+    assert_eq!(store.segments(SessionId::new(2)).unwrap(), other);
+}
