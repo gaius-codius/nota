@@ -16,7 +16,13 @@
 //!   rows), it appends a line to `<promises>` and fsyncs it. Keep
 //!   `<promises>` off the filesystem under test. Without `--stop-after` it
 //!   runs to the end and prints `ops <total>`.
-//! - `check <dir> <promises> [--recovered] [--end <file>]` checks the
+//! - `prepare-repair <dir> <promises> missing|mismatched` makes committed
+//!   rows with their journals retained, then removes or replaces one file.
+//!   A mismatched case plants two occupied aside names and logs their hashes.
+//! - `probe-rename <dir>` checks that the filesystem supports no-replace
+//!   renames and refuses to overwrite an occupied name.
+//! - `check <dir> <promises> [--recovered] [--end <file>] [--repair]
+//!   [--expect-repair] [--stop-after N]` checks the
 //!   invariants the in-memory crash tests check (`src/segment/tests.rs`): before salvage,
 //!   every row has its file and every promised sample is in a row or a
 //!   journal; after salvage, only segments and rows are left, holding every
@@ -25,7 +31,11 @@
 //!   salvage, for a run after a crash that followed a completed salvage.
 //!   With `--end`, it writes where the first salvage ended (each session
 //!   file's name and hash, and the rows) to `<file>`, so the script can
-//!   compare a salvage that was interrupted with one that wasn't.
+//!   compare a salvage that was interrupted with one that wasn't. `--repair`
+//!   admits broken rows before salvage when journals still hold their audio;
+//!   all rows must prove their audio afterwards. `--expect-repair` requires
+//!   the reference run to repair one row. `--stop-after` counts recovery's
+//!   recorder operations and uses the same stop marker as `write`.
 //!
 //! SQLite's own I/O isn't counted: `--stop-after` crash points fall between
 //! the recorder's operations, and the store commits in between them. The
@@ -51,7 +61,7 @@ use nota_core::{
 use nota_recorder::fs::{FileSyncer, Fs, FsFile, StdFile, StdFs, StdLock, StdSyncer, Synced};
 use nota_recorder::journal::{JournalId, read_journal};
 use nota_recorder::segment::{
-    Published, SegmentLength, publish_journals, salvage, segment_file_name,
+    FINDINGS_FILE_NAME, Published, SegmentLength, publish_journals, salvage, segment_file_name,
 };
 use nota_recorder::session::{MARKS_FILE_NAME, SessionDir, SessionStore, SessionWriter, Syncing};
 use nota_store::{NewSession, SegmentRow, Store, StoreError};
@@ -97,9 +107,13 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("write") => write_command(&args[1..]),
         Some("check") => check_command(&args[1..]),
+        Some("probe-rename") => probe_rename_command(&args[1..]),
+        Some("prepare-repair") => prepare_repair_command(&args[1..]),
         _ => Err(
             "usage: lazyfs_crash write <dir> <promises> [--stop-after N] [--no-publish] | \
-                  check <dir> <promises> [--recovered] [--end <file>]"
+                  check <dir> <promises> [--recovered] [--end <file>] [--repair] \
+                  [--expect-repair] [--stop-after N] | \
+                  prepare-repair <dir> <promises> missing|mismatched | probe-rename <dir>"
                 .into(),
         ),
     };
@@ -120,24 +134,31 @@ fn main() -> ExitCode {
 /// dead after the `stop_after`th.
 #[derive(Debug, Clone)]
 struct CountingFs {
+    /// Operations completed so far.
     ops: Arc<AtomicUsize>,
+    /// The operation after which execution stops.
     stop_after: Option<usize>,
     /// Set at the crash point: every thread stops before its next
     /// operation.
     halted: Arc<AtomicBool>,
+    /// The marker the shell waits for before killing this process.
     marker: PathBuf,
 }
 
 #[derive(Debug)]
 struct CountingFile {
+    /// The file on the filesystem under test.
     file: StdFile,
+    /// The shared counter and stop marker.
     fs: CountingFs,
 }
 
 /// Fsyncs a [`CountingFile`] from a sync thread, counted.
 #[derive(Debug)]
 struct CountingSyncer {
+    /// The underlying file sync handle.
     syncer: StdSyncer,
+    /// The shared counter and stop marker.
     fs: CountingFs,
 }
 
@@ -266,7 +287,9 @@ impl FileSyncer for CountingSyncer {
 
 #[derive(Debug)]
 struct PromiseLog {
+    /// The log kept outside the filesystem under test.
     file: StdFile,
+    /// The furthest sample each track has promised.
     durable: BTreeMap<TrackId, SampleIndex>,
 }
 
@@ -342,10 +365,18 @@ fn hex(bytes: &[u8]) -> String {
 /// The promises read back.
 #[derive(Debug, Default)]
 struct Promised {
+    /// The first sample recorded on each track.
     started: BTreeMap<TrackId, SampleIndex>,
+    /// The furthest sample each track has promised.
     durable: BTreeMap<TrackId, SampleIndex>,
     /// (track, epoch, start, end, sha256 hex)
     rows: Vec<(u32, u64, u64, u64, String)>,
+    /// The segment name selected for repair; only its aside files are expected.
+    repair_file: Option<String>,
+    /// Exact names and hashes of files that must never be replaced.
+    kept: Vec<(String, String)>,
+    /// The mismatched file must survive under its original or aside name.
+    displaced: Option<(String, String)>,
 }
 
 fn read_promises(path: &Path) -> Res<Promised> {
@@ -379,6 +410,15 @@ fn read_promises(path: &Path) -> Res<Promised> {
                 promised
                     .rows
                     .push((track(1)?.get(), num(2)?, num(3)?, num(4)?, sha));
+            }
+            Some("repair") if words.len() == 2 => promised.repair_file = Some(words[1].to_owned()),
+            Some("keep" | "displaced") if words.len() == 3 => {
+                let entry = (words[1].to_owned(), words[2].to_owned());
+                if words[0] == "keep" {
+                    promised.kept.push(entry);
+                } else {
+                    promised.displaced = Some(entry);
+                }
             }
             _ => return Err(format!("bad promise line {line:?}").into()),
         }
@@ -495,12 +535,169 @@ fn record(
 }
 
 // ---------------------------------------------------------------------------
+// Repair fixtures: committed rows plus the journals that can rebuild them.
+
+fn put_file(path: &Path, bytes: &[u8]) -> Res<()> {
+    let mut file = StdFs.create(path)?;
+    file.write_all(bytes)?;
+    file.sync()?;
+    Ok(())
+}
+
+/// Refuse a filesystem that cannot enforce the repair's no-replace rename.
+fn probe_rename_command(args: &[String]) -> Res<()> {
+    let [dir] = args else {
+        return Err("probe-rename needs <dir>".into());
+    };
+    let dir = Path::new(dir);
+    let from = dir.join("rename-source");
+    let taken = dir.join("rename-taken");
+    let free = dir.join("rename-free");
+    put_file(&from, b"source")?;
+    put_file(&taken, b"taken")?;
+    match StdFs.rename_new(&from, &taken) {
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        _ => return Err("LazyFS must support RENAME_NOREPLACE and refuse occupied names".into()),
+    }
+    StdFs.rename_new(&from, &free)?;
+    if StdFs.read(&taken)? != b"taken" || StdFs.read(&free)? != b"source" {
+        return Err("LazyFS no-replace rename changed the wrong file".into());
+    }
+    StdFs.remove(&taken)?;
+    StdFs.remove(&free)?;
+    StdFs.sync_dir(dir)?;
+    Ok(())
+}
+
+/// The fault planted before recovery starts.
+#[derive(Debug, Clone, Copy)]
+enum RepairScenario {
+    Missing,
+    Mismatched,
+}
+
+impl RepairScenario {
+    fn parse(value: &str) -> Res<Self> {
+        match value {
+            "missing" => Ok(Self::Missing),
+            "mismatched" => Ok(Self::Mismatched),
+            _ => Err("repair scenario needs missing or mismatched".into()),
+        }
+    }
+}
+
+fn prepare_repair_command(args: &[String]) -> Res<()> {
+    let [dir, promises, scenario] = args else {
+        return Err("prepare-repair needs <dir> <promises> missing|mismatched".into());
+    };
+    let scenario = RepairScenario::parse(scenario)?;
+    write_command(&[dir.clone(), promises.clone(), "--no-publish".to_owned()])?;
+    prepare_repair(Path::new(dir), Path::new(promises), scenario)
+}
+
+fn prepare_repair(dir: &Path, promises: &Path, scenario: RepairScenario) -> Res<()> {
+    let session = dir.join("session");
+    let mut store = open_library(dir)?;
+    let journals: Vec<_> = observe(&session, &store)?
+        .files
+        .into_iter()
+        .filter(|(path, _)| is_journal(path))
+        .collect();
+    if journals.is_empty() {
+        return Err("repair fixture has no journals".into());
+    }
+    let ours = SessionDir::new(SESSION, StdFs, &session).lock()?;
+    salvage(&mut SessionStore::new(ours, &mut store), length()?)?;
+    let rows = store.segments(SESSION)?;
+    let row = rows.first().ok_or("repair fixture has no rows")?;
+    // Restore all journals so the missing file's audio can be proved.
+    for (path, bytes) in journals {
+        put_file(&path, &bytes)?;
+    }
+    let mut log = repair_promises(promises, &rows)?;
+    let name = segment_file_name(row.track(), row.range());
+    log.line(&format!("repair {name}"))?;
+    StdFs.remove(&session.join(&name))?;
+    match scenario {
+        RepairScenario::Missing => {}
+        RepairScenario::Mismatched => plant_mismatch(&session, &name, &rows, &mut log)?,
+    }
+    StdFs.sync_dir(&session)?;
+    Ok(())
+}
+
+fn repair_promises(path: &Path, rows: &[SegmentRow]) -> Res<PromiseLog> {
+    StdFs.remove(path)?;
+    let mut log = PromiseLog::create(path)?;
+    for (track, at) in TRACKS {
+        log.start(track, SampleIndex::new(at))?;
+        let end = rows
+            .iter()
+            .filter(|r| r.track() == track)
+            .map(|r| r.range().end())
+            .max()
+            .ok_or("track has no rows")?;
+        log.durable(track, end)?;
+    }
+    log.rows(rows)?;
+    if let Some(parent) = path.parent() {
+        StdFs.sync_dir(parent)?;
+    }
+    Ok(log)
+}
+
+fn plant_mismatch(
+    session: &Path,
+    name: &str,
+    rows: &[SegmentRow],
+    log: &mut PromiseLog,
+) -> Res<()> {
+    let other = rows.get(1).ok_or("repair fixture needs another segment")?;
+    let junk = StdFs.read(&session.join(segment_file_name(other.track(), other.range())))?;
+    put_file(&session.join(name), &junk)?;
+    log.line(&format!("displaced {name} {}", hex(&Sha256::digest(&junk))))?;
+    // Occupied names make recovery use a later suffix without replacing them.
+    for (suffix, bytes) in [
+        (".mismatched", b"first kept file".as_slice()),
+        (".mismatched.1", b"second kept file".as_slice()),
+    ] {
+        let kept = format!("{name}{suffix}");
+        put_file(&session.join(&kept), bytes)?;
+        log.line(&format!("keep {kept} {}", hex(&Sha256::digest(bytes))))?;
+    }
+    Ok(())
+}
+
+/// Preservation is checked before and after recovery, and after cache loss.
+fn check_kept(session: &Path, promised: &Promised, seen: &Observed, repaired: bool) -> Res<()> {
+    let matches = |name: &str, hash: &str| {
+        seen.files
+            .get(&session.join(name))
+            .is_some_and(|bytes| hex(&Sha256::digest(bytes)) == hash)
+    };
+    for (name, hash) in &promised.kept {
+        if !matches(name, hash) {
+            return Err(format!("kept file {name} was lost or replaced").into());
+        }
+    }
+    if let Some((name, hash)) = &promised.displaced {
+        let aside = format!("{name}.mismatched.2");
+        if !matches(&aside, hash) && (repaired || !matches(name, hash)) {
+            return Err(format!("mismatched file {name} was lost or replaced").into());
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // check
 
 /// The session's files and the store's rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Observed {
+    /// Each session file and its bytes.
     files: BTreeMap<PathBuf, Vec<u8>>,
+    /// The rows committed for this session.
     rows: Vec<SegmentRow>,
 }
 
@@ -643,18 +840,36 @@ fn check_after(session: &Path, promised: &Promised, after: &Observed) -> Res<()>
             .into());
         }
     }
+    check_file_names(session, promised, after)
+}
+
+/// Only the planted repair can leave aside files after a crash and restart.
+fn is_repair_aside(path: &Path, promised: &Promised) -> bool {
+    let (Some(name), Some(repair)) = (
+        path.file_name().and_then(|n| n.to_str()),
+        &promised.repair_file,
+    ) else {
+        return false;
+    };
+    let base = format!("{repair}.mismatched");
+    name == base
+        || name
+            .strip_prefix(&format!("{base}."))
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+fn check_file_names(session: &Path, promised: &Promised, after: &Observed) -> Res<()> {
     let named: BTreeSet<PathBuf> = after
         .rows
         .iter()
         .map(|r| session.join(segment_file_name(r.track(), r.range())))
         .collect();
-    // The session's marks are the one other file a recording leaves.
+    // Marks and repair findings accompany the segments.
     let marks = session.join(MARKS_FILE_NAME);
-    if let Some(orphan) = after
-        .files
-        .keys()
-        .find(|p| !named.contains(*p) && **p != marks)
-    {
+    let findings = session.join(FINDINGS_FILE_NAME);
+    if let Some(orphan) = after.files.keys().find(|p| {
+        !named.contains(*p) && **p != marks && **p != findings && !is_repair_aside(p, promised)
+    }) {
         return Err(format!("a file without a row: {}", orphan.display()).into());
     }
     Ok(())
@@ -691,36 +906,71 @@ fn write_end(path: &Path, session: &Path, after: &Observed) -> Res<()> {
     Ok(())
 }
 
-fn check_command(args: &[String]) -> Res<()> {
-    let (Some(dir), Some(promises_path)) = (args.first(), args.get(1)) else {
-        return Err("check needs <dir> <promises>".into());
-    };
-    let mut recovered = false;
-    let mut end = None;
-    let mut rest = args[2..].iter();
-    while let Some(arg) = rest.next() {
-        match arg.as_str() {
-            "--recovered" => recovered = true,
-            "--end" => {
-                end = Some(PathBuf::from(
-                    rest.next().ok_or("check: --end needs <file>")?,
-                ));
-            }
-            other => return Err(format!("check: unknown option {other}").into()),
-        }
-    }
-    let dir = PathBuf::from(dir);
-    let session = dir.join("session");
-    let promised = read_promises(Path::new(promises_path))?;
-    let length = length()?;
-    let mut store = open_library(&dir)?;
+/// Options read at the command boundary.
+#[derive(Debug, Default)]
+struct CheckOptions {
+    /// Require a completed recovery to have survived another crash.
+    recovered: bool,
+    /// Admit a broken row before recovery if journals hold its audio.
+    repair: bool,
+    /// Require the reference run to repair exactly one row.
+    expect_repair: bool,
+    /// Stop after this recorder operation for the shell to kill the process.
+    stop_after: Option<usize>,
+    /// Write the recovered file names, hashes and rows here.
+    end: Option<PathBuf>,
+}
 
-    let before = observe(&session, &store)?;
-    let in_rows = row_samples(&session, &before).map_err(|e| format!("before salvage: {e}"))?;
-    let in_journals = journal_samples(&before).map_err(|e| format!("before salvage: {e}"))?;
+impl CheckOptions {
+    fn parse(args: &[String]) -> Res<Self> {
+        let mut options = Self::default();
+        let mut rest = args.iter();
+        while let Some(arg) = rest.next() {
+            match arg.as_str() {
+                "--recovered" => options.recovered = true,
+                "--repair" => options.repair = true,
+                "--expect-repair" => options.expect_repair = true,
+                "--stop-after" => {
+                    options.stop_after = Some(
+                        rest.next()
+                            .ok_or("check: --stop-after needs N")?
+                            .parse::<usize>()?,
+                    );
+                }
+                "--end" => {
+                    options.end = Some(PathBuf::from(
+                        rest.next().ok_or("check: --end needs <file>")?,
+                    ));
+                }
+                other => return Err(format!("check: unknown option {other}").into()),
+            }
+        }
+        Ok(options)
+    }
+}
+
+fn check_before(
+    session: &Path,
+    promised: &Promised,
+    before: &Observed,
+    options: &CheckOptions,
+) -> Res<()> {
+    check_kept(session, promised, before, options.recovered)?;
+    let mut proven = before.clone();
+    if options.repair && !options.recovered {
+        proven.rows.retain(|row| {
+            let one = Observed {
+                files: before.files.clone(),
+                rows: vec![*row],
+            };
+            row_samples(session, &one).is_ok()
+        });
+    }
+    let in_rows = row_samples(session, &proven)?;
+    let in_journals = journal_samples(before)?;
     let held = in_rows.union(&in_journals).copied().collect();
-    check_durable(&promised, &held).map_err(|e| format!("before salvage: {e}"))?;
-    if recovered
+    check_durable(promised, &held)?;
+    if options.recovered
         && let Some(left) = before
             .files
             .keys()
@@ -732,15 +982,50 @@ fn check_command(args: &[String]) -> Res<()> {
         )
         .into());
     }
+    Ok(())
+}
 
-    let ours = SessionDir::new(SESSION, StdFs, &session).lock()?;
+fn stopped_marker(promises: &Path) -> PathBuf {
+    let mut marker = promises.as_os_str().to_os_string();
+    marker.push(".stopped");
+    PathBuf::from(marker)
+}
+
+fn check_command(args: &[String]) -> Res<()> {
+    let (Some(dir), Some(promises_path)) = (args.first(), args.get(1)) else {
+        return Err("check needs <dir> <promises>".into());
+    };
+    let options = CheckOptions::parse(&args[2..])?;
+    check(Path::new(dir), Path::new(promises_path), &options)
+}
+
+fn check(dir: &Path, promises_path: &Path, options: &CheckOptions) -> Res<()> {
+    let session = dir.join("session");
+    let promised = read_promises(promises_path)?;
+    let length = length()?;
+    let mut store = open_library(dir)?;
+
+    let before = observe(&session, &store)?;
+    check_before(&session, &promised, &before, options)
+        .map_err(|e| format!("before salvage: {e}"))?;
+    let fs = CountingFs {
+        ops: Arc::new(AtomicUsize::new(0)),
+        stop_after: options.stop_after,
+        halted: Arc::new(AtomicBool::new(false)),
+        marker: stopped_marker(promises_path),
+    };
+    let ours = SessionDir::new(SESSION, fs.clone(), &session).lock()?;
     let first = salvage(&mut SessionStore::new(ours.clone(), &mut store), length)?;
-    let after = observe(&session, &store)?;
-    check_after(&session, &promised, &after).map_err(|e| format!("after salvage: {e}"))?;
-    if let Some(end) = end {
-        write_end(&end, &session, &after)?;
+    if options.expect_repair && first.repaired().len() != 1 {
+        return Err(format!("expected one repair, got {}", first.repaired().len()).into());
     }
-    if recovered && after != before {
+    let after = observe(&session, &store)?;
+    check_kept(&session, &promised, &after, true)?;
+    check_after(&session, &promised, &after).map_err(|e| format!("after salvage: {e}"))?;
+    if let Some(end) = &options.end {
+        write_end(end, &session, &after)?;
+    }
+    if options.recovered && after != before {
         return Err("a completed salvage didn't last: salvage changed the disk again".into());
     }
 
@@ -748,6 +1033,11 @@ fn check_command(args: &[String]) -> Res<()> {
     if second != Published::default() || observe(&session, &store)? != after {
         return Err("a second salvage changed something".into());
     }
+    writeln!(io::stdout(), "ops {}", fs.total())?;
+    report_check(&promised, &after, &first)
+}
+
+fn report_check(promised: &Promised, after: &Observed, first: &Published) -> Res<()> {
     let durable: Vec<String> = promised
         .durable
         .iter()
@@ -763,4 +1053,113 @@ fn check_command(args: &[String]) -> Res<()> {
         durable.join(" ")
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each test gets its own fixture; both harnesses can run tests in parallel.
+    fn fixture(scenario: RepairScenario, test: &str) -> Res<(PathBuf, PathBuf)> {
+        let root =
+            std::env::temp_dir().join(format!("nota-lazyfs-repair-{test}-{}", std::process::id()));
+        if root.exists() {
+            std::fs::remove_dir_all(&root)?;
+        }
+        StdFs.create_dir(&root)?;
+        let rec = root.join("rec");
+        StdFs.create_dir(&rec)?;
+        let promises = root.join("promises");
+        write_command(&[
+            rec.to_string_lossy().into_owned(),
+            promises.to_string_lossy().into_owned(),
+            "--no-publish".to_owned(),
+        ])?;
+        prepare_repair(&rec, &promises, scenario)?;
+        Ok((rec, promises))
+    }
+
+    /// A planted fault must really require repair, then stay fixed on reopening.
+    fn recovery(scenario: RepairScenario, test: &str) -> Res<()> {
+        let (rec, promises) = fixture(scenario, test)?;
+        // The ordinary check rejects the broken row, so this is a repair case.
+        assert!(check(&rec, &promises, &CheckOptions::default()).is_err());
+        check(
+            &rec,
+            &promises,
+            &CheckOptions {
+                repair: true,
+                expect_repair: true,
+                ..CheckOptions::default()
+            },
+        )?;
+        // Reopening must find the row proved and nothing left to salvage.
+        check(
+            &rec,
+            &promises,
+            &CheckOptions {
+                recovered: true,
+                ..CheckOptions::default()
+            },
+        )?;
+        if let Some(root) = rec.parent() {
+            std::fs::remove_dir_all(root)?;
+        }
+        Ok(())
+    }
+
+    /// Journals must repair a committed row whose file is missing.
+    #[test]
+    fn missing_fixture_needs_one_repair_and_stays_fixed() -> Res<()> {
+        recovery(RepairScenario::Missing, "missing")
+    }
+
+    /// Journals must repair a mismatched row without replacing occupied names.
+    #[test]
+    fn mismatched_fixture_needs_one_repair_and_stays_fixed() -> Res<()> {
+        recovery(RepairScenario::Mismatched, "mismatched")
+    }
+
+    /// Independent hashes must reject replacement of either occupied aside name.
+    #[test]
+    fn preservation_promises_detect_replacement() -> Res<()> {
+        let (rec, promises) = fixture(RepairScenario::Mismatched, "replacement")?;
+        let session = rec.join("session");
+        let promised = read_promises(&promises)?;
+        let seen = observe(&session, &open_library(&rec)?)?;
+        check_kept(&session, &promised, &seen, false)?;
+        for (name, _) in &promised.kept {
+            // Replace each name separately so either overwritten file fails.
+            let mut replaced = seen.clone();
+            replaced
+                .files
+                .insert(session.join(name), b"replacement".to_vec());
+            assert!(check_kept(&session, &promised, &replaced, false).is_err());
+        }
+        if let Some(root) = rec.parent() {
+            std::fs::remove_dir_all(root)?;
+        }
+        Ok(())
+    }
+
+    /// The old mismatched audio must survive the move to its aside name.
+    #[test]
+    fn preservation_promises_detect_lost_mismatched_audio() -> Res<()> {
+        let (rec, promises) = fixture(RepairScenario::Mismatched, "lost")?;
+        let session = rec.join("session");
+        let promised = read_promises(&promises)?;
+        let mut seen = observe(&session, &open_library(&rec)?)?;
+        check_kept(&session, &promised, &seen, false)?;
+        let (name, _) = promised
+            .displaced
+            .as_ref()
+            .ok_or("no displaced file promise")?;
+        // Removing the only copy must fail even before repair runs.
+        seen.files.remove(&session.join(name));
+        assert!(check_kept(&session, &promised, &seen, false).is_err());
+        if let Some(root) = rec.parent() {
+            std::fs::remove_dir_all(root)?;
+        }
+        Ok(())
+    }
 }

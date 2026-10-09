@@ -6,7 +6,7 @@
 # Not run in CI: it needs FUSE, a LazyFS build and a few minutes. Run it by
 # hand after changing the write path, journal, salvage or the store.
 #
-# It runs five kinds of crash point, numbered in this order:
+# It runs six kinds of crash point, numbered in this order:
 #
 #   ops    after the Nth disk-changing recorder operation. `lazyfs_crash
 #          write --stop-after N` stops dead there and the script SIGKILLs
@@ -35,6 +35,12 @@
 #          journals leave salvage nothing to report, so its findings file
 #          isn't written here.) Journal deletes need no point of their own:
 #          LazyFS writes unlinks through.
+#   repair   missing and mismatched committed segments with their original
+#          journals retained. Each scenario stops after every recorder
+#          operation in recovery, including syncs and no-replace renames,
+#          and crashes LazyFS after every write and fsync it logs. Restart
+#          must recover all promised audio and rows, and keep the original
+#          mismatched file and two occupied aside names byte for byte.
 #
 # After each crash, on a fresh mount of what reached the disk:
 #   1. `lazyfs_crash check`: salvage, then the invariants, against the
@@ -71,7 +77,8 @@
 #                                [--to N] [--scratch DIR] [--keep]
 #   LAZYFS   the LazyFS binary
 #            (default ~/.local/share/nota/lazyfs/lazyfs/build/lazyfs)
-#   --only KIND    run only the ops, sqlite, torn, reorder or salvage
+#   Repair points need a LazyFS build that supports RENAME_NOREPLACE.
+#   --only KIND    run only the ops, sqlite, torn, reorder, salvage or repair
 #            points (default: all)
 #   --step K run every Kth crash point (default 1: all of them)
 #   --from N, --to N  the first and last point to run, in the numbering
@@ -122,8 +129,8 @@ command -v fusermount3 > /dev/null || die "fusermount3 not found"
 [[ $FROM =~ ^[1-9][0-9]{0,8}$ ]] || die "--from needs a positive number"
 [[ -z $TO || $TO =~ ^[1-9][0-9]{0,8}$ ]] || die "--to needs a positive number"
 [[ -z $TO || $FROM -le $TO ]] || die "--from $FROM is after --to $TO"
-[[ -z $ONLY || $ONLY =~ ^(ops|sqlite|torn|reorder|salvage)$ ]] ||
-  die "--only needs ops, sqlite, torn, reorder or salvage"
+[[ -z $ONLY || $ONLY =~ ^(ops|sqlite|torn|reorder|salvage|repair)$ ]] ||
+  die "--only needs ops, sqlite, torn, reorder, salvage or repair"
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 cargo build --manifest-path "$REPO/Cargo.toml" --example lazyfs_crash --locked --quiet
@@ -310,11 +317,42 @@ if [[ -z $ONLY || $ONLY == salvage ]]; then
   file_ops "$WORK/salvage-ref" | count_ops > "$WORK/salvage-counts"
 fi
 
+# Build each repair input on disk, then count one recovery on LazyFS.
+# --expect-repair makes a scenario that no longer reaches repair fail here.
+prepare_repairs() {
+  local scenario ref count
+  mount_lazyfs "$WORK/repair-probe"
+  "$BIN" probe-rename "$WORK/repair-probe/mnt" ||
+    die "repair needs a LazyFS build with RENAME_NOREPLACE support (set LAZYFS)"
+  unmount
+  for scenario in missing mismatched; do
+    mkdir -p "$WORK/repair-$scenario-base/rec" "$WORK/repair-$scenario-ref/root"
+    "$BIN" prepare-repair "$WORK/repair-$scenario-base/rec" \
+      "$WORK/repair-$scenario-base/promises" "$scenario" > /dev/null
+    ref=$WORK/repair-$scenario-ref
+    cp -a "$WORK/repair-$scenario-base/rec" "$ref/root/rec"
+    mount_lazyfs "$ref" 1
+    count=$("$BIN" check "$ref/mnt/rec" "$WORK/repair-$scenario-base/promises" \
+      --repair --expect-repair | sed -n 's/^ops //p') ||
+      die "uninterrupted $scenario repair failed (see $ref)"
+    [[ $count =~ ^[1-9][0-9]*$ ]] || die "$scenario repair reported no operations"
+    echo "$count" > "$WORK/repair-$scenario-ops"
+    file_ops "$ref" | count_ops > "$WORK/repair-$scenario-counts"
+    clear_cache "$ref"
+    "$BIN" check "$ref/mnt/rec" "$WORK/repair-$scenario-base/promises" \
+      --recovered > /dev/null || die "$scenario repair didn't survive cache loss"
+    unmount
+    # The operation log above covers only the first recovery.
+  done
+}
+if [[ -z $ONLY || $ONLY == repair ]]; then prepare_repairs; fi
+
 # The points, one per line: "ops N", "sqlite <op> <file> <k>" (crash after
 # the kth op on the file), "torn <file> <k> <half>" (the kth write to the
 # file, with only that half on the disk), "reorder <file> <group> <i>" (the
 # group's writes up to the ith on the disk, except the one before it) or
-# "salvage <op> <file> <k>" (as sqlite, while salvaging).
+# "salvage <op> <file> <k>" (as sqlite, while salvaging), or
+# "repair <scenario> ops <k>" / "repair <scenario> <op> <file> <k>".
 POINTS=$WORK/points
 : > "$POINTS"
 if [[ -z $ONLY || $ONLY == ops ]]; then
@@ -340,6 +378,19 @@ if [[ -z $ONLY || $ONLY == salvage ]]; then
   # The shared-memory index isn't data; SQLite rebuilds it.
   awk '$2 != "library.db-shm" { for (k = 1; k <= $3; k++) print "salvage", $1, $2, k }' \
     "$WORK/salvage-counts" >> "$POINTS"
+fi
+if [[ -z $ONLY || $ONLY == repair ]]; then
+  for scenario in missing mismatched; do
+    count=$(cat "$WORK/repair-$scenario-ops")
+    for ((n = 1; n <= count; n++)); do echo "repair $scenario ops $n"; done >> "$POINTS"
+    awk -v scenario="$scenario" '$2 != "library.db-shm" {
+      for (k = 1; k <= $3; k++) print "repair", scenario, $1, $2, k
+    }' "$WORK/repair-$scenario-counts" >> "$POINTS"
+    grep -q '^write session/seg-.*\.flac.tmp ' "$WORK/repair-$scenario-counts" ||
+      die "no segment writes in $scenario repair (see $WORK/repair-$scenario-counts)"
+    grep -q '^fsync session/seg-.*\.flac.tmp ' "$WORK/repair-$scenario-counts" ||
+      die "no segment syncs in $scenario repair (see $WORK/repair-$scenario-counts)"
+  done
 fi
 mapfile -t POINT_LINES < "$POINTS"
 TOTAL=${#POINT_LINES[@]}
@@ -372,8 +423,8 @@ TO=${TO:-$TOTAL}
 [[ $FROM -le $TO ]] || die "--from $FROM is past the last point, $TO"
 
 KINDS=$(awk '{ n[$1]++ } END {
-  printf "%d ops, %d sqlite, %d torn, %d reorder, %d salvage",
-    n["ops"], n["sqlite"], n["torn"], n["reorder"], n["salvage"]
+  printf "%d ops, %d sqlite, %d torn, %d reorder, %d salvage, %d repair",
+    n["ops"], n["sqlite"], n["torn"], n["reorder"], n["salvage"], n["repair"]
 }' "$POINTS")
 echo "LazyFS crash checks: $TOTAL points ($KINDS); points $FROM..$TO step $STEP; work dir $WORK"
 
@@ -391,6 +442,10 @@ describe() {
     torn) echo "write $2 of $1 torn, only half $3 on disk" ;;
     reorder) echo "write group $2 of $1: writes up to $3 on disk except $(($3 - 1))" ;;
     salvage) echo "in salvage, after $1 $3 of $2" ;;
+    repair)
+      if [[ $2 == ops ]]; then echo "in $1 repair, after recorder operation $3"
+      else echo "in $1 repair, after $2 $4 of $3"; fi
+      ;;
   esac
 }
 
@@ -408,8 +463,10 @@ fail() {
 # exactly as recorded there. Unmounts; a passed point is removed.
 check_point() {
   local n=$1 end=${2:-}
+  local mode=()
+  [[ ${POINT[0]} != repair ]] || mode=(--repair)
   local dir=$WORK/point-$n
-  if ! "$BIN" check "$dir/mnt/rec" "$dir/promises" --end "$dir/end" > "$dir/check.out" 2>&1; then
+  if ! "$BIN" check "$dir/mnt/rec" "$dir/promises" "${mode[@]}" --end "$dir/end" > "$dir/check.out" 2>&1; then
     fail "$n" "after the crash" "$dir/check.out"
     unmount
     return 0
@@ -470,6 +527,36 @@ run_ops_point() {
   check_point "$n"
 }
 
+# Recorder-operation points cover renames, removals and directory syncs,
+# which LazyFS's write/fsync injections cannot reach.
+run_repair_ops_point() {
+  local n=$1 scenario=$2 k=$3
+  local dir=$WORK/point-$n status=0
+  cp -a "$WORK/repair-$scenario-base/rec" "$dir/root/rec"
+  cp "$WORK/repair-$scenario-base/promises" "$dir/promises"
+  mount_lazyfs "$dir"
+  "$BIN" check "$dir/mnt/rec" "$dir/promises" --repair --stop-after "$k" \
+    > "$dir/write.out" 2>&1 &
+  WRITER_PID=$!
+  stopped_or_done() { [[ -e $dir/promises.stopped ]] || ! kill -0 "$WRITER_PID" 2> /dev/null; }
+  wait_for 60 stopped_or_done || die "point $n: repair neither stopped nor finished"
+  if [[ ! -e $dir/promises.stopped ]]; then
+    wait "$WRITER_PID" || status=$?
+    WRITER_PID=
+    fail "$n" "repair finished (status $status) without reaching operation $k" "$dir/write.out"
+    unmount
+    return 0
+  fi
+  kill -9 "$WRITER_PID"
+  wait "$WRITER_PID" 2> /dev/null || true
+  WRITER_PID=
+  POINT_REACHED=1
+  clear_cache "$dir"
+  unmount
+  mount_lazyfs "$dir"
+  check_point "$n"
+}
+
 # run_fault_point N RUN INJECTION: LazyFS injects the fault and crashes
 # itself while RUN runs: `write` records afresh; `salvage` checks (and so
 # salvages) a copy of the unpublished recording. The backing directory is
@@ -479,7 +566,12 @@ run_fault_point() {
   local dir=$WORK/point-$n
   local end='' what="the writer"
   local cmd=("$BIN" write "$dir/mnt/rec" "$dir/promises")
-  if [[ $run == salvage ]]; then
+  if [[ $run == repair-* ]]; then
+    cp -a "$WORK/$run-base/rec" "$dir/root/rec"
+    cp "$WORK/$run-base/promises" "$dir/promises"
+    what="$run"
+    cmd=("$BIN" check "$dir/mnt/rec" "$dir/promises" --repair)
+  elif [[ $run == salvage ]]; then
     cp -a "$WORK/salvage-base/rec" "$dir/root/rec"
     cp "$WORK/salvage-base/promises" "$dir/promises"
     end=$WORK/salvage-end
@@ -490,7 +582,7 @@ run_fault_point() {
   # LazyFS reports a fault it can't parse, and runs without it.
   ! grep -q '\[error\]' "$dir/lazyfs.out" ||
     die "point $n: LazyFS rejected the fault (see $dir/lazyfs.out)"
-  [[ $run == salvage ]] || mkdir "$dir/mnt/rec"
+  [[ $run != write ]] || mkdir "$dir/mnt/rec"
 
   "${cmd[@]}" > "$dir/write.out" 2>&1 &
   WRITER_PID=$!
@@ -524,6 +616,7 @@ run_fault_point() {
     unmount
     return 0
   fi
+  POINT_REACHED=1
   unmount
   mount_lazyfs "$dir"
   check_point "$n" "$end"
@@ -551,6 +644,19 @@ op=\"$1\"
 occurrence=$3
 crash=true"
       ;;
+    repair)
+      if [[ $2 == ops ]]; then
+        run_repair_ops_point "$n" "$1" "$3"
+      else
+        run_fault_point "$n" "repair-$1" "[[injection]]
+type=\"clear-cache\"
+from=\"$root/$3\"
+timing=\"after\"
+op=\"$2\"
+occurrence=$4
+crash=true"
+      fi
+      ;;
     torn)
       run_fault_point "$n" write "[[injection]]
 type=\"torn-op\"
@@ -575,10 +681,20 @@ persist=[$persist]"
 }
 
 UNREACHED=0
+REPAIR_SELECTED=(0 0)
+REPAIR_REACHED=(0 0)
+REPAIR_PASSED=(0 0)
 for ((n = FROM; n <= TO; n += STEP)); do
   read -r -a POINT <<< "${POINT_LINES[n - 1]}"
   POINT_DESC=$(describe "${POINT[@]}")
+  POINT_REACHED=0
   run_point "$n" "${POINT[@]}"
+  if [[ ${POINT[0]} == repair ]]; then
+    scenario_index=0
+    [[ ${POINT[1]} == missing ]] || scenario_index=1
+    REPAIR_SELECTED[scenario_index]=$((REPAIR_SELECTED[scenario_index] + 1))
+    REPAIR_REACHED[scenario_index]=$((REPAIR_REACHED[scenario_index] + POINT_REACHED))
+  fi
   if [[ -e $WORK/point-$n.unreached ]]; then
     UNREACHED=$((UNREACHED + 1))
     echo "  point $n unreached (${POINT_DESC}): this run made fewer operations"
@@ -587,6 +703,9 @@ for ((n = FROM; n <= TO; n += STEP)); do
     sed 's/^/  /' "$WORK/point-$n/result" >&2
   else
     PASS=$((PASS + 1))
+    if [[ ${POINT[0]} == repair ]]; then
+      REPAIR_PASSED[scenario_index]=$((REPAIR_PASSED[scenario_index] + 1))
+    fi
   fi
   if (((n - FROM) / STEP % 20 == 19)); then
     echo "  ... point $n: $PASS passed, ${#FAILED[@]} failed ($((SECONDS - START))s)"
@@ -595,6 +714,17 @@ done
 
 RAN=$((PASS + ${#FAILED[@]}))
 echo "Ran $RAN crash points in $((SECONDS - START))s: $PASS passed, ${#FAILED[@]} failed, $UNREACHED unreached."
+if [[ -z $ONLY || $ONLY == repair ]]; then
+  for scenario in missing mismatched; do
+    available=$(awk -v s="$scenario" '$1 == "repair" && $2 == s { n++ } END { print n+0 }' "$POINTS")
+    scenario_index=0
+    [[ $scenario == missing ]] || scenario_index=1
+    selected=${REPAIR_SELECTED[scenario_index]}
+    reached=${REPAIR_REACHED[scenario_index]}
+    passed=${REPAIR_PASSED[scenario_index]}
+    echo "Repair $scenario: $available available, $selected selected, $reached reached, $passed passed, $((selected - passed)) failed, $((selected - reached)) unreached."
+  done
+fi
 if [[ ${#FAILED[@]} -gt 0 ]]; then
   echo "Failed points: ${FAILED[*]} (details in $WORK/point-N/)"
   exit 1
