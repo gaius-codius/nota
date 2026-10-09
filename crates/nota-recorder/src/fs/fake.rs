@@ -74,7 +74,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use super::{
-    FileSyncer, Fs, FsFile, Synced, is_a_directory, same_directory, valid_dir, valid_path,
+    FileSyncer, Fs, FsFile, MAX_READ_LEN, Synced, is_a_directory, same_directory, too_large,
+    valid_dir, valid_path,
 };
 
 /// One operation on a [`FakeFs`], as recorded in its log.
@@ -108,6 +109,19 @@ pub enum Op {
     Read(PathBuf),
     /// [`Fs::list`].
     List(PathBuf),
+}
+
+/// An operation [`FakeFs::fail_on`] can fail for one path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fault {
+    /// [`Fs::create`] at the path.
+    Create,
+    /// [`Fs::rename`] from or to the path.
+    Rename,
+    /// [`Fs::remove`] of the path.
+    Remove,
+    /// [`Fs::read`] of the path.
+    Read,
 }
 
 /// What survives a crash beyond the durable view (see the module docs).
@@ -373,6 +387,9 @@ struct State {
     /// An injected failure: after this many more operations, fail the next
     /// one with this error.
     fail: Option<(usize, io::ErrorKind)>,
+    /// Injected failures that last: every operation of this kind on this
+    /// path fails with this error.
+    faults: Vec<(PathBuf, Fault, io::ErrorKind)>,
     crashed: bool,
     /// The directories locked by a live [`FakeLock`].
     locked: BTreeSet<PathBuf>,
@@ -393,6 +410,7 @@ impl State {
             attempted: 0,
             budget: None,
             fail: None,
+            faults: Vec::new(),
             crashed: false,
             locked: BTreeSet::new(),
             stalls: Vec::new(),
@@ -423,6 +441,14 @@ impl State {
             *after -= 1;
         }
         Ok(())
+    }
+
+    /// Fails with the lasting fault set for `op` on `path`, if there is one.
+    fn fault(&self, op: Fault, path: &Path) -> io::Result<()> {
+        match self.faults.iter().find(|(p, o, _)| *o == op && p == path) {
+            Some(&(_, _, kind)) => Err(io::Error::new(kind, "injected failure")),
+            None => Ok(()),
+        }
     }
 
     fn inode(&mut self, id: InodeId) -> io::Result<&mut Inode> {
@@ -593,6 +619,15 @@ impl FakeFs {
         self.lock().fail = Some((ops, kind));
     }
 
+    /// Fails every `op` on `path` from now on with an error of `kind`, as an
+    /// immutable file (`EPERM`) or a failing sector (`EIO`) would, without
+    /// crashing. Each still counts as an operation attempted. It lasts until
+    /// a crash: the filesystem [`Self::crash`] or [`Self::copy_disk`]
+    /// returns has no faults.
+    pub fn fail_on(&self, path: &Path, op: Fault, kind: io::ErrorKind) {
+        self.lock().faults.push((path.to_path_buf(), op, kind));
+    }
+
     /// Holds back every fsync of the file created at `path`, from now until
     /// the returned [`Stall`] is released or dropped (see the module docs).
     /// A held fsync isn't attempted yet: it counts towards
@@ -687,6 +722,7 @@ impl Fs for FakeFs {
         valid_path(path)?;
         let mut state = self.lock();
         state.admit()?;
+        state.fault(Fault::Create, path)?;
         state.parent_exists(path)?;
         if state.names.exists(path) {
             return Err(exists());
@@ -722,6 +758,8 @@ impl Fs for FakeFs {
         same_directory(from, to)?;
         let mut state = self.lock();
         state.admit()?;
+        state.fault(Fault::Rename, from)?;
+        state.fault(Fault::Rename, to)?;
         if state.names.dirs.contains(from) {
             return Err(is_a_directory());
         }
@@ -765,6 +803,7 @@ impl Fs for FakeFs {
         valid_path(path)?;
         let mut state = self.lock();
         state.admit()?;
+        state.fault(Fault::Remove, path)?;
         if state.names.dirs.contains(path) {
             return Err(is_a_directory());
         }
@@ -778,11 +817,15 @@ impl Fs for FakeFs {
         valid_path(path)?;
         let mut state = self.lock();
         state.admit()?;
+        state.fault(Fault::Read, path)?;
         if state.names.dirs.contains(path) {
             return Err(is_a_directory());
         }
         let id = *state.names.files.get(path).ok_or_else(not_found)?;
         let data = state.inode(id)?.data.clone();
+        if u64::try_from(data.len()).map_or(true, |n| n > MAX_READ_LEN) {
+            return Err(too_large());
+        }
         state.log.push(Op::Read(path.to_path_buf()));
         Ok(data)
     }

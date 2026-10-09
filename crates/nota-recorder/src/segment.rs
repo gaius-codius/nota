@@ -198,12 +198,15 @@ fn temp_path(dir: &Path, track: TrackId, range: SampleRange) -> PathBuf {
     dir.join(format!("{}.tmp", segment_file_name(track, range)))
 }
 
-/// Whether `path` is a segment temp file: never the only copy of anything
-/// (its journals are kept until after the rename), so salvage removes it.
+/// Whether `path` is a segment temp file: exactly the name [`temp_path`]
+/// gives some segment, never the only copy of anything (its journals are
+/// kept until after the rename), so salvage removes it. Other names that
+/// only look like one are left alone: nota never wrote them.
 fn is_temp_segment(path: &Path) -> bool {
     path.file_name()
         .and_then(|n| n.to_str())
-        .is_some_and(|n| n.starts_with("seg-") && n.ends_with(".flac.tmp"))
+        .and_then(|n| n.strip_suffix(".tmp"))
+        .is_some_and(|n| segment_in_file_name(OsStr::new(n)).is_some())
 }
 
 #[cfg(test)]

@@ -258,14 +258,13 @@ fn record_into(fs: &FakeFs, run: Run, promised: &mut Promised) -> Result<(), Str
 }
 
 /// One publish run as the [`Publisher`](crate::segment::Publisher) makes
-/// it: what failed, or couldn't be read, stays pending for the next.
+/// it: every journal still on disk afterwards (its run failed, or it
+/// couldn't be read or deleted) stays pending for the next.
 fn publish(store: &mut SessionStore<FakeFs, FakeStore>, pending: &mut Vec<FinishedJournal>) {
-    if let Ok(published) = publish_journals(store, length(), pending) {
-        *pending = published
-            .unread()
-            .iter()
-            .map(|(j, _)| FinishedJournal::new(j.session(), j.id()))
-            .collect();
+    let _ = publish_journals(store, length(), pending);
+    let dir = store.session();
+    if let Ok(there) = dir.fs().list(dir.dir()) {
+        pending.retain(|j| there.contains(&dir.dir().join(j.id().file_name())));
     }
 }
 

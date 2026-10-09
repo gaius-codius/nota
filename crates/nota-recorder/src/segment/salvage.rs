@@ -18,7 +18,9 @@ use sha2::{Digest, Sha256};
 use super::findings::{self, Finding, Problem, ReadFailure, Verification};
 use super::flac::{self, FlacError};
 use super::plan::{self, JournalSummary, PlannedSegment};
-use super::publish::{Committed, DeletableJournal, TempSegment, delete_journals};
+use super::publish::{
+    Committed, DeletableJournal, DurableSegment, StepError, TempSegment, delete_journals,
+};
 use super::store::SegmentStore;
 use super::{SegmentLength, is_temp_segment, segment_file_name};
 use crate::fs::Fs;
@@ -32,6 +34,10 @@ pub struct Published {
     segments: Vec<SegmentRow>,
     deleted: Vec<JournalId>,
     quarantined: Vec<PathBuf>,
+    not_set_aside: Vec<(PathBuf, io::ErrorKind)>,
+    not_deleted: Vec<(JournalId, io::ErrorKind)>,
+    blocked: Vec<(PathBuf, io::ErrorKind)>,
+    temps_kept: Vec<(PathBuf, io::ErrorKind)>,
     unread: Vec<(FinishedJournal, io::ErrorKind)>,
     findings: Vec<Finding>,
     findings_unsaved: Option<io::ErrorKind>,
@@ -60,6 +66,46 @@ impl Published {
     #[must_use]
     pub fn quarantined(&self) -> &[PathBuf] {
         &self.quarantined
+    }
+
+    /// Journal files that were to be set aside (as [`Self::quarantined`]
+    /// says) but couldn't be, with the error's kind: something is already
+    /// under the aside name (`AlreadyExists`; it's never replaced), or the
+    /// rename failed. Each is left under its own name, so every run publishes
+    /// what reads of it again (finding it already in rows) and reports it
+    /// here, until the name is free.
+    #[must_use]
+    pub fn not_set_aside(&self) -> &[(PathBuf, io::ErrorKind)] {
+        &self.not_set_aside
+    }
+
+    /// Journals whose audio is all in committed rows but that couldn't be
+    /// deleted (an immutable file's `EPERM`, `EIO`), with the error's kind.
+    /// Each is left as it is; nothing in it is lost, and the next run tries
+    /// again.
+    #[must_use]
+    pub fn not_deleted(&self) -> &[(JournalId, io::ErrorKind)] {
+        &self.not_deleted
+    }
+
+    /// Names a planned segment needed but couldn't use, with the error's
+    /// kind: its temp name (something there can't be removed, or the file
+    /// can't be created) or its own (the rename onto it failed, as onto a
+    /// directory). That segment wasn't published and its journals are kept;
+    /// every other segment was. A run reports each again until the name is
+    /// free.
+    #[must_use]
+    pub fn blocked(&self) -> &[(PathBuf, io::ErrorKind)] {
+        &self.blocked
+    }
+
+    /// Segment temp files salvage found but couldn't remove, with the
+    /// error's kind (a directory under the name, an immutable file). Each is
+    /// left as it is; it's never the only copy of anything. Only
+    /// [`salvage`] removes temp files, so only it reports these.
+    #[must_use]
+    pub fn temps_kept(&self) -> &[(PathBuf, io::ErrorKind)] {
+        &self.temps_kept
     }
 
     /// The journals that are there but couldn't be read (`EIO`, `EACCES`, a
@@ -173,7 +219,9 @@ fn store_error<E: Error + Send + Sync + 'static>(e: E) -> PublishError {
 /// Recovers a session after a crash: publishes every journal left in its
 /// directory as segments, adds the rows missing from its store, and deletes
 /// the journals once their rows are committed. Leftover segment and findings
-/// temp files are removed first; they're never the only copy of anything.
+/// temp files are removed first; they're never the only copy of anything. A
+/// segment temp file that can't be removed is left and reported (see
+/// [`Published::temps_kept`]).
 ///
 /// Safe to run again after it fails or the machine crashes partway: every
 /// step is repeatable, and a second run on a recovered session changes
@@ -202,6 +250,7 @@ pub fn salvage<S: Fs, T: SegmentStore>(
         .map_err(PublishError::InUse)?;
     let (fs, dir) = (session.session().fs(), session.session().dir());
     let mut journals = Vec::new();
+    let mut temps_kept = Vec::new();
     for path in fs.list(dir)? {
         if findings::is_temp(&path) || crate::session::is_marks_temp(&path) {
             // Best effort: the next findings write removes it anyway, and
@@ -211,21 +260,27 @@ pub fn salvage<S: Fs, T: SegmentStore>(
             match fs.remove(&path) {
                 Ok(()) => {}
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.into()),
+                // Left as it is: the segment it's named for reports its own
+                // name blocked if it's planned, and nothing else needs it.
+                Err(e) => temps_kept.push((path, e.kind())),
             }
         } else if let Some(id) = path.file_name().and_then(JournalId::from_file_name) {
             // At startup nothing is writing: every journal is finished.
             journals.push(FinishedJournal::new(session.session().id(), id));
         }
     }
-    publish(session, length, &journals)
+    let mut published = publish(session, length, &journals)?;
+    published.temps_kept = temps_kept;
+    Ok(published)
 }
 
 /// Whether the session's directory holds journals, so [`salvage`] may have
 /// work to do. A session that was still recording when nota stopped holds
 /// some, but so can one already salvaged: salvage keeps a journal it can't
-/// read, or whose audio is held up by a row that doesn't match its file
-/// (see [`Published`]). Salvaging such a session again changes nothing.
+/// read, delete or set aside, whose segment's name is blocked, or whose
+/// audio is held up by a row that doesn't match its file (see
+/// [`Published`]). Salvaging such a session again changes nothing, so don't
+/// loop on this: it stays true until someone clears what holds them.
 ///
 /// # Errors
 ///
@@ -244,7 +299,11 @@ pub fn needs_salvage<S: Fs>(session: &SessionDir<S>) -> io::Result<bool> {
 /// deletes each journal once every sample it holds is in a committed row. A
 /// journal that isn't there any more is skipped. One that's there but can't
 /// be read is left as it is and reported in [`Published::unread`]; every
-/// other segment is published.
+/// other segment is published. So is every segment but one whose temp or
+/// own name can't be used ([`Published::blocked`]), and a journal that
+/// can't be deleted or set aside is left and reported
+/// ([`Published::not_deleted`], [`Published::not_set_aside`]) without
+/// stopping the run.
 ///
 /// A committed row claims its samples only if its file is in the session's
 /// directory, can be read, and matches it: the file's SHA-256 is the row's,
@@ -397,12 +456,15 @@ fn publish<S: Fs, T: SegmentStore>(
             // aren't deleted.
             continue;
         }
-        let flac = encode(fs, dir, segment)?;
-        let durable =
-            TempSegment::write(fs, dir, segment.track, segment.epoch, segment.range, &flac)?
-                .sync()?
-                .rename(fs)?
-                .sync_dir(fs)?;
+        let durable = match write_segment(fs, dir, segment)? {
+            Ok(durable) => durable,
+            Err((path, kind)) => {
+                // Nothing durable changed: like a bad window, its samples
+                // stay in their journals, which need it.
+                published.blocked.push((path, kind));
+                continue;
+            }
+        };
         let done = durable.commit(&mut store).map_err(store_error)?;
         committed.add(&done);
         published.segments.push(*done.row());
@@ -419,6 +481,25 @@ fn publish<S: Fs, T: SegmentStore>(
     let unreadable = settled(unreadable, &plan.needs, &committed);
     quarantine(fs, dir, &unreadable, &mut published)?;
     Ok(published)
+}
+
+/// Encodes `segment` and makes its file durable under its name: steps 1 to
+/// 4 of the module's order. `Ok(Err(..))` if a name it needs can't be used,
+/// with that name and the error's kind; nothing durable changed then.
+fn write_segment<S: Fs>(
+    fs: &S,
+    dir: &Path,
+    segment: &PlannedSegment,
+) -> Result<Result<DurableSegment, (PathBuf, io::ErrorKind)>, PublishError> {
+    let flac = encode(fs, dir, segment)?;
+    let renamed = TempSegment::write(fs, dir, segment.track, segment.epoch, segment.range, &flac)
+        .and_then(|temp| temp.sync().map_err(StepError::Io))
+        .and_then(|synced| synced.rename(fs));
+    match renamed {
+        Ok(renamed) => Ok(Ok(renamed.sync_dir(fs)?)),
+        Err(StepError::Name(path, e)) => Ok(Err((path, e.kind()))),
+        Err(StepError::Io(e)) => Err(e.into()),
+    }
 }
 
 /// Of the committed `rows`, those that claim samples in this run: those
@@ -508,10 +589,15 @@ fn release<S: Fs>(
         .iter()
         .filter_map(|(&id, path)| committed.release(id, path, needs.get(&id).unwrap_or(&empty)))
         .collect();
-    delete_journals(fs, dir, &ready)?;
+    let kept = delete_journals(fs, dir, &ready)?;
     for journal in ready {
+        // One that couldn't be deleted isn't tried again this run: it holds
+        // nothing still to publish, and the next run finds it again.
         waiting.remove(&journal.id());
-        published.deleted.push(journal.id());
+        match kept.iter().find(|(id, _)| *id == journal.id()) {
+            Some(&failed) => published.not_deleted.push(failed),
+            None => published.deleted.push(journal.id()),
+        }
     }
     Ok(())
 }
@@ -537,7 +623,14 @@ fn settled(
         .collect()
 }
 
-/// Renames unreadable journals aside, keeping their bytes.
+/// Renames unreadable journals aside, keeping their bytes. One whose aside
+/// name is taken, by anything, keeps its own name: a rename would replace a
+/// file there, which may be another journal set aside. It, and one whose
+/// rename fails, are reported in [`Published::not_set_aside`].
+///
+/// # Errors
+///
+/// Only syncing the directory after a rename.
 fn quarantine<S: Fs>(
     fs: &S,
     dir: &Path,
@@ -547,14 +640,45 @@ fn quarantine<S: Fs>(
     if paths.is_empty() {
         return Ok(());
     }
+    let there = match fs.list(dir) {
+        Ok(there) => there,
+        Err(e) => {
+            let kind = e.kind();
+            published
+                .not_set_aside
+                .extend(paths.iter().map(|p| (p.clone(), kind)));
+            return Ok(());
+        }
+    };
+    let mut renamed = false;
     for path in paths {
-        let mut aside = path.clone().into_os_string();
-        aside.push(".unreadable");
-        let aside = PathBuf::from(aside);
-        fs.rename(path, &aside)?;
-        published.quarantined.push(aside);
+        let aside = set_aside_path(path);
+        if there.contains(&aside) {
+            published
+                .not_set_aside
+                .push((path.clone(), io::ErrorKind::AlreadyExists));
+            continue;
+        }
+        match fs.rename(path, &aside) {
+            Ok(()) => {
+                renamed = true;
+                published.quarantined.push(aside);
+            }
+            Err(e) => published.not_set_aside.push((path.clone(), e.kind())),
+        }
     }
-    fs.sync_dir(dir)
+    if renamed {
+        fs.sync_dir(dir)?;
+    }
+    Ok(())
+}
+
+/// Where a journal at `path` is set aside: its name with
+/// [`SET_ASIDE`](crate::session::SET_ASIDE) appended.
+fn set_aside_path(path: &Path) -> PathBuf {
+    let mut aside = path.as_os_str().to_os_string();
+    aside.push(crate::session::SET_ASIDE);
+    PathBuf::from(aside)
 }
 
 /// The most bytes a crash can leave after a journal's last valid frame: the

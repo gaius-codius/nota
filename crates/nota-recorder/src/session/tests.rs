@@ -387,6 +387,7 @@ fn track_errors() {
         SessionError::UnknownTrack(MIC),
         SessionError::TrackExists(MIC),
         SessionError::Overflow,
+        SessionError::LastJournalId(PathBuf::from("/s/journal-x")),
         SessionError::Io(io::Error::other("x")),
         SessionError::Journal(JournalError::Broken),
         SessionError::InUse(Use::Recording),
@@ -407,20 +408,31 @@ fn track_errors() {
 }
 
 #[test]
-fn the_last_journal_id_is_refused() {
-    let fs = FakeFs::with_dirs([dir()]);
-    let _ = fs
-        .create(&dir().join(JournalId::new(u64::MAX).file_name()))
-        .unwrap();
-    assert!(matches!(
-        SessionWriter::open(
+fn the_last_journal_id_is_refused_naming_the_file() {
+    for name in [
+        JournalId::new(u64::MAX).file_name(),
+        format!("{}.unreadable", JournalId::new(u64::MAX).file_name()),
+    ] {
+        let fs = FakeFs::with_dirs([dir()]);
+        let path = dir().join(&name);
+        let _ = fs.create(&path).unwrap();
+        let refused = SessionWriter::open(
             &session_dir(&fs).lock().unwrap(),
             rate(),
             length(),
-            clock().1
-        ),
-        Err(SessionError::Overflow)
-    ));
+            clock().1,
+        );
+        let Err(SessionError::LastJournalId(named)) = refused else {
+            panic!("{name}: {refused:?}");
+        };
+        assert_eq!(named, path);
+        assert!(
+            SessionError::LastJournalId(named)
+                .to_string()
+                .contains(&name),
+            "{name}"
+        );
+    }
 }
 
 #[test]

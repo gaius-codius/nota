@@ -38,6 +38,11 @@ sha2.workspace = true
 # (`realtime-dbus`), libdbus-1 (see the `capture` module's docs for the
 # build dependencies). thread-priority promotes the stream's thread to
 # real time directly, where the user's rtprio limit allows it.
+# The real filesystem opens files to read with `O_NOFOLLOW | O_NONBLOCK`
+# (`fs::real`), flags std has no names for.
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["fs"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 cpal = { workspace = true, features = ["pipewire", "realtime-dbus"] }
 thread-priority.workspace = true

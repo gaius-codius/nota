@@ -3,6 +3,7 @@
 
 use std::fmt;
 use std::io;
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
@@ -51,6 +52,7 @@ pub struct PublishReport {
     rows: Vec<SegmentRow>,
     errors: Vec<PublishError>,
     left: Vec<FinishedJournal>,
+    set_aside: Vec<PathBuf>,
 }
 
 impl PublishReport {
@@ -71,7 +73,9 @@ impl PublishReport {
 
     /// The journals still on disk after the last try: its run failed,
     /// they couldn't be read (see
-    /// [`Published::unread`](super::Published::unread)), or a finding
+    /// [`Published::unread`](super::Published::unread)), deleted or set
+    /// aside, a name their segment needs couldn't be used (see
+    /// [`Published::blocked`](super::Published::blocked)), or a finding
     /// holds their audio back (see
     /// [`Published::findings`](super::Published::findings)). They're left
     /// for salvage at the next start.
@@ -80,11 +84,20 @@ impl PublishReport {
         &self.left
     }
 
+    /// The journal files set aside as damaged, under their new names (see
+    /// [`Published::quarantined`](super::Published::quarantined)): what of
+    /// each read was published, but audio after the damage wasn't, and no
+    /// later run publishes it. The files are kept.
+    #[must_use]
+    pub fn set_aside(&self) -> &[PathBuf] {
+        &self.set_aside
+    }
+
     /// Whether every journal sent was published: nothing is left for
-    /// salvage.
+    /// salvage, and nothing was set aside as damaged.
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        self.left.is_empty()
+        self.left.is_empty() && self.set_aside.is_empty()
     }
 }
 
@@ -234,7 +247,10 @@ fn publish_pending<S: Fs, T: SegmentStore>(
     report: &mut PublishReport,
 ) {
     match publish_journals(session, length, pending) {
-        Ok(published) => report.rows.extend_from_slice(published.segments()),
+        Ok(published) => {
+            report.rows.extend_from_slice(published.segments());
+            report.set_aside.extend_from_slice(published.quarantined());
+        }
         Err(error) => report.errors.push(error),
     }
     let dir = session.session();
