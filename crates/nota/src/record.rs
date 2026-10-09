@@ -51,7 +51,8 @@
 //! stops: the warning and `Stopping` go to the screen, the last segments
 //! are published into the ballast's room, and the summary says the
 //! recording stopped early. A low disk never stops a start: nota records
-//! what fits, with the warning from the start.
+//! what fits, sending the low-disk warning from the start (the screen
+//! doesn't show warnings yet; the summary says the disk ran low).
 //!
 //! # SIGXCPU
 //!

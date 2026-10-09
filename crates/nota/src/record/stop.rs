@@ -34,6 +34,8 @@ pub(super) fn stop<B: CaptureBackend>(
         live,
         recorder,
     } = started;
+    // Whether the disk had filled while recording: what stopped it.
+    let full_while_recording = disk.full().is_some();
     // Stop, in order.
     drop(captures);
     let (writer, how_it_ended, failures, failed_streams) = recorder
@@ -65,8 +67,9 @@ pub(super) fn stop<B: CaptureBackend>(
     if let Some(e) = stopped.finishing {
         outcome.notes.push(format!("finishing the recording: {e}"));
     }
+    // The disk's notes even if publishing went wrong.
+    note_disk(&mut outcome, disk.stop(), full_while_recording);
     note_published(&mut outcome, &stopped.published?);
-    note_disk(&mut outcome, disk.stop());
     match library
         .db()
         .with(|db| db.set_state(session, SessionState::Stopped))
@@ -104,9 +107,14 @@ pub(super) fn stop<B: CaptureBackend>(
     Ok(outcome)
 }
 
-/// What the summary says of the disk: a full disk, which stopped the
-/// recording, and a ballast that couldn't be made.
-fn note_disk(outcome: &mut Outcome, disk: Result<DiskSummary, MonitorPanicked>) {
+/// What the summary says of the disk: a full disk (which stopped the
+/// recording if it filled `while_recording`), a low disk, a disk that
+/// couldn't be checked, and a ballast that couldn't be made.
+fn note_disk(
+    outcome: &mut Outcome,
+    disk: Result<DiskSummary, MonitorPanicked>,
+    while_recording: bool,
+) {
     let summary = match disk {
         Ok(summary) => summary,
         Err(e) => {
@@ -116,19 +124,32 @@ fn note_disk(outcome: &mut Outcome, disk: Result<DiskSummary, MonitorPanicked>) 
             return;
         }
     };
-    if let Some(full) = summary.full {
+    if let Some(full) = &summary.full {
         let ballast = match full.ballast {
             Freed::Freed => {
-                "nota freed the space it keeps for this, so the last segments were finished"
-                    .to_owned()
+                "nota freed the space it keeps for this to finish the last segments".to_owned()
             }
-            Freed::None => "there was no room for the space nota keeps for this".to_owned(),
+            Freed::None => "nota had no space set aside for this".to_owned(),
             Freed::Failed(kind) => {
                 format!("the space nota keeps for this couldn't be freed ({kind})")
             }
         };
+        let what = if while_recording {
+            "stopped early: the disk is full"
+        } else {
+            "the disk filled while the last segments were published"
+        };
         outcome.notes.push(format!(
-            "stopped early: the disk is full; {ballast}. Free some space before recording again"
+            "{what}; {ballast}. Free some space before recording again"
+        ));
+    } else if summary.low {
+        outcome
+            .notes
+            .push("the disk ran low: under an hour of recording was left".to_owned());
+    }
+    if let Some(e) = summary.unchecked {
+        outcome.notes.push(format!(
+            "the free space couldn't be checked ({e}), so a low disk wasn't warned of"
         ));
     }
     if let Some(e) = summary.ballast_error {
@@ -147,40 +168,45 @@ mod tests {
 
     use super::*;
 
-    fn noted(disk: Result<DiskSummary, MonitorPanicked>) -> Vec<String> {
+    fn noted(disk: Result<DiskSummary, MonitorPanicked>, while_recording: bool) -> Vec<String> {
         let mut outcome = Outcome::default();
-        note_disk(&mut outcome, disk);
+        note_disk(&mut outcome, disk, while_recording);
         outcome.notes
+    }
+
+    fn full(ballast: Freed) -> DiskSummary {
+        DiskSummary {
+            full: Some(Full {
+                path: Some(PathBuf::from("/data/sessions/1/audio/journal-000003")),
+                ballast,
+            }),
+            ballast_held: true,
+            low: true,
+            ..DiskSummary::default()
+        }
     }
 
     #[test]
     fn a_full_disk_says_the_recording_stopped_early_and_what_became_of_the_ballast() {
-        let full = |ballast| {
-            Ok(DiskSummary {
-                full: Some(Full {
-                    path: Some(PathBuf::from("/data/sessions/1/audio/journal-000003")),
-                    ballast,
-                }),
-                ballast_error: None,
-                ballast_held: true,
-            })
-        };
         assert_eq!(
-            noted(full(Freed::Freed)),
+            noted(Ok(full(Freed::Freed)), true),
             [
-                "stopped early: the disk is full; nota freed the space it keeps for this, \
-              so the last segments were finished. Free some space before recording again"
+                "stopped early: the disk is full; nota freed the space it keeps for this to \
+              finish the last segments. Free some space before recording again"
             ]
         );
         assert_eq!(
-            noted(full(Freed::None)),
+            noted(Ok(full(Freed::None)), true),
             [
-                "stopped early: the disk is full; there was no room for the space nota keeps \
-              for this. Free some space before recording again"
+                "stopped early: the disk is full; nota had no space set aside for this. \
+              Free some space before recording again"
             ]
         );
         assert_eq!(
-            noted(full(Freed::Failed(io::ErrorKind::PermissionDenied))),
+            noted(
+                Ok(full(Freed::Failed(io::ErrorKind::PermissionDenied))),
+                true
+            ),
             [
                 "stopped early: the disk is full; the space nota keeps for this couldn't be \
               freed (permission denied). Free some space before recording again"
@@ -189,18 +215,37 @@ mod tests {
     }
 
     #[test]
-    fn a_disk_that_never_filled_says_nothing_unless_the_ballast_failed() {
-        assert!(noted(Ok(DiskSummary::default())).is_empty());
-        let failed = DiskSummary {
+    fn a_disk_that_filled_after_the_stop_doesnt_say_the_recording_stopped_early() {
+        assert_eq!(
+            noted(Ok(full(Freed::Freed)), false),
+            [
+                "the disk filled while the last segments were published; nota freed the space \
+              it keeps for this to finish the last segments. Free some space before \
+              recording again"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_low_disk_an_unchecked_one_and_a_ballast_that_failed_are_noted() {
+        assert!(noted(Ok(DiskSummary::default()), false).is_empty());
+        let summary = DiskSummary {
+            low: true,
+            unchecked: Some("permission denied".to_owned()),
             ballast_error: Some("permission denied".to_owned()),
             ..DiskSummary::default()
         };
         assert_eq!(
-            noted(Ok(failed)),
-            ["the space nota keeps for a full disk couldn't be set aside: permission denied"]
+            noted(Ok(summary), false),
+            [
+                "the disk ran low: under an hour of recording was left",
+                "the free space couldn't be checked (permission denied), so a low disk \
+                 wasn't warned of",
+                "the space nota keeps for a full disk couldn't be set aside: permission denied",
+            ]
         );
         assert_eq!(
-            noted(Err(MonitorPanicked)),
+            noted(Err(MonitorPanicked), true),
             ["the disk monitor stopped unexpectedly; the disk wasn't watched to the end"]
         );
     }

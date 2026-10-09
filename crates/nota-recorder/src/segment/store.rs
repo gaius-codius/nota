@@ -36,6 +36,14 @@ pub trait SegmentStore {
     /// whose samples overlap this one's, and a session the store doesn't
     /// hold.
     fn insert(&mut self, session: SessionId, segment: &DurableSegment) -> Result<(), Self::Error>;
+
+    /// Whether `error` says the disk is full (see
+    /// [`is_disk_full`](crate::fs::is_disk_full)). A store that can't tell
+    /// says no.
+    fn is_disk_full(error: &Self::Error) -> bool {
+        let _ = error;
+        false
+    }
 }
 
 impl SegmentStore for nota_store::Store {
@@ -47,6 +55,10 @@ impl SegmentStore for nota_store::Store {
 
     fn insert(&mut self, session: SessionId, segment: &DurableSegment) -> Result<(), Self::Error> {
         self.insert_segment(session, segment.row()).map(|_| ())
+    }
+
+    fn is_disk_full(error: &Self::Error) -> bool {
+        error.is_disk_full()
     }
 }
 
@@ -62,6 +74,10 @@ impl SegmentStore for nota_store::Writer {
         self.with(|store| store.insert_segment(session, segment.row()))
             .map(|_| ())
     }
+
+    fn is_disk_full(error: &Self::Error) -> bool {
+        error.is_disk_full()
+    }
 }
 
 /// A store lent to a [`SessionStore`](crate::session::SessionStore), so the
@@ -75,6 +91,10 @@ impl<T: SegmentStore + ?Sized> SegmentStore for &mut T {
 
     fn insert(&mut self, session: SessionId, segment: &DurableSegment) -> Result<(), Self::Error> {
         (**self).insert(session, segment)
+    }
+
+    fn is_disk_full(error: &Self::Error) -> bool {
+        T::is_disk_full(error)
     }
 }
 
@@ -177,6 +197,10 @@ mod fake {
 
     impl<S: Fs> SegmentStore for FakeStore<S> {
         type Error = io::Error;
+
+        fn is_disk_full(error: &io::Error) -> bool {
+            crate::fs::is_disk_full(error)
+        }
 
         fn rows(&mut self, session: SessionId) -> io::Result<Vec<SegmentRow>> {
             let mut rows = Vec::new();

@@ -13,7 +13,7 @@ use nota_recorder::capture::{
 };
 use nota_recorder::disk::{
     BALLAST_LEN, CHECK_INTERVAL, DiskMonitor, DiskReport, DiskWatch, MonitorConfig, Usage,
-    WatchedFs,
+    WatchedFs, WatchedStore,
 };
 use nota_recorder::engine::{EngineCommand, EngineConfig, EngineSupervisor};
 use nota_recorder::fs::StdFs;
@@ -131,13 +131,15 @@ pub(super) fn start<B: CaptureBackend>(
     // opened later doesn't push the first one's audio later.
     let mut timelines = open_timelines(&mut writer, &captures)?;
 
-    // The disk is checked at once, before the first audio is journaled,
-    // and then while recording; a full disk stops the recording.
-    let disk = watch_disk(args, &session.audio(), captures.len(), watch, &ui, clock)?;
+    // The disk is checked, and a ballast already there held, before the
+    // recorder starts; then while recording. A full disk stops it.
+    let disk = watch_disk(args, &session.audio(), captures.len(), &watch, &ui, clock)?;
 
     // The session's row is added by the publisher, before its first
     // segment's: recording never waits on the database.
+    // SQLite writes the database itself: its commits are watched too.
     let rows = session_rows(&library, setup, session.id, &sources, &captures);
+    let rows = WatchedStore::new(rows, watch, &library.db_path());
     let publisher = Publisher::spawn(SessionStore::new(lock.clone(), rows), segment_length())?;
     let (live_inputs, live_received) = mpsc::channel::<LiveInput>();
     let engine = match &args.models {
@@ -216,7 +218,7 @@ fn watch_disk(
     args: &RecordArgs,
     audio: &std::path::Path,
     tracks: usize,
-    watch: Arc<DiskWatch<StdFs>>,
+    watch: &Arc<DiskWatch<StdFs>>,
     ui: &Sender<Event>,
     clock: &Arc<dyn Clock>,
 ) -> std::io::Result<DiskMonitor<StdFs>> {
@@ -231,7 +233,8 @@ fn watch_disk(
         },
         interval: CHECK_INTERVAL,
     };
-    DiskMonitor::spawn(watch, config, disk_reports(ui.clone(), Arc::clone(clock)))
+    let reports = disk_reports(ui.clone(), Arc::clone(clock));
+    DiskMonitor::spawn(Arc::clone(watch), config, reports)
 }
 
 /// Turns what the disk monitor reports into the screens' events: the

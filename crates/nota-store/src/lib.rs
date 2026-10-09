@@ -115,6 +115,19 @@ impl fmt::Display for StoreError {
     }
 }
 
+impl StoreError {
+    /// Whether SQLite failed for want of space (`SQLITE_FULL`: the disk,
+    /// or the user's quota, is full).
+    #[must_use]
+    pub fn is_disk_full(&self) -> bool {
+        matches!(
+            self,
+            Self::Sqlite(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::DiskFull
+        )
+    }
+}
+
 impl std::error::Error for StoreError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {

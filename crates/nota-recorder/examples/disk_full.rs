@@ -38,8 +38,8 @@ use nota_core::{
     TrackId,
 };
 use nota_recorder::disk::{
-    BALLAST_FILE_NAME, Ballast, DiskMonitor, DiskReport, DiskWatch, Freed, Full, MonitorConfig,
-    Usage,
+    Ballast, DiskMonitor, DiskReport, DiskWatch, Freed, Full, MonitorConfig, Usage,
+    ballast_file_name,
 };
 use nota_recorder::fs::{Fs, StdFs};
 use nota_recorder::segment::{SegmentLength, publish_journals, segment_file_name};
@@ -108,7 +108,7 @@ fn say(line: &str) -> Res<()> {
 /// How the recording went, for the checks.
 struct Recorded {
     /// The samples each track took.
-    took: SampleIndex,
+    took: BTreeMap<TrackId, SampleIndex>,
     rounds: u64,
     /// Appends and syncs that lost audio.
     failures: Vec<String>,
@@ -222,7 +222,10 @@ fn record(watch: &Arc<DiskWatch<StdFs>>, session_dir: &Path, store: Store) -> Re
             return Err("the disk never filled".into());
         }
     }
-    let took = writer.next_sample(TRACKS[0]).ok_or("track not started")?;
+    let took = TRACKS
+        .iter()
+        .map(|&t| Ok((t, writer.next_sample(t).ok_or("track not started")?)))
+        .collect::<Res<BTreeMap<_, _>>>()?;
     let finishing = match writer.finish() {
         Ok(last) => {
             pending.extend(last);
@@ -257,7 +260,7 @@ fn report(full: &Full, recorded: &Recorded, reports: &Mutex<Vec<DiskReport>>) ->
         "full: {filled}; ballast {:?}; {} rounds, {} samples a track",
         full.ballast,
         recorded.rounds,
-        recorded.took.get()
+        recorded.took.values().map(|t| t.get()).max().unwrap_or(0)
     ))?;
     say(&format!(
         "{} journals left; finishing: {}; journal failures: {}",
@@ -288,7 +291,10 @@ fn check(dir: &Path, session_dir: &Path, full: &Full, recorded: &Recorded) -> Re
     if full.ballast != Freed::Freed {
         problems.push(format!("the ballast wasn't freed: {:?}", full.ballast));
     }
-    if StdFs.list(dir)?.contains(&dir.join(BALLAST_FILE_NAME)) {
+    if StdFs
+        .list(dir)?
+        .contains(&dir.join(ballast_file_name(BALLAST)))
+    {
         problems.push("the ballast is still there".to_owned());
     }
     if let Some(first) = recorded.failures.first() {
@@ -317,13 +323,17 @@ fn check(dir: &Path, session_dir: &Path, full: &Full, recorded: &Recorded) -> Re
     if !left.is_empty() {
         problems.push(format!("left for salvage: {left:?}"));
     }
-    problems.extend(check_segments(dir, session_dir, recorded.took)?);
+    problems.extend(check_segments(dir, session_dir, &recorded.took)?);
     Ok(problems)
 }
 
 /// Every sample each track took, from zero to `took`, in a committed row's
 /// segment, read back from the disk and decoded.
-fn check_segments(dir: &Path, session_dir: &Path, took: SampleIndex) -> Res<Vec<String>> {
+fn check_segments(
+    dir: &Path,
+    session_dir: &Path,
+    took: &BTreeMap<TrackId, SampleIndex>,
+) -> Res<Vec<String>> {
     let rows = Store::open(&dir.join("library.db"))?.segments(SESSION)?;
     let mut problems = Vec::new();
     let mut next: BTreeMap<TrackId, u64> = TRACKS.iter().map(|&t| (t, 0)).collect();
@@ -351,11 +361,11 @@ fn check_segments(dir: &Path, session_dir: &Path, took: SampleIndex) -> Res<Vec<
         }
     }
     for (track, end) in next {
-        if end != took.get() {
+        let took = took.get(&track).map_or(0, |t| t.get());
+        if end != took {
             problems.push(format!(
-                "track {} published up to {end} of {}",
-                track.get(),
-                took.get()
+                "track {} published up to {end} of {took}",
+                track.get()
             ));
         }
     }

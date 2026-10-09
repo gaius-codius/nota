@@ -70,15 +70,14 @@ if [[ $APP -eq 1 ]]; then
   cargo build --locked --quiet -p nota --features fake-capture
   dir=$(mktemp -d)
   log=$(mktemp)
+  trap 'rmdir "$dir" 2>/dev/null; rm -f "$log"' EXIT
   # The screen's output goes to the log; the summary is its last lines.
   unshare --user --map-root-user --mount sh -c '
     mount -t tmpfs -o size=4m tmpfs "$1" &&
     script -qec "$2 record --tone yes --title Full --data $1" /dev/null > "$3" 2>&1
     echo "journals left: $(find "$1" -name "journal-*" | wc -l)" >> "$3"' \
-    sh "$dir" "$target/debug/nota" "$log" || true
-  summary=$(tr -d '\r' < "$log" | sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g' | grep -A20 '^nota: ')
-  rmdir "$dir"
-  rm -f "$log"
+    sh "$dir" "$target/debug/nota" "$log" || echo "(the namespace or nota failed: $?)" >> "$log"
+  summary=$(tr -d '\r' < "$log" | sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g' | grep -A20 -e '^nota: ' -e '^(the namespace' || true)
   if grep -q 'stopped early: the disk is full' <<<"$summary" &&
     grep -q '^journals left: 0$' <<<"$summary"; then
     echo "nota record: $(head -1 <<<"$summary" | sed "s|$dir/||")"

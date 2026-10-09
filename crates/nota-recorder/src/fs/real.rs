@@ -125,10 +125,17 @@ impl Fs for StdFs {
 
 /// `statvfs(2)`: the blocks free to an unprivileged user (`f_bavail`, not
 /// `f_bfree`, which counts the blocks kept for root) times the fragment
-/// size they're counted in.
+/// size they're counted in. A filesystem that reports no blocks at all (a
+/// FUSE one without `statfs`) can't tell.
 #[cfg(unix)]
 fn free_space(dir: &Path) -> io::Result<u64> {
     let stat = rustix::fs::statvfs(dir)?;
+    if stat.f_blocks == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the filesystem doesn't say how much space it has",
+        ));
+    }
     Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
 }
 

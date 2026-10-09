@@ -214,5 +214,21 @@ fn is_temp_segment(path: &Path) -> bool {
         .is_some_and(|n| segment_in_file_name(OsStr::new(n)).is_some())
 }
 
+/// A segment file durable under its name in `dir`, holding `range` of
+/// `track`, for tests that commit rows.
+#[cfg(test)]
+pub(crate) fn durable_for_test<S: Fs>(
+    fs: &S,
+    dir: &Path,
+    track: TrackId,
+    range: SampleRange,
+) -> DurableSegment {
+    publish::TempSegment::write(fs, dir, track, nota_core::EpochId::new(0), range, b"flac")
+        .and_then(|t| t.sync().map_err(publish::StepError::Io))
+        .and_then(|t| t.rename(fs))
+        .and_then(|t| t.sync_dir(fs).map_err(publish::StepError::Io))
+        .unwrap_or_else(|e| panic!("{e:?}"))
+}
+
 #[cfg(test)]
 mod tests;

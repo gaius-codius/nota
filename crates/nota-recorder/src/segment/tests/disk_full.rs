@@ -178,9 +178,10 @@ const HINTS: [(Where, u64); 3] = [
     (Where::Row, 22_218),
 ];
 
-/// A capacity at which the disk first fills in a `kind` write: its hint
-/// if that still does, or else the first found scanning from 20 KB past
-/// the ballast (and then the hint wants updating).
+/// A capacity at which the disk first fills in a `kind` write: its hint.
+/// If the hint no longer does (the write path changed), this scans for one
+/// and fails, naming it, so the hint is updated rather than scanned for on
+/// every run.
 fn capacity_for(kind: Where) -> u64 {
     let fills_in = |capacity: u64| {
         let fs = FakeFs::with_dirs([session(), db(), data()]);
@@ -193,9 +194,13 @@ fn capacity_for(kind: Where) -> u64 {
     if fills_in(hint) {
         return hint;
     }
-    (BALLAST + 20_000..BALLAST + 30_000)
-        .find(|&capacity| fills_in(capacity))
-        .unwrap_or_else(|| panic!("no capacity fills the disk in a {kind:?} write"))
+    match (BALLAST + 20_000..BALLAST + 30_000).find(|&capacity| fills_in(capacity)) {
+        Some(found) => panic!(
+            "the hint for {kind:?} is stale: update it in HINTS to {}",
+            found - BALLAST
+        ),
+        None => panic!("no capacity fills the disk in a {kind:?} write"),
+    }
 }
 
 /// Recovery once there's room again: the user freed some, or the ballast's
@@ -220,7 +225,10 @@ fn clean_full_run(kind: Where) -> (FakeFs, FullRun) {
     assert_eq!(run.full.as_ref().map(|f| f.ballast), Some(Freed::Freed));
     assert_eq!(run.error, None, "audio was lost: {run:?}");
     assert_eq!(run.left, 0, "a segment wasn't finished: {run:?}");
-    assert!(!fs.paths().contains(&data().join("ballast")));
+    assert!(
+        !fs.paths()
+            .contains(&data().join(crate::disk::ballast_file_name(BALLAST)))
+    );
     assert!(
         !fs.paths().iter().any(|p| is_journal(p)),
         "{:?}",
@@ -261,15 +269,15 @@ fn a_full_disk_in_a_row_commit_frees_the_ballast_and_finishes_the_segment() {
 /// unfinished: the ballast is what finishes it.
 #[test]
 fn without_a_ballast_the_same_full_disk_leaves_the_recording_unfinished() {
-    let mut hurt = 0;
     for kind in [Where::Journal, Where::Flac, Where::Row] {
         let capacity = capacity_for(kind) - BALLAST;
         let fs = FakeFs::with_dirs([session(), db(), data()]);
         let run = record_until_full(&fs, capacity, None);
         assert_eq!(run.full.as_ref().map(|f| f.ballast), Some(Freed::None));
-        if run.error.is_some() || run.left > 0 {
-            hurt += 1;
-        }
+        assert!(
+            run.error.is_some() || run.left > 0,
+            "{kind:?}: the ballast made no difference: {run:?}"
+        );
         // Still, nothing promised is lost: what wasn't published waits in
         // its journals for a start with room.
         let survivor = fs.crash(CrashOutcome::LoseUnsynced);
@@ -284,15 +292,14 @@ fn without_a_ballast_the_same_full_disk_leaves_the_recording_unfinished() {
         check_full(&case, &run, &recover_with_room(&survivor))
             .unwrap_or_else(|e| panic!("{kind:?}: {e}"));
     }
-    assert!(hurt > 0, "the ballast made no difference");
 }
 
 /// A full disk in each kind of write, crashed after every operation of the
-/// recording (making the ballast included), losing everything unsynced and
-/// keeping it all (the partial outcomes are the segment tests'): the loss
-/// bound holds up to the failure, and salvage with room ends with every
-/// durable sample in a row.
-fn crash_swept(kind: Where) {
+/// recording (making the ballast included), losing everything unsynced,
+/// keeping it all, and with `partial`, keeping some of it, which tears the
+/// short write that met the full disk: the loss bound holds up to the
+/// failure, and salvage with room ends with every durable sample in a row.
+fn crash_swept(kind: Where, partial: bool) {
     let capacity = capacity_for(kind);
     clean_full_run(kind);
     let summary = CrashTest::new(
@@ -301,7 +308,15 @@ fn crash_swept(kind: Where) {
         check_full,
     )
     .dirs([session(), db(), data()])
-    .outcomes(vec![CrashOutcome::LoseUnsynced, CrashOutcome::KeepAll])
+    .outcomes(if partial {
+        vec![
+            CrashOutcome::LoseUnsynced,
+            CrashOutcome::KeepAll,
+            CrashOutcome::Partial { seed: 5 },
+        ]
+    } else {
+        vec![CrashOutcome::LoseUnsynced, CrashOutcome::KeepAll]
+    })
     .run()
     .unwrap_or_else(|failure| panic!("{kind:?}: {failure}"));
     assert!(summary.scenario_ops > 100, "{summary:?}");
@@ -309,17 +324,18 @@ fn crash_swept(kind: Where) {
 
 #[test]
 fn a_full_disk_in_a_journal_write_crashed_anywhere_loses_nothing_promised() {
-    crash_swept(Where::Journal);
+    // The write that meets the full disk is a journal's: torn too.
+    crash_swept(Where::Journal, true);
 }
 
 #[test]
 fn a_full_disk_in_a_flac_publish_crashed_anywhere_loses_nothing_promised() {
-    crash_swept(Where::Flac);
+    crash_swept(Where::Flac, false);
 }
 
 #[test]
 fn a_full_disk_in_a_row_commit_crashed_anywhere_loses_nothing_promised() {
-    crash_swept(Where::Row);
+    crash_swept(Where::Row, false);
 }
 
 /// `ENOSPC` injected once at every operation of a recording, with the
@@ -336,23 +352,22 @@ fn enospc_at_any_operation_frees_the_ballast_and_loses_nothing_promised() {
     assert_eq!(whole.full, None);
     let ops = clean.attempted();
     let mut kinds = BTreeSet::new();
-    for at in 0..ops {
+    // After the ballast is made: its own failures are another test's.
+    let made = {
+        let probe = FakeFs::with_dirs([session(), db(), data()]);
+        Ballast::keep(&probe, &data(), BALLAST, || false).unwrap();
+        probe.attempted()
+    };
+    for at in made..ops {
         let fs = FakeFs::with_dirs([session(), db(), data()]);
-        // After the ballast is made: its own failures are another test's.
-        let made = {
-            let probe = FakeFs::with_dirs([session(), db(), data()]);
-            Ballast::keep(&probe, &data(), BALLAST, || false).unwrap();
-            probe.attempted()
-        };
-        if at < made {
-            continue;
-        }
         fs.fail_after(at, io::ErrorKind::StorageFull);
         let run = record_rounds(&fs, capacity, Some(BALLAST), rounds);
         if let Some(full) = &run.full {
             assert_eq!(full.ballast, Freed::Freed, "op {at}");
             kinds.extend(hit(&run));
             assert_eq!(run.left, 0, "op {at}: {run:?}");
+            // The retry found the ballast's room: no audio lost.
+            assert_eq!(run.error, None, "op {at}: {run:?}");
         }
         for outcome in [CrashOutcome::LoseUnsynced, CrashOutcome::KeepAll] {
             let crashed = fs.crash(outcome);
