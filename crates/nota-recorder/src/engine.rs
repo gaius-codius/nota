@@ -97,12 +97,20 @@ pub struct EngineConfig {
     /// set it to at least 30 s of audio; less restarts every engine as
     /// behind before it can confirm anything.
     pub max_unconfirmed: SampleCount,
+    /// The longest a shutdown waits for the engine's last text: for one
+    /// still loading to say hello and be sent the audio it was queued, and
+    /// for the flushed audio to be confirmed. Within it, an engine that
+    /// confirms nothing for [`EngineConfig::request_timeout`] is hung and
+    /// killed, as while recording; one with nothing left to confirm gets
+    /// 3 s to exit.
+    pub shutdown_wait: Duration,
 }
 
 impl EngineConfig {
     /// The defaults: 60 s to start, 20 s per request, backoff from 250 ms to
-    /// 30 s, a flush after 5 s without audio, and 10 minutes of audio at
-    /// 16 kHz kept while down.
+    /// 30 s, a flush after 5 s without audio, 10 minutes of audio at
+    /// 16 kHz kept while down, and up to 30 s at shutdown for the last
+    /// text.
     #[must_use]
     pub const fn new(command: EngineCommand) -> Self {
         Self {
@@ -113,6 +121,7 @@ impl EngineConfig {
             max_backoff: Duration::from_secs(30),
             idle_flush: Duration::from_secs(5),
             max_unconfirmed: SampleCount::new(16_000 * 600),
+            shutdown_wait: Duration::from_secs(30),
         }
     }
 }
@@ -312,9 +321,11 @@ impl EngineSupervisor {
     }
 
     /// Stops the engine: flushes every track, closes its stdin so it
-    /// exits, and kills it if it hasn't within three seconds. Text the
-    /// engine sends in that time is passed on; audio it never confirmed is
-    /// reported as [`EngineEvent::Skipped`].
+    /// exits, and passes on the text it sends until it does. An engine
+    /// still loading is waited for and sent the audio queued for it first.
+    /// How long all this may take is bounded
+    /// ([`EngineConfig::shutdown_wait`]); then the engine is killed, and
+    /// audio it never confirmed is reported as [`EngineEvent::Skipped`].
     pub fn shutdown(mut self) {
         self.stop();
     }
@@ -334,7 +345,8 @@ impl Drop for EngineSupervisor {
     }
 }
 
-/// How long a closed engine gets to exit before it's killed.
+/// How long a closed engine with nothing left to confirm gets to exit
+/// before it's killed.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 
 /// The most the backoff can be once an engine has said hello: it started,
@@ -801,19 +813,30 @@ impl Supervisor {
     }
 
     /// Flushes every track and closes the engine's stdin so it exits,
-    /// passing on its last replies for up to [`SHUTDOWN_GRACE`] until its
-    /// output ends, then kills it. Whatever is still unconfirmed is
+    /// passing on its last replies until its output ends, then kills it.
+    /// An engine still starting, with audio queued for it, is first waited
+    /// for and sent that audio. All of it within
+    /// [`EngineConfig::shutdown_wait`]. Whatever is still unconfirmed is
     /// reported as skipped.
     fn shut_down(mut self, rx: &Receiver<Input>) {
-        if matches!(self.phase, Phase::Online(_)) {
-            for replay in self.tracks.values_mut() {
-                replay.push_flush();
-            }
-            self.send_unsent();
+        let now = self.clock.now();
+        let limit = now
+            .checked_add(self.config.shutdown_wait)
+            .unwrap_or(SessionTime::from_nanos(u64::MAX));
+        for replay in self.tracks.values_mut() {
+            replay.push_flush();
         }
+        if matches!(self.phase, Phase::Starting(..)) && self.unconfirmed() {
+            self.await_hello(rx, limit);
+        }
+        self.send_unsent();
         let phase = std::mem::replace(&mut self.phase, Phase::Waiting(self.clock.now()));
-        if let Phase::Starting(running, _) | Phase::Online(running) = phase {
-            self.drain(running, rx);
+        match phase {
+            Phase::Online(running) => self.drain(running, rx, limit),
+            // Still loading, with nothing for it: killed (as it drops),
+            // not waited for.
+            Phase::Starting(running, _) => drop(running),
+            Phase::Waiting(_) => {}
         }
         // Never transcribed live; it's still in the recording.
         let tracks: Vec<TrackId> = self.tracks.keys().copied().collect();
@@ -822,16 +845,68 @@ impl Supervisor {
         }
     }
 
+    /// Whether any track has audio the engine hasn't confirmed.
+    fn unconfirmed(&self) -> bool {
+        self.tracks
+            .values()
+            .any(|replay| replay.unconfirmed().get() > 0)
+    }
+
+    /// Waits, until `limit` or its start deadline, for the starting engine
+    /// to say hello, and brings it online if it does. Anything else from
+    /// it (its output ending, the wrong version) ends the wait: it's
+    /// killed with what it was queued.
+    fn await_hello(&mut self, rx: &Receiver<Input>, limit: SessionTime) {
+        let Phase::Starting(running, deadline) = &self.phase else {
+            return;
+        };
+        let (generation, until) = (running.generation, limit.min(*deadline));
+        while let Some(left) = until.checked_duration_since(self.clock.now()) {
+            match rx.recv_timeout(left) {
+                Ok(Input::Engine {
+                    generation: g,
+                    event: FromChild::Frame(Frame::Hello(version)),
+                }) if g == generation => {
+                    if version == ProtocolVersion::CURRENT {
+                        self.online();
+                    }
+                    return;
+                }
+                Ok(Input::Engine { generation: g, .. }) if g == generation => return,
+                Ok(_) => {}
+                Err(_) => return,
+            }
+        }
+    }
+
     /// Closes the engine's stdin and passes on its replies until its
-    /// output ends or [`SHUTDOWN_GRACE`] is up, then kills it.
-    fn drain(&mut self, mut running: Running, rx: &Receiver<Input>) {
+    /// output ends, then kills it. It's killed sooner at `limit`, when it
+    /// confirms nothing for [`EngineConfig::request_timeout`] while audio
+    /// is unconfirmed, or [`SHUTDOWN_GRACE`] after its last confirmation
+    /// once nothing is: a slow last decode is waited for, a hung engine
+    /// isn't.
+    fn drain(&mut self, mut running: Running, rx: &Receiver<Input>, limit: SessionTime) {
         let generation = running.generation;
         // Closing the queue to the writer thread closes the engine's stdin
         // once the queued frames are written.
         let Running { writer, .. } = &mut running;
         drop(std::mem::replace(writer, mpsc::channel().0));
-        let deadline = self.clock.now().checked_add(SHUTDOWN_GRACE);
-        while let Some(left) = deadline.and_then(|at| at.checked_duration_since(self.clock.now())) {
+        // Waiting counts from the stop, not from the last confirmation
+        // while recording.
+        self.progress = self.clock.now();
+        loop {
+            let stall = if self.unconfirmed() {
+                self.config.request_timeout
+            } else {
+                SHUTDOWN_GRACE
+            };
+            let until = self
+                .progress
+                .checked_add(stall)
+                .map_or(limit, |at| at.min(limit));
+            let Some(left) = until.checked_duration_since(self.clock.now()) else {
+                break;
+            };
             match rx.recv_timeout(left) {
                 Ok(Input::Engine {
                     generation: g,
@@ -845,8 +920,9 @@ impl Supervisor {
                         break;
                     }
                 }
-                Ok(_) => {}
-                Err(_) => break,
+                // A timeout loops to check the deadline.
+                Ok(_) | Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
             }
         }
         drop(running);

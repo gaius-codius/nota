@@ -163,6 +163,13 @@ impl Events {
         }
     }
 
+    /// Everything left, once the supervisor has stopped.
+    fn rest(&mut self) {
+        while let Ok(event) = self.rx.recv_timeout(Duration::from_secs(5)) {
+            self.seen.push((self.clock.now(), event));
+        }
+    }
+
     /// The ranges of `TRACK` reported skipped, as `(start, end)`.
     fn skipped(&self) -> Vec<(u64, u64)> {
         self.skipped_on(TRACK)
@@ -413,6 +420,83 @@ fn shutdown_passes_on_the_answer_to_a_last_flush() {
     supervisor.shutdown();
     events.confirmed_to(3 * CHUNK, Duration::from_secs(5));
     events.assert_tiles(3 * CHUNK);
+}
+
+/// How long `work` took on `events`' clock.
+fn timed(events: &Events, work: impl FnOnce()) -> Duration {
+    let before = events.clock.now();
+    work();
+    events.clock.now().checked_duration_since(before).unwrap()
+}
+
+/// GAI-204: a stop while the engine still loads waits for it, sends it
+/// the audio queued meanwhile, and passes on that audio's text.
+#[test]
+fn a_shutdown_while_the_engine_loads_still_transcribes_the_queued_audio() {
+    let (mut supervisor, mut events) = start(fake(&["echo", "--hello-delay-ms", "1500"]));
+    send(&mut supervisor, 0..3);
+    let took = timed(&events, || supervisor.shutdown());
+    events.rest();
+    assert!(took >= Duration::from_millis(1_000), "{took:?}");
+    events.assert_tiles(3 * CHUNK);
+    assert!(events.skipped().is_empty(), "{:#?}", events.seen);
+}
+
+/// A stop while the engine loads, with nothing queued for it, doesn't
+/// wait for it.
+#[test]
+fn a_shutdown_while_the_engine_loads_with_nothing_queued_doesnt_wait() {
+    let (supervisor, events) = start(fake(&["echo", "--hello-delay-ms", "5000"]));
+    let took = timed(&events, || supervisor.shutdown());
+    assert!(took < Duration::from_secs(2), "{took:?}");
+}
+
+/// GAI-204: a last decode slower than the old fixed 3 s grace is waited
+/// for, and its text passed on.
+#[test]
+fn a_shutdown_waits_for_a_slow_last_decode() {
+    let (mut supervisor, mut events) =
+        start(fake(&["echo", "--every", "100", "--delay-ms", "4000"]));
+    events.online();
+    send(&mut supervisor, 0..3);
+    let took = timed(&events, || supervisor.shutdown());
+    events.rest();
+    assert!(took >= Duration::from_secs(4), "{took:?}");
+    events.assert_tiles(3 * CHUNK);
+    assert!(events.skipped().is_empty(), "{:#?}", events.seen);
+}
+
+/// The wait is bounded: a decode slower than `shutdown_wait` is cut off,
+/// and its audio reported skipped.
+#[test]
+fn a_shutdown_gives_up_at_its_limit() {
+    let mut config = fake(&["echo", "--every", "100", "--delay-ms", "5000"]);
+    config.shutdown_wait = Duration::from_millis(500);
+    let (mut supervisor, mut events) = start(config);
+    events.online();
+    send(&mut supervisor, 0..3);
+    let took = timed(&events, || supervisor.shutdown());
+    events.rest();
+    assert!(took < Duration::from_secs(3), "{took:?}");
+    assert!(events.transcripts().is_empty(), "{:#?}", events.seen);
+    events.assert_tiles_with_skips(3 * CHUNK);
+}
+
+/// An engine that confirms nothing after the stop is hung: it's killed
+/// after the request timeout, not kept for the whole limit.
+#[test]
+fn a_shutdown_kills_an_engine_that_stops_confirming() {
+    let mut config = fake(&["deaf"]);
+    config.request_timeout = Duration::from_secs(1);
+    let (mut supervisor, mut events) = start(config);
+    let pid = events.online();
+    send(&mut supervisor, 0..3);
+    let took = timed(&events, || supervisor.shutdown());
+    events.rest();
+    assert!(took >= Duration::from_millis(900), "{took:?}");
+    assert!(took < Duration::from_secs(3), "{took:?}");
+    assert!(!alive(pid));
+    events.assert_tiles_with_skips(3 * CHUNK);
 }
 
 #[test]
