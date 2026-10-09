@@ -180,9 +180,9 @@ fn recover(fs: &FakeFs) -> Recovered {
 }
 
 /// The most audio that may be captured but not durable: the 850 ms sync
-/// interval at 16 kHz. Kept below the 1.1 s bounded-loss rule so the
-/// stream's buffering and a slow fsync still fit within it against the
-/// audio delivered.
+/// interval at 16 kHz. Kept well below the bounded-loss rule (about 2 s on
+/// a quiet disk) so the stream's buffering and a slow fsync still fit
+/// within it against the audio delivered.
 const LAG_LIMIT: SampleCount = SampleCount::new(13_600);
 
 /// The journal's crash invariants. A closure, to match `CrashTest`'s check

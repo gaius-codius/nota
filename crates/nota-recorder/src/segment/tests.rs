@@ -504,7 +504,7 @@ fn check_after(promised: &Promised, after: &Observed) -> Result<(), String> {
 
 /// The most audio that may be captured but not durable: the journal's
 /// 850 ms sync interval at the test's rate, which keeps durable within the
-/// 1.1 s bounded-loss rule of the audio delivered.
+/// bounded-loss rule (about 2 s on a quiet disk) of the audio delivered.
 const LAG_LIMIT: u64 = 850;
 
 /// The most any track had captured but not durable when the recording

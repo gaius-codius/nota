@@ -61,9 +61,10 @@ fn db() -> PathBuf {
     PathBuf::from("/db")
 }
 
-/// The most audio a track may lose: the 1.1 s bounded-loss rule. The
-/// journal's 850 ms sync interval keeps what's unsynced below it, with room
-/// for a chunk being written when the process dies.
+/// The most audio a track may lose here: 1.1 s, the journal's 850 ms sync
+/// interval with room for a chunk being written when the process dies.
+/// Stricter than the bounded-loss rule (about 2 s on a quiet disk), which
+/// also allows for a slow fsync; these tests' fsyncs are instant.
 const LOSS_LIMIT: u64 = 1_100;
 
 /// The sample a test track holds at `index`: distinct per track and
