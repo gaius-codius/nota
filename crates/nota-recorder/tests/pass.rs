@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nota_core::messages::Transcript;
-use nota_core::{Clock, EpochId, SampleIndex, SampleRange, SystemClock, TrackId};
+use nota_core::{Clock, EpochId, SampleCount, SampleIndex, SampleRange, SystemClock, TrackId};
 use nota_recorder::engine::EngineCommand;
 use nota_recorder::engine::pass::{PassConfig, PassEnd, PassSink, TrackAudio, transcribe};
 use nota_recorder::segment::ReadSegmentError;
@@ -35,8 +35,13 @@ fn config(args: &[&str]) -> PassConfig {
     config.engine.max_backoff = Duration::from_millis(200);
     config.engine.start_timeout = Duration::from_secs(10);
     config.engine.request_timeout = Duration::from_secs(10);
+    // A pass that stops making progress fails its test quickly.
+    config.stall = Duration::from_secs(5);
     config
 }
+
+/// The fake answering every two frames a track, and at each flush.
+const ECHO: &[&str] = &["echo", "--every", "2"];
 
 fn row(track: TrackId, epoch: u32, from: u64, to: u64) -> SegmentRow {
     SegmentRow::new(
@@ -91,6 +96,8 @@ struct Committed {
     skipped: Vec<(TrackId, u64, u64)>,
     progress: BTreeMap<TrackId, u64>,
     calls: Rc<Cell<usize>>,
+    /// The last point confirmed, on any track.
+    latest: Rc<Cell<u64>>,
 }
 
 impl PassSink for Committed {
@@ -120,6 +127,7 @@ impl PassSink for Committed {
         let progress = self.progress.entry(track).or_default();
         assert!(up_to.get() >= *progress, "progress goes forward");
         *progress = up_to.get();
+        self.latest.set(up_to.get());
         self.calls.set(self.calls.get() + 1);
         Ok(())
     }
@@ -136,7 +144,7 @@ fn run(config: &PassConfig, sink: &mut Committed, stop: &dyn Fn() -> bool) -> Pa
 
 fn uninterrupted() -> Committed {
     let mut sink = Committed::default();
-    let end = run(&config(&["echo"]), &mut sink, &|| false);
+    let end = run(&config(ECHO), &mut sink, &|| false);
     assert!(matches!(end, PassEnd::Done), "{end:?}");
     sink
 }
@@ -181,13 +189,115 @@ fn every_published_sample_is_transcribed_once_on_both_tracks() {
         sink.progress,
         BTreeMap::from([(MIC, 23 * S + S * 3 / 10), (SYSTEM, 9 * S)])
     );
-    // No frame crosses a run's end (the epoch change at 7 s included):
-    // runs are flushed apart.
-    for (track, from, to, _) in &sink.texts {
-        if *track == SYSTEM {
-            assert!(*to <= 7 * S || *from >= 7 * S, "{from}..{to}");
-        }
-    }
+    // Frames end on whole seconds and at segments' ends; each run is
+    // flushed at its end (the gap, the epoch change at 7 s, the last
+    // sample), and only there, so the fake's answers to every two frames
+    // run on across the segment boundary at 5 s.
+    let ranges: Vec<(TrackId, u64, u64)> = sink.texts.iter().map(|t| (t.0, t.1, t.2)).collect();
+    let mic = [
+        (0, 2 * S),
+        (2 * S, 4 * S),
+        (4 * S, 6 * S),
+        (6 * S, 8 * S),
+        (8 * S, 10 * S),
+        (10 * S, 12 * S),
+        (12 * S, 12 * S + S / 2),
+        (20 * S, 22 * S),
+        (22 * S, 23 * S + S * 3 / 10),
+    ]
+    .map(|(a, b)| (MIC, a, b));
+    let system = [
+        (0, 2 * S),
+        (2 * S, 4 * S),
+        (4 * S, 6 * S),
+        (6 * S, 7 * S),
+        (7 * S, 9 * S),
+    ]
+    .map(|(a, b)| (SYSTEM, a, b));
+    assert_eq!(ranges, [&mic[..], &system[..]].concat());
+}
+
+/// The final pass's config: 1 s frames, a minute ahead at most, 25 s
+/// skipped on poison, a minute per request, no idle flush, a short stop.
+#[test]
+fn the_final_pass_config() {
+    let config = PassConfig::final_pass(EngineCommand {
+        program: PathBuf::from("nota"),
+        args: Vec::new(),
+    });
+    assert_eq!(config.frame.get(), S);
+    assert_eq!(config.in_flight.get(), 60 * S);
+    assert_eq!(config.stall, Duration::from_mins(10));
+    assert_eq!(config.engine.poison_skip.get(), 25 * S);
+    assert_eq!(config.engine.request_timeout, Duration::from_mins(1));
+    assert_eq!(config.engine.idle_flush, Duration::from_hours(24));
+    assert_eq!(config.engine.shutdown_wait, Duration::from_secs(2));
+}
+
+/// Audio goes no further ahead of what's confirmed than the config says:
+/// with one second in flight, each one-second segment is read only once
+/// the one before it is confirmed.
+#[test]
+fn the_pass_stays_within_its_window() {
+    let segments: Vec<SegmentRow> = (0..6).map(|k| row(MIC, 0, k * S, (k + 1) * S)).collect();
+    let tracks = [TrackAudio {
+        track: MIC,
+        segments,
+        from: SampleIndex::ZERO,
+    }];
+    let mut config = config(&["echo"]);
+    config.in_flight = SampleCount::new(S);
+    let mut sink = Committed::default();
+    let seen = Rc::clone(&sink.latest);
+    let reads = std::cell::RefCell::new(Vec::new());
+    let end = transcribe(
+        &tracks,
+        |row| {
+            reads
+                .borrow_mut()
+                .push((row.range().start().get(), seen.get()));
+            Ok(audio(row))
+        },
+        &config,
+        &clock(),
+        &mut sink,
+        &|| false,
+    );
+    assert!(matches!(end, PassEnd::Done), "{end:?}");
+    // Segment k is read when exactly k seconds are confirmed.
+    let want: Vec<(u64, u64)> = (0..6).map(|k| (k * S, k * S)).collect();
+    assert_eq!(*reads.borrow(), want);
+}
+
+/// How a pass ended, in words.
+#[test]
+fn a_pass_says_how_it_ended() {
+    let said = |end: PassEnd<String>| end.to_string();
+    assert_eq!(said(PassEnd::Done), "done");
+    assert_eq!(said(PassEnd::Stopped), "stopped");
+    assert_eq!(
+        said(PassEnd::Stalled(Some("exited".into()))),
+        "the transcriber stopped working: exited"
+    );
+    assert_eq!(
+        said(PassEnd::Stalled(None)),
+        "the transcriber stopped answering"
+    );
+    assert_eq!(
+        said(PassEnd::Segment(
+            row(SYSTEM, 0, 5, 9),
+            ReadSegmentError::Hash
+        )),
+        "the segment of track 1 from sample 5 doesn't match its row's SHA-256"
+    );
+    assert_eq!(
+        said(PassEnd::Sink("the disk is full".into())),
+        "the disk is full"
+    );
+    assert_eq!(
+        said(PassEnd::Engine(std::io::Error::other("no such file"))),
+        "the transcriber couldn't be started: no such file"
+    );
 }
 
 /// Acceptance (GAI-317): an engine killed mid-pass, again and again,
@@ -198,7 +308,7 @@ fn an_engine_killed_mid_pass_loses_nothing_and_matches_an_uninterrupted_pass() {
     let reference = uninterrupted();
     let mut sink = Committed::default();
     let end = run(
-        &config(&["crash-after", "--after", "7"]),
+        &config(&["crash-after", "--after", "7", "--every", "2"]),
         &mut sink,
         &|| false,
     );
@@ -215,14 +325,12 @@ fn an_engine_killed_mid_pass_loses_nothing_and_matches_an_uninterrupted_pass() {
 fn a_pass_stopped_partway_resumes_to_the_same_result() {
     let reference = uninterrupted();
     let mut sink = Committed::default();
-    for stop_after in [3, 9, 20] {
+    for stop_after in [2, 5, 9] {
         let calls = Rc::clone(&sink.calls);
-        let end = run(&config(&["echo"]), &mut sink, &move || {
-            calls.get() >= stop_after
-        });
+        let end = run(&config(ECHO), &mut sink, &move || calls.get() >= stop_after);
         assert!(matches!(end, PassEnd::Stopped), "{end:?}");
     }
-    let end = run(&config(&["echo"]), &mut sink, &|| false);
+    let end = run(&config(ECHO), &mut sink, &|| false);
     assert!(matches!(end, PassEnd::Done), "{end:?}");
     assert_eq!(sink.texts, reference.texts);
     assert_eq!(sink.progress, reference.progress);

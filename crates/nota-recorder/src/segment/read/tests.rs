@@ -1,3 +1,4 @@
+use std::io;
 use std::path::Path;
 
 use nota_core::{EpochId, SampleIndex, SampleRange, TrackId};
@@ -147,5 +148,35 @@ proptest::proptest! {
         if let Ok(read) = read_segment(&fs, dir, &row, SampleRate::SPEECH) {
             proptest::prop_assert_eq!(read.len() as u64, len);
         }
+    }
+}
+
+#[test]
+fn read_errors_say_what_went_wrong() {
+    use std::error::Error as _;
+    let io = ReadSegmentError::Io(io::Error::from(io::ErrorKind::NotFound));
+    assert!(io.to_string().starts_with("couldn't be read: "), "{io}");
+    assert!(io.source().is_some());
+    let said = [
+        (ReadSegmentError::Hash, "doesn't match its row's SHA-256"),
+        (
+            ReadSegmentError::Flac("bad header".into()),
+            "doesn't decode: bad header",
+        ),
+        (
+            ReadSegmentError::Rate(SampleRate::new(48_000).unwrap()),
+            "is at 48000 Hz",
+        ),
+        (
+            ReadSegmentError::Length {
+                expected: 5,
+                found: 4,
+            },
+            "holds 4 samples, its row 5",
+        ),
+    ];
+    for (error, text) in said {
+        assert_eq!(error.to_string(), text);
+        assert!(error.source().is_none());
     }
 }

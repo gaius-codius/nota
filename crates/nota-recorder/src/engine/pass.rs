@@ -312,11 +312,12 @@ impl Feed {
             let Some(&row) = self.segments.front() else {
                 return Ok(());
             };
-            // A new run: the one before it ends here.
-            let follows = self.previous.is_some_and(|previous| {
-                previous.range().end() == row.range().start() && previous.epoch() == row.epoch()
+            // A new run (after a gap, or in a new epoch): the one before it
+            // ends here, once, before any of this segment is sent.
+            let new_run = self.previous.is_some_and(|previous| {
+                previous.range().end() != row.range().start() || previous.epoch() != row.epoch()
             });
-            if self.previous.is_some() && !follows && self.audio.is_none() {
+            if new_run && self.audio.is_none() {
                 engine.flush(self.track);
             }
             let audio = match &self.audio {
