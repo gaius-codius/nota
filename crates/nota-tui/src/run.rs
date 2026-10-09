@@ -210,7 +210,10 @@ pub fn run<B: Backend>(
 }
 
 /// Runs `home` on `terminal` until it asks for something: draws it and
-/// applies each event, redrawing at least every 250 ms. It ends with
+/// applies each event, redrawing at least every 250 ms. Before each draw it
+/// calls `refresh`, which may give Home a new list
+/// ([`Home::set_sessions`]); it decides itself whether one is due, since
+/// it runs at every draw. It ends with
 /// [`Action::Record`] when `R` is pressed, and with [`Action::Quit`] when
 /// it's closed from the keyboard, when a signal asks nota to stop
 /// ([`recorder::Event::Stopping`]), or once every sender of `events` is
@@ -225,8 +228,10 @@ pub fn run_home<B: Backend>(
     terminal: &mut Terminal<B>,
     home: &mut Home,
     events: &Receiver<Event>,
+    refresh: &mut dyn FnMut(&mut Home),
 ) -> Result<Action, RunError<B::Error>> {
     loop {
+        refresh(home);
         terminal
             .draw(|frame| home.draw(frame))
             .map_err(RunError::Terminal)?;
@@ -525,7 +530,35 @@ mod tests {
             event_tx.send(event).unwrap();
         }
         drop(event_tx);
-        run_home(&mut terminal, &mut home(), &event_rx)
+        run_home(&mut terminal, &mut home(), &event_rx, &mut |_| {})
+    }
+
+    #[test]
+    fn home_is_refreshed_before_each_draw() {
+        let mut terminal = Terminal::new(TestBackend::new(62, 20)).unwrap();
+        let (event_tx, event_rx) = mpsc::channel();
+        let mut refreshes = 0;
+        // Each refresh sends one key, so each comes in a batch of its own,
+        // with a draw before it: `j`, then `q`.
+        let mut refresh = |home: &mut Home| {
+            refreshes += 1;
+            let session = crate::home::Session {
+                id: 1,
+                title: format!("Loop, refresh {refreshes}"),
+                status: crate::home::Status::Ready,
+                duration: None,
+                date: None,
+                detail: None,
+            };
+            home.set_sessions(vec![session]);
+            let next = if refreshes == 1 { 'j' } else { 'q' };
+            event_tx.send(key(next)).unwrap();
+        };
+        let action = run_home(&mut terminal, &mut home(), &event_rx, &mut refresh);
+        assert_eq!(action.unwrap(), Action::Quit);
+        assert_eq!(refreshes, 2);
+        let screen_text = format!("{}", terminal.backend());
+        assert!(screen_text.contains("Loop, refresh 2"), "{screen_text}");
     }
 
     #[test]

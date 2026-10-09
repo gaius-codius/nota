@@ -1,10 +1,12 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
-use nota_core::{EpochId, SampleIndex, SampleRange, TrackId};
+use nota_core::{EpochId, FakeClock, SampleIndex, SampleRange, TrackId};
 use nota_store::{NewSession, SegmentRow, Sha256Digest, Track, TrackKind};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::*;
 
@@ -284,4 +286,235 @@ fn dates_read_today_then_day_and_month_then_month_and_year() {
         zone: TimeZone::UTC,
     };
     assert_eq!(unknown.label(at(day(3))).as_deref(), Some("3 Oct"));
+}
+
+/// A listing of `library` in UTC, timed by `clock`, with the calendar's
+/// time read from `wall` (UTC seconds).
+fn listing_of<'a>(
+    library: &'a Library,
+    clock: &Arc<FakeClock>,
+    wall: &Arc<AtomicI64>,
+) -> Listing<'a> {
+    let wall = Arc::clone(wall);
+    Listing {
+        library,
+        salvaged: &[],
+        zone: || TimeZone::UTC,
+        clock: Arc::clone(clock) as Arc<dyn Clock>,
+        wall: Box::new(move || WallTime::from_unix_seconds(wall.load(Ordering::SeqCst))),
+        listed_at: None,
+        said: None,
+    }
+}
+
+fn date_of(home: &Home, id: u64) -> Option<String> {
+    let session = home.sessions().iter().find(|s| s.id == id).unwrap();
+    session.date.clone()
+}
+
+/// A Home left open past midnight words yesterday's session as its date
+/// as soon as the date changes, without waiting for the next listing.
+#[test]
+fn home_open_past_midnight_dates_yesterday() {
+    let tmp = TestDir::new("midnight");
+    let library = library_of_three(&tmp.0);
+    let clock = Arc::new(FakeClock::new(SessionTime::ZERO));
+    // 23:59:58 UTC on 3 Oct.
+    let wall = Arc::new(AtomicI64::new(day(3) + 15 * 3_600 - 2));
+    let mut listing = listing_of(&library, &clock, &wall);
+    let mut home = Home::new(listing.sessions().unwrap(), "parakeet", Theme::no_color());
+    assert_eq!(date_of(&home, 3).as_deref(), Some("today"));
+    // A second later, still the same day: nothing is listed again, so a
+    // journal left meanwhile doesn't show yet.
+    leave_journal(&tmp.0, 1);
+    wall.fetch_add(1, Ordering::SeqCst);
+    clock.advance(Duration::from_secs(1));
+    listing.refresh(&mut home);
+    assert_eq!(date_of(&home, 3).as_deref(), Some("today"));
+    assert!(home.sessions().iter().all(|s| s.status == Status::Ready));
+    // Past midnight, well within the interval: listed again.
+    wall.fetch_add(2, Ordering::SeqCst);
+    clock.advance(Duration::from_secs(2));
+    listing.refresh(&mut home);
+    assert_eq!(date_of(&home, 3).as_deref(), Some("3 Oct"));
+    assert_eq!(date_of(&home, 2).as_deref(), Some("2 Oct"));
+    assert_eq!(home.sessions()[0].status, Status::NeedsYou);
+}
+
+/// A session's `!` clears on Home once its journal is gone, at the next
+/// listing, and the selection stays on the session it was on though the
+/// order changes.
+#[test]
+fn home_shows_a_status_change_without_leaving() {
+    let tmp = TestDir::new("relist");
+    let library = library_of_three(&tmp.0);
+    leave_journal(&tmp.0, 1);
+    let clock = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let wall = Arc::new(AtomicI64::new(day(3)));
+    let mut listing = listing_of(&library, &clock, &wall);
+    let mut home = Home::new(listing.sessions().unwrap(), "parakeet", Theme::no_color());
+    let ids = |home: &Home| home.sessions().iter().map(|s| s.id).collect::<Vec<_>>();
+    assert_eq!(ids(&home), [1, 3, 2]);
+    home.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    home.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(home.selected(), Some(2));
+
+    remove_journal(&tmp.0, 1);
+    // Before the interval: not listed again, so still `!`.
+    clock.advance(RELIST.checked_sub(Duration::from_millis(1)).unwrap());
+    listing.refresh(&mut home);
+    assert_eq!(home.sessions()[0].status, Status::NeedsYou);
+    clock.advance(Duration::from_millis(1));
+    listing.refresh(&mut home);
+    assert_eq!(ids(&home), [3, 2, 1]);
+    assert!(home.sessions().iter().all(|s| s.status == Status::Ready));
+    assert_eq!(home.selected(), Some(2));
+
+    let mut terminal = Terminal::new(TestBackend::new(62, 20)).unwrap();
+    terminal.draw(|frame| home.draw(frame)).unwrap();
+    assert!(
+        row(&terminal, 0).ends_with(" ✓ ready ─╮"),
+        "{}",
+        row(&terminal, 0)
+    );
+}
+
+/// If listing fails while Home is open, Home keeps its list and says so
+/// once, and the next listing that works replaces it.
+#[test]
+fn a_failed_listing_keeps_the_list_and_says_so_once() {
+    let tmp = TestDir::new("relist-fails");
+    let library = library_of_three(&tmp.0);
+    let clock = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let wall = Arc::new(AtomicI64::new(day(3)));
+    let mut listing = listing_of(&library, &clock, &wall);
+    let mut home = Home::new(listing.sessions().unwrap(), "parakeet", Theme::no_color());
+    let sessions = tmp.0.join("sessions");
+    let aside = tmp.0.join("sessions-aside");
+    rename(&sessions, &aside);
+    // Where the sessions were, a file: listing it fails.
+    write_file(&sessions);
+    let mut terminal = Terminal::new(TestBackend::new(62, 20)).unwrap();
+    let notice = |terminal: &mut Terminal<TestBackend>, home: &mut Home| {
+        terminal.draw(|frame| home.draw(frame)).unwrap();
+        row(terminal, 10)
+    };
+    clock.advance(RELIST);
+    listing.refresh(&mut home);
+    assert_eq!(home.sessions().len(), 3);
+    assert!(
+        notice(&mut terminal, &mut home).contains("the sessions couldn't be listed"),
+        "{}",
+        notice(&mut terminal, &mut home)
+    );
+    // Seen, then the next failure says nothing more.
+    home.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    clock.advance(RELIST);
+    listing.refresh(&mut home);
+    assert!(!notice(&mut terminal, &mut home).contains("couldn't be listed"));
+    assert_eq!(home.sessions().len(), 3);
+    // Back again: listed, with what changed meanwhile.
+    remove_file(&sessions);
+    rename(&aside, &sessions);
+    leave_journal(&tmp.0, 2);
+    clock.advance(RELIST);
+    listing.refresh(&mut home);
+    assert_eq!(home.sessions()[0].id, 2);
+    assert_eq!(home.sessions()[0].status, Status::NeedsYou);
+    // A failure after that is said again.
+    rename(&sessions, &aside);
+    write_file(&sessions);
+    clock.advance(RELIST);
+    listing.refresh(&mut home);
+    assert!(notice(&mut terminal, &mut home).contains("couldn't be listed"));
+}
+
+/// A listing that fails just after midnight waits the interval before
+/// trying again, like any other failure, rather than at every draw.
+#[test]
+fn a_failed_listing_after_midnight_waits_to_try_again() {
+    let tmp = TestDir::new("midnight-fails");
+    let library = library_of_three(&tmp.0);
+    let clock = Arc::new(FakeClock::new(SessionTime::ZERO));
+    // 23:59:59 UTC on 3 Oct.
+    let wall = Arc::new(AtomicI64::new(day(3) + 15 * 3_600 - 1));
+    let mut listing = listing_of(&library, &clock, &wall);
+    let mut home = Home::new(listing.sessions().unwrap(), "parakeet", Theme::no_color());
+    let sessions = tmp.0.join("sessions");
+    let aside = tmp.0.join("sessions-aside");
+    rename(&sessions, &aside);
+    write_file(&sessions);
+    wall.fetch_add(2, Ordering::SeqCst);
+    listing.refresh(&mut home);
+    assert_eq!(date_of(&home, 3).as_deref(), Some("today"));
+    // Listing works again, but the interval since the failure hasn't
+    // passed: nothing is listed.
+    remove_file(&sessions);
+    rename(&aside, &sessions);
+    clock.advance(RELIST.checked_sub(Duration::from_millis(1)).unwrap());
+    listing.refresh(&mut home);
+    assert_eq!(date_of(&home, 3).as_deref(), Some("today"));
+    clock.advance(Duration::from_millis(1));
+    listing.refresh(&mut home);
+    assert_eq!(date_of(&home, 3).as_deref(), Some("3 Oct"));
+}
+
+/// A failed listing doesn't replace a problem Home already shows, and the
+/// notice it gives is taken back once a listing works.
+#[test]
+fn a_listing_notice_leaves_another_and_goes_once_listing_works() {
+    let tmp = TestDir::new("relist-notice");
+    let library = library_of_three(&tmp.0);
+    let clock = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let wall = Arc::new(AtomicI64::new(day(3)));
+    let mut listing = listing_of(&library, &clock, &wall);
+    let mut home = Home::new(listing.sessions().unwrap(), "parakeet", Theme::no_color());
+    home.set_notice(Some("the recording failed: no mic".into()));
+    let sessions = tmp.0.join("sessions");
+    let aside = tmp.0.join("sessions-aside");
+    rename(&sessions, &aside);
+    write_file(&sessions);
+    clock.advance(RELIST);
+    listing.refresh(&mut home);
+    assert_eq!(home.notice(), Some("the recording failed: no mic"));
+    // Once that's dismissed, the next failure says so.
+    let mut terminal = Terminal::new(TestBackend::new(62, 20)).unwrap();
+    terminal.draw(|frame| home.draw(frame)).unwrap();
+    home.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    clock.advance(RELIST);
+    listing.refresh(&mut home);
+    let failed = home.notice().unwrap();
+    assert!(
+        failed.starts_with("the sessions couldn't be listed: "),
+        "{failed}"
+    );
+    // Listing works again: the notice goes, unread or not.
+    remove_file(&sessions);
+    rename(&aside, &sessions);
+    clock.advance(RELIST);
+    listing.refresh(&mut home);
+    assert_eq!(home.notice(), None);
+}
+
+/// Removes the journal [`leave_journal`] left.
+#[expect(clippy::disallowed_methods, reason = "test scaffolding")]
+fn remove_journal(dir: &Path, id: u64) {
+    let name = nota_recorder::journal::JournalId::new(1).file_name();
+    let audio = dir.join("sessions").join(id.to_string()).join("audio");
+    std::fs::remove_file(audio.join(name)).unwrap();
+}
+
+#[expect(clippy::disallowed_methods, reason = "test scaffolding")]
+fn rename(from: &Path, to: &Path) {
+    std::fs::rename(from, to).unwrap();
+}
+
+#[expect(clippy::disallowed_methods, reason = "test scaffolding")]
+fn write_file(path: &Path) {
+    std::fs::write(path, b"").unwrap();
+}
+
+#[expect(clippy::disallowed_methods, reason = "test scaffolding")]
+fn remove_file(path: &Path) {
+    std::fs::remove_file(path).unwrap();
 }
