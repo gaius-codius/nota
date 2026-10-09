@@ -39,6 +39,9 @@
 //! - [`Fs::lock_dir`] takes an advisory lock on a directory, without
 //!   waiting: one holder at a time, across processes too. It isn't durable;
 //!   it ends when its guard drops or the process dies.
+//! - [`Fs::free_space`] says how many bytes the filesystem holding a
+//!   directory has left for nota (`statvfs`), for the disk check (see
+//!   [`disk`](crate::disk)). It changes nothing.
 //!
 //! Paths are absolute, or at least have a non-empty directory part:
 //! `journal` alone is refused, so the fake and the real filesystem agree.
@@ -147,6 +150,35 @@ pub trait Fs: Send + Sync + fmt::Debug {
     /// [`io::ErrorKind::WouldBlock`] if the lock is held; any I/O error,
     /// including a missing directory or one that's a file.
     fn lock_dir(&self, dir: &Path) -> io::Result<Self::Lock>;
+
+    /// The bytes free for an unprivileged user on the filesystem holding
+    /// `dir`: what files nota writes there can still take. It changes
+    /// nothing, and may be out of date as soon as it returns.
+    ///
+    /// The default says the filesystem can't tell: a wrapper that doesn't
+    /// pass it on reports no figure rather than a wrong one.
+    ///
+    /// # Errors
+    ///
+    /// Any I/O error, including a missing directory;
+    /// [`io::ErrorKind::Unsupported`] where the platform can't tell.
+    fn free_space(&self, dir: &Path) -> io::Result<u64> {
+        let _ = dir;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "this filesystem can't say how much space is free",
+        ))
+    }
+}
+
+/// Whether `e` says the disk is full: no space left (`ENOSPC`), or the
+/// user's quota is used up (`EDQUOT`), which a recording meets the same way.
+#[must_use]
+pub fn is_disk_full(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded
+    )
 }
 
 /// The longest file [`Fs::read`] reads: 1 GiB. Nothing nota writes comes

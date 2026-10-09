@@ -4084,3 +4084,5 @@ fn a_set_aside_is_reported_whatever_fails_after_it() {
     }
     assert_eq!(unsynced, 1);
 }
+
+mod disk_full;

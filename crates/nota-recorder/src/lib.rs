@@ -2,6 +2,8 @@
 //!
 //! - [`capture`]: audio capture (`PipeWire` on Linux) and the recorder loop
 //!   that journals it.
+//! - [`disk`]: the disk check, the ballast, and a full disk during a
+//!   recording.
 //! - [`fs`]: the filesystem layer every durable write goes through, with a
 //!   fake that simulates crashes for exhaustive crash tests.
 //! - [`journal`]: the framed PCM journal, the crash-safe first stop for every
@@ -28,6 +30,7 @@
 //! crate's own tests turn on; it isn't part of nota.
 
 pub mod capture;
+pub mod disk;
 pub mod engine;
 pub mod fs;
 pub mod journal;

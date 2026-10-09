@@ -121,6 +121,11 @@ impl Library {
         })
     }
 
+    /// The library database's file.
+    pub(crate) fn db_path(&self) -> PathBuf {
+        self.root.join(LIBRARY_DB)
+    }
+
     /// The library database.
     pub(crate) const fn db(&self) -> &Writer {
         &self.db
@@ -495,6 +500,10 @@ impl SegmentStore for NewSessionRows {
     fn insert(&mut self, session: SessionId, segment: &DurableSegment) -> Result<(), StoreError> {
         self.added(session)?;
         self.db.insert(session, segment)
+    }
+
+    fn is_disk_full(error: &StoreError) -> bool {
+        error.is_disk_full()
     }
 }
 

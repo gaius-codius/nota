@@ -116,6 +116,38 @@ impl Fs for StdFs {
             Err(std::fs::TryLockError::Error(e)) => Err(e),
         }
     }
+
+    fn free_space(&self, dir: &Path) -> io::Result<u64> {
+        valid_dir(dir)?;
+        free_space(dir)
+    }
+}
+
+/// `statvfs(2)`: the blocks free to an unprivileged user (`f_bavail`, not
+/// `f_bfree`, which counts the blocks kept for root) times the fragment
+/// size they're counted in. A filesystem that reports no blocks at all (a
+/// FUSE one without `statfs`) can't tell. Elsewhere than Unix nota can't
+/// tell yet, and the disk check reports no figure.
+fn free_space(dir: &Path) -> io::Result<u64> {
+    #[cfg(unix)]
+    {
+        let stat = rustix::fs::statvfs(dir)?;
+        if stat.f_blocks == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "the filesystem doesn't say how much space it has",
+            ));
+        }
+        Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "free space isn't read on this platform yet",
+        ))
+    }
 }
 
 /// [`Fs::read`], refusing a file longer than `limit`.
@@ -274,6 +306,24 @@ mod tests {
 
         fs.remove(&done).unwrap();
         assert_eq!(fs.read(&done).unwrap_err().kind(), io::ErrorKind::NotFound);
+    }
+
+    /// `statvfs` on a real directory: some space, and shrinking by about
+    /// what a written file takes. Other processes write too, so only
+    /// roughly.
+    #[cfg(unix)]
+    #[test]
+    fn free_space_reads_statvfs() {
+        let dir = TestDir::new("free");
+        let fs = StdFs;
+        let before = fs.free_space(&dir.0).unwrap();
+        // Any disk the tests run on has a megabyte free.
+        assert!(before > 1 << 20, "{before}");
+        assert_eq!(
+            fs.free_space(&dir.0.join("missing")).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        assert!(fs.free_space(Path::new("journal")).is_err());
     }
 
     #[test]
