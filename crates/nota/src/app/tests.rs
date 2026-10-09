@@ -299,11 +299,11 @@ fn listing_of<'a>(
     Listing {
         library,
         salvaged: &[],
-        zone: TimeZone::UTC,
+        zone: || TimeZone::UTC,
         clock: Arc::clone(clock) as Arc<dyn Clock>,
         wall: Box::new(move || WallTime::from_unix_seconds(wall.load(Ordering::SeqCst))),
         listed_at: None,
-        failing: false,
+        said: None,
     }
 }
 
@@ -324,17 +324,21 @@ fn home_open_past_midnight_dates_yesterday() {
     let mut listing = listing_of(&library, &clock, &wall);
     let mut home = Home::new(listing.sessions().unwrap(), "parakeet", Theme::no_color());
     assert_eq!(date_of(&home, 3).as_deref(), Some("today"));
-    // A second later, still the same day: nothing is listed again.
+    // A second later, still the same day: nothing is listed again, so a
+    // journal left meanwhile doesn't show yet.
+    leave_journal(&tmp.0, 1);
     wall.fetch_add(1, Ordering::SeqCst);
     clock.advance(Duration::from_secs(1));
     listing.refresh(&mut home);
     assert_eq!(date_of(&home, 3).as_deref(), Some("today"));
-    // Past midnight, well within the interval.
+    assert!(home.sessions().iter().all(|s| s.status == Status::Ready));
+    // Past midnight, well within the interval: listed again.
     wall.fetch_add(2, Ordering::SeqCst);
     clock.advance(Duration::from_secs(2));
     listing.refresh(&mut home);
     assert_eq!(date_of(&home, 3).as_deref(), Some("3 Oct"));
     assert_eq!(date_of(&home, 2).as_deref(), Some("2 Oct"));
+    assert_eq!(home.sessions()[0].status, Status::NeedsYou);
 }
 
 /// A session's `!` clears on Home once its journal is gone, at the next
@@ -423,6 +427,73 @@ fn a_failed_listing_keeps_the_list_and_says_so_once() {
     clock.advance(RELIST);
     listing.refresh(&mut home);
     assert!(notice(&mut terminal, &mut home).contains("couldn't be listed"));
+}
+
+/// A listing that fails just after midnight waits the interval before
+/// trying again, like any other failure, rather than at every draw.
+#[test]
+fn a_failed_listing_after_midnight_waits_to_try_again() {
+    let tmp = TestDir::new("midnight-fails");
+    let library = library_of_three(&tmp.0);
+    let clock = Arc::new(FakeClock::new(SessionTime::ZERO));
+    // 23:59:59 UTC on 3 Oct.
+    let wall = Arc::new(AtomicI64::new(day(3) + 15 * 3_600 - 1));
+    let mut listing = listing_of(&library, &clock, &wall);
+    let mut home = Home::new(listing.sessions().unwrap(), "parakeet", Theme::no_color());
+    let sessions = tmp.0.join("sessions");
+    let aside = tmp.0.join("sessions-aside");
+    rename(&sessions, &aside);
+    write_file(&sessions);
+    wall.fetch_add(2, Ordering::SeqCst);
+    listing.refresh(&mut home);
+    assert_eq!(date_of(&home, 3).as_deref(), Some("today"));
+    // Listing works again, but the interval since the failure hasn't
+    // passed: nothing is listed.
+    remove_file(&sessions);
+    rename(&aside, &sessions);
+    clock.advance(RELIST.checked_sub(Duration::from_millis(1)).unwrap());
+    listing.refresh(&mut home);
+    assert_eq!(date_of(&home, 3).as_deref(), Some("today"));
+    clock.advance(Duration::from_millis(1));
+    listing.refresh(&mut home);
+    assert_eq!(date_of(&home, 3).as_deref(), Some("3 Oct"));
+}
+
+/// A failed listing doesn't replace a problem Home already shows, and the
+/// notice it gives is taken back once a listing works.
+#[test]
+fn a_listing_notice_leaves_another_and_goes_once_listing_works() {
+    let tmp = TestDir::new("relist-notice");
+    let library = library_of_three(&tmp.0);
+    let clock = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let wall = Arc::new(AtomicI64::new(day(3)));
+    let mut listing = listing_of(&library, &clock, &wall);
+    let mut home = Home::new(listing.sessions().unwrap(), "parakeet", Theme::no_color());
+    home.set_notice(Some("the recording failed: no mic".into()));
+    let sessions = tmp.0.join("sessions");
+    let aside = tmp.0.join("sessions-aside");
+    rename(&sessions, &aside);
+    write_file(&sessions);
+    clock.advance(RELIST);
+    listing.refresh(&mut home);
+    assert_eq!(home.notice(), Some("the recording failed: no mic"));
+    // Once that's dismissed, the next failure says so.
+    let mut terminal = Terminal::new(TestBackend::new(62, 20)).unwrap();
+    terminal.draw(|frame| home.draw(frame)).unwrap();
+    home.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    clock.advance(RELIST);
+    listing.refresh(&mut home);
+    let failed = home.notice().unwrap();
+    assert!(
+        failed.starts_with("the sessions couldn't be listed: "),
+        "{failed}"
+    );
+    // Listing works again: the notice goes, unread or not.
+    remove_file(&sessions);
+    rename(&aside, &sessions);
+    clock.advance(RELIST);
+    listing.refresh(&mut home);
+    assert_eq!(home.notice(), None);
 }
 
 /// Removes the journal [`leave_journal`] left.

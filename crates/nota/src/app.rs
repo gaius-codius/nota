@@ -78,11 +78,11 @@ fn run_app(args: &RecordArgs, said: &mut Vec<String>) -> Result<(), BoxError> {
     let mut listing = Listing {
         library: &library,
         salvaged: &salvaged,
-        zone: TimeZone::system(),
+        zone: TimeZone::system,
         clock: Arc::clone(&clock),
         wall: Box::new(wall_now),
         listed_at: None,
-        failing: false,
+        said: None,
     };
     let mut screen: Option<Screen> = None;
     let mut notice = None;
@@ -217,17 +217,19 @@ struct Listing<'a> {
     library: &'a Library,
     /// What salvage did at start.
     salvaged: &'a [Salvaged],
-    zone: TimeZone,
+    /// The local time zone, read at each use so a change to it is seen.
+    zone: fn() -> TimeZone,
     /// Times the interval between listings.
     clock: Arc<dyn Clock>,
     /// The calendar's time, which says what day it is.
     wall: Box<dyn Fn() -> Option<WallTime>>,
-    /// When the sessions were last listed, by `clock`, and the local date
-    /// then, if the calendar's time could be read.
+    /// When the sessions were last listed, or a listing last failed, by
+    /// `clock`, and the local date then, if the calendar's time could be
+    /// read.
     listed_at: Option<(SessionTime, Option<Date>)>,
-    /// Whether the last listing failed, so Home says so once, not at every
-    /// try.
-    failing: bool,
+    /// While listing fails, the notice that said so on Home, once: it isn't
+    /// said again at every try, and it's taken back once a listing works.
+    said: Option<String>,
 }
 
 impl Listing<'_> {
@@ -237,11 +239,7 @@ impl Listing<'_> {
     ///
     /// If the library can't be listed.
     fn sessions(&mut self) -> io::Result<Vec<Session>> {
-        let now = (self.wall)();
-        let dates = Dates {
-            now,
-            zone: self.zone.clone(),
-        };
+        let dates = self.dates();
         // Taken before listing, so time spent listing counts towards the
         // next one.
         let at = self.clock.now();
@@ -258,42 +256,57 @@ impl Listing<'_> {
     /// Gives `home` the sessions again if a listing is due: [`RELIST`] has
     /// passed since the last, or the local date has changed. If listing
     /// fails, Home keeps the list it has and says why, once until a
-    /// listing works again.
+    /// listing works again, without replacing another problem it shows.
     fn refresh(&mut self, home: &mut Home) {
         if !self.due() {
             return;
         }
         match self.sessions() {
             Ok(sessions) => {
-                self.failing = false;
+                if self
+                    .said
+                    .take()
+                    .is_some_and(|said| home.notice() == Some(&said))
+                {
+                    home.set_notice(None);
+                }
                 home.set_sessions(sessions);
             }
             Err(e) => {
-                // Not listed: wait the interval before trying again.
-                self.listed_at = self.listed_at.map(|(_, day)| (self.clock.now(), day));
-                if !self.failing {
-                    self.failing = true;
+                // Not listed: wait the interval before trying again, even
+                // if the date has changed since the last listing.
+                self.listed_at = Some((self.clock.now(), self.today()));
+                if self.said.is_none() && home.notice().is_none() {
                     home.set_notice(Some(format!("the sessions couldn't be listed: {e}")));
+                    self.said = home.notice().map(str::to_owned);
                 }
             }
         }
+    }
+
+    /// Now, and the local time zone.
+    fn dates(&self) -> Dates {
+        Dates {
+            now: (self.wall)(),
+            zone: (self.zone)(),
+        }
+    }
+
+    /// Today's local date, if the calendar's time can be read.
+    fn today(&self) -> Option<Date> {
+        self.dates().today()
     }
 
     fn due(&self) -> bool {
         let Some((at, day)) = self.listed_at else {
             return true;
         };
-        let today = Dates {
-            now: (self.wall)(),
-            zone: self.zone.clone(),
-        }
-        .today();
         self.clock
             .now()
             .checked_duration_since(at)
             .unwrap_or_default()
             >= RELIST
-            || today != day
+            || self.today() != day
     }
 }
 

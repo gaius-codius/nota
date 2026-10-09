@@ -353,3 +353,27 @@ fn a_new_list_without_the_selected_session_closes_its_page() {
     home.set_sessions(vec![session(5, Status::Ready)]);
     assert_eq!(home.selected(), Some(5));
 }
+
+#[test]
+fn a_notice_not_yet_drawn_outlasts_a_key() {
+    let mut home = home_of(vec![session(1, Status::Ready)], Theme::default());
+    press(&mut home, KeyCode::Enter);
+    home.set_notice(Some("the sessions couldn't be listed".into()));
+    // Drawn on the page, where the notice isn't shown: esc leaves it.
+    draw(&mut home, 20);
+    press(&mut home, KeyCode::Esc);
+    assert!(!home.is_open());
+    assert_eq!(home.notice(), Some("the sessions couldn't be listed"));
+    // Too small to show it: a key leaves it too.
+    draw(&mut home, 5);
+    press(&mut home, KeyCode::Down);
+    assert_eq!(home.notice(), Some("the sessions couldn't be listed"));
+    let buf = draw(&mut home, 20);
+    assert!(
+        row(&buf, 10).contains("couldn't be listed"),
+        "{}",
+        row(&buf, 10)
+    );
+    press(&mut home, KeyCode::Down);
+    assert_eq!(home.notice(), None);
+}

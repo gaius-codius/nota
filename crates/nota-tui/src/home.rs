@@ -18,8 +18,9 @@
 //! rest follow newest first. The selected session's detail (what it needs,
 //! or how it was recovered) shows on the line below it.
 //!
-//! A problem (a recording that couldn't start) shows on the line above
-//! `recent` until the next key.
+//! A problem (a recording that couldn't start, the sessions not listed)
+//! shows on the line above `recent` until a key is pressed once it has been
+//! drawn there.
 //!
 //! The footer offers only keys that work: `r` joins it with Setup, `/`
 //! with search and `?` with the keys overlay. `⏎` opens a session; until
@@ -98,6 +99,10 @@ pub struct Home {
     busy: Option<String>,
     /// Something that went wrong, shown above the list until dismissed.
     notice: Option<String>,
+    /// Whether the notice has been drawn, so a key can dismiss it: one
+    /// pressed on a session's page, or in a terminal too small to show it,
+    /// doesn't.
+    notice_drawn: bool,
 }
 
 impl Home {
@@ -116,6 +121,7 @@ impl Home {
             opened: None,
             busy: None,
             notice: None,
+            notice_drawn: false,
         }
     }
 
@@ -157,9 +163,17 @@ impl Home {
         self.busy = what;
     }
 
-    /// Shows `problem` above the list, until the next key, or nothing.
+    /// Shows `problem` above the list, until a key is pressed once it has
+    /// been drawn, or nothing.
     pub fn set_notice(&mut self, problem: Option<String>) {
         self.notice = problem.map(|text| drawn(&text));
+        self.notice_drawn = false;
+    }
+
+    /// The problem shown above the list, if any, as it's drawn.
+    #[must_use]
+    pub fn notice(&self) -> Option<&str> {
+        self.notice.as_deref()
     }
 
     /// Handles a key press. Returns what Home asks for, if anything.
@@ -172,8 +186,12 @@ impl Home {
         if key.kind == KeyEventKind::Release {
             return None;
         }
-        // Any key dismisses the notice; it has been seen.
-        self.notice = None;
+        // Any key dismisses the notice, once it has been drawn: it has been
+        // seen.
+        if self.notice_drawn {
+            self.notice = None;
+            self.notice_drawn = false;
+        }
         let ctrl_c = key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('c' | 'C'));
         if ctrl_c {
@@ -301,6 +319,7 @@ impl Home {
         );
         let label_y = logo_top + logo::HEIGHT + LOGO_GAP;
         if let Some(notice) = &self.notice {
+            self.notice_drawn = true;
             let room = usize::from(inside.width.saturating_sub(5));
             let mut spans = vec![Span::styled("! ", self.theme.gold)];
             spans.extend(truncate(

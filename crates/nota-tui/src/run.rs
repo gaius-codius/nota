@@ -537,10 +537,9 @@ mod tests {
     fn home_is_refreshed_before_each_draw() {
         let mut terminal = Terminal::new(TestBackend::new(62, 20)).unwrap();
         let (event_tx, event_rx) = mpsc::channel();
-        event_tx.send(key('j')).unwrap();
-        event_tx.send(key('q')).unwrap();
-        drop(event_tx);
         let mut refreshes = 0;
+        // Each refresh sends one key, so each comes in a batch of its own,
+        // with a draw before it: `j`, then `q`.
         let mut refresh = |home: &mut Home| {
             refreshes += 1;
             let session = crate::home::Session {
@@ -552,13 +551,14 @@ mod tests {
                 detail: None,
             };
             home.set_sessions(vec![session]);
+            let next = if refreshes == 1 { 'j' } else { 'q' };
+            event_tx.send(key(next)).unwrap();
         };
         let action = run_home(&mut terminal, &mut home(), &event_rx, &mut refresh);
         assert_eq!(action.unwrap(), Action::Quit);
-        // Both keys come in one batch: one draw before them.
-        assert_eq!(refreshes, 1);
+        assert_eq!(refreshes, 2);
         let screen_text = format!("{}", terminal.backend());
-        assert!(screen_text.contains("Loop, refresh 1"), "{screen_text}");
+        assert!(screen_text.contains("Loop, refresh 2"), "{screen_text}");
     }
 
     #[test]
