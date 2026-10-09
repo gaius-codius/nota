@@ -1,16 +1,14 @@
 ---
-source: crates/nota-tui/tests/home_screen.rs
-expression: terminal.backend()
+source: crates/nota-tui/tests/processing_screen.rs
+expression: "draw(&mut screen, 62, 20)"
 ---
-"╭─ ≈ nota · Joinery · mortise and tenon ─────── 2 Oct · 58m ─╮"
+"╭─ ≈ nota · Woodwork workshop ──────────────── ◐ processing ─╮"
 "│                                                            │"
-"│  Reviewing a session comes in a later version of nota.     │"
+"│ ▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ │"
 "│                                                            │"
-"│  ! This session needs you:                                 │"
-"│    stopped early: disk full · free space to finish         │"
+"│  Summary ◐   Transcript                                    │"
 "│                                                            │"
-"│                                                            │"
-"│                                                            │"
+"│  Use a sharp plane on the edge of the board.               │"
 "│                                                            │"
 "│                                                            │"
 "│                                                            │"
@@ -21,4 +19,6 @@ expression: terminal.backend()
 "│                                                            │"
 "│                                                            │"
 "│                                                            │"
-"╰─ esc back ────────────────────────────────────── parakeet ─╯"
+"│                                                            │"
+"│                                                            │"
+"╰─ tab view  r record new  esc home ────────────── parakeet ─╯"

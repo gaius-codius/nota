@@ -258,6 +258,45 @@ pub fn run_home<B: Backend>(
     }
 }
 
+/// Runs Processing with job and transcript updates before each draw.
+/// Signals and a closed event source end it in order.
+///
+/// # Errors
+///
+/// Returns terminal draw failures or a lost keyboard.
+pub fn run_processing<B: Backend>(
+    terminal: &mut Terminal<B>,
+    processing: &mut crate::Processing,
+    events: &Receiver<Event>,
+    refresh: &mut dyn FnMut(&mut crate::Processing),
+) -> Result<crate::ProcessingAction, RunError<B::Error>> {
+    loop {
+        refresh(processing);
+        terminal
+            .draw(|frame| processing.draw(frame))
+            .map_err(RunError::Terminal)?;
+        let first = match events.recv_timeout(REDRAW) {
+            Ok(event) => event,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => return Ok(crate::ProcessingAction::Quit),
+        };
+        for event in std::iter::once(first).chain(events.try_iter().take(MAX_BATCH - 1)) {
+            match event {
+                Event::Key { key, .. } => {
+                    if let Some(action) = processing.key(key) {
+                        return Ok(action);
+                    }
+                }
+                Event::Recorder(recorder::Event::Stopping | recorder::Event::Stopped(_)) => {
+                    return Ok(crate::ProcessingAction::Quit);
+                }
+                Event::InputLost(kind) => return Err(RunError::InputLost(kind)),
+                Event::Recorder(_) | Event::Paste(_) | Event::Resize => {}
+            }
+        }
+    }
+}
+
 /// A thread that reads keys, pastes and resizes from the terminal and sends them as
 /// [`Event`]s, each key stamped with the session clock as it's read. Keys
 /// already waiting when it starts are discarded: they were typed before the
@@ -563,14 +602,14 @@ mod tests {
 
     #[test]
     fn home_runs_until_it_asks_to_record() {
-        let events = vec![
-            Event::Resize,
-            key_at(KeyCode::Enter, 0),
-            key_at(KeyCode::Esc, 0),
-            key('R'),
-            key('q'),
-        ];
+        let events = vec![Event::Resize, key('R'), key('q')];
         assert_eq!(run_home_over(events).unwrap(), Action::Record);
+    }
+
+    #[test]
+    fn home_opens_selected_session() {
+        let events = vec![Event::Resize, key_at(KeyCode::Enter, 0), key('R')];
+        assert_eq!(run_home_over(events).unwrap(), Action::Open(1));
     }
 
     #[test]

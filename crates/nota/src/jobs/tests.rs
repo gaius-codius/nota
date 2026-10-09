@@ -73,6 +73,7 @@ enum Then {
     UntilStopped,
     /// Runs out of space.
     NoSpace,
+    NoEngine,
 }
 
 /// A worker that does as told per session, and notes each run.
@@ -109,6 +110,7 @@ impl Worker for Fake {
         match then {
             Then::Done => JobEnd::Done,
             Then::Fail => JobEnd::Failed("it broke".into()),
+            Then::NoEngine => JobEnd::Waiting(Some(Wait::Engine)),
             Then::NoSpace => JobEnd::Waiting(Some(Wait::Space)),
             Then::UntilStopped => {
                 while !(running.stop)() {
@@ -355,4 +357,40 @@ fn a_wait_for_space_isnt_lost_to_a_missing_engine() {
     room.set(true);
     runner.wake();
     until_states(&db, &[(S1, JobState::Done)]);
+}
+
+/// Startup failures remain queued, do not block other sessions, and wakes
+/// cannot restart the same engine before one idle interval has passed.
+#[test]
+fn engine_startup_retries_wait_one_idle_interval_and_then_finish() {
+    let (_dir, db) = library("engine-retry", &[(S1, None), (S2, None)]);
+    let worker = Fake::default();
+    worker.script(S1, &[Then::NoEngine, Then::Done]);
+    let clock = Arc::new(nota_core::FakeClock::new(SessionTime::ZERO));
+    let mut runner = Loop {
+        db: db.clone(),
+        worker: worker.clone(),
+        capture: Switch::default(),
+        room: Switch::on(),
+        shared: Arc::new(Shared::default()),
+        clock: Arc::clone(&clock) as Arc<dyn Clock>,
+        retry_after: BTreeMap::new(),
+    };
+    let job = runner.next().unwrap().unwrap();
+    runner.run_one(&job);
+    assert_eq!(states(&db)[0], (S1, JobState::Waiting(Some(Wait::Engine))));
+    let next = runner.next().unwrap().unwrap();
+    assert_eq!(next.session, S2);
+    runner.run_one(&next);
+    for _ in 0..10 {
+        runner.shared.wake();
+        assert!(runner.next().unwrap().is_none());
+    }
+    clock.advance(Duration::from_nanos(4_999_999_999));
+    assert!(runner.next().unwrap().is_none());
+    clock.advance(Duration::from_nanos(1));
+    let job = runner.next().unwrap().unwrap();
+    runner.run_one(&job);
+    assert_eq!(states(&db), [(S1, JobState::Done), (S2, JobState::Done)]);
+    assert_eq!(worker.ran(), [S1, S2, S1]);
 }

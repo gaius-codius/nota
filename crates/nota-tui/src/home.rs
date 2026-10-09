@@ -23,8 +23,8 @@
 //! drawn there.
 //!
 //! The footer offers only keys that work: `r` joins it with Setup, `/`
-//! with search and `?` with the keys overlay. `⏎` opens a session; until
-//! Review exists it opens a page that says so, and what the session needs.
+//! with search and `?` with the keys overlay. `⏎` asks the app to open the
+//! selected session on its Processing screen.
 
 use std::time::Duration;
 
@@ -70,13 +70,15 @@ pub struct Session {
     /// When it was recorded, as Home words it (`today`, `2 Oct`), if known.
     pub date: Option<String>,
     /// What it needs, or how it was recovered, in words: shown under it
-    /// when it's selected, and on its page.
+    /// when it's selected.
     pub detail: Option<String>,
 }
 
 /// What Home asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
+    /// `⏎`: open the selected session.
+    Open(u64),
     /// `R`: record with the last settings.
     Record,
     /// `q`, `esc` or Ctrl+C: close nota.
@@ -92,16 +94,13 @@ pub struct Home {
     scroll: usize,
     engines: String,
     theme: Theme,
-    /// The session whose page is open, by index.
-    opened: Option<usize>,
     /// Something nota is doing that the user should wait for, shown in
     /// the top border.
     busy: Option<String>,
     /// Something that went wrong, shown above the list until dismissed.
     notice: Option<String>,
     /// Whether the notice has been drawn, so a key can dismiss it: one
-    /// pressed on a session's page, or in a terminal too small to show it,
-    /// doesn't.
+    /// pressed in a terminal too small to show it doesn't.
     notice_drawn: bool,
 }
 
@@ -118,7 +117,6 @@ impl Home {
             scroll: 0,
             engines: drawn(engines),
             theme,
-            opened: None,
             busy: None,
             notice: None,
             notice_drawn: false,
@@ -126,18 +124,15 @@ impl Home {
     }
 
     /// Lists `sessions` instead, in the order [`Home::new`] gives them. The
-    /// selection stays on the same session, and so does an open page; if
-    /// that session has gone, the selection stays at the same place in the
-    /// list (or the last row) and its page closes.
+    /// selection stays on the same session; if that session has gone, the
+    /// selection stays at the same place in the list (or the last row).
     pub fn set_sessions(&mut self, sessions: Vec<Session>) {
         let selected = self.selected();
-        let opened = self.opened.and_then(|i| self.sessions.get(i)).map(|s| s.id);
         self.sessions = listed(sessions);
         let at = |id| self.sessions.iter().position(|s| s.id == id);
         self.selected = selected
             .and_then(at)
             .unwrap_or_else(|| self.selected.min(self.sessions.len().saturating_sub(1)));
-        self.opened = opened.and_then(at);
     }
 
     /// The sessions in the order they're listed.
@@ -150,12 +145,6 @@ impl Home {
     #[must_use]
     pub fn selected(&self) -> Option<u64> {
         self.sessions.get(self.selected).map(|s| s.id)
-    }
-
-    /// Whether a session's page is open.
-    #[must_use]
-    pub const fn is_open(&self) -> bool {
-        self.opened.is_some()
     }
 
     /// Shows `what` in the top border while nota does it, or nothing.
@@ -180,7 +169,7 @@ impl Home {
     ///
     /// - `R` records with the last settings.
     /// - `↑`/`↓` (or `k`/`j`) move the selection.
-    /// - `⏎` opens the selected session's page; `esc` closes it.
+    /// - `⏎` asks to open the selected session.
     /// - `q`, `esc` and Ctrl+C close nota.
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
         if key.kind == KeyEventKind::Release {
@@ -204,12 +193,6 @@ impl Home {
         {
             return None;
         }
-        if self.opened.is_some() {
-            if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
-                self.opened = None;
-            }
-            return None;
-        }
         match key.code {
             KeyCode::Char('R') => return Some(Action::Record),
             KeyCode::Char('q') | KeyCode::Esc => return Some(Action::Quit),
@@ -217,7 +200,7 @@ impl Home {
             KeyCode::Down | KeyCode::Char('j') => {
                 self.selected = (self.selected + 1).min(self.sessions.len().saturating_sub(1));
             }
-            KeyCode::Enter if !self.sessions.is_empty() => self.opened = Some(self.selected),
+            KeyCode::Enter => return self.selected().map(Action::Open),
             _ => {}
         }
         None
@@ -237,13 +220,9 @@ impl Home {
             buf.set_string(area.x, y, "│", self.theme.border);
             buf.set_string(area.right() - 1, y, "│", self.theme.border);
         }
-        if let Some(session) = self.opened.and_then(|i| self.sessions.get(i)) {
-            self.draw_page(session, area, inside, buf);
-        } else {
-            self.draw_top(area, buf);
-            self.draw_list(inside, buf);
-            self.draw_bottom(area, buf);
-        }
+        self.draw_top(area, buf);
+        self.draw_list(inside, buf);
+        self.draw_bottom(area, buf);
     }
 
     fn draw_top(&self, area: Rect, buf: &mut Buffer) {
@@ -433,71 +412,6 @@ impl Home {
         spans.push(Span::raw(" ".repeat(room - title_width + 1)));
         spans.push(Span::styled(right, self.theme.text_secondary));
         Line::from(spans)
-    }
-
-    /// A session's page: until Review exists, what it needs in words.
-    fn draw_page(&self, session: &Session, area: Rect, inside: Rect, buf: &mut Buffer) {
-        let left = vec![
-            Span::styled("≈ nota", self.theme.accent),
-            Span::styled(" · ", self.theme.text_hint),
-            Span::styled(session.title.as_str(), self.theme.text),
-        ];
-        let when = [
-            session.date.clone(),
-            session.duration.map(|d| duration(d).trim().to_owned()),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" · ");
-        frame_row(
-            Rect::new(area.x, area.y, area.width, 1),
-            ('╭', '╮'),
-            left,
-            vec![Span::styled(when, self.theme.text_secondary)],
-            Keep::Right,
-            self.theme.border,
-            buf,
-        );
-        let mut lines = vec![Line::styled(
-            "Reviewing a session comes in a later version of nota.",
-            self.theme.text,
-        )];
-        let (glyph, style, what) = match session.status {
-            Status::NeedsYou => ("!", self.theme.gold, "This session needs you:"),
-            Status::Processing => ("◐", self.theme.gold, "Still being processed."),
-            Status::Ready => ("✓", self.theme.green, "Recorded and ready."),
-        };
-        lines.push(Line::raw(""));
-        lines.push(Line::from(vec![
-            Span::styled(glyph, style),
-            Span::raw(" "),
-            Span::styled(what, self.theme.text),
-        ]));
-        if let Some(detail) = &session.detail {
-            lines.push(Line::styled(
-                format!("  {detail}"),
-                self.theme.text_secondary,
-            ));
-        }
-        for (y, line) in (inside.y + 1..inside.bottom()).zip(&lines) {
-            buf.set_line(inside.x + 2, y, line, inside.width.saturating_sub(3));
-        }
-        frame_row(
-            Rect::new(area.x, area.bottom() - 1, area.width, 1),
-            ('╰', '╯'),
-            vec![
-                Span::styled("esc", self.theme.text),
-                Span::styled(" back", self.theme.text_hint),
-            ],
-            vec![Span::styled(
-                self.engines.as_str(),
-                self.theme.text_secondary,
-            )],
-            Keep::Left,
-            self.theme.border,
-            buf,
-        );
     }
 }
 

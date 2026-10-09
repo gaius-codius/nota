@@ -1,14 +1,14 @@
 //! `nota` with no command: the Home screen, and the flow between screens.
 //!
 //! ```text
-//! Home ──R──▶ Recording ──s, y──▶ (stopping) ──▶ Home
+//! Home ──R──▶ Recording ──s, y──▶ Processing ──esc──▶ Home
 //! ```
 //!
 //! The terminal is set up once, for Home, and lent to each recording: the
 //! Recording screen runs on it, and Home shows "finishing the recording"
-//! while the recording stops, then lists the sessions again. Setup (`r`),
-//! Processing and Review join the flow as they're built; until then `R`
-//! records with the last session's settings, and stopping returns to Home.
+//! while the recording stops, then Processing shows its jobs and transcript.
+//! Home opens a session in Processing too. Until Setup exists, `R`
+//! records with the last session's settings.
 //!
 //! At start, sessions an earlier run left are salvaged, as `nota record`
 //! does. While Home is open, the jobs queued after each stop (the final
@@ -98,6 +98,7 @@ fn run_app(args: &RecordArgs, said: &mut Vec<String>) -> Result<(), BoxError> {
         said: None,
     };
     let mut screen: Option<Screen> = None;
+    let mut processing_session = None;
     while !quit.asked() {
         let mut current = match screen.take() {
             Some(screen) => screen,
@@ -105,12 +106,32 @@ fn run_app(args: &RecordArgs, said: &mut Vec<String>) -> Result<(), BoxError> {
         };
         let mut home = Home::new(listing.sessions()?, engines, theme);
         home.set_notice(notice.take());
-        match show_home(&mut current, &mut home, &mut listing, &quit)? {
-            Action::Quit => return Ok(()),
-            Action::Record => {}
+        let action = if let Some(id) = processing_session.take() {
+            processing::show(&mut current, &library, id, engines, theme, &clock, &quit)?
+        } else {
+            match show_home(&mut current, &mut home, &mut listing, &quit)? {
+                Action::Quit => nota_tui::ProcessingAction::Quit,
+                Action::Record => nota_tui::ProcessingAction::Record,
+                Action::Open(id) => {
+                    processing_session = Some(SessionId::new(id));
+                    screen = Some(current);
+                    continue;
+                }
+            }
+        };
+        match action {
+            nota_tui::ProcessingAction::Quit => return Ok(()),
+            nota_tui::ProcessingAction::Home => {
+                screen = Some(current);
+                continue;
+            }
+            nota_tui::ProcessingAction::Record => {}
         }
         match record_from(args, &library, current, &mut home, said, &jobs) {
-            Recorded::Back(back) => screen = Some(back),
+            Recorded::Back(back, id) => {
+                screen = Some(back);
+                processing_session = id;
+            }
             Recorded::Failed(e) => notice = Some(format!("the recording failed: {e}")),
             Recorded::TerminalGone => return Ok(()),
         }
@@ -191,7 +212,7 @@ impl Capture for Recordings {
 /// How a recording from Home went, for what comes next.
 enum Recorded {
     /// It was recorded, and the terminal is back for Home.
-    Back(Screen),
+    Back(Screen, Option<SessionId>),
     /// It failed: the terminal was restored, and Home says why.
     Failed(String),
     /// It was recorded, but the terminal failed (as after a hangup):
@@ -243,7 +264,13 @@ fn record_from(
                 outcome.segments
             ));
             said.extend(outcome.notes.iter().map(|note| format!("  {note}")));
-            back.map_or(Recorded::TerminalGone, Recorded::Back)
+            let id = outcome
+                .session
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.parse::<u64>().ok())
+                .map(SessionId::new);
+            back.map_or(Recorded::TerminalGone, |screen| Recorded::Back(screen, id))
         }
         Err(e) => {
             said.push(format!("nota: the recording failed: {e}"));
@@ -339,12 +366,36 @@ impl Listing<'_> {
         // Taken before listing, so time spent listing counts towards the
         // next one.
         let at = self.clock.now();
-        let sessions = self
+        let mut sessions: Vec<Session> = self
             .library
             .listing(RATE)?
             .into_iter()
             .map(|listed| session(listed, self.salvaged, &dates))
             .collect();
+        if let Ok(jobs) = self.library.db().with(|db| db.jobs()) {
+            for shown in &mut sessions {
+                if shown.status != Status::Ready {
+                    continue;
+                }
+                let own: Vec<_> = jobs
+                    .iter()
+                    .filter(|job| job.session.get() == shown.id)
+                    .collect();
+                if let Some(why) = own.iter().find_map(|job| match &job.state {
+                    nota_store::JobState::Failed(why) => Some(why),
+                    _ => None,
+                }) {
+                    shown.status = Status::NeedsYou;
+                    shown.detail = Some(format!("processing failed: {why}"));
+                } else if own
+                    .iter()
+                    .any(|job| job.state != nota_store::JobState::Done)
+                {
+                    shown.status = Status::Processing;
+                    shown.detail = Some("final transcript queued or running".into());
+                }
+            }
+        }
         self.listed_at = Some((at, dates.today()));
         Ok(sessions)
     }
@@ -491,3 +542,5 @@ const fn salvaged_id(salvaged: &Salvaged) -> SessionId {
 
 #[cfg(test)]
 mod tests;
+
+mod processing;

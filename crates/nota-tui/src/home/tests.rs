@@ -99,19 +99,23 @@ fn the_selection_moves_within_the_list() {
 }
 
 #[test]
-fn enter_opens_the_page_and_esc_closes_it() {
-    let mut home = home_of(vec![session(1, Status::NeedsYou)], Theme::default());
-    assert_eq!(press(&mut home, KeyCode::Enter), None);
-    assert!(home.is_open());
-    // On the page, `R` and `q` don't act behind it.
-    assert_eq!(press(&mut home, KeyCode::Char('R')), None);
-    assert!(home.is_open());
-    assert_eq!(press(&mut home, KeyCode::Esc), None);
-    assert!(!home.is_open());
+fn enter_asks_to_open_the_selected_session() {
+    let mut home = home_of(
+        vec![session(1, Status::Ready), session(2, Status::NeedsYou)],
+        Theme::default(),
+    );
+    assert_eq!(press(&mut home, KeyCode::Enter), Some(Action::Open(2)));
+    press(&mut home, KeyCode::Down);
+    assert_eq!(press(&mut home, KeyCode::Enter), Some(Action::Open(1)));
+    // Modified Enter and key releases must not open a session.
+    let alt_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT);
+    assert_eq!(home.handle_key(alt_enter), None);
+    let mut release = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    release.kind = KeyEventKind::Release;
+    assert_eq!(home.handle_key(release), None);
     // Nothing to open in an empty library.
     let mut empty = home_of(Vec::new(), Theme::default());
-    press(&mut empty, KeyCode::Enter);
-    assert!(!empty.is_open());
+    assert_eq!(press(&mut empty, KeyCode::Enter), None);
     assert_eq!(empty.selected(), None);
     press(&mut empty, KeyCode::Down);
     assert_eq!(empty.selected(), None);
@@ -258,7 +262,7 @@ fn no_color_draws_no_colour() {
     check(&mut home);
     home.set_busy(Some("finishing".into()));
     check(&mut home);
-    press(&mut home, KeyCode::Enter);
+    assert_eq!(press(&mut home, KeyCode::Enter), Some(Action::Open(2)));
     check(&mut home);
 }
 
@@ -287,7 +291,7 @@ fn a_notice_shows_until_the_next_key() {
 }
 
 #[test]
-fn a_new_list_keeps_the_selection_and_the_open_page_on_their_session() {
+fn a_new_list_keeps_the_selection_on_its_session() {
     let mut home = home_of(
         vec![
             session(1, Status::NeedsYou),
@@ -299,9 +303,9 @@ fn a_new_list_keeps_the_selection_and_the_open_page_on_their_session() {
     press(&mut home, KeyCode::Down);
     press(&mut home, KeyCode::Down);
     assert_eq!(home.selected(), Some(2));
-    press(&mut home, KeyCode::Enter);
+    assert_eq!(press(&mut home, KeyCode::Enter), Some(Action::Open(2)));
     // Session 1 no longer needs you, so it moves below 2; session 2's
-    // detail changes, and its page shows the new one.
+    // detail changes, and the selected row shows the new one.
     let mut two = session(2, Status::Ready);
     two.detail = Some("recovered".into());
     home.set_sessions(vec![
@@ -311,9 +315,10 @@ fn a_new_list_keeps_the_selection_and_the_open_page_on_their_session() {
     ]);
     assert_eq!(ids(&home), [3, 2, 1]);
     assert_eq!(home.selected(), Some(2));
-    assert!(home.is_open());
-    let page: String = (0..20).map(|y| row(&draw(&mut home, 20), y)).collect();
-    assert!(page.contains("recovered"), "{page}");
+    assert_eq!(press(&mut home, KeyCode::Enter), Some(Action::Open(2)));
+    let buf = draw(&mut home, 20);
+    let list: String = (0..20).map(|y| row(&buf, y)).collect();
+    assert!(list.contains("recovered"), "{list}");
     // Text is cleaned as it is by `new`.
     home.set_sessions(vec![Session {
         title: "a\u{202e}b".into(),
@@ -323,7 +328,7 @@ fn a_new_list_keeps_the_selection_and_the_open_page_on_their_session() {
 }
 
 #[test]
-fn a_new_list_without_the_selected_session_closes_its_page() {
+fn a_new_list_without_the_selected_session_keeps_its_position() {
     let mut home = home_of(
         vec![
             session(1, Status::Ready),
@@ -333,7 +338,7 @@ fn a_new_list_without_the_selected_session_closes_its_page() {
         Theme::default(),
     );
     press(&mut home, KeyCode::Down);
-    press(&mut home, KeyCode::Enter);
+    assert_eq!(press(&mut home, KeyCode::Enter), Some(Action::Open(2)));
     assert_eq!(home.selected(), Some(2));
     // Session 2 has gone: the selection stays at the second row.
     home.set_sessions(vec![
@@ -342,7 +347,7 @@ fn a_new_list_without_the_selected_session_closes_its_page() {
         session(4, Status::Ready),
     ]);
     assert_eq!(home.selected(), Some(3));
-    assert!(!home.is_open());
+    assert_eq!(press(&mut home, KeyCode::Enter), Some(Action::Open(3)));
     // Past the end of a shorter list: the last row.
     press(&mut home, KeyCode::Down);
     press(&mut home, KeyCode::Down);
@@ -357,12 +362,9 @@ fn a_new_list_without_the_selected_session_closes_its_page() {
 #[test]
 fn a_notice_not_yet_drawn_outlasts_a_key() {
     let mut home = home_of(vec![session(1, Status::Ready)], Theme::default());
-    press(&mut home, KeyCode::Enter);
     home.set_notice(Some("the sessions couldn't be listed".into()));
-    // Drawn on the page, where the notice isn't shown: esc leaves it.
-    draw(&mut home, 20);
-    press(&mut home, KeyCode::Esc);
-    assert!(!home.is_open());
+    // A key before the first draw leaves the notice.
+    press(&mut home, KeyCode::Down);
     assert_eq!(home.notice(), Some("the sessions couldn't be listed"));
     // Too small to show it: a key leaves it too.
     draw(&mut home, 5);

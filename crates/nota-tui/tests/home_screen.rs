@@ -104,13 +104,3 @@ fn home_empty() {
     let terminal = draw(&mut home, 62, 20);
     insta::assert_snapshot!(terminal.backend());
 }
-
-/// `⏎` opens the selected session's page, which says in words what it
-/// needs, until Review exists.
-#[test]
-fn home_session_page() {
-    let mut home = mockup_home();
-    press(&mut home, KeyCode::Enter);
-    let terminal = draw(&mut home, 62, 20);
-    insta::assert_snapshot!(terminal.backend());
-}

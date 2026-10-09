@@ -259,3 +259,22 @@ fn the_final_pass_waits_for_journals_to_be_published() {
     .unwrap();
     assert_eq!(jobs.lacks(&job), None);
 }
+
+#[test]
+fn an_engine_that_cant_start_or_answer_waits_for_a_working_one() {
+    let failed = PassEnd::Engine(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "missing engine",
+    ));
+    assert_eq!(pass_end(failed), JobEnd::Waiting(Some(Wait::Engine)));
+    assert_eq!(
+        pass_end(PassEnd::Stalled(Some("broken model".into()))),
+        JobEnd::Waiting(Some(Wait::Engine))
+    );
+    assert_eq!(
+        pass_end(PassEnd::Stalled(None)),
+        JobEnd::Waiting(Some(Wait::Engine))
+    );
+    assert_eq!(pass_end(PassEnd::Done), JobEnd::Done);
+    assert_eq!(pass_end(PassEnd::Stopped), JobEnd::Waiting(None));
+}

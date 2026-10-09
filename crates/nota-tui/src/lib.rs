@@ -1,6 +1,6 @@
 //! nota's terminal UI, drawn with `ratatui` on crossterm.
 //!
-//! Two screens so far:
+//! Screens so far:
 //!
 //! - [`Home`] (the UI spec's `Home` mockup): the logo, the recent sessions
 //!   with their status, and `R` to record with the last settings. [`run_home`]
@@ -12,7 +12,10 @@
 //!   From 100 columns (`MainWide`) a panel beside it lists the marks and
 //!   notes, and `j`/`k` move through them.
 //!
-//! Both draw in the [`Theme`] [`Theme::load`] reads from the Omarchy theme,
+//! - [`Processing`]: the final processing steps and their engines, a
+//!   progress band, and the heard transcript available while work runs.
+//!
+//! All draw in the [`Theme`] [`Theme::load`] reads from the Omarchy theme,
 //! or with no colour at all under `NO_COLOR`.
 //!
 //! The screen owns no threads and reads no devices. It talks to the recorder
@@ -32,6 +35,7 @@ mod band;
 mod home;
 mod level;
 mod logo;
+mod processing;
 mod render;
 mod run;
 mod screen;
@@ -39,6 +43,7 @@ mod text;
 mod theme;
 
 pub use home::{Action, Home, Session, Status};
-pub use run::{Ended, Event, InputThread, RunError, run, run_home};
+pub use processing::{Processing, ProcessingAction, ProcessingJob, ProcessingState};
+pub use run::{Ended, Event, InputThread, RunError, run, run_home, run_processing};
 pub use screen::Recording;
 pub use theme::{Theme, ThemeError};
