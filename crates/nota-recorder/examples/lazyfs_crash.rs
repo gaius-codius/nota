@@ -1,9 +1,10 @@
 //! The workload and the checker for `scripts/lazyfs-crash.sh`, which runs
 //! the recorder's crash checks on a real filesystem through `LazyFS`.
 //!
-//! - `write <dir> <promises> [--stop-after N]` records two tracks with live
-//!   publishing into `<dir>/session`, with the library database at
-//!   `<dir>/library.db`.
+//! - `write <dir> <promises> [--stop-after N] [--no-publish]` records two
+//!   tracks with live publishing into `<dir>/session`, with the library
+//!   database at `<dir>/library.db`. With `--no-publish` it publishes
+//!   nothing, leaving every finished journal for salvage.
 //!   Every recorder filesystem operation that changes the disk (create,
 //!   mkdir, write, fsync, rename, directory fsync, remove) is counted. The
 //!   journals are fsync'd on a thread per track, as `nota record` does it,
@@ -15,20 +16,24 @@
 //!   rows), it appends a line to `<promises>` and fsyncs it. Keep
 //!   `<promises>` off the filesystem under test. Without `--stop-after` it
 //!   runs to the end and prints `ops <total>`.
-//! - `check <dir> <promises> [--recovered]` checks the invariants the
-//!   in-memory crash tests check (`src/segment/tests.rs`): before salvage,
+//! - `check <dir> <promises> [--recovered] [--end <file>]` checks the
+//!   invariants the in-memory crash tests check (`src/segment/tests.rs`): before salvage,
 //!   every row has its file and every promised sample is in a row or a
 //!   journal; after salvage, only segments and rows are left, holding every
 //!   promised sample and every promised row; a second salvage changes
 //!   nothing. With `--recovered`, it also requires that nothing is left to
 //!   salvage, for a run after a crash that followed a completed salvage.
+//!   With `--end`, it writes where the first salvage ended (each session
+//!   file's name and hash, and the rows) to `<file>`, so the script can
+//!   compare a salvage that was interrupted with one that wasn't.
 //!
 //! SQLite's own I/O isn't counted: `--stop-after` crash points fall between
 //! the recorder's operations, and the store commits in between them. The
 //! script reaches inside SQLite's commits, and tears the recorder's writes,
 //! by having `LazyFS` inject the fault and crash itself while `write` runs
 //! without `--stop-after`; the writer's calls then fail, and the script
-//! kills it.
+//! kills it. It crashes salvage the same way, while `check` runs on a copy
+//! of what `write --no-publish` left.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -93,8 +98,8 @@ fn main() -> ExitCode {
         Some("write") => write_command(&args[1..]),
         Some("check") => check_command(&args[1..]),
         _ => Err(
-            "usage: lazyfs_crash write <dir> <promises> [--stop-after N] | \
-                  check <dir> <promises> [--recovered]"
+            "usage: lazyfs_crash write <dir> <promises> [--stop-after N] [--no-publish] | \
+                  check <dir> <promises> [--recovered] [--end <file>]"
                 .into(),
         ),
     };
@@ -380,11 +385,19 @@ fn write_command(args: &[String]) -> Res<()> {
     let (Some(dir), Some(promises)) = (args.first(), args.get(1)) else {
         return Err("write needs <dir> <promises>".into());
     };
-    let stop_after = match (args.get(2).map(String::as_str), args.get(3)) {
-        (None, _) => None,
-        (Some("--stop-after"), Some(n)) => Some(n.parse::<usize>()?),
-        _ => return Err("write: expected --stop-after N".into()),
-    };
+    let mut stop_after = None;
+    let mut publish = true;
+    let mut rest = args[2..].iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--stop-after" => {
+                let n = rest.next().ok_or("write: --stop-after needs N")?;
+                stop_after = Some(n.parse::<usize>()?);
+            }
+            "--no-publish" => publish = false,
+            other => return Err(format!("write: unknown option {other}").into()),
+        }
+    }
     let dir = PathBuf::from(dir);
     let promises = PathBuf::from(promises);
     let mut marker = promises.clone().into_os_string();
@@ -408,14 +421,21 @@ fn write_command(args: &[String]) -> Res<()> {
         halted: Arc::new(AtomicBool::new(false)),
         marker: PathBuf::from(marker),
     };
-    record(&fs, &mut store, &session, &mut log)?;
+    record(&fs, &mut store, &session, &mut log, publish)?;
     writeln!(io::stdout(), "ops {}", fs.total())?;
     Ok(())
 }
 
 /// Records both tracks in real time, publishing finished journals as it
-/// goes; the same scenario as the in-memory `record_into`, longer.
-fn record(fs: &CountingFs, store: &mut Store, session: &Path, log: &mut PromiseLog) -> Res<()> {
+/// goes (unless `publish` is false); the same scenario as the in-memory
+/// `record_into`, longer.
+fn record(
+    fs: &CountingFs,
+    store: &mut Store,
+    session: &Path,
+    log: &mut PromiseLog,
+    publish: bool,
+) -> Res<()> {
     let (rate, length) = (rate()?, length()?);
     let clock = Arc::new(FakeClock::new(SessionTime::ZERO));
     let dyn_clock: Arc<dyn Clock> = Arc::clone(&clock) as Arc<dyn Clock>;
@@ -446,7 +466,7 @@ fn record(fs: &CountingFs, store: &mut Store, session: &Path, log: &mut PromiseL
         }
         synced?;
         let finished = writer.take_finished();
-        if !finished.is_empty() {
+        if publish && !finished.is_empty() {
             let done = publish_journals(&mut store, length, &finished)?;
             log.rows(done.segments())?;
         }
@@ -459,8 +479,10 @@ fn record(fs: &CountingFs, store: &mut Store, session: &Path, log: &mut PromiseL
     for (track, end) in ends {
         log.durable(track, end)?;
     }
-    let done = publish_journals(&mut store, length, &finished)?;
-    log.rows(done.segments())?;
+    if publish {
+        let done = publish_journals(&mut store, length, &finished)?;
+        log.rows(done.segments())?;
+    }
     Ok(())
 }
 
@@ -629,15 +651,55 @@ fn check_after(session: &Path, promised: &Promised, after: &Observed) -> Res<()>
     Ok(())
 }
 
+/// Writes where salvage ended: one line per session file (its name and
+/// hash), then one per row, in the promises' format.
+fn write_end(path: &Path, session: &Path, after: &Observed) -> Res<()> {
+    let mut text = String::new();
+    for (file, bytes) in &after.files {
+        let name = file.strip_prefix(session).unwrap_or(file);
+        writeln!(
+            text,
+            "file {} {}",
+            name.display(),
+            hex(&Sha256::digest(bytes))
+        )?;
+    }
+    for row in &after.rows {
+        let r = row.range();
+        writeln!(
+            text,
+            "row {} {} {} {} {}",
+            row.track().get(),
+            row.epoch().get(),
+            r.start().get(),
+            r.end().get(),
+            hex(row.sha256().as_bytes())
+        )?;
+    }
+    let mut file = StdFs.create(path)?;
+    file.write_all(text.as_bytes())?;
+    file.sync()?;
+    Ok(())
+}
+
 fn check_command(args: &[String]) -> Res<()> {
     let (Some(dir), Some(promises_path)) = (args.first(), args.get(1)) else {
         return Err("check needs <dir> <promises>".into());
     };
-    let recovered = match args.get(2).map(String::as_str) {
-        None => false,
-        Some("--recovered") => true,
-        Some(other) => return Err(format!("check: unknown option {other}").into()),
-    };
+    let mut recovered = false;
+    let mut end = None;
+    let mut rest = args[2..].iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--recovered" => recovered = true,
+            "--end" => {
+                end = Some(PathBuf::from(
+                    rest.next().ok_or("check: --end needs <file>")?,
+                ));
+            }
+            other => return Err(format!("check: unknown option {other}").into()),
+        }
+    }
     let dir = PathBuf::from(dir);
     let session = dir.join("session");
     let promised = read_promises(Path::new(promises_path))?;
@@ -666,6 +728,9 @@ fn check_command(args: &[String]) -> Res<()> {
     let first = salvage(&mut SessionStore::new(ours.clone(), &mut store), length)?;
     let after = observe(&session, &store)?;
     check_after(&session, &promised, &after).map_err(|e| format!("after salvage: {e}"))?;
+    if let Some(end) = end {
+        write_end(&end, &session, &after)?;
+    }
     if recovered && after != before {
         return Err("a completed salvage didn't last: salvage changed the disk again".into());
     }
