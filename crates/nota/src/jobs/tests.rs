@@ -331,3 +331,28 @@ fn a_job_without_an_engine_waits_for_one() {
     pause(Duration::from_millis(300));
     assert!(worker.ran().is_empty());
 }
+
+/// A job waiting for space keeps that wait while nota has no engine
+/// either, so a nota with one later still checks for room first.
+#[test]
+fn a_wait_for_space_isnt_lost_to_a_missing_engine() {
+    let (dir, db) = library("space-engine", &[(S1, Some(Wait::Space))]);
+    let idle = Fake {
+        no_engine: true,
+        ..Fake::default()
+    };
+    for room in [Switch::default(), Switch::on()] {
+        let runner = spawn(&dir, &db, &idle, &Switch::default(), &room);
+        pause(Duration::from_millis(500));
+        drop(runner);
+        assert_eq!(states(&db), [(S1, JobState::Waiting(Some(Wait::Space)))]);
+    }
+    let worker = Fake::default();
+    let room = Switch::default();
+    let runner = spawn(&dir, &db, &worker, &Switch::default(), &room);
+    pause(Duration::from_millis(500));
+    assert!(worker.ran().is_empty());
+    room.set(true);
+    runner.wake();
+    until_states(&db, &[(S1, JobState::Done)]);
+}
