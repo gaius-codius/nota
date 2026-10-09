@@ -84,6 +84,10 @@ fn run_app(args: &RecordArgs, said: &mut Vec<String>) -> Result<(), BoxError> {
         Arc::new(SystemClock::start().map_err(|_| "the system clock can't be read")?);
     let theme = Theme::load();
     let engines = engines(args);
+    let processing_engine = final_engine(args).ok().flatten().map_or_else(
+        || "speech engine unavailable".into(),
+        |engine| format!("{} · {}", engine.heard_by.engine, engine.heard_by.model),
+    );
     // Set while this nota records: no job runs then.
     let here = Arc::new(AtomicBool::new(false));
     let (runner, mut notice) = start_jobs(args, &library, &clock, &here);
@@ -104,10 +108,23 @@ fn run_app(args: &RecordArgs, said: &mut Vec<String>) -> Result<(), BoxError> {
             Some(screen) => screen,
             None => Screen::enter(None)?,
         };
-        let mut home = Home::new(listing.sessions()?, engines, theme);
+        let sessions = if processing_session.is_some() {
+            Vec::new()
+        } else {
+            listing.sessions()?
+        };
+        let mut home = Home::new(sessions, engines, theme);
         home.set_notice(notice.take());
         let action = if let Some(id) = processing_session.take() {
-            processing::show(&mut current, &library, id, engines, theme, &clock, &quit)?
+            processing::show(
+                &mut current,
+                &library,
+                id,
+                &processing_engine,
+                theme,
+                &clock,
+                &quit,
+            )?
         } else {
             match show_home(&mut current, &mut home, &mut listing, &quit)? {
                 Action::Quit => nota_tui::ProcessingAction::Quit,
@@ -372,7 +389,8 @@ impl Listing<'_> {
             .into_iter()
             .map(|listed| session(listed, self.salvaged, &dates))
             .collect();
-        if let Ok(jobs) = self.library.db().with(|db| db.jobs()) {
+        let jobs = self.library.db().with(|db| db.jobs());
+        if let Ok(jobs) = &jobs {
             for shown in &mut sessions {
                 if shown.status != Status::Ready {
                     continue;
@@ -393,6 +411,14 @@ impl Listing<'_> {
                 {
                     shown.status = Status::Processing;
                     shown.detail = Some("final transcript queued or running".into());
+                }
+            }
+        }
+        if let Err(error) = jobs {
+            for shown in &mut sessions {
+                if shown.status == Status::Ready {
+                    shown.status = Status::NeedsYou;
+                    shown.detail = Some(format!("processing status couldn't be read: {error}"));
                 }
             }
         }

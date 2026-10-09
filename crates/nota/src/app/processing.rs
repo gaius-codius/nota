@@ -4,8 +4,12 @@ use super::{
     Arc, BoxError, Clock, Duration, InputThread, Library, QuitSignals, RunError, Screen, SessionId,
     SessionTime, Theme, mpsc,
 };
-use nota_store::{Job, JobKind, JobState, StoreError, Wait};
+use nota_recorder::fs::StdFs;
+use nota_recorder::segment::needs_salvage;
+use nota_recorder::session::SessionDir;
+use nota_store::{FinalText, Job, JobKind, JobState, SessionState, StoreError, TrackKind, Wait};
 use nota_tui::{Processing, ProcessingAction, ProcessingJob, ProcessingState};
+use std::io;
 
 const REFRESH: Duration = Duration::from_secs(1);
 
@@ -66,6 +70,7 @@ struct Data<'a> {
 impl Data<'_> {
     fn refresh(&mut self, page: &mut Processing) {
         let now = self.clock.now();
+        page.tick(now);
         if self
             .at
             .is_some_and(|at| now.checked_duration_since(at).unwrap_or_default() < REFRESH)
@@ -88,32 +93,50 @@ impl Data<'_> {
         self.library.db().with(|db| {
             let session = db.session(self.id)?.ok_or(StoreError::NoSession(self.id))?;
             let jobs = db.session_jobs(self.id)?;
-            let done = jobs
-                .iter()
-                .any(|job| job.kind == JobKind::FinalPass && job.state == JobState::Done);
-            let mut final_text = if done {
-                db.final_texts(self.id)?
-            } else {
-                Vec::new()
-            };
-            final_text.sort_by_key(|text| (text.range.start(), text.track));
-            let mut transcript: Vec<_> = final_text
+            let final_text = db.final_texts(self.id)?;
+            let heard = db
+                .utterances(self.id)?
                 .into_iter()
-                .filter_map(|text| text.text)
+                .map(|text| text.heard.utterance.into_text())
                 .collect();
-            if transcript.is_empty() {
-                transcript = db
-                    .utterances(self.id)?
-                    .into_iter()
-                    .map(|text| text.heard.utterance.into_text())
-                    .collect();
-            }
+            let transcript = transcript(heard, &final_text, &db.tracks(self.id)?);
+            let saved = if session.state == SessionState::Recording {
+                ProcessingState::Waiting {
+                    reason: "recording is still underway".into(),
+                    progress: 0,
+                }
+            } else {
+                let paths = self.library.session(self.id);
+                let dir = SessionDir::new(self.id, StdFs, &paths.audio());
+                match needs_salvage(&dir) {
+                    Ok(false) => ProcessingState::Done,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => ProcessingState::Done,
+                    Ok(true) => ProcessingState::Waiting {
+                        reason: "audio still to save".into(),
+                        progress: 0,
+                    },
+                    Err(e) => ProcessingState::Waiting {
+                        reason: format!("saved audio can't be checked: {e}"),
+                        progress: 0,
+                    },
+                }
+            };
             let mut steps = vec![ProcessingJob {
                 name: "Recording saved".into(),
                 engine: "nota".into(),
-                state: ProcessingState::Done,
+                state: saved,
             }];
-            steps.extend(jobs.into_iter().map(|job| step(job, self.engines)));
+            let engine = final_text
+                .first()
+                .map(|text| format!("{} · {}", text.heard_by.engine, text.heard_by.model));
+            let engine = engine
+                .as_deref()
+                .unwrap_or(if self.engines == "no live text" {
+                    "speech engine"
+                } else {
+                    self.engines
+                });
+            steps.extend(jobs.into_iter().map(|job| step(job, engine)));
             Ok((
                 session
                     .title
@@ -125,7 +148,52 @@ impl Data<'_> {
     }
 }
 
+/// The live record has session times; final rows have only track-local samples.
+/// Keep the chronological heard transcript. If none exists, label final text
+/// by track rather than suggesting that sample indices align across tracks.
+fn transcript(
+    heard: Vec<String>,
+    final_text: &[FinalText],
+    tracks: &[nota_store::Track],
+) -> Vec<String> {
+    if !heard.is_empty() {
+        return heard;
+    }
+    let mut lines = Vec::new();
+    let mut previous = None;
+    for text in final_text {
+        let Some(words) = &text.text else {
+            continue;
+        };
+        if previous != Some(text.track) {
+            let name =
+                tracks
+                    .iter()
+                    .find(|track| track.track == text.track)
+                    .map(|track| match track.kind {
+                        TrackKind::Microphone => "Microphone",
+                        TrackKind::System => "System audio",
+                    });
+            lines.push(format!(
+                "{} · final pass",
+                name.map_or_else(|| format!("Track {}", text.track.get()), str::to_owned)
+            ));
+            previous = Some(text.track);
+        }
+        lines.push(words.clone());
+    }
+    lines
+}
+
 fn step(job: Job, engine: &str) -> ProcessingJob {
+    let progress = if job.progress.total == 0 {
+        0
+    } else {
+        u8::try_from(
+            (u128::from(job.progress.done) * 100 / u128::from(job.progress.total)).min(100),
+        )
+        .unwrap_or(100)
+    };
     let state = match job.state {
         JobState::Waiting(wait) => ProcessingState::Waiting {
             reason: match wait {
@@ -135,19 +203,11 @@ fn step(job: Job, engine: &str) -> ProcessingJob {
                 None => "queued or paused for a recording",
             }
             .into(),
+            progress,
         },
-        JobState::Running => ProcessingState::Running {
-            progress: if job.progress.total == 0 {
-                0
-            } else {
-                u8::try_from(
-                    (u128::from(job.progress.done) * 100 / u128::from(job.progress.total)).min(100),
-                )
-                .unwrap_or(100)
-            },
-        },
+        JobState::Running => ProcessingState::Running { progress },
         JobState::Done => ProcessingState::Done,
-        JobState::Failed(reason) => ProcessingState::Failed { reason },
+        JobState::Failed(reason) => ProcessingState::Failed { reason, progress },
     };
     ProcessingJob {
         name: match job.kind {
@@ -163,6 +223,7 @@ fn step(job: Job, engine: &str) -> ProcessingJob {
 mod tests {
     use super::*;
     use nota_core::{FakeClock, Utterance};
+    use nota_recorder::fs::Fs as _;
     use nota_store::{Heard, JobEnd, NewSession, Progress};
 
     #[test]
@@ -228,9 +289,112 @@ mod tests {
         );
         library
             .db()
+            .with(|db| {
+                db.add_final_text(
+                    id,
+                    nota_core::TrackId::new(0),
+                    nota_core::SampleIndex::new(100),
+                    &[FinalText {
+                        track: nota_core::TrackId::new(0),
+                        range: nota_core::SampleRange::new(
+                            nota_core::SampleIndex::ZERO,
+                            nota_core::SampleIndex::new(100),
+                        )
+                        .unwrap(),
+                        text: Some("Final text has track-local samples.".into()),
+                        words: vec![],
+                        heard_by: nota_store::HeardBy {
+                            engine: "stored-engine".into(),
+                            model: "stored-model".into(),
+                        },
+                    }],
+                )
+            })
+            .unwrap();
+        library
+            .db()
             .with(|db| db.end_job(job.id, &JobEnd::Done))
             .unwrap();
         assert_eq!(data.read().unwrap().1[1].state, ProcessingState::Done);
         assert_eq!(data.read().unwrap().2, transcript);
+        assert_eq!(
+            data.read().unwrap().1[1].engine,
+            "stored-engine · stored-model"
+        );
+    }
+    #[test]
+    fn final_only_text_is_grouped_by_track_without_assuming_aligned_clocks() {
+        use nota_core::{SampleIndex, SampleRange, TrackId};
+        use nota_store::{HeardBy, Track};
+        let text = |track, start, words: &str| FinalText {
+            track: TrackId::new(track),
+            range: SampleRange::new(SampleIndex::new(start), SampleIndex::new(start + 100))
+                .unwrap(),
+            text: Some(words.into()),
+            words: vec![],
+            heard_by: HeardBy {
+                engine: "test".into(),
+                model: "test".into(),
+            },
+        };
+        let tracks = [
+            Track {
+                track: TrackId::new(0),
+                kind: TrackKind::Microphone,
+                source: None,
+            },
+            Track {
+                track: TrackId::new(1),
+                kind: TrackKind::System,
+                source: None,
+            },
+        ];
+        let finals = [
+            text(0, 4800, "earlier mic speech"),
+            text(1, 1600, "later system speech"),
+        ];
+        assert_eq!(
+            transcript(vec![], &finals, &tracks),
+            [
+                "Microphone · final pass",
+                "earlier mic speech",
+                "System audio · final pass",
+                "later system speech"
+            ]
+        );
+        let heard = vec!["earlier mic speech".into(), "later system speech".into()];
+        assert_eq!(transcript(heard.clone(), &finals, &tracks), heard);
+    }
+
+    #[test]
+    fn live_or_unpublished_audio_does_not_claim_to_be_saved() {
+        let dir = crate::app::tests::TestDir::new("processing-unsaved");
+        let library = Library::open(&dir.0).unwrap();
+        let paths = library.create().unwrap();
+        library
+            .db()
+            .with(|db| db.create_session(&NewSession::bare(paths.id)))
+            .unwrap();
+        let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
+        let data = Data {
+            library: &library,
+            id: paths.id,
+            engines: "test",
+            clock: &clock,
+            at: None,
+        };
+        assert!(matches!(
+            data.read().unwrap().1[0].state,
+            ProcessingState::Waiting { .. }
+        ));
+        library
+            .db()
+            .with(|db| db.finish_recording(paths.id, None))
+            .unwrap();
+        assert_eq!(data.read().unwrap().1[0].state, ProcessingState::Done);
+        drop(StdFs.create(&paths.audio().join("journal-000001")).unwrap());
+        assert!(
+            matches!(data.read().unwrap().1[0].state, ProcessingState::Waiting { ref reason, .. } if reason == "audio still to save")
+        );
     }
 }

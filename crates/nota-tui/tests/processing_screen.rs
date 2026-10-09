@@ -62,12 +62,14 @@ fn states_and_progress_are_visible_without_color() {
             "Transcript",
             ProcessingState::Waiting {
                 reason: "engine offline".into(),
+                progress: 0,
             },
         ),
         job(
             "Conversion",
             ProcessingState::Failed {
                 reason: "disk full".into(),
+                progress: 0,
             },
         ),
     ]);
@@ -171,4 +173,34 @@ fn refresh_errors_keep_the_transcript_readable_and_clear_after_recovery() {
     let output = draw(&mut screen, 62, 20);
     assert!(!output.contains("database busy"));
     assert!(output.contains("Use a sharp plane"));
+}
+
+#[test]
+fn paused_progress_is_kept_and_finished_or_failed_work_has_an_honest_heading() {
+    let mut screen = screen();
+    screen.set_jobs(vec![job(
+        "Final transcript",
+        ProcessingState::Waiting {
+            reason: "engine offline".into(),
+            progress: 40,
+        },
+    )]);
+    assert_eq!(draw(&mut screen, 62, 20).matches('▰').count(), 23);
+    screen.set_jobs(vec![job("Final transcript", ProcessingState::Done)]);
+    let output = draw(&mut screen, 62, 20);
+    assert!(output.contains("✓ ready"));
+    assert!(output.contains("Transcript ready"));
+    screen.set_jobs(vec![job(
+        "Final transcript",
+        ProcessingState::Failed {
+            reason: "missing audio".into(),
+            progress: 40,
+        },
+    )]);
+    let output = draw(&mut screen, 62, 20);
+    assert!(output.contains("! needs you"));
+    assert!(output.contains("Processing needs you"));
+    assert_eq!(output.matches('▰').count(), 23);
+    screen.tick(nota_core::SessionTime::from_nanos(250_000_000));
+    assert!(draw(&mut screen, 62, 20).contains("Summary ◓"));
 }

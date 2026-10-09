@@ -15,13 +15,13 @@ use crate::text::{is_drawn, wrap};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProcessingState {
     /// Not yet started.
-    Waiting { reason: String },
+    Waiting { reason: String, progress: u8 },
     /// Work underway, with progress in percent (clamped when drawn).
     Running { progress: u8 },
     /// Finished successfully.
     Done,
     /// Stopped, with an actionable explanation.
-    Failed { reason: String },
+    Failed { reason: String, progress: u8 },
 }
 
 /// One step, named alongside the engine doing it.
@@ -57,6 +57,7 @@ pub struct Processing {
     transcript: Vec<String>,
     wrapped: Vec<String>,
     wrap_width: Option<u16>,
+    spinner: char,
     show_transcript: bool,
     scroll: usize,
     page_rows: usize,
@@ -77,10 +78,17 @@ impl Processing {
             transcript: Vec::new(),
             wrapped: Vec::new(),
             wrap_width: None,
+            spinner: '◐',
             show_transcript: false,
             scroll: 0,
             page_rows: 1,
         }
+    }
+
+    /// Advances the Summary spinner using the supplied session clock time.
+    pub fn tick(&mut self, now: nota_core::SessionTime) {
+        let phase = usize::try_from((now.as_nanos() / 250_000_000) % 4).unwrap_or(0);
+        self.spinner = ['◐', '◓', '◑', '◒'][phase];
     }
 
     /// Updates the session title read from the library.
@@ -170,7 +178,7 @@ impl Processing {
                 Span::styled("≈ nota", self.theme.accent),
                 Span::styled(format!(" · {}", self.title), self.theme.text),
             ],
-            vec![Span::styled("◐ processing", self.theme.gold)],
+            vec![Span::styled(self.status(), self.theme.gold)],
             Keep::Right,
             self.theme.border,
             buf,
@@ -187,7 +195,10 @@ impl Processing {
             inside.x + 2,
             inside.y + 3,
             &Line::from(vec![
-                Span::styled("Summary ◐", tab_style(!self.show_transcript)),
+                Span::styled(
+                    format!("Summary {}", self.spinner),
+                    tab_style(!self.show_transcript),
+                ),
                 Span::raw("   "),
                 Span::styled("Transcript", tab_style(self.show_transcript)),
             ]),
@@ -282,9 +293,12 @@ impl Processing {
     fn progress(&self) -> u8 {
         self.jobs
             .iter()
+            .rev()
             .find_map(|job| match job.state {
-                ProcessingState::Running { progress } => Some(progress.min(100)),
-                _ => None,
+                ProcessingState::Running { progress }
+                | ProcessingState::Waiting { progress, .. }
+                | ProcessingState::Failed { progress, .. } => Some(progress.min(100)),
+                ProcessingState::Done => None,
             })
             .unwrap_or_else(|| {
                 if !self.jobs.is_empty()
@@ -297,14 +311,41 @@ impl Processing {
             })
     }
 
+    fn status(&self) -> &'static str {
+        if self
+            .jobs
+            .iter()
+            .any(|job| matches!(job.state, ProcessingState::Failed { .. }))
+        {
+            "! needs you"
+        } else if !self.jobs.is_empty()
+            && self
+                .jobs
+                .iter()
+                .all(|job| job.state == ProcessingState::Done)
+        {
+            "✓ ready"
+        } else {
+            "◐ processing"
+        }
+    }
+
+    fn heading(&self) -> &'static str {
+        match self.status() {
+            "✓ ready" => "Transcript ready",
+            "! needs you" => "Processing needs you",
+            _ => "Finishing up",
+        }
+    }
+
     fn summary_lines(&self, width: usize) -> Vec<Line<'static>> {
         let mut lines = vec![
-            Line::styled("Finishing up", self.theme.text_bright),
+            Line::styled(self.heading(), self.theme.text_bright),
             Line::raw(""),
         ];
         for job in &self.jobs {
             let (glyph, style, state) = match &job.state {
-                ProcessingState::Waiting { reason } => (
+                ProcessingState::Waiting { reason, .. } => (
                     "○",
                     self.theme.text_hint,
                     format!("waiting: {}", drawn(reason)),
@@ -313,7 +354,7 @@ impl Processing {
                     ("◐", self.theme.gold, format!("{}%", progress.min(&100)))
                 }
                 ProcessingState::Done => ("✓", self.theme.green, "done".to_owned()),
-                ProcessingState::Failed { reason } => {
+                ProcessingState::Failed { reason, .. } => {
                     ("!", self.theme.gold, format!("failed: {}", drawn(reason)))
                 }
             };
