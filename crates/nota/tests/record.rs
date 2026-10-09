@@ -512,6 +512,7 @@ fn home_records_and_comes_back_after_the_stop() {
     );
     assert!(nota.shows_after(at, "✓ ready"), "{}", nota.output());
     assert!(nota.shows_after(at, "✓ Recording"), "{}", nota.output());
+    assert!(nota.shows_after(at, "today"), "{}", nota.output());
     assert!(nota.shows_after(at, "⏎ open"), "{}", nota.output());
     assert!(!nota.terminal_restored());
 
@@ -527,6 +528,9 @@ fn home_records_and_comes_back_after_the_stop() {
         .unwrap();
     assert_eq!(session.state, SessionState::Stopped);
     assert_eq!(session.title.as_deref(), Some("Recording"));
+    // Its start was written with its row: after this code was written.
+    let started = session.started_at.expect("no start time");
+    assert!(started.unix_seconds() > 1_767_225_600, "{started:?}");
 
     nota.press("q");
     let status = nota.exits().expect("nota didn't close");

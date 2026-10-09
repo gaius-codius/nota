@@ -17,8 +17,10 @@
 use std::sync::Arc;
 use std::sync::mpsc;
 
+use jiff::Timestamp;
+use jiff::tz::TimeZone;
 use nota_core::recorder::{Command, Input, Setup};
-use nota_core::{Clock, SessionId, SystemClock};
+use nota_core::{Clock, SessionId, SystemClock, WallTime, wall_now};
 use nota_tui::{Action, Home, InputThread, RunError, Session, Status, Theme};
 
 use crate::library::{Library, Listed, Needs, Salvaged};
@@ -56,10 +58,14 @@ pub(crate) fn app(args: &RecordArgs) -> Result<Vec<String>, BoxError> {
             Some(screen) => screen,
             None => Screen::enter(None)?,
         };
+        let dates = Dates {
+            now: wall_now(),
+            zone: TimeZone::system(),
+        };
         let sessions = library
             .listing(RATE)?
             .into_iter()
-            .map(|listed| session(listed, &salvaged))
+            .map(|listed| session(listed, &salvaged, &dates))
             .collect();
         let mut home = Home::new(sessions, engines, theme);
         home.set_notice(notice.take());
@@ -146,8 +152,35 @@ const fn engines(args: &RecordArgs) -> &'static str {
     }
 }
 
+/// How Home words a session's date: `today`, `2 Oct` this year, `Oct 2025`
+/// before it, in the local time zone.
+struct Dates {
+    /// Now, if the calendar's time can be read; without it, no day is
+    /// `today`.
+    now: Option<WallTime>,
+    zone: TimeZone,
+}
+
+impl Dates {
+    /// The local date of `at`, in words.
+    fn label(&self, at: WallTime) -> Option<String> {
+        let date = Timestamp::from_second(at.unix_seconds())
+            .ok()?
+            .to_zoned(self.zone.clone());
+        let today = self
+            .now
+            .and_then(|now| Timestamp::from_second(now.unix_seconds()).ok())
+            .map(|now| now.to_zoned(self.zone.clone()));
+        Some(match today {
+            Some(today) if today.date() == date.date() => "today".to_owned(),
+            Some(today) if today.year() != date.year() => date.strftime("%b %Y").to_string(),
+            _ => date.strftime("%-d %b").to_string(),
+        })
+    }
+}
+
 /// How Home shows `listed`, given what salvage did to it at start.
-fn session(listed: Listed, salvaged: &[Salvaged]) -> Session {
+fn session(listed: Listed, salvaged: &[Salvaged], dates: &Dates) -> Session {
     let id = listed.id;
     let salvage = salvaged.iter().find(|s| salvaged_id(s) == id);
     let (status, detail) = match (listed.needs, salvage) {
@@ -171,7 +204,7 @@ fn session(listed: Listed, salvaged: &[Salvaged]) -> Session {
             .unwrap_or_else(|| format!("session {}", id.get())),
         status,
         duration: listed.recorded,
-        date: None,
+        date: listed.started_at.and_then(|at| dates.label(at)),
         detail,
     }
 }

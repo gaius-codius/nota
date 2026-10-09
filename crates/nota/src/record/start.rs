@@ -6,7 +6,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
 use nota_core::recorder::{self, Input, Setup};
-use nota_core::{Clock, EpochId, SessionId, TrackId, TrackTimeline};
+use nota_core::{Clock, EpochId, SessionId, TrackId, TrackTimeline, wall_now};
 use nota_recorder::capture::{
     Capture, CaptureBackend, RecordError, RecorderEvent, Source, record_tracks, start_tracks,
 };
@@ -240,6 +240,8 @@ fn session_rows<S>(
             id,
             title: Some(setup.title.clone()),
             language: None,
+            // When it started, for its date; read once, here.
+            started_at: wall_now(),
             tracks: sources
                 .iter()
                 .filter(|(track, _)| captures.iter().any(|c| c.track() == *track))

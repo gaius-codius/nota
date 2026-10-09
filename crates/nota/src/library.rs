@@ -20,7 +20,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use nota_core::{SampleCount, SampleRate, SessionId, TrackId};
+use nota_core::{SampleCount, SampleRate, SessionId, TrackId, WallTime};
 use nota_recorder::fs::{Fs, StdFs};
 use nota_recorder::segment::{
     DurableSegment, SegmentLength, SegmentStore, needs_salvage, read_findings, salvage,
@@ -84,6 +84,8 @@ pub(crate) struct Listed {
     pub(crate) id: SessionId,
     /// Its title, if the library database has one.
     pub(crate) title: Option<String>,
+    /// When it started, if the library database knows.
+    pub(crate) started_at: Option<WallTime>,
     /// How much audio its longest track has published, if the library
     /// database could be read.
     pub(crate) recorded: Option<Duration>,
@@ -243,19 +245,23 @@ impl Library {
         let in_db = self.db.with(|db| {
             db.sessions()?
                 .into_iter()
-                .map(|session| Ok((session.id, session.title, db.segments(session.id)?)))
+                .map(|session| {
+                    let rows = db.segments(session.id)?;
+                    Ok((session.id, session.title, session.started_at, rows))
+                })
                 .collect::<Result<Vec<_>, StoreError>>()
         });
         let mut listed: BTreeMap<u64, Listed> = BTreeMap::new();
         let db_error = match in_db {
             Ok(sessions) => {
-                for (id, title, rows) in sessions {
+                for (id, title, started_at, rows) in sessions {
                     let recorded = longest_track(&rows, rate);
                     listed.insert(
                         id.get(),
                         Listed {
                             id,
                             title,
+                            started_at,
                             recorded,
                             needs: Needs::Nothing,
                         },
@@ -280,6 +286,7 @@ impl Library {
                 .or_insert(Listed {
                     id: session.id,
                     title: None,
+                    started_at: None,
                     recorded: None,
                     needs,
                 });

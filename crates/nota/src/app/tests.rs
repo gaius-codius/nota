@@ -28,6 +28,20 @@ impl Drop for TestDir {
     }
 }
 
+/// 09:00 UTC on 2026-10-0`n`, as UTC seconds.
+fn day(n: u64) -> i64 {
+    // 2026-10-01 09:00 UTC.
+    1_790_845_200 + i64::try_from(n - 1).unwrap() * 86_400
+}
+
+/// Dates in UTC, with now at 2026-10-03 09:00 (19:00 in Sydney).
+fn dates() -> Dates {
+    Dates {
+        now: WallTime::from_unix_seconds(day(3)),
+        zone: TimeZone::UTC,
+    }
+}
+
 /// A library with sessions 1 to 3 in the database, each a minute of
 /// audio per minute of its number, and their tracks.
 fn library_of_three(dir: &Path) -> Library {
@@ -54,6 +68,7 @@ fn library_of_three(dir: &Path) -> Library {
                     id,
                     title: Some(title.into()),
                     language: None,
+                    started_at: WallTime::from_unix_seconds(day(id.get())),
                     tracks: vec![
                         Track {
                             track: TrackId::new(0),
@@ -100,7 +115,7 @@ fn home_lists_the_library_newest_first_and_says_what_needs_you() {
         .listing(RATE)
         .unwrap()
         .into_iter()
-        .map(|listed| session(listed, &[]))
+        .map(|listed| session(listed, &[], &dates()))
         .collect();
     let mut home = Home::new(sessions, "parakeet", Theme::no_color());
     let ids: Vec<u64> = home.sessions().iter().map(|s| s.id).collect();
@@ -113,10 +128,10 @@ fn home_lists_the_library_newest_first_and_says_what_needs_you() {
     assert_eq!(
         lines,
         [
-            "│ ▸ ! Joinery                                     1m         │",
+            "│ ▸ ! Joinery                                     1m  1 Oct  │",
             "│     audio still to save · nota tries again when it starts  │",
-            "│   ✓ Finishing                                   3m         │",
-            "│   ✓ Turning                                     2m         │",
+            "│   ✓ Finishing                                   3m  today  │",
+            "│   ✓ Turning                                     2m  2 Oct  │",
         ]
     );
 }
@@ -147,6 +162,7 @@ fn the_last_settings_come_from_the_last_session() {
                 id: paths.id,
                 title: None,
                 language: None,
+                started_at: None,
                 tracks: vec![Track {
                     track: TrackId::new(0),
                     kind: TrackKind::Microphone,
@@ -170,11 +186,12 @@ fn each_session_shows_what_salvage_found() {
     let listed = |needs| Listed {
         id: SessionId::new(4),
         title: None,
+        started_at: None,
         recorded: Some(Duration::from_secs(60)),
         needs,
     };
     let shown = |needs, salvaged: &[Salvaged]| {
-        let s = session(listed(needs), salvaged);
+        let s = session(listed(needs), salvaged, &dates());
         (s.status, s.detail)
     };
     let id = SessionId::new(4);
@@ -204,8 +221,9 @@ fn each_session_shows_what_salvage_found() {
         shown(Needs::InUse, &[]),
         (Status::Processing, Some("being recorded".into()))
     );
-    let untitled = session(listed(Needs::Nothing), &[]);
+    let untitled = session(listed(Needs::Nothing), &[], &dates());
     assert_eq!(untitled.title, "session 4");
+    assert_eq!(untitled.date, None);
     assert_eq!(untitled.duration, Some(Duration::from_secs(60)));
 }
 
@@ -221,4 +239,29 @@ fn the_engines_are_named_when_there_are_any() {
     assert_eq!(engines(&args), "no live text");
     args.models = Some((PathBuf::from("p"), PathBuf::from("v")));
     assert_eq!(engines(&args), "parakeet");
+}
+
+#[test]
+fn dates_read_today_then_day_and_month_then_month_and_year() {
+    let dates = dates();
+    let at = |s| WallTime::from_unix_seconds(s).unwrap();
+    assert_eq!(dates.label(at(day(3))).as_deref(), Some("today"));
+    assert_eq!(dates.label(at(day(2))).as_deref(), Some("2 Oct"));
+    // 2025-12-31 23:00 UTC: last year.
+    assert_eq!(dates.label(at(1_767_222_000)).as_deref(), Some("Dec 2025"));
+    // The local time zone decides the day: 23:30 UTC on 2 Oct is 3 Oct
+    // in Sydney (UTC+10), so today there.
+    let sydney = Dates {
+        now: dates.now,
+        zone: TimeZone::fixed(jiff::tz::offset(10)),
+    };
+    let late = at(day(2) + 14 * 3_600 + 1_800);
+    assert_eq!(dates.label(late).as_deref(), Some("2 Oct"));
+    assert_eq!(sydney.label(late).as_deref(), Some("today"));
+    // Without now, nothing is today.
+    let unknown = Dates {
+        now: None,
+        zone: TimeZone::UTC,
+    };
+    assert_eq!(unknown.label(at(day(3))).as_deref(), Some("3 Oct"));
 }

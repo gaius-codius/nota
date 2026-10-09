@@ -428,6 +428,7 @@ mod tests {
             id: SessionId::new(id),
             title: None,
             language: None,
+            started_at: None,
             tracks: vec![],
         }
     }

@@ -233,6 +233,7 @@ fn new_rows(library: &Library, id: SessionId) -> NewSessionRows {
             id,
             title: Some(format!("lecture {}", id.get())),
             language: None,
+            started_at: None,
             tracks: vec![Track {
                 track: MIC,
                 kind: TrackKind::Microphone,
@@ -631,11 +632,15 @@ fn listing_gives_each_session_s_title_audio_and_needs() {
     library
         .db()
         .with(|db| {
-            for (paths, title) in [(&one, "Joinery"), (&two, "Turning")] {
+            for (paths, title, started) in [
+                (&one, "Joinery", Some(1_760_000_000)),
+                (&two, "Turning", None),
+            ] {
                 db.create_session(&NewSession {
                     id: paths.id,
                     title: Some(title.into()),
                     language: None,
+                    started_at: started.and_then(WallTime::from_unix_seconds),
                     tracks: Vec::new(),
                 })?;
             }
@@ -660,18 +665,21 @@ fn listing_gives_each_session_s_title_audio_and_needs() {
             Listed {
                 id: one.id,
                 title: Some("Joinery".into()),
+                started_at: WallTime::from_unix_seconds(1_760_000_000),
                 recorded: Some(Duration::from_secs(90)),
                 needs: Needs::Nothing,
             },
             Listed {
                 id: two.id,
                 title: Some("Turning".into()),
+                started_at: None,
                 recorded: None,
                 needs: attention(left),
             },
             Listed {
                 id: three.id,
                 title: None,
+                started_at: None,
                 recorded: None,
                 needs: attention(left),
             },
