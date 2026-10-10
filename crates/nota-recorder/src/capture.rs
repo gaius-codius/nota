@@ -69,7 +69,11 @@
 //! the track's sample count carries on as if nothing was missed. So the
 //! first audio after either opens a new epoch, at the time that audio was
 //! captured ([`CaptureEvent::Reopened`]): the stretch with no audio is a
-//! gap between epochs, as it is after an overrun. The stream's sender
+//! gap between epochs, as it is after an overrun. The new device's stamps
+//! don't carry on from the old one's, and may put that audio before the
+//! old audio's end (on `PipeWire`, tens of milliseconds before, after a
+//! default switch): the epoch then starts where the old audio ends, late
+//! by the overlap ([`TrackTimeline::reopen`]). The stream's sender
 //! notices a suspend by the session clock's count of time spent suspended
 //! ([`Clock::suspended`]), read on each buffer, and reports it as a
 //! [`CaptureNotice::Suspended`].
@@ -379,13 +383,66 @@ pub struct CaptureSender {
     lost: Arc<AtomicBool>,
     /// Set once the first audio is sent.
     began: Arc<AtomicBool>,
-    /// Set when the stream followed a new device, until its next audio.
-    rerouted: Arc<AtomicBool>,
+    /// The new devices the stream followed, and those its audio has
+    /// reopened for.
+    reroutes: Arc<Reroutes>,
     /// The clock's count of time suspended when the last audio was sent,
     /// in nanoseconds.
     asleep: Arc<AtomicU64>,
     /// The rate the stream captures at, to time the first audio.
     rate: SampleRate,
+}
+
+/// The route changes a stream's sender has been told of, and how many of
+/// them its audio has reopened for.
+///
+/// A stream that follows the default hears of each new device twice: from
+/// the stream itself ([`CaptureNotice::RouteChanged`], cpal's
+/// `DeviceChanged`) and from the backend's watch on the audio server
+/// ([`DeviceChange::Changed`]). Either may be missing (cpal reports a
+/// failed watch of its own as a warning), late (the watch's poll catches
+/// what its events missed up to a second after), or report a change the
+/// other doesn't (a default swapped within the watch's grace). So each is
+/// counted apart, and the audio reopens whenever either has counted more
+/// changes than it has reopened for: once for a change both report, and
+/// once for a change only one does.
+///
+/// The reopening is the first buffer sent after the first report: the old
+/// device's buffers sent before stay in the old epoch. Both reports come
+/// from the server's `default` metadata, which the session manager
+/// changes before it moves the stream; on `PipeWire`, the next buffer is
+/// the new device's (`scripts/pipewire-devices.sh` checks it).
+#[derive(Debug, Default)]
+struct Reroutes {
+    /// The route changes the stream reported.
+    stream: AtomicU64,
+    /// The new devices the watch reported.
+    watch: AtomicU64,
+    /// How many changes the audio has reopened for: the most either had
+    /// counted when it last did.
+    taken: AtomicU64,
+}
+
+impl Reroutes {
+    /// Counts a route change the stream reported.
+    fn stream_moved(&self) {
+        self.stream.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Counts a new device the watch reported.
+    fn watch_moved(&self) {
+        self.watch.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Whether the audio about to be sent is due to reopen for a change
+    /// either reported since it last did; it then has.
+    fn take(&self) -> bool {
+        let reported = self
+            .stream
+            .load(Ordering::SeqCst)
+            .max(self.watch.load(Ordering::SeqCst));
+        self.taken.fetch_max(reported, Ordering::SeqCst) < reported
+    }
 }
 
 /// The least growth in the clock's count of time suspended taken for a
@@ -462,7 +519,7 @@ impl CaptureSender {
         if slept {
             self.notice(CaptureNotice::Suspended);
         }
-        let rerouted = self.rerouted.swap(false, Ordering::SeqCst);
+        let rerouted = self.reroutes.take();
         slept || rerouted
     }
 
@@ -478,10 +535,12 @@ impl CaptureSender {
 
     /// Reports something that doesn't stop the stream, stamped with the
     /// session time now. After a [`CaptureNotice::RouteChanged`], the
-    /// stream's next audio opens a new epoch.
+    /// stream's next audio opens a new epoch, unless a
+    /// [`DeviceChange::Changed`] already did for the same change (see
+    /// [`Reroutes`]).
     pub fn notice(&self, notice: CaptureNotice) {
         if notice == CaptureNotice::RouteChanged {
-            self.rerouted.store(true, Ordering::SeqCst);
+            self.reroutes.stream_moved();
         }
         let at = self.clock.now();
         self.events
@@ -491,7 +550,10 @@ impl CaptureSender {
     /// Reports something that happened to the stream's device, stamped
     /// with the session time now. Nothing is sent once the stream has
     /// failed (its track has ended), and a loss only once until another
-    /// device follows.
+    /// device follows. After a [`DeviceChange::Changed`], the stream's
+    /// next audio opens a new epoch, unless a
+    /// [`CaptureNotice::RouteChanged`] already did for the same change (see
+    /// [`Reroutes`]).
     pub fn device(&self, change: DeviceChange) {
         self.device_at(change, self.clock.now());
     }
@@ -506,6 +568,9 @@ impl CaptureSender {
         let lost = change == DeviceChange::Lost;
         if self.lost.swap(lost, Ordering::SeqCst) && lost {
             return;
+        }
+        if matches!(change, DeviceChange::Changed(_)) {
+            self.reroutes.watch_moved();
         }
         self.send_device(change, at);
     }
@@ -858,7 +923,7 @@ impl TrackStarter {
             failed: Arc::new(AtomicBool::new(false)),
             lost: Arc::new(AtomicBool::new(false)),
             began: Arc::new(AtomicBool::new(false)),
-            rerouted: Arc::new(AtomicBool::new(false)),
+            reroutes: Arc::default(),
             // Suspends before the stream starts aren't its to report.
             asleep: Arc::new(AtomicU64::new(
                 u64::try_from(self.clock.suspended().as_nanos()).unwrap_or(u64::MAX),
@@ -1425,7 +1490,7 @@ fn handle<S: Fs>(
                     Ok(())
                 } else {
                     let drift = stamps.drift_for(timeline);
-                    open_epoch_after_loss(writer, timeline, at, drift, &mut |e| {
+                    reopen_epoch(writer, timeline, at, drift, &mut |e| {
                         report(Some(track), e);
                     })
                 }
@@ -1656,6 +1721,26 @@ fn open_epoch_after_loss<S: Fs>(
         .next_sample(track)
         .ok_or(SessionError::UnknownTrack(track))?;
     let opened = timeline.open_epoch_drifting(at, next, writer.rate(), drift);
+    move_to_opened(writer, timeline, opened, report)
+}
+
+/// Moves `timeline`'s track to a new epoch at `at`, under `drift`, in
+/// `timeline` and `writer` alike, as its stream's audio resumes on a new
+/// device or after a suspend: as [`open_epoch_after_loss`], except that
+/// audio stamped before the old audio's end starts at that end
+/// ([`TrackTimeline::reopen`]). Errors as [`open_epoch_after_loss`].
+fn reopen_epoch<S: Fs>(
+    writer: &mut SessionWriter<S>,
+    timeline: &mut TrackTimeline,
+    at: SessionTime,
+    drift: Drift,
+    report: &mut dyn FnMut(RecorderEvent),
+) -> Result<(), SessionError> {
+    let track = timeline.track();
+    let next = writer
+        .next_sample(track)
+        .ok_or(SessionError::UnknownTrack(track))?;
+    let opened = timeline.reopen(at, next, writer.rate(), drift);
     move_to_opened(writer, timeline, opened, report)
 }
 
