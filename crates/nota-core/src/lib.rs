@@ -43,7 +43,7 @@ pub mod utterance;
 #[cfg(any(test, feature = "fake-clock"))]
 pub use clock::FakeClock;
 pub use clock::{Clock, ClockUnavailable, SystemClock, wall_now};
-pub use drift::{Drift, DriftMeter};
+pub use drift::{Drift, DriftMeter, Stamp};
 pub use epoch::{Epoch, EpochAnchor, EpochError, Gap, OpenedEpoch, TrackTimeline};
 pub use ids::{EpochId, SessionId, TrackId};
 pub use time::{SampleCount, SampleIndex, SampleRange, SampleRate, SessionTime, WallTime};

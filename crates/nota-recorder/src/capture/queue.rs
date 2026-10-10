@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use nota_core::{SampleCount, SampleIndex, SessionTime, TrackId};
+use nota_core::{SampleCount, SampleIndex, SessionTime, Stamp, TrackId};
 
 use super::CaptureEvent;
 
@@ -191,7 +191,7 @@ impl QueueSender {
     }
 
     /// Queues a copy of `samples` from `track`, in a spare buffer if there
-    /// is one, as [`CaptureEvent::TimedAudio`] if the stream stamped it as
+    /// is one, as [`CaptureEvent::TimedAudio`] if the stream stamped it
     /// `captured`, or else [`CaptureEvent::Audio`]; first
     /// [`CaptureEvent::Began`], at the time `first` gives, if its flag
     /// isn't set yet, or else [`CaptureEvent::Reopened`] at `reopened`, if
@@ -205,7 +205,7 @@ impl QueueSender {
         samples: &[i16],
         first: Option<(&AtomicBool, SessionTime)>,
         reopened: Option<SessionTime>,
-        captured: Option<SessionTime>,
+        captured: Option<Stamp>,
     ) {
         let mut state = self.0.lock();
         if state.closed {
@@ -233,9 +233,9 @@ impl QueueSender {
         buffer.clear();
         buffer.extend_from_slice(samples);
         let event = match captured {
-            Some(at) => CaptureEvent::TimedAudio {
+            Some(stamp) => CaptureEvent::TimedAudio {
                 samples: buffer,
-                at,
+                stamp,
             },
             None => CaptureEvent::Audio(buffer),
         };

@@ -33,11 +33,14 @@
 //! [`PipeWireBackend`] does with the audio server's timestamps) is timed by
 //! those stamps, read through each track's [`DriftMeter`]:
 //! - A buffer captured at least [`LOSS_MIN`](nota_core::drift::LOSS_MIN)
-//!   later than its epoch says opens a new epoch at its capture time,
-//!   whether or not an overrun was reported (cpal drops a report it can't
-//!   deliver at once). An overrun after which the stream's next buffer is
-//!   on time lost nothing on this stream (the server reports overruns of
-//!   its whole graph), and opens nothing.
+//!   later than the buffer before it puts it opens a new epoch where it
+//!   came, whether or not an overrun was reported (cpal drops a
+//!   report it can't deliver at once). An overrun after which the stream's
+//!   next buffer is on time lost nothing on this stream (the server reports
+//!   overruns of its whole graph), and opens nothing. Buffers are compared
+//!   by the stream's cycle times, so a step in the delay the stream takes
+//!   off them, as when the graph's quantum changes, isn't taken for a loss
+//!   (see [`nota_core::drift`]).
 //! - Losses come in bursts under I/O pressure, and each epoch costs a
 //!   journal. Within [`BURST_WINDOW`] of the last epoch opened for a loss,
 //!   no other opens: the audio after a second loss is timed early by it
@@ -47,6 +50,9 @@
 //! - Otherwise the stamps measure the device's drift, and the meter
 //!   retimes the track when its mapping strays (see [`nota_core::drift`]),
 //!   so a loss still shows as a gap however long the track has drifted.
+//!   For [`SETTLE`](nota_core::drift::SETTLE) after a track's first buffer,
+//!   and after each epoch opened for a loss or a reopening, the stamps
+//!   settle, and the meter only watches for a loss.
 //!
 //! A stream that doesn't stamp its buffers opens an epoch at each overrun,
 //! at the session time the overrun was reported on the stream's thread. It
@@ -185,7 +191,7 @@ use nota_core::messages::AudioChunk;
 use nota_core::recorder::{DeviceChange, WarningState};
 use nota_core::{
     Clock, Drift, DriftMeter, Epoch, EpochError, OpenedEpoch, SampleCount, SampleIndex, SampleRate,
-    SessionTime, TrackId, TrackTimeline,
+    SessionTime, Stamp, TrackId, TrackTimeline,
 };
 
 use crate::detect::{Condition, Thresholds};
@@ -308,8 +314,8 @@ pub enum CaptureEvent {
         /// The samples.
         samples: Vec<i16>,
         /// When the first of them was captured, by the stream's stamp, on
-        /// the session clock.
-        at: SessionTime,
+        /// the session clock, and the stream's delay.
+        stamp: Stamp,
     },
     /// Something to note; capture goes on.
     Notice {
@@ -401,20 +407,25 @@ impl CaptureSender {
 
     /// [`Self::audio`], for a stream that stamps its buffers: the first of
     /// `samples` was captured at `captured`, on the system's clock that
-    /// stops during suspend (`CLOCK_MONOTONIC`, as `PipeWire` stamps them).
-    /// The samples are timed by the stamp, and so are a first buffer and
-    /// one after a gap; one the session clock can't place is sent as
-    /// [`Self::audio`] sends it.
-    pub fn audio_captured(&self, samples: &[i16], captured: Duration) {
+    /// stops during suspend (`CLOCK_MONOTONIC`, as `PipeWire` stamps them),
+    /// `delay` before the stream's cycle that delivered them. The samples
+    /// are timed by the stamp, and so are a first buffer and one after a
+    /// gap; one the session clock can't place is sent as [`Self::audio`]
+    /// sends it.
+    pub fn audio_captured(&self, samples: &[i16], captured: Duration, delay: Duration) {
         if samples.is_empty() {
             return;
         }
-        self.send_audio(samples, self.clock.awake_to_session(captured));
+        let stamp = self
+            .clock
+            .awake_to_session(captured)
+            .map(|at| Stamp { at, delay });
+        self.send_audio(samples, stamp);
     }
 
     /// Sends `samples`, stamped `captured` if the stream gave a time the
     /// session clock could place.
-    fn send_audio(&self, samples: &[i16], captured: Option<SessionTime>) {
+    fn send_audio(&self, samples: &[i16], captured: Option<Stamp>) {
         // After a failure the track has ended: audio the stream still
         // delivers, from a device it was moved to say, isn't the track's.
         if samples.is_empty() || self.failed.load(Ordering::SeqCst) {
@@ -427,7 +438,7 @@ impl CaptureSender {
         // Without a stamp, the clock is read only when a time is needed: a
         // stream's first buffers, and its first after a gap.
         let at = (!began || reopened)
-            .then(|| captured.unwrap_or_else(|| self.captured_at(samples.len())));
+            .then(|| captured.map_or_else(|| self.captured_at(samples.len()), |s| s.at));
         let first = at.filter(|_| !began).map(|at| (&*self.began, at));
         // Counted before it's queued, so it's never missed.
         self.progress.sent(samples.len());
@@ -1378,13 +1389,13 @@ fn handle<S: Fs>(
         CaptureEvent::Audio(samples) => {
             return record_audio(writer, timelines, detectors, track, (samples, None), report);
         }
-        CaptureEvent::TimedAudio { samples, at } => {
+        CaptureEvent::TimedAudio { samples, stamp } => {
             return record_audio(
                 writer,
                 timelines,
                 detectors,
                 track,
-                (samples, Some(at)),
+                (samples, Some(stamp)),
                 report,
             );
         }
@@ -1451,8 +1462,8 @@ fn handle<S: Fs>(
     Ok(Handled::Recorded(outcome.map_err(|e| (track, e)), None))
 }
 
-/// Records `track`'s `audio`: samples, and when the first was captured by
-/// the stream's stamp if it gave one. It's read against the track's epoch
+/// Records `track`'s `audio`: samples, and the stream's stamp if it gave
+/// one. It's read against the track's epoch
 /// first, which may move it to a new one ([`time_buffer`]), then appended,
 /// reported, and fed to the track's detectors.
 fn record_audio<S: Fs>(
@@ -1460,10 +1471,10 @@ fn record_audio<S: Fs>(
     timelines: &mut Timelines<'_>,
     detectors: &mut Detectors,
     track: TrackId,
-    audio: (Vec<i16>, Option<SessionTime>),
+    audio: (Vec<i16>, Option<Stamp>),
     report: &mut dyn FnMut(Option<TrackId>, RecorderEvent),
 ) -> Result<Handled, RecordError> {
-    let (samples, at) = audio;
+    let (samples, stamp) = audio;
     let Some((timeline, stamps)) = timelines.get_mut(track) else {
         return Err(RecordError::Session(SessionError::UnknownTrack(track)));
     };
@@ -1471,8 +1482,8 @@ fn record_audio<S: Fs>(
         .next_sample(track)
         .ok_or(SessionError::UnknownTrack(track))
         .map_err(RecordError::Session)?;
-    if let Some(at) = at {
-        let moved = time_buffer(writer, timeline, stamps, first, at, &mut |e| {
+    if let Some(stamp) = stamp {
+        let moved = time_buffer(writer, timeline, stamps, first, stamp, &mut |e| {
             report(Some(track), e);
         });
         // Reported now, so a journal that broke as the epoch moved isn't
@@ -1494,9 +1505,9 @@ fn record_audio<S: Fs>(
 }
 
 /// Reads a stamped buffer of `timeline`'s track, whose first sample is
-/// `first`, captured at `at`, and moves the track to a new epoch if the
-/// meter says to: at `at` after a loss (unless a burst's window is still
-/// open), or straight on to correct drift. A drift past the limit is
+/// `first`, stamped `stamp`, and moves the track to a new epoch if the
+/// meter says to: where the stream's cycles put it after a loss (unless a
+/// burst's window is still open), or straight on to correct drift. A drift past the limit is
 /// reported, once.
 ///
 /// A [`SessionError::Journal`] or [`SessionError::Marks`] from ending the
@@ -1506,29 +1517,36 @@ fn time_buffer<S: Fs>(
     timeline: &mut TrackTimeline,
     stamps: &mut Stamps,
     first: SampleIndex,
-    at: SessionTime,
+    stamp: Stamp,
     report: &mut dyn FnMut(RecorderEvent),
 ) -> Result<(), SessionError> {
     stamps.stamped = true;
     let Some(epoch) = timeline.current().copied() else {
         return Ok(());
     };
+    let at = stamp.at;
     if first == epoch.first_sample() && at > epoch.start() {
         // The epoch holds no audio yet, and starts before its first audio
         // was captured: a track started first opens it when its stream was
         // asked to start, early by the stream's start-up. Its audio starts
         // when it was captured, as a joining track's does, and the time
         // before is a gap.
-        return open_at_capture(writer, timeline, stamps, first, at, report);
+        return open_at_capture(writer, timeline, stamps, (first, at), stamp, report);
     }
-    let moved = match stamps.meter.observe(&epoch, first, at) {
+    let moved = match stamps.meter.observe(&epoch, first, stamp) {
         Reading::Steady => Ok(()),
         // Within a burst, the next window's first buffer opens one epoch
         // for every loss.
         Reading::Lost { .. } if stamps.in_burst(at) => Ok(()),
-        Reading::Lost { .. } => {
-            stamps.last_loss = Some(at);
-            open_at_capture(writer, timeline, stamps, first, at, report)
+        Reading::Lost { hole } => {
+            // Where the stream's cycles put the buffer, not its capture
+            // stamp: a step in the delay moves the stamp, not the audio.
+            let resumed = epoch
+                .time_of(first)
+                .and_then(|mapped| mapped.checked_add(hole))
+                .unwrap_or(at);
+            stamps.last_loss = Some(resumed);
+            open_at_capture(writer, timeline, stamps, (first, resumed), stamp, report)
         }
         Reading::Retime(drift) => {
             let opened = timeline.retime(first, drift);
@@ -1597,23 +1615,23 @@ fn opened_since<S: Fs>(
     }
 }
 
-/// Moves `timeline`'s track to a new epoch at `at`, when the stamped
-/// buffer from sample `first` was captured, after a stretch with no audio,
-/// and starts the meter's new run with that buffer. Errors as
+/// Moves `timeline`'s track to a new epoch at `at`, when the buffer from
+/// sample `first`, stamped `stamp`, was captured, after a stretch with no
+/// audio, and starts the meter's new run with that buffer. Errors as
 /// [`open_epoch_after_loss`].
 fn open_at_capture<S: Fs>(
     writer: &mut SessionWriter<S>,
     timeline: &mut TrackTimeline,
     stamps: &mut Stamps,
-    first: SampleIndex,
-    at: SessionTime,
+    (first, at): (SampleIndex, SessionTime),
+    stamp: Stamp,
     report: &mut dyn FnMut(RecorderEvent),
 ) -> Result<(), SessionError> {
     let drift = stamps.drift_for(timeline);
     let moved = open_epoch_after_loss(writer, timeline, at, drift, report);
     stamps.meter.restart();
     if let Some(epoch) = timeline.current() {
-        stamps.meter.observe(epoch, first, at);
+        stamps.meter.observe(epoch, first, stamp);
     }
     moved
 }
