@@ -433,6 +433,8 @@ fn a_track_that_cant_join_leaves_the_other_recording() {
     assert!(failed[0].1.contains("couldn't record it"), "{failed:?}");
     assert_eq!(writer.next_sample(MIC), Some(SampleIndex::new(20)));
     assert_eq!(writer.next_sample(SYSTEM), Some(SampleIndex::ZERO));
+    // Every buffer goes back to be filled again, the refused track's too.
+    assert_eq!(events.events.spare(), 3);
 }
 
 /// Opens "mic" at once; "system" only once `gate` says so; "late" after

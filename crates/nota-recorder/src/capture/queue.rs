@@ -137,6 +137,12 @@ impl Queue {
         drop((events, spare));
     }
 
+    /// How many buffers wait to be filled again.
+    #[cfg(test)]
+    pub(super) fn spare(&self) -> usize {
+        self.lock().spare.len()
+    }
+
     /// How many buffers sending has had to allocate so far.
     #[cfg(test)]
     pub(super) fn allocated(&self) -> u64 {
