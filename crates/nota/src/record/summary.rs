@@ -334,8 +334,8 @@ pub(super) mod tests {
         let given = [
             Command::Start(Setup {
                 title: "Workshop".to_owned(),
-                mic: Input::Default,
-                system: Input::Default,
+                mic: Some(Input::Default),
+                system: Some(Input::Default),
             }),
             Command::Mark(Mark { at }),
             Command::Note(note.clone()),

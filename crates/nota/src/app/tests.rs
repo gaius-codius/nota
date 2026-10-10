@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
+use crate::record::last_setup;
+use nota_core::recorder::Input;
 use nota_core::{EpochId, FakeClock, SampleIndex, SampleRange, TrackId};
 use nota_store::{NewSession, SegmentRow, Sha256Digest, Track, TrackKind};
 use ratatui::Terminal;
@@ -46,7 +48,7 @@ fn dates() -> Dates {
 
 /// A library with sessions 1 to 3 in the database, each a minute of
 /// audio per minute of its number, and their tracks.
-fn library_of_three(dir: &Path) -> Library {
+pub(super) fn library_of_three(dir: &Path) -> Library {
     let library = Library::open(dir).unwrap();
     for (title, mic) in [
         ("Joinery", "mic"),
@@ -151,8 +153,8 @@ fn the_last_settings_come_from_the_last_session() {
         last_setup(&library),
         Some(Setup {
             title: "Finishing".into(),
-            mic: Input::Default,
-            system: Input::Default,
+            mic: Some(Input::Default),
+            system: Some(Input::Default),
         })
     );
     // A session with a named mic, and no system audio track.
@@ -177,8 +179,8 @@ fn the_last_settings_come_from_the_last_session() {
         last_setup(&library),
         Some(Setup {
             title: "Recording".into(),
-            mic: Input::Device("usb-mic".into()),
-            system: Input::Default,
+            mic: Some(Input::Device("usb-mic".into())),
+            system: Some(Input::Default),
         })
     );
 }
@@ -659,4 +661,22 @@ fn a_failed_relist_before_recording_keeps_home() {
     listing.relist(&mut home);
     assert_eq!(home.sessions(), listed);
     assert!(home.notice().unwrap().contains("couldn't be listed"));
+}
+
+/// A recording's default title is the local date and time, as Setup shows
+/// it, and plain `Recording` where the calendar's time can't be read.
+#[test]
+fn the_default_title_is_the_local_date_and_time() {
+    // 2026-10-03 09:00 in UTC, and 19:00 in Sydney.
+    assert_eq!(dates().title(), "3 Oct, 09:00");
+    let sydney = Dates {
+        zone: TimeZone::get("Australia/Sydney").unwrap(),
+        ..dates()
+    };
+    assert_eq!(sydney.title(), "3 Oct, 19:00");
+    let unknown = Dates {
+        now: None,
+        ..dates()
+    };
+    assert_eq!(unknown.title(), "Recording");
 }

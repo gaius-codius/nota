@@ -154,8 +154,8 @@ fn parses_record() {
         r.start,
         recorder::Command::Start(Setup {
             title: "Pharmacy workshop".into(),
-            mic: Input::Device("usb-mic".into()),
-            system: Input::Device("speakers.monitor".into()),
+            mic: Some(Input::Device("usb-mic".into())),
+            system: Some(Input::Device("speakers.monitor".into())),
         })
     );
     assert_eq!(r.data, PathBuf::from("/d"));
@@ -180,8 +180,8 @@ fn record_defaults_to_the_default_devices_and_no_engine() {
         r.start,
         recorder::Command::Start(Setup {
             title: "Recording".into(),
-            mic: Input::Default,
-            system: Input::Default,
+            mic: Some(Input::Default),
+            system: Some(Input::Default),
         })
     );
     assert_eq!(r.models, None);

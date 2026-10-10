@@ -1,14 +1,16 @@
 //! `nota` with no command: the Home screen, and the flow between screens.
 //!
 //! ```text
-//! Home ──R──▶ Recording ──s, y──▶ Processing ──esc──▶ Home
+//! Home ──r──▶ Setup ──⏎──▶ Recording ──s, y──▶ Processing ──esc──▶ Home
+//!  └──────────R (last settings)──▶ Recording
 //! ```
 //!
 //! The terminal is set up once, for Home, and lent to each recording: the
 //! Recording screen runs on it, and Home shows "finishing the recording"
 //! while the recording stops, then Processing shows its jobs and transcript.
-//! Home opens a session in Processing too. Until Setup exists, `R`
-//! records with the last session's settings.
+//! Home opens a session in Processing too. Setup (see `setup`) listens to
+//! both sources so their meters move before a session exists; `R` skips it
+//! and records with the last settings, which Setup keeps (see `remembered`).
 //!
 //! At start, sessions an earlier run left are salvaged, as `nota record`
 //! does. While Home is open, the jobs queued after each stop (the final
@@ -30,7 +32,7 @@ use std::time::Duration;
 use jiff::Timestamp;
 use jiff::civil::Date;
 use jiff::tz::TimeZone;
-use nota_core::recorder::{Command, Input, Setup};
+use nota_core::recorder::{Command, Setup};
 use nota_core::{Clock, SessionId, SessionTime, SystemClock, WallTime, wall_now};
 use nota_tui::{Action, Home, InputThread, RunError, Session, Status, Theme};
 
@@ -38,12 +40,13 @@ use crate::final_pass::Jobs;
 use crate::jobs::{Capture, FreeSpace, Runner};
 use crate::library::{Library, Listed, Needs, Salvaged};
 use crate::record::{
-    BoxError, Lent, QuitSignals, RATE, RecordArgs, final_engine, last_setup, record_in,
-    segment_length,
+    BoxError, Lent, QuitSignals, RATE, RecordArgs, final_engine, record_in, segment_length,
 };
 use crate::terminal::Screen;
 
 mod processing;
+mod remembered;
+mod setup;
 
 /// What Home shows while a recording stops.
 const STOPPING: &str = "finishing the recording";
@@ -57,7 +60,8 @@ const ELSEWHERE: Duration = Duration::from_secs(1);
 /// it isn't done at every draw.
 const RELIST: Duration = Duration::from_secs(5);
 
-/// Runs Home until it's closed, recording each time `R` is pressed.
+/// Runs Home until it's closed, recording each time `r` (through Setup)
+/// or `R` (with the last settings) is pressed.
 /// `args` says where the library is and how to record; its start command
 /// is replaced by each recording's. SIGHUP, SIGTERM and SIGINT close nota,
 /// on Home or during a recording (which stops in order first).
@@ -157,15 +161,26 @@ impl Pages<'_> {
                 Some(screen) => screen,
                 None => Screen::enter(None)?,
             };
-            match self.action(&mut current, &mut processing_session)? {
-                nota_tui::ProcessingAction::Quit => return Ok(()),
-                nota_tui::ProcessingAction::Home => {
+            let setup = match self.action(&mut current, &mut processing_session)? {
+                Next::Quit => return Ok(()),
+                Next::Home => {
                     screen = Some(current);
                     continue;
                 }
-                nota_tui::ProcessingAction::Record => {}
-            }
-            match self.record(args, current, said, jobs) {
+                Next::Record => self.last_setup(args),
+                Next::Setup => match self.setup(args, &mut current)? {
+                    setup::Done::Start(setup, note) => {
+                        said.extend(note.map(|note| format!("nota: {note}")));
+                        setup
+                    }
+                    setup::Done::Back => {
+                        screen = Some(current);
+                        continue;
+                    }
+                    setup::Done::Quit => return Ok(()),
+                },
+            };
+            match self.record(args, setup, current, said, jobs) {
                 Recorded::Back(back, id) => {
                     screen = Some(back);
                     processing_session = Some(id);
@@ -177,10 +192,35 @@ impl Pages<'_> {
         Ok(())
     }
 
-    /// Starts a recording with the kept Home page for its stop.
+    /// What `R` records with: the last settings, or a first recording's
+    /// default sources.
+    fn last_setup(&self, args: &RecordArgs) -> Setup {
+        setup::last_setup_for(self.listing.library, &args.data)
+    }
+
+    /// Shows Setup, with the date and time as the title it starts with.
+    fn setup(&mut self, args: &RecordArgs, screen: &mut Screen) -> Result<setup::Done, BoxError> {
+        let title = self.listing.dates().title();
+        setup::show(
+            screen,
+            &setup::Page {
+                args,
+                library: self.listing.library,
+                theme: self.theme,
+                clock: &self.listing.clock,
+                quit: self.quit,
+                engines: engines_line(args),
+                title,
+            },
+        )
+    }
+
+    /// Starts a recording as `setup` says, with the kept Home page for its
+    /// stop.
     fn record(
         &mut self,
         args: &RecordArgs,
+        setup: Setup,
         screen: Screen,
         said: &mut Vec<String>,
         jobs: &Background,
@@ -188,6 +228,7 @@ impl Pages<'_> {
         self.listing.relist(&mut self.home);
         record_from(
             args,
+            setup,
             self.listing.library,
             screen,
             &mut self.home,
@@ -201,7 +242,7 @@ impl Pages<'_> {
         &mut self,
         screen: &mut Screen,
         processing_session: &mut Option<SessionId>,
-    ) -> Result<nota_tui::ProcessingAction, BoxError> {
+    ) -> Result<Next, BoxError> {
         if let Some(id) = processing_session.take() {
             return processing::show(
                 screen,
@@ -211,7 +252,13 @@ impl Pages<'_> {
                 self.theme,
                 &self.listing.clock,
                 self.quit,
-            );
+            )
+            .map(|next| match next {
+                nota_tui::ProcessingAction::Quit => Next::Quit,
+                nota_tui::ProcessingAction::Home => Next::Home,
+                // Another recording is set up first, as from Home's `r`.
+                nota_tui::ProcessingAction::Record => Next::Setup,
+            });
         }
         self.home.set_busy(None);
         if let Some(notice) = self.notice.take() {
@@ -220,15 +267,28 @@ impl Pages<'_> {
         self.listing.relist(&mut self.home);
         Ok(
             match show_home(screen, &mut self.home, &mut self.listing, self.quit)? {
-                Action::Quit => nota_tui::ProcessingAction::Quit,
-                Action::Record => nota_tui::ProcessingAction::Record,
+                Action::Quit => Next::Quit,
+                Action::Record => Next::Record,
+                Action::Setup => Next::Setup,
                 Action::Open(id) => {
                     *processing_session = Some(SessionId::new(id));
-                    nota_tui::ProcessingAction::Home
+                    Next::Home
                 }
             },
         )
     }
+}
+
+/// Where the app goes from a page.
+enum Next {
+    /// Close nota.
+    Quit,
+    /// Home.
+    Home,
+    /// Set up a recording.
+    Setup,
+    /// Record with the last settings.
+    Record,
 }
 
 /// The jobs that run after each stop, and whether this nota is recording.
@@ -317,12 +377,12 @@ enum Recorded {
     TerminalGone,
 }
 
-/// Records with the last session's settings on the app's terminal, `home`
-/// showing while it stops, and adds what it reported to `said`. No job
-/// runs meanwhile; once it has stopped, its own are queued and the runner
-/// is woken for them.
+/// Records as `setup` says on the app's terminal, `home` showing while it
+/// stops, and adds what it reported to `said`. No job runs meanwhile; once
+/// it has stopped, its own are queued and the runner is woken for them.
 fn record_from(
     args: &RecordArgs,
+    setup: Setup,
     library: &Library,
     screen: Screen,
     home: &mut Home,
@@ -330,7 +390,7 @@ fn record_from(
     jobs: &Background,
 ) -> Recorded {
     let mut record = args.clone();
-    record.start = Command::Start(last_setup(library).unwrap_or_else(first_setup));
+    record.start = Command::Start(setup);
     let mut stopping = |screen: &mut Screen| {
         stopping_home(home);
         // Only a courtesy: if drawing fails, the next draw says so.
@@ -415,13 +475,13 @@ fn show_home(
     ran
 }
 
-/// The setup of a first recording: both tracks from the system's default
-/// devices.
-fn first_setup() -> Setup {
-    Setup {
-        title: "Recording".to_owned(),
-        mic: Input::Default,
-        system: Input::Default,
+/// The engines named on Setup, which says when they hear: live and again
+/// after the stop.
+const fn engines_line(args: &RecordArgs) -> &'static str {
+    if args.models.is_some() {
+        "parakeet, live and after the stop"
+    } else {
+        "no live text"
     }
 }
 
@@ -592,6 +652,21 @@ impl Dates {
     fn today(&self) -> Option<Date> {
         let now = Timestamp::from_second(self.now?.unix_seconds()).ok()?;
         Some(now.to_zoned(self.zone.clone()).date())
+    }
+
+    /// The default title of a recording started now: `9 Oct, 14:05`, in the
+    /// local time zone, or `Recording` if the calendar's time can't be read.
+    fn title(&self) -> String {
+        self.now
+            .and_then(|now| Timestamp::from_second(now.unix_seconds()).ok())
+            .map_or_else(
+                || "Recording".to_owned(),
+                |now| {
+                    now.to_zoned(self.zone.clone())
+                        .strftime("%-d %b, %H:%M")
+                        .to_string()
+                },
+            )
     }
 
     /// The local date of `at`, in words.

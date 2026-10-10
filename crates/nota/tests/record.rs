@@ -598,10 +598,15 @@ fn stops_on(signal: Signal, name: &str) {
 }
 
 /// Starts a recording from the current page, then stops it and opens Processing.
+/// `r` goes through Setup first, and `⏎` there starts the recording.
 fn record_from_page_and_stop(nota: &mut Running, key: &str) -> usize {
     // Wait for Recording before sending its stop key.
     let at = nota.len();
     nota.press(key);
+    if key == "r" {
+        assert!(nota.shows_after(at, "new recording"), "{}", nota.output());
+        nota.press("\r");
+    }
     assert!(nota.shows_after(at, "s stop"), "{}", nota.output());
     let at = nota.len();
     nota.press("s");
@@ -653,6 +658,8 @@ fn home_lists_sessions_during_a_stop_started_from_processing() {
     assert!(nota.shows_after(at, "tab view"), "{}", nota.output());
     let at = nota.len();
     nota.press("r");
+    assert!(nota.shows_after(at, "new recording"), "{}", nota.output());
+    nota.press("\r");
     assert!(nota.shows_after(at, "s stop"), "{}", nota.output());
     // Wait for the question's guard before answering the stop.
     let at = nota.len();
@@ -739,6 +746,83 @@ fn home_records_opens_processing_and_returns_home() {
         "{}",
         nota.output()
     );
+}
+
+/// Home's `r` opens Setup, which creates no session however long it's
+/// open, and `esc` goes back to Home.
+#[test]
+fn setup_creates_no_session_and_esc_goes_back_home() {
+    let tmp = TestDir::new("setup-esc");
+    let mut nota = Running::start_home(&tmp.0);
+    assert!(nota.shows_after(0, "r record"), "{}", nota.output());
+    let at = nota.len();
+    nota.press("r");
+    assert!(nota.shows_after(at, "new recording"), "{}", nota.output());
+    assert!(nota.shows_after(at, "pick the one that moves"));
+    // Long enough for the preview to have opened its streams and sent
+    // levels.
+    pause(Duration::from_millis(1_000));
+    assert!(
+        tmp.0.join("sessions").read_dir().unwrap().next().is_none(),
+        "{}",
+        nota.output()
+    );
+    let at = nota.len();
+    nota.press("\u{1b}");
+    assert!(
+        nota.shows_after(at, "nothing recorded yet"),
+        "{}",
+        nota.output()
+    );
+    nota.press("q");
+    assert!(nota.exits().unwrap().success());
+    assert!(tmp.0.join("sessions").read_dir().unwrap().next().is_none());
+}
+
+/// Setup's `⏎` records what it shows: `↓` chooses the microphone alone,
+/// so the session has that one track, and `R` then records the same
+/// again.
+#[test]
+fn setup_records_the_chosen_source_and_r_records_it_again() {
+    let tmp = TestDir::new("setup-mic");
+    let mut nota = Running::start_home(&tmp.0);
+    assert!(nota.shows_after(0, "r record"), "{}", nota.output());
+    let at = nota.len();
+    nota.press("r");
+    assert!(nota.shows_after(at, "new recording"), "{}", nota.output());
+    // `↓` chooses the microphone.
+    nota.press("\u{1b}[B");
+    pause(Duration::from_millis(300));
+    record_from_setup_and_stop(&mut nota, "\r");
+    // Home again, then `R`: the last settings, the microphone alone.
+    let at = nota.len();
+    nota.press("\u{1b}");
+    assert!(nota.shows_after(at, "⏎ open"), "{}", nota.output());
+    record_from_setup_and_stop(&mut nota, "R");
+    nota.press("q");
+    assert!(nota.exits().unwrap().success());
+    for session in [1, 2] {
+        let (rows, left) = published(&tmp.0, session);
+        assert!(!left, "journals left after the stop");
+        assert!(rows.iter().all(|&(track, ..)| track == 0), "{rows:?}");
+        assert!(!rows.is_empty(), "session {session} published nothing");
+    }
+}
+
+/// Starts a recording with `key` from the current page, stops it and
+/// opens Processing.
+fn record_from_setup_and_stop(nota: &mut Running, key: &str) {
+    let at = nota.len();
+    nota.press(key);
+    assert!(nota.shows_after(at, "s stop"), "{}", nota.output());
+    pause(Duration::from_millis(1_000));
+    let at = nota.len();
+    nota.press("s");
+    assert!(nota.shows_after(at, "stop recording?"), "{}", nota.output());
+    pause(Duration::from_millis(700));
+    let at = nota.len();
+    nota.press("y");
+    assert!(nota.shows_after(at, "tab view"), "{}", nota.output());
 }
 
 /// A signal during a recording started from Home stops it in order, and

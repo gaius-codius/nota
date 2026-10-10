@@ -126,7 +126,7 @@ mod stop;
 mod summary;
 
 pub(crate) use signals::QuitSignals;
-pub(crate) use start::last_setup;
+pub(crate) use start::{last_setup, source_of};
 use summary::show;
 #[cfg(test)]
 pub(crate) use summary::tests::cleanup_report;

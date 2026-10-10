@@ -762,7 +762,7 @@ fn set_aside_part(aside: &[PathBuf]) -> String {
 }
 
 /// This session's row: its title and every track asked for.
-fn session_row(setup: &Setup, id: SessionId, sources: &[(TrackId, Source); 2]) -> NewSession {
+fn session_row(setup: &Setup, id: SessionId, sources: &[(TrackId, Source)]) -> NewSession {
     NewSession {
         id,
         title: Some(setup.title.clone()),
@@ -852,21 +852,33 @@ fn start_engine(
     Ok(supervisor)
 }
 
-/// Each track's source, as `setup` chose it.
-fn sources(setup: &Setup) -> [(TrackId, Source); 2] {
-    let source = |input: &Input, default| match input {
+/// What `input` captures: the device it names, or `default`, the source
+/// that follows the system's default.
+pub(crate) fn source_of(input: &Input, default: Source) -> Source {
+    match input {
         Input::Default => default,
         Input::Device(name) => Source::Device(name.clone()),
-    };
+    }
+}
+
+/// Each track `setup` asks for, with its source as `setup` chose it: the
+/// microphone's, then the system audio's. A track the setup leaves out is
+/// not recorded.
+fn sources(setup: &Setup) -> Vec<(TrackId, Source)> {
     [
-        (MIC, source(&setup.mic, Source::Microphone)),
-        (SYSTEM, source(&setup.system, Source::SystemAudio)),
+        (MIC, setup.mic.as_ref(), Source::Microphone),
+        (SYSTEM, setup.system.as_ref(), Source::SystemAudio),
     ]
+    .into_iter()
+    .filter_map(|(track, input, default)| Some((track, source_of(input?, default))))
+    .collect()
 }
 
 /// The setup the last session recorded with: its title, and each track's
 /// source, as [`source_name`] named it in the library. A track it didn't
-/// record (a stream that didn't start) follows the default. `None` if
+/// record (a stream that didn't start) follows the default, and both
+/// tracks are asked for: the rows can't say whether one was left out on
+/// purpose (Setup's own choice is kept apart, see `app`). `None` if
 /// there's no last session, or the library database can't be read.
 pub(crate) fn last_setup(library: &Library) -> Option<Setup> {
     let (session, tracks) = library
@@ -891,8 +903,11 @@ pub(crate) fn last_setup(library: &Library) -> Option<Setup> {
     };
     Some(Setup {
         title: session.title.unwrap_or_else(|| "Recording".to_owned()),
-        mic: input(TrackKind::Microphone, &source_name(&Source::Microphone)),
-        system: input(TrackKind::System, &source_name(&Source::SystemAudio)),
+        mic: Some(input(
+            TrackKind::Microphone,
+            &source_name(&Source::Microphone),
+        )),
+        system: Some(input(TrackKind::System, &source_name(&Source::SystemAudio))),
     })
 }
 
@@ -982,15 +997,15 @@ mod tests {
     fn the_setup_chooses_each_track_s_source() {
         let mut setup = Setup {
             title: "Workshop".to_owned(),
-            mic: Input::Default,
-            system: Input::Default,
+            mic: Some(Input::Default),
+            system: Some(Input::Default),
         };
         assert_eq!(
             sources(&setup),
             [(MIC, Source::Microphone), (SYSTEM, Source::SystemAudio)]
         );
-        setup.mic = Input::Device("usb-mic".to_owned());
-        setup.system = Input::Device("speakers.monitor".to_owned());
+        setup.mic = Some(Input::Device("usb-mic".to_owned()));
+        setup.system = Some(Input::Device("speakers.monitor".to_owned()));
         assert_eq!(
             sources(&setup),
             [
