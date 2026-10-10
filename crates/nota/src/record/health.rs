@@ -117,20 +117,26 @@ impl<T> ReportingStore<T> {
         }
     }
 
-    /// Notes how a call went, and passes its result on. A stored row
-    /// that doesn't parse came from a database that answered: that's a
-    /// damaged row for publishing to name, not the library being down.
-    fn noted<R>(&self, result: Result<R, T::Error>) -> Result<R, T::Error>
+    /// Notes how a call went, and passes its result on. A failure raises
+    /// the warning; a success clears it only if it `commits` a row: a read
+    /// that works says nothing of writes, and a publish run reads before
+    /// it inserts, so a read clearing it would clear it every run while
+    /// inserts still fail. A stored row that doesn't parse came from a
+    /// database that answered: that's a damaged row for publishing to
+    /// name, not the library being down.
+    fn noted<R>(&self, result: Result<R, T::Error>, commits: bool) -> Result<R, T::Error>
     where
         T: SegmentStore,
     {
         let failed = result
             .as_ref()
             .is_err_and(|error| T::unparsable_row(error).is_none());
-        self.health.note(Writer::Publisher, failed, |state| {
-            let warning = library_warning(state, self.clock.as_ref());
-            to_screen(&self.ui, &self.save, warning, self.clock.now());
-        });
+        if failed || commits {
+            self.health.note(Writer::Publisher, failed, |state| {
+                let warning = library_warning(state, self.clock.as_ref());
+                to_screen(&self.ui, &self.save, warning, self.clock.now());
+            });
+        }
         result
     }
 }
@@ -140,12 +146,12 @@ impl<T: SegmentStore> SegmentStore for ReportingStore<T> {
 
     fn rows(&mut self, session: SessionId) -> Result<Vec<SegmentRow>, Self::Error> {
         let rows = self.inner.rows(session);
-        self.noted(rows)
+        self.noted(rows, false)
     }
 
     fn insert(&mut self, session: SessionId, segment: &DurableSegment) -> Result<(), Self::Error> {
         let inserted = self.inner.insert(session, segment);
-        self.noted(inserted)
+        self.noted(inserted, true)
     }
 
     fn is_disk_full(error: &Self::Error) -> bool {

@@ -81,7 +81,12 @@ pub(crate) enum Happening {
     /// A lost track's device is back.
     Back(TrackId),
     /// The machine slept, for as long as the gap after it, once one comes.
-    Slept(Option<Duration>),
+    Slept {
+        /// When it woke: the warning's time.
+        woke: SessionTime,
+        /// How long it slept, from the gap.
+        lasted: Option<Duration>,
+    },
 }
 
 /// How a warning is coloured. Each also has its glyph, so none relies on
@@ -188,11 +193,14 @@ impl Warnings {
             Event::Disk(disk) => self.disk_left = disk.left,
             Event::Gap { gap, .. } => {
                 // The sleep's length is the gap after it: the longest, if
-                // tracks woke at different times.
-                if let Some((Happening::Slept(slept), at)) = &mut self.happening
+                // tracks woke at different times. A gap that began after
+                // the machine woke (an overrun soon after) isn't the
+                // sleep's.
+                if let Some((Happening::Slept { woke, lasted }, at)) = &mut self.happening
                     && shows_at(*at, now)
+                    && gap.from() < *woke
                 {
-                    *slept = Some(slept.map_or(gap.duration(), |s| s.max(gap.duration())));
+                    *lasted = Some(lasted.map_or(gap.duration(), |s| s.max(gap.duration())));
                 }
             }
             Event::Recorded(_)
@@ -237,7 +245,13 @@ impl Warnings {
             (Cause::DiskLow, _) => self.disk_low = raised,
             (Cause::DiskFull, _) if raised => self.disk_full = Some(warning.at),
             (Cause::SleepNotHeld, _) => self.stand(Condition::MaySleep, raised),
-            (Cause::Slept, _) if raised => self.happening = Some((Happening::Slept(None), now)),
+            (Cause::Slept, _) if raised => {
+                let slept = Happening::Slept {
+                    woke: warning.at,
+                    lasted: None,
+                };
+                self.happening = Some((slept, now));
+            }
             (Cause::LibraryUnavailable, _) => self.stand(Condition::LibraryOffline, raised),
             // Drift is corrected as it's measured: the timeline keeps it,
             // and there's nothing for the listener to do. The rest are a
@@ -411,10 +425,11 @@ impl Warnings {
         match happening {
             Happening::Route(id, name) => (format!("↪ {}: {name}", self.name(*id)), Tone::Plain),
             Happening::Back(id) => (format!("✓ {} back", self.name(*id)), Tone::Good),
-            Happening::Slept(Some(slept)) => {
-                (format!("⚠ slept {}", duration_words(*slept)), Tone::Gold)
-            }
-            Happening::Slept(None) => ("⚠ slept".to_owned(), Tone::Gold),
+            Happening::Slept {
+                lasted: Some(lasted),
+                ..
+            } => (format!("⚠ slept {}", duration_words(*lasted)), Tone::Gold),
+            Happening::Slept { lasted: None, .. } => ("⚠ slept".to_owned(), Tone::Gold),
         }
     }
 

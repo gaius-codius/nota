@@ -325,6 +325,33 @@ fn a_sleep_shows_how_long_it_lasted() {
     assert_eq!(warnings.top(secs(210)), None);
 }
 
+/// A gap that began after the machine woke (an overrun soon after) isn't
+/// the sleep's: the sleep keeps its own length.
+#[test]
+fn a_later_gap_doesn_t_lengthen_the_sleep() {
+    let mut warnings = two_tracks();
+    raise(&mut warnings, Cause::Slept, None, 200);
+    let rate = SampleRate::new(1_000).unwrap();
+    let mut timeline = TrackTimeline::new(MIC);
+    timeline
+        .open_epoch(secs(0), SampleIndex::ZERO, rate)
+        .unwrap();
+    timeline
+        .open_epoch(secs(198), SampleIndex::new(196_000), rate)
+        .unwrap();
+    // The sleep's own 2 s, then a 5 s overrun after the machine woke.
+    timeline
+        .open_epoch(secs(207), SampleIndex::new(198_000), rate)
+        .unwrap();
+    for gap in timeline.gaps() {
+        warnings.update(&Event::Gap { track: MIC, gap }, secs(205));
+    }
+    assert_eq!(
+        warnings.top(secs(205)),
+        Some(shown("⚠ slept 2s", Tone::Gold, 0))
+    );
+}
+
 /// A broken journal shows `not recording` for 10 s: recording goes on in
 /// a new one.
 #[test]

@@ -82,6 +82,10 @@ pub(crate) struct Live {
     /// Where each track's audio so far ends, so a gap that ended before
     /// it isn't taken for a sleep's.
     heard_to: BTreeMap<TrackId, SessionTime>,
+    /// Where the last gap sent for each track ends, so a gap the epoch
+    /// sent (an overrun reported on the way back from a sleep comes before
+    /// the sleep's notice) isn't sent again with the sleep's warning.
+    gaps_sent: BTreeMap<TrackId, SessionTime>,
     /// The sleeps seen so far, oldest first.
     slept: Vec<Slept>,
     /// The tracks that woke from the last sleep in `slept`.
@@ -108,6 +112,7 @@ impl Live {
             recorded_samples: 0,
             sleeping: BTreeSet::new(),
             heard_to: BTreeMap::new(),
+            gaps_sent: BTreeMap::new(),
             slept: Vec::new(),
             woke_from_last: BTreeSet::new(),
             handed: BTreeMap::new(),
@@ -169,9 +174,10 @@ impl Live {
                     // (`woke_with`), so it isn't sent twice.
                     if followed && !straight_on && !self.sleeping.contains(&track) {
                         let gap = follower.gaps().last().filter(|g| g.to() == epoch.start());
-                        actions
-                            .updates
-                            .extend(gap.map(|gap| Event::Gap { track, gap }));
+                        if let Some(gap) = gap {
+                            self.gaps_sent.insert(track, gap.to());
+                            actions.updates.push(Event::Gap { track, gap });
+                        }
                     }
                 } else {
                     // The track joined: its first epoch, numbered above
@@ -287,10 +293,15 @@ impl Live {
             self.slept.push(seen);
             self.woke_from_last = BTreeSet::from([track]);
         }
+        let sent = self.gaps_sent.get(&track).copied();
         for gap in gaps {
+            if sent.is_some_and(|sent| gap.to() <= sent) {
+                continue;
+            }
             let after = timeline.epochs().iter().find(|e| e.start() == gap.to());
             updates.extend(after.map(|&epoch| Event::Epoch { track, epoch }));
             updates.push(Event::Gap { track, gap });
+            self.gaps_sent.insert(track, gap.to());
         }
         updates
     }
