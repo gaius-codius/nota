@@ -1,8 +1,12 @@
+#[cfg(target_os = "linux")]
 use std::os::unix::net::UnixListener;
+#[cfg(target_os = "linux")]
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
+#[cfg(target_os = "linux")]
+use std::thread;
 
 use nota_core::FakeClock;
 
@@ -254,11 +258,13 @@ fn merging_sleeps_keeps_the_stretch_no_track_recorded() {
 }
 
 /// A fresh directory under the system temp dir, removed when dropped.
+#[cfg(target_os = "linux")]
 struct TestDir(
     /// The directory removed when the test ends.
     PathBuf,
 );
 
+#[cfg(target_os = "linux")]
 impl TestDir {
     #[expect(
         clippy::disallowed_methods,
@@ -272,6 +278,7 @@ impl TestDir {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for TestDir {
     #[expect(
         clippy::disallowed_methods,
@@ -283,11 +290,13 @@ impl Drop for TestDir {
 }
 
 /// What a lock that arrives late holds: dropping it says so on a channel.
+#[cfg(target_os = "linux")]
 struct Dropped(
     /// Told when the lock is dropped.
     Sender<()>,
 );
 
+#[cfg(target_os = "linux")]
 impl Drop for Dropped {
     fn drop(&mut self) {
         let _ = self.0.send(());

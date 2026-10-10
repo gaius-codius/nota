@@ -26,7 +26,10 @@
 
 use std::error::Error;
 use std::fmt;
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::mpsc::Sender;
+#[cfg(target_os = "linux")]
+use std::sync::mpsc::{self, RecvTimeoutError};
+#[cfg(target_os = "linux")]
 use std::thread;
 use std::time::Duration;
 
