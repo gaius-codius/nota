@@ -17,15 +17,26 @@ fn field<const N: usize>(data: &[u8], at: usize) -> [u8; N] {
 }
 
 /// The header's fields are the input's bytes, checked independently of the
-/// reader: magic, version 2, a CRC that matches, and the id, track, epoch
-/// and rate where the layout puts them.
+/// reader: magic, version 3 (or 2, with no anchor), a CRC that matches, and
+/// the id, track, epoch, rate and anchor where the layout puts them.
 fn check_header(data: &[u8], header: JournalHeader) {
-    assert!(data.len() >= HEADER_LEN, "a header from too few bytes");
+    let anchor = header.anchor();
+    let (version, len) = if anchor.is_some() {
+        (3, HEADER_LEN)
+    } else {
+        (2, 34)
+    };
+    assert_eq!(header.encoded_len(), len, "header length");
+    assert!(data.len() >= len, "a header from too few bytes");
     assert_eq!(&data[..8], b"NOTAJRNL", "header magic");
-    assert_eq!(u16::from_le_bytes(field(data, 8)), 2, "header version");
     assert_eq!(
-        u32::from_le_bytes(field(data, 30)),
-        crc32fast::hash(&data[..30]),
+        u16::from_le_bytes(field(data, 8)),
+        version,
+        "header version"
+    );
+    assert_eq!(
+        u32::from_le_bytes(field(data, len - 4)),
+        crc32fast::hash(&data[..len - 4]),
         "returned a header whose CRC fails"
     );
     assert_eq!(
@@ -44,11 +55,21 @@ fn check_header(data: &[u8], header: JournalHeader) {
         u32::from_le_bytes(field(data, 26)),
         "epoch"
     );
-    assert_eq!(
-        encode_header(header),
-        data[..HEADER_LEN],
-        "header re-encodes"
-    );
+    if let Some(anchor) = anchor {
+        assert_eq!(anchor.id, header.epoch(), "anchor's epoch");
+        assert_eq!(anchor.rate, header.rate(), "anchor's rate");
+        assert_eq!(
+            anchor.first_sample.get(),
+            u64::from_le_bytes(field(data, 30)),
+            "anchor's first sample"
+        );
+        assert_eq!(
+            anchor.start.as_nanos(),
+            u64::from_le_bytes(field(data, 38)),
+            "anchor's start"
+        );
+    }
+    assert_eq!(encode_header(header), data[..len], "header re-encodes");
 }
 
 fn check(data: &[u8]) {
@@ -63,7 +84,7 @@ fn check(data: &[u8]) {
 
     check_header(data, header);
 
-    let mut expected_len = HEADER_LEN;
+    let mut expected_len = header.encoded_len();
     let mut previous_end = None;
     for (index, frame) in read.frames().iter().enumerate() {
         assert_eq!(frame.seq(), index as u64, "sequence numbers not 0,1,2,...");
@@ -79,6 +100,13 @@ fn check(data: &[u8]) {
         );
         // One track per journal: the header's, and continuous.
         assert_eq!(frame.track(), header.track(), "a frame of another track");
+        // None before its epoch's first sample, where the header gives it.
+        if let Some(anchor) = header.anchor() {
+            assert!(
+                frame.range().start() >= anchor.first_sample,
+                "a frame before its epoch"
+            );
+        }
         if let Some(end) = previous_end {
             assert_eq!(frame.range().start(), end, "frames are not contiguous");
         }

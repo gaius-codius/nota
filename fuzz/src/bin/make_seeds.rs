@@ -9,7 +9,9 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
-use nota_core::{Clock, EpochId, SampleIndex, SampleRate, SystemClock, TrackId};
+use nota_core::{
+    Clock, EpochAnchor, EpochId, SampleIndex, SampleRate, SessionTime, SystemClock, TrackId,
+};
 use nota_recorder::fs::{Fs, FsFile, StdFile, StdFs};
 use nota_recorder::journal::format::MAX_FRAME_SAMPLES;
 use nota_recorder::journal::{JournalHeader, JournalId, JournalWriter};
@@ -72,35 +74,43 @@ fn main() -> Result<()> {
     let (dir, scratch) = (&here.join("in"), &here.join("seeds.tmp"));
     ensure_dir(dir)?;
     ensure_dir(scratch)?;
-    let speech = |id, track, epoch| {
+    // Each journal's epoch starts at its first sample, `first`, a second
+    // per epoch number into the session.
+    let speech = |id, track, epoch, first| {
         JournalHeader::new(
             JournalId::new(id),
             TrackId::new(track),
-            EpochId::new(epoch),
-            SampleRate::SPEECH,
+            EpochAnchor {
+                id: EpochId::new(epoch),
+                start: SessionTime::from_nanos(u64::from(epoch) * 1_000_000_000),
+                first_sample: SampleIndex::new(first),
+                rate: SampleRate::SPEECH,
+            },
         )
     };
 
+    seed(dir, scratch, "empty.journal", speech(0, 0, 0, 0), 0, |_| {
+        Ok(())
+    })?;
     seed(
         dir,
         scratch,
-        "empty.journal",
-        speech(0, 0, 0),
+        "one_track.journal",
+        speech(0, 0, 0, 0),
         0,
-        |_| Ok(()),
+        |w| {
+            for len in [10, 160, 1] {
+                w.append(&tone(len, 7))?;
+            }
+            Ok(())
+        },
     )?;
-    seed(dir, scratch, "one_track.journal", speech(0, 0, 0), 0, |w| {
-        for len in [10, 160, 1] {
-            w.append(&tone(len, 7))?;
-        }
-        Ok(())
-    })?;
     // Another track, a later epoch and journal, starting partway in.
     seed(
         dir,
         scratch,
         "later_journal.journal",
-        speech(7, 1, 2),
+        speech(7, 1, 2, 480),
         480,
         |w| {
             for round in 0..3 {
@@ -113,7 +123,7 @@ fn main() -> Result<()> {
         dir,
         scratch,
         "split_append.journal",
-        speech(1, 0, 0),
+        speech(1, 0, 0, 0),
         0,
         |w| {
             w.append(&tone(MAX_FRAME_SAMPLES as usize + 500, 11))?;
