@@ -7,8 +7,9 @@
 # reported, and a tag quoted or mentioned in a shell comment isn't one; a
 # base with no merge base is an error; and a call with no base prints its
 # usage. Also checks that the crash harnesses' bounds in this repo carry the
-# tag, and that every crash or seed sweep in the crash test files reports
-# into the sweep helper, whose floor proves it wasn't vacuous.
+# tag, and that every crash or seed sweep in the crash test files (each
+# file with tests that uses the fake filesystem) reports into the sweep
+# helper, whose floor proves it wasn't vacuous.
 #
 # Requires: bash, git.
 set -euo pipefail
@@ -171,7 +172,10 @@ tagged "the crash sweeps' floors" "$(grep -rhE --include='*.rs' \
 for want in nota-recorder/src/segment/tests.rs:48 nota-recorder/src/capture/stop_tests.rs:6 \
   nota-recorder/src/journal/tests.rs:10 nota-recorder/src/segment/tests/epochs.rs:3 \
   nota-recorder/src/segment/tests/disk_full.rs:7 nota-recorder/src/capture/tests.rs:9 \
-  nota/src/library/kept.rs:1 nota-recorder/examples/capture_wall_time.rs:3; do
+  nota/src/library/kept.rs:1 nota-recorder/examples/capture_wall_time.rs:3 \
+  nota-recorder/src/disk/tests.rs:4 nota-recorder/src/segment/findings/tests.rs:5 \
+  nota-recorder/src/segment/tests/repair.rs:3 nota-recorder/src/session/marks.rs:2 \
+  nota-recorder/src/session/tests.rs:1 nota/src/record/start.rs:4; do
   file=$repo/crates/${want%:*}
   # Only a tag after code counts: a comment of its own sets no bound.
   got=$(grep -cE '^[[:space:]]*[^/[:space:]].*//[[:space:]]*check-bound([^A-Za-z0-9_-]|$)' "$file" || true)
@@ -204,13 +208,17 @@ done
 sweep_awk='
   function flush() {
     if (name == "") return
-    if (pass == 1 && point && floors == 0) print name
+    if (pass == 1 && point && floors == 0) print family "|" name
     if (pass == 2 && sweeps > floors)
       printf "%s:%d: %s runs %d sweeps with %d floors\n", file, start, name, sweeps, floors
     name = ""
   }
   BEGIN { n = split(points, list, " "); for (i = 1; i <= n; i++) at_point[list[i]] = 1 }
-  FNR == 1 { flush(); file = FILENAME; depth = 0 }
+  FNR == 1 {
+    flush(); file = FILENAME; depth = 0
+    family = file
+    sub(/\/tests\/[^\/]*\.rs$/, "/tests.rs", family)
+  }
   /^[[:space:]]*(pub(\([a-z]+\))? )?fn [a-z_0-9]+/ {
     flush()
     match($0, /fn [a-z_0-9]+/)
@@ -227,8 +235,11 @@ sweep_awk='
     }
     if (code ~ /(crash_after|fail_after)\(\*?[a-z_]/) point = 1
     hit = code ~ /crash_after\(|fail_after\(|(fail_at|stop_after_ops): Some\(\*?[a-z_]|Partial \{ seed(: [^0-9 }][^}]*)? \}/
-    for (f in at_point)
-      if (code ~ ("(^|[^a-z_0-9])" f "\\(")) { hit = 1; point = 1 }
+    rest = code
+    while (match(rest, /[a-z_][a-z_0-9]*\(/)) {
+      if ((family "|" substr(rest, RSTART, RLENGTH - 1)) in at_point) { hit = 1; point = 1 }
+      rest = substr(rest, RSTART + RLENGTH)
+    }
     if (loops && hit) marked = 1
     if (pending && code ~ /^[[:space:]]*\.unwrap_err\(\)/) sweeps--
     pending = 0
@@ -391,9 +402,17 @@ sweeps.rs:98: runs_one_to_pass_one_to_fail runs 1 sweeps with 0 floors
 sweeps.rs:105: sweeps_two_calls_deep runs 1 sweeps with 0 floors
 tail.rs:1: the_last_function runs 1 sweeps with 0 floors'
 [[ $got == "$want" ]] || fail "the sweep guard found the wrong sweeps: $got"
-swept=(nota-recorder/src/journal/tests.rs nota-recorder/src/segment/tests.rs
-  nota-recorder/src/segment/tests/epochs.rs nota-recorder/src/segment/tests/disk_full.rs
-  nota-recorder/src/capture/stop_tests.rs nota/src/library/kept.rs)
+# The files checked: every one with tests that uses the fake filesystem,
+# so a new crash test file is covered without naming it here. The fake,
+# the crash test and the sweep helper are left out: their own tests check
+# the instruments, crashing them on purpose to see them work.
+swept=()
+while IFS= read -r file; do
+  swept+=("$file")
+done < <(cd "$repo/crates" && grep -rlE --include='*.rs' 'FakeFs' . |
+  xargs grep -l '#\[test\]' | sed 's#^\./##' |
+  grep -vxE 'nota-recorder/src/fs/(fake|crash|sweep)\.rs' | sort)
+(( ${#swept[@]} >= 20 )) || fail "expected at least 20 crash test files: ${swept[*]}"
 found=$(cd "$repo/crates" && bypassing "${swept[@]}")
 [[ -z $found ]] || fail "a sweep without the helper's floor:"$'\n'"$found"
 # Each floor the helper checks is a bound, wherever it is.

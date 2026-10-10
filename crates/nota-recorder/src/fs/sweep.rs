@@ -13,8 +13,9 @@
 //! every outcome it must reach. The line stating a floor ends with the
 //! check-bound tag, so `scripts/check-weakened.sh` reports any change to
 //! it. A sweep dropped without a floor fails the test, and
-//! `scripts/check-weakened.test.sh` fails on a sweep without a floor in the
-//! crash test files it lists.
+//! `scripts/check-weakened.test.sh` fails on a sweep without a floor in any
+//! file with tests that uses [`FakeFs`], but for the fake's, the crash
+//! test's and this module's own.
 //!
 //! A [`CrashTest`](super::crash::CrashTest)'s sweeps don't report point by
 //! point: [`CrashSummary::scenario`], [`CrashSummary::recovery`] and

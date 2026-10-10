@@ -282,6 +282,7 @@ mod tests {
 
     use super::*;
     use crate::fs::fake::{CrashOutcome, FakeFs};
+    use crate::fs::sweep::Sweep;
 
     fn dir() -> PathBuf {
         PathBuf::from("/session")
@@ -482,13 +483,17 @@ mod tests {
             new.write(&fs, &dir()).unwrap();
             fs.attempted() - before
         };
+        // Whether each crash left the new marks.
+        let mut sweep = Sweep::with_outcomes();
         for n in 0..=total {
             for outcome in CrashOutcome::standard() {
                 let fs = FakeFs::with_dirs([dir()]);
                 old.write(&fs, &dir()).unwrap();
                 fs.crash_after(n);
                 let done = new.write(&fs, &dir()).is_ok();
+                sweep.crash_point(&fs);
                 let got = Marks::read(&fs.crash(outcome), &dir()).unwrap();
+                sweep.saw(got == new);
                 if done {
                     assert_eq!(got, new, "{n} {outcome:?}");
                 } else {
@@ -496,6 +501,10 @@ mod tests {
                 }
             }
         }
+        // Not vacuous: the crash cut the write short at every point but the
+        // last, under every outcome, and left the old marks and the new.
+        sweep.interrupted_at_least(total * CrashOutcome::standard().len()); // check-bound
+        sweep.saw_each([false, true]); // check-bound
     }
 
     #[test]

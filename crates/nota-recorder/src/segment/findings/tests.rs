@@ -9,6 +9,7 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::fs::fake::{CrashOutcome, FakeFs, Op};
+use crate::fs::sweep::Sweep;
 use crate::session::SessionDir;
 
 fn dir() -> PathBuf {
@@ -752,20 +753,21 @@ fn a_write_crashed_at_every_operation_leaves_the_old_findings_or_the_new() {
     let new = rec(&probe, &[b], Verification::Unavailable).unwrap();
     assert_ne!(old, new);
     let ops = probe.attempted();
-    assert!(ops >= 7, "{ops}");
-    let mut saw = (0, 0);
+    assert!(ops >= 7, "{ops}"); // check-bound
+    // Which the first crash left: the new findings or not.
+    let mut sweep = Sweep::with_outcomes();
+    let mut retries = Sweep::new();
+    // Every retry's crash point but its last, under every outcome.
+    let mut retry_floor = 0;
     for after in 0..=ops {
         for outcome in CrashOutcome::standard() {
             let run = base.copy_disk();
             run.crash_after(after);
             let _ = rec(&run, &[b], Verification::Unavailable);
+            sweep.crash_point(&run);
             let survived = run.crash(outcome);
             let case = format!("after {after}, {outcome:?}");
-            if old_or_new(&survived, &old, &new, &case) {
-                saw.1 += 1;
-            } else {
-                saw.0 += 1;
-            }
+            sweep.saw(old_or_new(&survived, &old, &new, &case));
             // The retry crashed too, anywhere: still old or new.
             let retry_ops = {
                 let probe = survived.copy_disk();
@@ -781,6 +783,8 @@ fn a_write_crashed_at_every_operation_leaves_the_old_findings_or_the_new() {
                     let run = survived.copy_disk();
                     run.crash_after(again);
                     let _ = rec(&run, &[b], Verification::Unavailable);
+                    retries.crash_point(&run);
+                    retry_floor += usize::from(again < retry_ops);
                     let twice = run.crash(second);
                     let case = format!("{case}, then after {again}, {second:?}");
                     old_or_new(&twice, &old, &new, &case);
@@ -792,7 +796,12 @@ fn a_write_crashed_at_every_operation_leaves_the_old_findings_or_the_new() {
             }
         }
     }
-    assert!(saw.0 > 0 && saw.1 > 0, "{saw:?}");
+    // Not vacuous: the crash cut the write short at every point but the
+    // last, under every outcome, and left the old findings and the new.
+    sweep.interrupted_at_least(ops * CrashOutcome::standard().len()); // check-bound
+    sweep.saw_each([false, true]); // check-bound
+    // And so did the second crash, of the retry.
+    retries.interrupted_at_least(retry_floor); // check-bound
 }
 
 #[test]
@@ -804,11 +813,13 @@ fn a_retry_after_any_failed_operation_is_durable_when_it_returns() {
     let probe = base.copy_disk();
     let new = rec(&probe, &[b], Verification::Done).unwrap();
     let ops = probe.attempted();
+    let mut sweep = Sweep::new();
     for at in 0..ops {
         for outcome in CrashOutcome::standard() {
             let run = base.copy_disk();
             run.fail_after(at, io::ErrorKind::Other);
             let first = rec(&run, &[b], Verification::Done);
+            sweep.failure_point(&run);
             assert!(first.is_err(), "failing op {at} went unnoticed");
             // The retry succeeds: then the new findings survive any crash.
             assert_eq!(rec(&run, &[b], Verification::Done).unwrap(), new);
@@ -820,5 +831,7 @@ fn a_retry_after_any_failed_operation_is_durable_when_it_returns() {
             );
         }
     }
+    // Not vacuous: the failure fired at every operation of the write.
+    sweep.interrupted_at_least(ops * CrashOutcome::standard().len()); // check-bound
     assert_ne!(old, new);
 }
