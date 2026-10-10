@@ -1,3 +1,5 @@
+use std::os::unix::net::UnixListener;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -249,4 +251,121 @@ fn merging_sleeps_keeps_the_stretch_no_track_recorded() {
     let unknown = slept(5_500, None);
     assert_eq!(mic.merged_with(&unknown), mic);
     assert_eq!(unknown.merged_with(&mic), mic);
+}
+
+/// A fresh directory under the system temp dir, removed when dropped.
+struct TestDir(
+    /// The directory removed when the test ends.
+    PathBuf,
+);
+
+impl TestDir {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test scaffolding outside the recorder's write path"
+    )]
+    fn new(name: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("nota-inhibit-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+}
+
+impl Drop for TestDir {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test scaffolding outside the recorder's write path"
+    )]
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// What a lock that arrives late holds: dropping it says so on a channel.
+struct Dropped(Sender<()>);
+
+impl Drop for Dropped {
+    fn drop(&mut self) {
+        let _ = self.0.send(());
+    }
+}
+
+/// An attempt that hasn't answered when the wait ends is a refusal that
+/// says logind didn't answer, and the start isn't held up for it.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_attempt_that_hangs_is_given_up_on() {
+    let (release, released) = mpsc::channel::<()>();
+    let refused = bounded(Duration::from_millis(50), move || {
+        // Nothing sends until the test ends: the attempt hangs, for longer
+        // than any wait a start would put up with.
+        let _ = released.recv_timeout(Duration::from_secs(10));
+        Err::<(), _>(SleepNotHeld::new("the attempt ran its course"))
+    })
+    .unwrap_err();
+    assert_eq!(
+        refused.to_string(),
+        "sleep couldn't be held off: logind didn't answer within less than a second"
+    );
+    drop(release);
+}
+
+/// A lock that arrives after the start gave up is dropped by the thread
+/// that got it, so no recording holds it without having asked.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_lock_that_arrives_late_is_dropped() {
+    let (release, released) = mpsc::channel::<()>();
+    let (dropped_tx, dropped) = mpsc::channel();
+    let result = bounded(Duration::from_millis(50), move || {
+        let _ = released.recv();
+        Ok(SleepLock::new(Dropped(dropped_tx)))
+    });
+    assert!(result.is_err());
+    // The start has gone on without it; now the lock arrives.
+    release.send(()).unwrap();
+    assert_eq!(dropped.recv_timeout(Duration::from_secs(10)), Ok(()));
+}
+
+/// An answer inside the wait is passed on as it is, a lock or a refusal.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_answer_in_time_is_passed_on() {
+    let wait = Duration::from_secs(10);
+    let lock = bounded(wait, || Ok(SleepLock::new(()))).map(|_| ());
+    assert!(lock.is_ok());
+    let refused = bounded(wait, || Err::<(), _>(SleepNotHeld::new("access denied"))).unwrap_err();
+    assert_eq!(
+        refused.to_string(),
+        "sleep couldn't be held off: access denied"
+    );
+}
+
+/// A bus that accepts connections and never answers costs only the wait,
+/// not libdbus's own 25 s, and the start goes on with no lock.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_bus_that_only_accepts_is_given_up_on() {
+    let dir = TestDir::new("silent-bus");
+    let socket = dir.0.join("bus");
+    let listener = UnixListener::bind(&socket).unwrap();
+    // Accepts and keeps the connection open, and never says a word.
+    let (close_it, closed) = mpsc::channel::<()>();
+    let silent = thread::spawn(move || {
+        let _kept = listener.accept();
+        let _ = closed.recv();
+    });
+    let address = format!("unix:path={}", socket.display());
+    let refused = bounded(Duration::from_millis(300), move || {
+        take_lock(&Bus::At(address))
+    })
+    .map(|_| ())
+    .unwrap_err();
+    assert_eq!(
+        refused.to_string(),
+        "sleep couldn't be held off: logind didn't answer within less than a second"
+    );
+    drop(close_it);
+    silent.join().unwrap();
 }

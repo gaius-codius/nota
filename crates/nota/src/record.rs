@@ -81,12 +81,13 @@
 //!
 //! The machine is kept awake while it records, by a logind lock held from
 //! before the first stream opens to the end of the recording. If logind
-//! refuses, the screen gets a warning once the streams have started and
-//! the summary says the machine may sleep; recording goes on. If the machine sleeps anyway,
-//! the capture opens a new epoch at the resume, and the live thread tells
-//! the screen (a warning, the epoch and its gap) and the summary says when
-//! and for how long (see `crate::inhibit` and `crate::live`). The screen
-//! doesn't show these warnings yet.
+//! refuses, or the bus or logind hasn't answered within two seconds, the
+//! screen gets a warning once the streams have started and the summary
+//! says the machine may sleep; recording goes on. If the machine sleeps
+//! anyway, the capture opens a new epoch at the resume, and the live
+//! thread tells the screen (a warning, the epoch and its gap) and the
+//! summary says when and for how long (see `crate::inhibit` and
+//! `crate::live`). The screen doesn't show these warnings yet.
 //!
 //! # SIGXCPU
 //!

@@ -20,11 +20,14 @@
 //! The lock is a file descriptor: logind drops it when the descriptor is
 //! closed, including if nota dies, so a crash can't leave the machine
 //! unable to sleep. The D-Bus call is made with the `dbus` crate, which
-//! cpal already links for its real-time promotion.
+//! cpal already links for its real-time promotion. Connecting to the bus
+//! can't be given a short timeout, so the whole attempt runs on a thread
+//! that the start waits two seconds for ([`bounded`]).
 
 use std::error::Error;
 use std::fmt;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::thread;
 use std::time::Duration;
 
 use nota_core::recorder::{self, Cause, Warning, WarningState};
@@ -152,42 +155,102 @@ impl Sleep {
 #[cfg(target_os = "linux")]
 pub(crate) struct SystemLogind;
 
-/// The longest the `Inhibit` call waits for logind's answer. Recording
-/// starts after it, so a logind that doesn't answer costs this much. Making
-/// the connection isn't bounded by it: libdbus waits as long as it does for
-/// the bus's own greeting.
+/// The longest the whole attempt waits for the lock, connecting to the
+/// bus included. Recording starts after it, so a bus or a logind that
+/// doesn't answer costs this much. The connection can't be given a bound
+/// of its own: libdbus waits about 25 s for the bus's greeting.
+#[cfg(target_os = "linux")]
+const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The longest the `Inhibit` call waits for logind's answer, in the
+/// milliseconds D-Bus takes. It matches [`ATTEMPT_TIMEOUT`], so a late
+/// thread ends itself soon after the start has given up on it.
 #[cfg(target_os = "linux")]
 const CALL_TIMEOUT_MS: i32 = 2_000;
+
+/// Which bus the lock is asked for on.
+#[cfg(target_os = "linux")]
+enum Bus {
+    /// The system bus, where logind lives.
+    System,
+    /// A bus at this address, which tests use to stand one in.
+    #[cfg(test)]
+    At(String),
+}
 
 #[cfg(target_os = "linux")]
 impl Logind for SystemLogind {
     fn inhibit_sleep(&self) -> Result<SleepLock, SleepNotHeld> {
-        use dbus::{BusType, Connection, Message, MessageItem};
+        bounded(ATTEMPT_TIMEOUT, move || take_lock(&Bus::System))
+    }
+}
 
-        // `Inhibit(what, who, why, mode)` returns the lock as a file
-        // descriptor: logind drops the lock when the last copy closes.
-        let connection =
-            Connection::get_private(BusType::System).map_err(|e| SleepNotHeld::from_dbus(&e))?;
-        let mut call = Message::new_method_call(
-            "org.freedesktop.login1",
-            "/org/freedesktop/login1",
-            "org.freedesktop.login1.Manager",
-            "Inhibit",
-        )
-        .map_err(SleepNotHeld::new)?;
-        call.append_items(&[
-            MessageItem::Str("sleep".to_owned()),
-            MessageItem::Str("nota".to_owned()),
-            MessageItem::Str("recording".to_owned()),
-            MessageItem::Str("block".to_owned()),
-        ]);
-        let reply = connection
-            .send_with_reply_and_block(call, CALL_TIMEOUT_MS)
-            .map_err(|e| SleepNotHeld::from_dbus(&e))?;
-        match reply.get_items().into_iter().next() {
-            Some(MessageItem::UnixFd(lock)) => Ok(SleepLock::new(lock)),
-            _ => Err(SleepNotHeld::new("logind gave no lock")),
+/// Runs `attempt` on a thread of its own and waits `wait` for what it
+/// gives. If that takes longer the start goes on without a lock, and a
+/// lock that arrives afterwards is dropped on the thread, so it's never
+/// held for a recording that began without it. A thread that dies without
+/// an answer is a refusal too.
+#[cfg(target_os = "linux")]
+fn bounded<T: Send + 'static>(
+    wait: Duration,
+    attempt: impl FnOnce() -> Result<T, SleepNotHeld> + Send + 'static,
+) -> Result<T, SleepNotHeld> {
+    let (give, given) = mpsc::channel();
+    thread::Builder::new()
+        .name("nota-logind".to_owned())
+        .spawn(move || {
+            // If the start has given up, the receiver is gone and the
+            // answer, a late lock included, is dropped here.
+            let _ = give.send(attempt());
+        })
+        .map_err(|e| SleepNotHeld::new(format!("couldn't ask logind: {e}")))?;
+    match given.recv_timeout(wait) {
+        Ok(answer) => answer,
+        Err(RecvTimeoutError::Timeout) => Err(SleepNotHeld::new(format!(
+            "logind didn't answer within {}",
+            lasted(wait)
+        ))),
+        Err(RecvTimeoutError::Disconnected) => {
+            Err(SleepNotHeld::new("the request to logind stopped early"))
         }
+    }
+}
+
+/// Connects to `bus` and asks logind for the sleep lock.
+#[cfg(target_os = "linux")]
+fn take_lock(bus: &Bus) -> Result<SleepLock, SleepNotHeld> {
+    use dbus::{BusType, Connection, Message, MessageItem};
+
+    let connection = match bus {
+        Bus::System => Connection::get_private(BusType::System),
+        #[cfg(test)]
+        Bus::At(address) => Connection::open_private(address).and_then(|connection| {
+            connection.register()?;
+            Ok(connection)
+        }),
+    }
+    .map_err(|e| SleepNotHeld::from_dbus(&e))?;
+    // `Inhibit(what, who, why, mode)` returns the lock as a file
+    // descriptor: logind drops the lock when the last copy closes.
+    let mut call = Message::new_method_call(
+        "org.freedesktop.login1",
+        "/org/freedesktop/login1",
+        "org.freedesktop.login1.Manager",
+        "Inhibit",
+    )
+    .map_err(SleepNotHeld::new)?;
+    call.append_items(&[
+        MessageItem::Str("sleep".to_owned()),
+        MessageItem::Str("nota".to_owned()),
+        MessageItem::Str("recording".to_owned()),
+        MessageItem::Str("block".to_owned()),
+    ]);
+    let reply = connection
+        .send_with_reply_and_block(call, CALL_TIMEOUT_MS)
+        .map_err(|e| SleepNotHeld::from_dbus(&e))?;
+    match reply.get_items().into_iter().next() {
+        Some(MessageItem::UnixFd(lock)) => Ok(SleepLock::new(lock)),
+        _ => Err(SleepNotHeld::new("logind gave no lock")),
     }
 }
 
