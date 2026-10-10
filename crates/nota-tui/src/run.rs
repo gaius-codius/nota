@@ -16,6 +16,7 @@ use ratatui::crossterm::event::{self, KeyEvent};
 
 use crate::home::{Action, Home};
 use crate::screen::Recording;
+use crate::setup::{Setup, SetupAction};
 
 /// How often the screen redraws with nothing new, so the elapsed time and
 /// the REC dot keep moving.
@@ -213,9 +214,9 @@ pub fn run<B: Backend>(
 /// applies each event, redrawing at least every 250 ms. Before each draw it
 /// calls `refresh`, which may give Home a new list
 /// ([`Home::set_sessions`]); it decides itself whether one is due, since
-/// it runs at every draw. It ends with
-/// [`Action::Record`] when `R` is pressed, and with [`Action::Quit`] when
-/// it's closed from the keyboard, when a signal asks nota to stop
+/// it runs at every draw. It ends with [`Action::Setup`] when `r` is
+/// pressed, with [`Action::Record`] when `R` is, and with [`Action::Quit`]
+/// when it's closed from the keyboard, when a signal asks nota to stop
 /// ([`recorder::Event::Stopping`]), or once every sender of `events` is
 /// gone. The caller then stops its [`InputThread`].
 ///
@@ -252,6 +253,55 @@ pub fn run_home<B: Backend>(
                     return Ok(Action::Quit);
                 }
                 Event::Recorder(_) | Event::Paste(_) | Event::Resize => {}
+                Event::InputLost(kind) => return Err(RunError::InputLost(kind)),
+            }
+        }
+    }
+}
+
+/// Runs `setup` on `terminal` until it asks for something: draws it and
+/// applies each key or paste, redrawing at least every 250 ms. Before each
+/// draw it calls `refresh`, which gives the screen what the preview heard
+/// ([`Setup::set_level`]) and may change what the preview listens to; it
+/// decides itself whether anything is due, since it runs at every draw. It
+/// ends with [`SetupAction::Start`] on `⏎`, [`SetupAction::Back`] on `esc`,
+/// and [`SetupAction::Quit`] on Ctrl+C, when a signal asks nota to stop
+/// ([`recorder::Event::Stopping`]), or once every sender of `events` is
+/// gone. The caller then stops its [`InputThread`].
+///
+/// # Errors
+///
+/// - [`RunError::Terminal`] if drawing fails.
+/// - [`RunError::InputLost`] if the input thread reports that reading the
+///   terminal failed.
+pub fn run_setup<B: Backend>(
+    terminal: &mut Terminal<B>,
+    setup: &mut Setup,
+    events: &Receiver<Event>,
+    refresh: &mut dyn FnMut(&mut Setup),
+) -> Result<SetupAction, RunError<B::Error>> {
+    loop {
+        refresh(setup);
+        terminal
+            .draw(|frame| setup.draw(frame))
+            .map_err(RunError::Terminal)?;
+        let first = match events.recv_timeout(REDRAW) {
+            Ok(event) => event,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => return Ok(SetupAction::Quit),
+        };
+        for event in std::iter::once(first).chain(events.try_iter().take(MAX_BATCH - 1)) {
+            match event {
+                Event::Key { key, .. } => {
+                    if let Some(action) = setup.handle_key(key) {
+                        return Ok(action);
+                    }
+                }
+                Event::Paste(text) => setup.paste(&text),
+                Event::Recorder(recorder::Event::Stopping | recorder::Event::Stopped(_)) => {
+                    return Ok(SetupAction::Quit);
+                }
+                Event::Recorder(_) | Event::Resize => {}
                 Event::InputLost(kind) => return Err(RunError::InputLost(kind)),
             }
         }

@@ -60,7 +60,7 @@ const MARGIN: u16 = 3;
 
 /// The columns of a frame row besides its content and fill: `╭─ `, a
 /// space either side of the fill, and ` ─╮`.
-const FRAME_ROW_FIXED: usize = 8;
+pub(crate) const FRAME_ROW_FIXED: usize = 8;
 
 const MARK: &str = "◆";
 const NOTE: &str = "◇";

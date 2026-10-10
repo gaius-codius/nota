@@ -1,0 +1,24 @@
+---
+source: crates/nota-tui/tests/setup_screen.rs
+expression: terminal.backend()
+---
+"╭─ ≈ nota · new recording ───────────────────────────── last settings ─╮"
+"│                                                                      │"
+"│   Title      9 Oct, 14:05                                            │"
+"│                                                                      │"
+"│ ▸ Listen to  pick the one that moves                                 │"
+"│              ● System audio  Speakers · default     ▇▅▂▆██▅▂         │"
+"│              ○ Microphone    Seiren Mini · default  ▁▁▁▁▁▁▁▁         │"
+"│              ○ Both                                                  │"
+"│                                                                      │"
+"│              Records everything playing on Speakers, notifications   │"
+"│              included.                                               │"
+"│                                                                      │"
+"│   Engines    parakeet, live and after the stop                       │"
+"│              ✓ everything stays on this machine                      │"
+"│                                                                      │"
+"│                                                                      │"
+"│                                                                      │"
+"│                                                                      │"
+"│                                                                      │"
+"╰─ ⏎ start  tab next  ↑↓ source  ←→ device  esc back ─── R skips this ─╯"
