@@ -4,6 +4,7 @@ use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(target_os = "linux")]
 use std::sync::mpsc::{self, Sender};
 #[cfg(target_os = "linux")]
 use std::thread;
