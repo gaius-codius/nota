@@ -5,6 +5,7 @@ use nota_core::SampleCount;
 
 use super::*;
 use crate::fs::fake::{CrashOutcome, FakeFs};
+use crate::fs::sweep::Sweep;
 
 fn p(path: &str) -> PathBuf {
     PathBuf::from(path)
@@ -293,12 +294,15 @@ fn a_crash_while_making_the_ballast_never_leaves_a_partial_one() {
     let clean = FakeFs::with_dirs(["/data"]);
     Ballast::keep(&clean, &p("/data"), 3_000, || false).unwrap();
     let ops = clean.attempted();
-    assert!(ops >= 6, "{ops}");
+    assert!(ops >= 6, "{ops}"); // check-bound
+    let outcomes = [CrashOutcome::LoseUnsynced, CrashOutcome::KeepAll];
+    let mut sweep = Sweep::new();
     for at in 0..ops {
-        for outcome in [CrashOutcome::LoseUnsynced, CrashOutcome::KeepAll] {
+        for outcome in outcomes {
             let fs = FakeFs::with_dirs(["/data"]);
             fs.crash_after(at);
             assert!(Ballast::keep(&fs, &p("/data"), 3_000, || false).is_err());
+            sweep.crash_point(&fs);
             let survivor = fs.crash(outcome);
             if let Ok(bytes) = survivor.read(&p("/data/ballast-3000")) {
                 assert_eq!(bytes.len(), 3_000, "crash after {at}, {outcome:?}");
@@ -314,6 +318,9 @@ fn a_crash_while_making_the_ballast_never_leaves_a_partial_one() {
             );
         }
     }
+    // Not vacuous: the crash cut the ballast short at each of its
+    // operations, under both outcomes.
+    sweep.interrupted_at_least(ops * outcomes.len()); // check-bound
 }
 
 /// A watch over `fs` holding a ballast of `len` bytes in `/data`.
@@ -376,10 +383,14 @@ fn errors_that_arent_for_space_free_nothing() {
     let watch = watched(&fs, 100);
     let disk = watch.fs();
     let mut file = disk.create(&p("/data/s/a")).unwrap();
+    let mut sweep = Sweep::new();
     for kind in [io::ErrorKind::Other, io::ErrorKind::PermissionDenied] {
         fs.fail_after(0, kind);
         assert!(file.write_all(b"x").is_err());
+        sweep.failure_point(&fs);
     }
+    // Not vacuous: both failures reached the write.
+    sweep.interrupted_at_least(2); // check-bound
     assert_eq!(watch.full(), None);
     assert!(watch.holds_ballast());
 }
@@ -404,6 +415,7 @@ fn every_kind_of_operation_is_watched_and_passed_on() {
             syncer.sync().map(drop)
         }),
     ];
+    let mut sweep = Sweep::new();
     for (name, op) in ops {
         let fs = FakeFs::with_dirs(["/data/s"]);
         fs.create(&p("/data/s/a")).unwrap();
@@ -413,12 +425,16 @@ fn every_kind_of_operation_is_watched_and_passed_on() {
             fs.fail_after(0, io::ErrorKind::StorageFull);
         }
         assert!(op(&disk).is_err(), "{name}");
+        sweep.failure_point(&fs);
         assert_eq!(
             watch.full().map(|f| f.ballast),
             Some(Freed::Freed),
             "{name}"
         );
     }
+    // Not vacuous: the injected failure, not something else, failed each
+    // kind of operation.
+    sweep.interrupted_at_least(ops.len()); // check-bound
     // What isn't a change passes straight through.
     let fs = FakeFs::with_dirs(["/data/s"]);
     fs.set_capacity(Some(1_000));

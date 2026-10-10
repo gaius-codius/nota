@@ -1349,6 +1349,7 @@ mod space_tests {
     use super::*;
     use nota_recorder::disk::{Ballast, Freed};
     use nota_recorder::fs::fake::FakeFs;
+    use nota_recorder::fs::sweep::Sweep;
 
     /// The directories a new start owns before it keeps the session row.
     fn pending_session(fs: &FakeFs) -> SessionPaths {
@@ -1545,11 +1546,13 @@ mod space_tests {
         let sessions = numbering.root.join("sessions");
         let operations = start_operations(&numbering, &fs);
         // Making both directories, keeping the title, and their syncs.
-        assert!(operations >= 10, "{operations}");
+        assert!(operations >= 10, "{operations}"); // check-bound
+        let mut sweep = Sweep::new();
         for at in 0..operations {
             let run = fs.copy_disk();
             run.fail_after(at, std::io::ErrorKind::StorageFull);
             assert!(start_session(&numbering, &run).is_err(), "at {at}");
+            sweep.failure_point(&run);
             assert_eq!(
                 run.list(&sessions).unwrap(),
                 [sessions.join("1")],
@@ -1567,6 +1570,8 @@ mod space_tests {
                 assert_eq!(files(&crashed), earlier, "at {at}, {outcome:?}");
             }
         }
+        // Not vacuous: the fault hit the start at every operation.
+        sweep.interrupted_at_least(operations); // check-bound
     }
 
     /// With the ballast held, a full disk at each of a new start's writes
@@ -1587,11 +1592,13 @@ mod space_tests {
         };
         let operations = start_operations(&numbering, &fs);
         // Making both directories, keeping the title, and their syncs.
-        assert!(operations >= looked + 10, "{looked}, {operations}");
+        assert!(operations >= looked + 10, "{looked}, {operations}"); // check-bound
+        let mut sweep = Sweep::new();
         for at in 0..operations {
             let run = fs.copy_disk();
             run.fail_after(at, std::io::ErrorKind::StorageFull);
             let made = start_session(&numbering, &run);
+            sweep.failure_point(&run);
             for (path, bytes) in &earlier {
                 assert_eq!(&run.read(path).unwrap(), bytes, "{path:?}, at {at}");
             }
@@ -1616,6 +1623,8 @@ mod space_tests {
                     .is_none()
             );
         }
+        // Not vacuous: the fault hit the start at every operation.
+        sweep.interrupted_at_least(operations); // check-bound
     }
 
     /// Cleanup refuses to remove any session containing recorded audio.

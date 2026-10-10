@@ -223,16 +223,20 @@ fn sweep_repair(disk: &FakeFs, promised: &Promised, row: &SegmentRow, junk: Opti
     let probe = disk.copy_disk();
     let done = salvage(&mut session_store(&probe), length()).unwrap();
     assert_eq!(done.repaired().len(), 1);
-    let settled = without_findings(observe(&probe));
+    // Salvage's own operations: reading the result back adds more, which
+    // the sweep would crash after salvage had finished.
     let ops = probe.attempted();
-    assert!(ops > 30, "{ops}");
+    let settled = without_findings(observe(&probe));
+    assert!(ops > 30, "{ops}"); // check-bound
     let mut repaired = 0;
+    let mut sweep = Sweep::new();
     for after in 0..=ops {
         for crash in CrashOutcome::standard() {
             let case = format!("after {after} ops, {crash:?}");
             let run = disk.copy_disk();
             run.crash_after(after);
             let _ = salvage(&mut session_store(&run), length());
+            sweep.crash_point(&run);
             let survived = run.crash(crash);
             if let Some(junk) = junk {
                 let there = survived
@@ -276,7 +280,10 @@ fn sweep_repair(disk: &FakeFs, promised: &Promised, row: &SegmentRow, junk: Opti
             assert!(fine, "{case}: {statuses:?}");
         }
     }
-    assert!(repaired > 0);
+    assert!(repaired > 0); // check-bound
+    // Not vacuous: the crash cut salvage short at every point but the last,
+    // under every outcome.
+    sweep.interrupted_at_least(ops * CrashOutcome::standard().len()); // check-bound
 }
 
 #[test]

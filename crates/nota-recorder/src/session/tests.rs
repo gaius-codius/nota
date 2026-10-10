@@ -15,6 +15,7 @@ use nota_core::{
 use super::*;
 use crate::fs::Fs;
 use crate::fs::fake::{CrashOutcome, FakeFile, FakeFs, FakeLock, Op};
+use crate::fs::sweep::Sweep;
 use crate::journal::read_journal;
 use crate::segment::{FakeStore, SegmentLength, SegmentStore, salvage, segment_file_name};
 
@@ -148,15 +149,19 @@ fn a_failed_fsync_at_a_rotation_is_replayed_into_a_new_journal() {
         1,
         |op| matches!(op, Op::Sync(p) if *p == journal0),
     );
+    let mut sweep = Sweep::new();
     for outcome in [CrashOutcome::LoseUnsynced, CrashOutcome::KeepAll] {
         let fs = FakeFs::with_dirs([dir(), PathBuf::from("/db")]);
         fs.fail_after(at, io::ErrorKind::Other);
         record(&fs).unwrap();
+        sweep.failure_point(&fs);
         // The failed fsync dropped journal 0's unsynced tail; the
         // replacement holds it, so nothing is lost.
         let disk = fs.crash(outcome);
         assert_eq!(joined(&salvaged(&disk)), [(0, 2_500)], "{outcome:?}");
     }
+    // Not vacuous: the fsync really failed, both times.
+    sweep.interrupted_at_least(2); // check-bound
 }
 
 #[test]
