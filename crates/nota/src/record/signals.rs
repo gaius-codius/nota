@@ -196,6 +196,12 @@ pub(crate) fn listen_for_signals(_ui: Sender<Event>) -> io::Result<SignalThread>
     Ok(SignalThread)
 }
 
+/// A raised signal reaches every `Signals` registered for it, so tests
+/// that raise one, or listen for one, take turns (if run as threads of one
+/// process).
+#[cfg(all(test, unix))]
+pub(crate) static RAISING: Mutex<()> = Mutex::new(());
+
 #[cfg(all(test, unix))]
 mod tests {
     use std::sync::mpsc;
@@ -205,10 +211,6 @@ mod tests {
     use signal_hook::low_level::raise;
 
     use super::*;
-
-    /// A raised signal reaches every `Signals` registered for it, so tests
-    /// that raise one take turns (if run as threads of one process).
-    static RAISING: Mutex<()> = Mutex::new(());
 
     /// A SIGXCPU that arrives during the stop, still pending when the
     /// signal thread is closed, is still noted.

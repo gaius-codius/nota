@@ -334,6 +334,7 @@ fn listing_of<'a>(
         zone: || TimeZone::UTC,
         clock: Arc::clone(clock) as Arc<dyn Clock>,
         wall: Box::new(move || WallTime::from_unix_seconds(wall.load(Ordering::SeqCst))),
+        room: Box::new(|| false),
         listed_at: None,
         said: None,
     }
@@ -729,6 +730,26 @@ fn home_shows_jobs_waiting_for_space_without_a_full_disk_stop() {
     );
 }
 
+/// Once there's space, jobs that still wait (for an engine, say) show as
+/// processing, as before: freeing space is no longer what they need.
+#[test]
+fn home_stops_asking_for_space_once_there_is_some() {
+    let tmp = TestDir::new("space-back");
+    let library = library_of_three(&tmp.0);
+    stopped_on_a_full_disk(&library, true);
+    let clock = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let wall = Arc::new(AtomicI64::new(day(3)));
+    let mut listing = listing_of(&library, &clock, &wall);
+    listing.room = Box::new(|| true);
+    let shown = listing
+        .sessions()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.id == 3)
+        .unwrap();
+    assert_eq!(shown.status, Status::Processing);
+}
+
 /// A Recording screen a full disk stopped.
 fn stopped_screen() -> Recording {
     let at = SessionTime::from_nanos(4_368_000_000_000);
@@ -755,6 +776,11 @@ fn enter() -> Event {
 /// Acceptance (GAI-426): `⏎` on the stopped screen goes Home.
 #[test]
 fn enter_on_the_stopped_screen_goes_home() {
+    // Other tests' signals don't reach this one's listener.
+    #[cfg(unix)]
+    let _turn = crate::record::RAISING
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let quit = QuitSignals::listen().unwrap();
     let mut terminal = Terminal::new(TestBackend::new(62, 20)).unwrap();
     let (ui, events) = mpsc::channel();
@@ -793,6 +819,11 @@ fn enter_later(ui: Sender<Event>, raise: bool) -> (std::thread::JoinHandle<bool>
 #[cfg(unix)]
 #[test]
 fn a_signal_while_the_stopped_screen_waits_closes_nota() {
+    // Other tests' signals don't reach this one's listener.
+    #[cfg(unix)]
+    let _turn = crate::record::RAISING
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let quit = QuitSignals::listen().unwrap();
     let mut terminal = Terminal::new(TestBackend::new(62, 20)).unwrap();
     let (ui, events) = mpsc::channel();
@@ -807,6 +838,11 @@ fn a_signal_while_the_stopped_screen_waits_closes_nota() {
 #[cfg(unix)]
 #[test]
 fn a_signal_before_the_stopped_screen_closes_nota_at_once() {
+    // Other tests' signals don't reach this one's listener.
+    #[cfg(unix)]
+    let _turn = crate::record::RAISING
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let quit = QuitSignals::listen().unwrap();
     signal_hook::low_level::raise(signal_hook::consts::SIGHUP).unwrap();
     for _ in 0..500 {
@@ -823,4 +859,25 @@ fn a_signal_before_the_stopped_screen_closes_nota_at_once() {
     let _ = done.send(());
     assert!(!later.join().unwrap(), "the signal didn't end the wait");
     assert_eq!(left, Left::Quit);
+}
+
+/// Acceptance (GAI-426): a recording a full disk stopped comes back with
+/// its screen to show stopped, not for Processing; any other goes on to
+/// Processing.
+#[test]
+fn a_full_disk_stop_is_shown_stopped_rather_than_processed() {
+    let id = SessionId::new(4);
+    let recorded = |stopped| {
+        let outcome = crate::record::Outcome::new(id, PathBuf::from("/s/4"));
+        let back = Returned {
+            screen: (),
+            stopped,
+        };
+        recorded_result(Ok((outcome, Some(back))), &mut Vec::new())
+    };
+    assert!(matches!(
+        recorded(Some(stopped_screen())),
+        Recorded::Stopped((), _)
+    ));
+    assert!(matches!(recorded(None), Recorded::Back((), back) if back == id));
 }

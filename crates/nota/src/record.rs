@@ -129,6 +129,8 @@ mod stop;
 mod summary;
 
 pub(crate) use signals::QuitSignals;
+#[cfg(all(test, unix))]
+pub(crate) use signals::RAISING;
 pub(crate) use start::{last_setup, source_of};
 use summary::show;
 #[cfg(test)]
@@ -238,9 +240,10 @@ pub(crate) struct Lent<'a> {
     pub(crate) stopping: &'a mut dyn FnMut(&mut Screen),
 }
 
-/// The app's terminal, handed back once a recording has stopped.
-pub(crate) struct Returned {
-    pub(crate) screen: Screen,
+/// The app's terminal (`S`, a [`Screen`] but in tests), handed back once
+/// a recording has stopped.
+pub(crate) struct Returned<S = Screen> {
+    pub(crate) screen: S,
     /// The Recording screen as it closed, if a full disk stopped the
     /// recording: the app shows it again, stopped, until `⏎`.
     pub(crate) stopped: Option<Recording>,

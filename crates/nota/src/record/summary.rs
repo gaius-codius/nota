@@ -28,7 +28,8 @@ pub(super) struct Shown {
     /// same.
     pub(super) problem: Option<String>,
     /// The screen as it closed, if a full disk stopped the recording: the
-    /// app shows it, stopped, until the listener has read what was saved.
+    /// app shows it, stopped, until the listener has read what was saved
+    /// (`nota record` has restored the terminal, and drops it).
     pub(super) stopped: Option<Recording>,
 }
 
