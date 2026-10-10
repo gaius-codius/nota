@@ -1,0 +1,23 @@
+--- a/lazyfs/src/lazyfs.cpp
++++ b/lazyfs/src/lazyfs.cpp
+@@ -9,0 +10,2 @@
++#include <fcntl.h>
++#include <stdio.h>
+@@ -1691 +1693 @@
+-    if (flags)
++    if (flags & ~RENAME_NOREPLACE)
+@@ -1698 +1700,13 @@
+-    if (inode.empty ()) {
++    if (flags == RENAME_NOREPLACE) {
++        struct stat source;
++        if (lstat (from, &source) == -1)
++            return -errno;
++        if (!S_ISREG (source.st_mode))
++            return -EOPNOTSUPP;
++        if (renameat2 (AT_FDCWD, from, AT_FDCWD, to, flags) == -1)
++            return -errno;
++        if (!inode.empty ())
++            this_ ()->FSCache->rename_item (last_owner, new_owner);
++        res = 0;
++
++    } else if (inode.empty ()) {
