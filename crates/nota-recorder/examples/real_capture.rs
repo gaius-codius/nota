@@ -146,7 +146,7 @@ mod linux {
     /// An operation slower than this is logged.
     const SLOW: Duration = Duration::from_millis(100);
     /// The quietest peak that counts as audio playing: -70 dBFS.
-    const MIN_PEAK: i16 = 10;
+    const MIN_PEAK: i16 = 10; // check-bound
 
     pub(super) fn main() -> ExitCode {
         let args: Vec<String> = std::env::args().skip(1).collect();

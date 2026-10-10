@@ -833,8 +833,8 @@ fn record_late_into(fs: &FakeFs, promised: &mut Promised) -> Result<(), Box<dyn 
 fn a_recording_whose_fsyncs_complete_late_crashed_anywhere_loses_nothing() {
     let fs = FakeFs::with_dirs([session(), db()]);
     let clean = record_late(&fs, None);
-    assert!(clean.most_waiting > 0, "no audio waited for an fsync");
-    assert!(clean.rows.len() >= 4, "{:?}", clean.rows);
+    assert!(clean.most_waiting > 0, "no audio waited for an fsync"); // check-bound
+    assert!(clean.rows.len() >= 4, "{:?}", clean.rows); // check-bound
     let summary = CrashTest::new(|fs: &FakeFs| record_late(fs, None), recover, check)
         .dirs([session(), db()])
         .outcomes(vec![
@@ -844,7 +844,7 @@ fn a_recording_whose_fsyncs_complete_late_crashed_anywhere_loses_nothing() {
         ])
         .run()
         .unwrap_or_else(|failure| panic!("{failure}"));
-    assert!(summary.scenario_ops > 100, "{summary:?}");
+    assert!(summary.scenario_ops > 100, "{summary:?}"); // check-bound
 }
 
 #[test]
@@ -875,7 +875,7 @@ fn a_failure_at_any_operation_while_fsyncs_complete_late_loses_nothing_promised(
         }
     }
     // Not vacuous: some failures stopped the recording early.
-    assert!(broke > 0);
+    assert!(broke > 0); // check-bound
 }
 
 fn crash_test(how: Recording) -> CrashTest<impl Fn(&FakeFs) -> Promised, RecoverFn, CheckFn> {
@@ -908,7 +908,7 @@ fn recording_and_salvage_crashed_anywhere_end_as_an_uninterrupted_salvage() {
     // Several segments per track, published live, so crashes land in every
     // publish step: a segment is published before the last audio is
     // journaled.
-    assert!(promised.rows.len() >= 4, "{:?}", promised.rows);
+    assert!(promised.rows.len() >= 4, "{:?}", promised.rows); // check-bound
     let ops = clean.ops();
     let first_row = ops
         .iter()
@@ -920,7 +920,7 @@ fn recording_and_salvage_crashed_anywhere_end_as_an_uninterrupted_salvage() {
         .iter()
         .rposition(|op| matches!(op, Op::Write { path, .. } if is_journal(path)))
         .unwrap();
-    assert!(first_row < last_journal, "nothing published live");
+    assert!(first_row < last_journal, "nothing published live"); // check-bound
 
     // Every crash point and outcome of the recording. Salvage is crashed at
     // a sample of its points per case, the sample moving along from case to
@@ -945,11 +945,11 @@ fn recording_and_salvage_crashed_anywhere_end_as_an_uninterrupted_salvage() {
     .crash_rerun(RERUN)
     .run()
     .unwrap_or_else(|failure| panic!("{failure}"));
-    assert!(summary.scenario_ops > 100, "{summary:?}");
-    assert!(summary.recovery_crashed > 1_000, "{summary:?}");
-    assert!(summary.rerun_crashed > 100, "{summary:?}");
+    assert!(summary.scenario_ops > 100, "{summary:?}"); // check-bound
+    assert!(summary.recovery_crashed > 1_000, "{summary:?}"); // check-bound
+    assert!(summary.rerun_crashed > 100, "{summary:?}"); // check-bound
     // Not vacuous: some crash came with most of the sync interval unsynced.
-    assert!(worst.get() >= 700, "{}", worst.get());
+    assert!(worst.get() >= 700, "{}", worst.get()); // check-bound
 }
 
 #[test]
@@ -980,9 +980,9 @@ fn a_recording_in_small_chunks_never_lags_past_the_limit_at_any_crash() {
     .outcomes(vec![CrashOutcome::LoseUnsynced, CrashOutcome::KeepAll])
     .run()
     .unwrap_or_else(|failure| panic!("{failure}"));
-    assert!(summary.scenario_ops > 240, "{summary:?}");
+    assert!(summary.scenario_ops > 240, "{summary:?}"); // check-bound
     // Within one chunk of the limit: the budget is what bounds the lag.
-    assert!(worst.get() >= LAG_LIMIT - 25, "{}", worst.get());
+    assert!(worst.get() >= LAG_LIMIT - 25, "{}", worst.get()); // check-bound
 }
 
 /// Salvage takes fewer than this many operations here, so each case crashes
@@ -1034,7 +1034,7 @@ fn salvage_crashed_after_every_operation_ends_as_an_uninterrupted_run() {
         CrashOutcome::Partial { seed: 1 },
     ] {
         let ops = salvage_crashed_everywhere(&fs.crash(outcome), &promised);
-        assert!(ops > 30, "{ops}");
+        assert!(ops > 30, "{ops}"); // check-bound
     }
 
     // Overlapping journals, kept by the crash.
@@ -1092,7 +1092,7 @@ fn recovery_crashed_at_every_point_of_a_short_recording() {
         .run()
         .unwrap_or_else(|failure| panic!("{failure}"));
     assert!(
-        summary.recovery_crashed > 3 * (summary.scenario_ops + 1),
+        summary.recovery_crashed > 3 * (summary.scenario_ops + 1), // check-bound
         "{summary:?}"
     );
 }
@@ -1153,7 +1153,7 @@ fn overlapping_journals_resolve_to_the_newer_one() {
             .iter()
             .any(|b| a.0 < b.0 && a.1 == b.1 && a.2.start() < b.2.end() && b.2.start() < a.2.end())
     });
-    assert!(overlaps, "{ranges:?}");
+    assert!(overlaps, "{ranges:?}"); // check-bound
     let after = salvage_fake(&disk).unwrap();
     check_after(&promised, &after).unwrap();
 
@@ -1332,7 +1332,7 @@ fn marking_the_older_copy_shows_which_journal_was_published() {
     let (fs, promised) = clean_run(how);
     let disk = fs.crash(CrashOutcome::KeepAll);
     let (marked, frames) = mark_older_copies(&disk);
-    assert!(frames > 0, "nothing overlapped");
+    assert!(frames > 0, "nothing overlapped"); // check-bound
     // Only that journal changed: no newer journal covers the others.
     let before = observe(&disk);
     let after = observe(&marked);
@@ -1413,14 +1413,14 @@ fn a_failed_journal_fsync_then_a_crash_anywhere_publishes_the_newer_copy_once() 
         .dirs([session(), db()])
         .run()
         .unwrap_or_else(|failure| panic!("publish {publish}: {failure}"));
-        assert!(summary.scenario_ops > 60, "{summary:?}");
+        assert!(summary.scenario_ops > 60, "{summary:?}"); // check-bound
         assert_eq!(
             summary.cases,
-            (summary.scenario_ops + 1) * CrashOutcome::standard().len()
+            (summary.scenario_ops + 1) * CrashOutcome::standard().len() // check-bound
         );
         // Not vacuous: many cases left an older copy for salvage to refuse.
         assert!(
-            marked_cases.get() > 20,
+            marked_cases.get() > 20, // check-bound
             "publish {publish}: {} cases overlapped",
             marked_cases.get()
         );
@@ -2501,7 +2501,7 @@ fn recording_with_the_store_down_loses_nothing_once_it_is_back() {
     // Journals rotated at every window while the store was down.
     let journals = fs.paths().into_iter().filter(|p| is_journal(p)).count();
     assert_eq!(journals, pending.len());
-    assert!(journals >= 10, "{journals}");
+    assert!(journals >= 10, "{journals}"); // check-bound
 
     // The store comes back.
     fs.create_dir(&db()).unwrap();
@@ -2682,13 +2682,13 @@ fn findings_survive_any_later_failure_and_their_own_never_stops_publishing() {
     }
     let durable_from = durable_from.unwrap();
     // Publishing comes after the findings, so failures there were tried.
-    assert!(ops - durable_from > 20, "{durable_from} of {ops}");
-    assert!(unsaved >= 4, "{unsaved}");
+    assert!(ops - durable_from > 20, "{durable_from} of {ops}"); // check-bound
+    assert!(unsaved >= 4, "{unsaved}"); // check-bound
     // Each journal's unlink.
-    assert!(carried_on >= 4, "{carried_on}");
-    assert_eq!(row_reads, 1);
+    assert!(carried_on >= 4, "{carried_on}"); // check-bound
+    assert_eq!(row_reads, 1); // check-bound
     let journals = fs.paths().into_iter().filter(|p| is_journal(p)).count();
-    assert!(journals >= 4, "{journals}");
+    assert!(journals >= 4, "{journals}"); // check-bound
     assert_eq!(journal_reads, journals);
 }
 
@@ -3030,7 +3030,7 @@ fn a_transient_read_error_then_a_crash_anywhere_loses_nothing() {
     }
     // Crashes landed both before the finding was durable and after.
     let runs = (ops + 1) * CrashOutcome::standard().len();
-    assert!(kept > 0 && kept < runs, "{kept} of {runs}");
+    assert!(kept > 0 && kept < runs, "{kept} of {runs}"); // check-bound
 }
 
 /// Where salvage of `disk` first reads each journal, in order: its pass
@@ -3098,7 +3098,7 @@ fn a_journal_that_cant_be_read_is_kept_and_everything_else_published() {
         let disk = fs.crash(CrashOutcome::KeepAll);
         assert_eq!(!overlapping_pairs(&disk).is_empty(), overlapping);
         let reads = first_journal_reads(&disk);
-        assert!(reads.len() >= 4, "{reads:?}");
+        assert!(reads.len() >= 4, "{reads:?}"); // check-bound
         for (at, path) in reads {
             let id = journal_id(&path);
             let bytes = disk.read(&path).unwrap();
@@ -3145,7 +3145,7 @@ fn a_journal_that_cant_be_read_is_kept_and_everything_else_published() {
             }
         }
     }
-    assert!(tried >= 24, "{tried}");
+    assert!(tried >= 24, "{tried}"); // check-bound
 }
 
 #[test]
@@ -3191,7 +3191,7 @@ fn a_directory_under_a_journals_name_never_stops_publishing_at_any_crash() {
     // ends where the uninterrupted one did, with every durable sample in a
     // row and the directory as it was.
     check_after(&promised, &settled).unwrap();
-    assert!(ops > 30, "{ops}");
+    assert!(ops > 30, "{ops}"); // check-bound
     for after in 0..=ops {
         for crash in CrashOutcome::standard() {
             let run = disk.copy_disk();
@@ -3574,7 +3574,7 @@ fn a_stale_finished_journal_never_touches_a_resumed_sessions_journal() {
         created.iter().filter(|&&id| id == JournalId::FIRST).count(),
         1
     );
-    assert!(created.len() > 2, "{created:?}");
+    assert!(created.len() > 2, "{created:?}"); // check-bound
     // The resumed rows are in a new epoch.
     let epochs: BTreeSet<u32> = FakeStore::new(&fs, &db())
         .rows(SESSION)
@@ -3610,7 +3610,7 @@ fn a_resumed_session_crashed_anywhere_loses_nothing_and_never_reuses_an_id() {
             cases += 1;
         }
     }
-    assert!(cases > 100, "{cases}");
+    assert!(cases > 100, "{cases}"); // check-bound
 }
 
 /// Journal ids come from the session directory's marks file, never from the
@@ -3880,7 +3880,7 @@ fn sweep_salvage(
         observe(&probe) == settled,
         "a second salvage changed the disk"
     );
-    assert!(ops > 30, "{ops}");
+    assert!(ops > 30, "{ops}"); // check-bound
     for after in 0..=ops {
         for crash in CrashOutcome::standard() {
             let run = disk.copy_disk();
@@ -3913,7 +3913,7 @@ fn unsalvaged() -> (FakeFs, Promised, Vec<SegmentRow>) {
         .unwrap()
         .segments()
         .to_vec();
-    assert!(rows.len() >= 4, "{rows:?}");
+    assert!(rows.len() >= 4, "{rows:?}"); // check-bound
     (disk, promised, rows)
 }
 
@@ -4189,7 +4189,7 @@ fn a_set_aside_is_reported_whatever_fails_after_it() {
             unsynced += 1;
         }
     }
-    assert_eq!(unsynced, 1);
+    assert_eq!(unsynced, 1); // check-bound
 }
 
 mod disk_full;

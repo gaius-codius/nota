@@ -3,9 +3,11 @@
 # base, and changes nothing, reports nothing; a test the branch itself
 # deletes is reported; a changed, deleted or untagged `// check-bound` line
 # is reported, as are two files swapping values, and one moved unchanged
-# isn't; a base with no merge base is
-# an error; and a call with no base prints its usage. Also checks that the
-# crash harnesses' bounds in this repo carry the tag.
+# isn't; a lowered coverage floor and a crash script's `#`-tagged bound are
+# reported, and a tag quoted or mentioned in a shell comment isn't one; a
+# base with no merge base is an error; and a call with no base prints its
+# usage. Also checks that the crash harnesses' bounds in this repo carry the
+# tag.
 #
 # Requires: bash, git.
 set -euo pipefail
@@ -92,6 +94,40 @@ git commit -qam swapped
 out=$("$script" main swapped 2>&1) || true
 grep -qx '  - bound set: bound.rs: const LIMIT: u64 = 2_000; // check-bound' <<<"$out" ||
   fail "missed bounds two files swapped: $out"
+# A sweep's coverage floor, tagged at the end of its assert.
+git checkout -q main
+printf 'fn e(ops: usize) {\n    assert!(ops > 150, "{ops}"); // check-bound\n}\n' >floor.rs
+git add floor.rs
+git commit -qm floor
+git checkout -q -b floor
+printf 'fn e(ops: usize) {\n    assert!(ops > 15, "{ops}"); // check-bound\n}\n' >floor.rs
+git commit -qam floor
+out=$("$script" main floor 2>&1) || true
+grep -qx '  - bound set: floor.rs: assert!(ops > 15, "{ops}"); // check-bound' <<<"$out" ||
+  fail "missed a lowered coverage floor: $out"
+# A crash script's bound: a `#` comment that ends the line. One quoted in a
+# string isn't a tag.
+git checkout -q main
+printf 'min_rows=2 # check-bound\necho "x # check-bound" y\nmin_ops=3 # check-bound\r\n' >bound.sh
+git add bound.sh
+git commit -qm shell
+git checkout -q -b shell
+printf 'min_rows=1 # check-bound\necho "x # check-bound" z\nmin_ops=2 # check-bound\r\n' >bound.sh
+git commit -qam shell
+out=$("$script" main shell 2>&1) || true
+grep -qx '  - bound set: bound.sh: min_rows=1 # check-bound' <<<"$out" ||
+  fail "missed a shell bound's new value: $out"
+grep -qx '  - bound was: bound.sh: min_rows=2 # check-bound' <<<"$out" ||
+  fail "missed a shell bound's old value: $out"
+grep -q '  - bound set: bound.sh: min_ops=2 # check-bound' <<<"$out" ||
+  fail "missed a shell bound on a CRLF line: $out"
+grep -q 'echo' <<<"$out" && fail "took a quoted tag for a bound: $out"
+git checkout -q -b shell-prose main
+printf 'min_rows=2 # check-bound\necho "x # check-bound" y\nmin_ops=3 # check-bound\r\n# A bound carries # check-bound\n' >bound.sh
+git commit -qam shell-prose
+out=$("$script" main shell-prose 2>&1) || true
+[[ $out == "check-weakened: nothing found" ]] ||
+  fail "took a comment's mention of the tag for a bound: $out"
 
 # Unrelated histories have no merge base: an error, never "nothing found".
 git checkout -q --orphan unrelated
@@ -108,13 +144,38 @@ fi
 grep -q '^usage: check-weakened.sh BASE \[HEAD\]' <<<"$out" || fail "no usage without arguments: $out"
 
 # The bounds the crash harnesses check carry the tag, so changing one is
-# reported.
-bounds=$(grep -rE --include='*.rs' 'const (MAX_LAG|LAG_LIMIT|LOSS_LIMIT):' "$scripts/../crates" || true)
-[[ -n $bounds ]] || fail "found none of the crash harnesses' bounds"
+# reported: the loss and lag limits, the real-capture harness's floor for
+# audio playing, and its script's baseline floors. The crash sweeps' floors
+# are too many to name one by one, so the guard checks each file still has
+# at least as many tags as this change gave it, and that the floors of the
+# common shapes (the crash summary's counts, the worst lag reached) have
+# theirs.
+repo=$scripts/..
+recorder=$repo/crates/nota-recorder
+tagged() { # what was searched for, the lines found
+  [[ -n $2 ]] || fail "found none of: $1"
+  while IFS= read -r line; do
+    [[ -z $line ]] || grep -qE '//[[:space:]]*check-bound([^A-Za-z0-9_-]|$)' <<<"$line" ||
+      fail "bound without its tag: $line"
+  done <<<"$2"
+}
+bounds=$(grep -rE --include='*.rs' 'const (MAX_LAG|LAG_LIMIT|LOSS_LIMIT):' "$repo/crates" || true)
+bounds+=$'\n'$(grep -E 'const MIN_PEAK:' "$recorder/examples/real_capture.rs" || true)
+tagged "the crash harnesses' limits" "$bounds"
+(( $(grep -c . <<<"$bounds") >= 5 )) || fail "expected at least 5 tagged bounds: $bounds"
+tagged "the crash sweeps' floors" "$(grep -E \
+  'summary\.(scenario_ops|recovery_crashed|rerun_crashed) >|worst\.get\(\) >=' \
+  "$recorder/src/segment/tests.rs" "$recorder/src/capture/stop_tests.rs" || true)"
+for want in segment/tests.rs:35 capture/stop_tests.rs:6; do
+  file=$recorder/src/${want%:*}
+  got=$(grep -cE '//[[:space:]]*check-bound([^A-Za-z0-9_-]|$)' "$file" || true)
+  (( got >= ${want#*:} )) || fail "${want%:*} has $got tagged bounds, expected at least ${want#*:}"
+done
+floors=$(grep -E '^min_[a-z_]+=' "$scripts/real-capture-crash.sh" || true)
+[[ $(grep -c . <<<"$floors") -eq 2 ]] || fail "expected the script's 2 baseline floors: $floors"
 while IFS= read -r line; do
-  [[ -z $line ]] || grep -qE '//[[:space:]]*check-bound([^A-Za-z0-9_-]|$)' <<<"$line" ||
+  grep -qE '[[:space:]]#[[:space:]]*check-bound[[:space:]]*$' <<<"$line" ||
     fail "bound without its tag: $line"
-done <<<"$bounds"
-(( $(grep -c . <<<"$bounds") >= 4 )) || fail "expected at least 4 tagged bounds: $bounds"
+done <<<"$floors"
 
 exit "$status"
