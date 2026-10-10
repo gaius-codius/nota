@@ -412,6 +412,8 @@ struct State {
     /// An injected failure: after this many more operations, fail the next
     /// one with this error.
     fail: Option<(usize, io::ErrorKind)>,
+    /// Whether the failure [`FakeFs::fail_after`] set last has fired.
+    failed: bool,
     /// Injected failures that last: every operation of this kind on this
     /// path fails with this error.
     faults: Vec<(PathBuf, Fault, io::ErrorKind)>,
@@ -437,6 +439,7 @@ impl State {
             attempted: 0,
             budget: None,
             fail: None,
+            failed: false,
             faults: Vec::new(),
             crashed: false,
             locked: BTreeSet::new(),
@@ -480,6 +483,7 @@ impl State {
             if *after == 0 {
                 let kind = *kind;
                 self.fail = None;
+                self.failed = true;
                 return Err(io::Error::new(kind, "injected failure"));
             }
             *after -= 1;
@@ -660,7 +664,9 @@ impl FakeFs {
     /// fsync leaves the unsynced bytes readable but not durable (see the
     /// module docs).
     pub fn fail_after(&self, ops: usize, kind: io::ErrorKind) {
-        self.lock().fail = Some((ops, kind));
+        let mut state = self.lock();
+        state.fail = Some((ops, kind));
+        state.failed = false;
     }
 
     /// Fails every `op` on `path` from now on with an error of `kind`, as an
@@ -702,6 +708,12 @@ impl FakeFs {
     #[must_use]
     pub fn attempted(&self) -> usize {
         self.lock().attempted
+    }
+
+    /// Whether the failure [`Self::fail_after`] set last has fired.
+    #[must_use]
+    pub fn has_failed(&self) -> bool {
+        self.lock().failed
     }
 
     /// Whether the simulated process has crashed.

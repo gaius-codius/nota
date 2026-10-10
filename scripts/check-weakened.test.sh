@@ -7,7 +7,8 @@
 # reported, and a tag quoted or mentioned in a shell comment isn't one; a
 # base with no merge base is an error; and a call with no base prints its
 # usage. Also checks that the crash harnesses' bounds in this repo carry the
-# tag.
+# tag, and that every crash or seed sweep in the crash test files reports
+# into the sweep helper, whose floor proves it wasn't vacuous.
 #
 # Requires: bash, git.
 set -euo pipefail
@@ -167,15 +168,239 @@ tagged "the crash harnesses' limits" "$bounds"
 tagged "the crash sweeps' floors" "$(grep -rhE --include='*.rs' \
   'summary\.(scenario_ops|recovery_crashed|rerun_crashed) >|worst(\.get\(\))? >=' \
   "$repo/crates" || true)"
-for want in nota-recorder/src/segment/tests.rs:35 nota-recorder/src/capture/stop_tests.rs:6 \
-  nota-recorder/src/journal/tests.rs:6 nota-recorder/src/segment/tests/epochs.rs:3 \
-  nota-recorder/src/segment/tests/disk_full.rs:6 nota-recorder/src/capture/tests.rs:9 \
+for want in nota-recorder/src/segment/tests.rs:48 nota-recorder/src/capture/stop_tests.rs:6 \
+  nota-recorder/src/journal/tests.rs:10 nota-recorder/src/segment/tests/epochs.rs:3 \
+  nota-recorder/src/segment/tests/disk_full.rs:7 nota-recorder/src/capture/tests.rs:9 \
   nota/src/library/kept.rs:1 nota-recorder/examples/capture_wall_time.rs:3; do
   file=$repo/crates/${want%:*}
   # Only a tag after code counts: a comment of its own sets no bound.
   got=$(grep -cE '^[[:space:]]*[^/[:space:]].*//[[:space:]]*check-bound([^A-Za-z0-9_-]|$)' "$file" || true)
   (( got >= ${want#*:} )) || fail "${want%:*} has $got tagged bounds, expected at least ${want#*:}"
 done
+
+# Every crash or seed sweep in these files reports into the sweep helper
+# (`nota-recorder/src/fs/sweep.rs`) and states a floor there, which fails
+# a sweep that reached too little. A sweep is a loop (`for`, `while`,
+# `loop` or `for_each`) that crashes, fails or stops the fake filesystem,
+# at a point or with a seed it may vary, or that calls a function doing so
+# at a point it's given without a floor of its own (followed through
+# several calls); or a crash test run expected to pass. A function needs
+# at least as many floors as the sweeps it runs, so a new sweep can't be
+# added without one, even beside another; the helper fails at run time a
+# sweep it never floors. A loop over a list of outcomes written out in
+# full, crashing nothing else, isn't a sweep: nothing in it can go
+# unreached. The awk is POSIX (CI's is mawk); where gawk is installed the
+# guard runs it in POSIX mode, so a gawk-only construct fails here first.
+#
+# One awk program, two jobs: with pass=1 it prints the functions that
+# crash or fail at a point they're given and floor nothing; with pass=2,
+# each function running more sweeps than it floors. Comments in it would
+# end the quoting at their first apostrophe, so they're here: strings,
+# block comments and line comments are dropped before matching; a loop
+# ends when the body it opened closes (its head may span lines), and one
+# that runs a crash test counts as that run; a run whose next line is
+# `.unwrap_err()` expects a failure.
+# shellcheck disable=SC2016 # the awk program's `$` aren't the shell's.
+sweep_awk='
+  function flush() {
+    if (name == "") return
+    if (pass == 1 && point && floors == 0) print name
+    if (pass == 2 && sweeps > floors)
+      printf "%s:%d: %s runs %d sweeps with %d floors\n", file, start, name, sweeps, floors
+    name = ""
+  }
+  BEGIN { n = split(points, list, " "); for (i = 1; i <= n; i++) at_point[list[i]] = 1 }
+  FNR == 1 { flush(); file = FILENAME; depth = 0 }
+  /^[[:space:]]*(pub(\([a-z]+\))? )?fn [a-z_0-9]+/ {
+    flush()
+    match($0, /fn [a-z_0-9]+/)
+    name = substr($0, RSTART + 3, RLENGTH - 3)
+    start = FNR; sweeps = 0; floors = 0; point = 0; loops = 0; marked = 0; pending = 0; ran = 0
+  }
+  {
+    code = $0
+    gsub(/"([^"\\]|\\.)*"/, "\"\"", code)
+    gsub(/\/\*([^*]|\*[^\/])*\*\//, "", code)
+    sub(/\/\/.*/, "", code)
+    if (code ~ /^[[:space:]]*(for .* in |while |loop \{)|\.for_each\(/) {
+      loops++; at[loops] = depth; opened[loops] = 0
+    }
+    if (code ~ /(crash_after|fail_after)\(\*?[a-z_]/) point = 1
+    hit = code ~ /crash_after\(|fail_after\(|(fail_at|stop_after_ops): Some\(\*?[a-z_]|Partial \{ seed(: [^0-9 }][^}]*)? \}/
+    for (f in at_point)
+      if (code ~ ("(^|[^a-z_0-9])" f "\\(")) { hit = 1; point = 1 }
+    if (loops && hit) marked = 1
+    if (pending && code ~ /^[[:space:]]*\.unwrap_err\(\)/) sweeps--
+    pending = 0
+    if (code ~ /\.run\(\)[[:space:]]*($|[.?])/ && code !~ /\.run\(\)\.unwrap_err\(\)/) {
+      sweeps++
+      ran = loops > 0
+      pending = code ~ /\.run\(\)[[:space:]]*$/
+    }
+    floors += gsub(/\.(interrupted_more_than|interrupted_at_least|saw_more_than|saw_each)\(/, "&", code)
+    depth += gsub(/\{/, "{", code) - gsub(/\}/, "}", code)
+    while (loops) {
+      if (depth > at[loops]) opened[loops] = 1
+      if (!opened[loops] || depth > at[loops]) break
+      loops--
+      if (loops == 0) { sweeps += marked && !ran; marked = 0; ran = 0 }
+    }
+  }
+  END { flush() }
+'
+sweep_awk_cmd=(awk)
+if command -v gawk >/dev/null; then sweep_awk_cmd=(gawk --posix); fi
+bypassing() { # files; prints each function with more sweeps than floors
+  local points="" next _
+  # Each round finds the callers of the last round's functions.
+  for _ in 1 2 3 4 5; do
+    next=$("${sweep_awk_cmd[@]}" -v pass=1 -v points="$points" "$sweep_awk" "$@" | sort -u | tr '\n' ' ')
+    [[ $next == "$points" ]] && break
+    points=$next
+  done
+  "${sweep_awk_cmd[@]}" -v pass=2 -v points="$points" "$sweep_awk" "$@"
+}
+cat >"$dir/sweeps.rs" <<'RUST'
+fn bypasses() {
+    for at in 0..ops {
+        let fs = FakeFs::new();
+        fs.crash_after(at);
+    }
+}
+fn seeds_without() {
+    for seed in 0..9 {
+        check(fs.crash(CrashOutcome::Partial { seed }), "{x}");
+    }
+}
+fn runs_without() {
+    let summary = CrashTest::new(a, b, c)
+        .run()
+        .unwrap();
+    let done = job.run();
+}
+fn runs_a_job() {
+    let done = job.run();
+}
+fn uses_it() {
+    let mut sweep = Sweep::new();
+    for at in 0..ops {
+        fs.fail_after(at, kind);
+        sweep.failure_point(&fs);
+    }
+    sweep.interrupted_at_least(3); // check-bound
+}
+fn floors_a_crash_test() {
+    let summary = CrashTest::new(a, b, c).run().unwrap();
+    summary.scenario().interrupted_more_than(40); // check-bound
+}
+fn expects_a_failure() {
+    let failure = CrashTest::new(a, b, c)
+        .run()
+        .unwrap_err();
+}
+fn lists_its_outcomes() {
+    for outcome in [
+        CrashOutcome::Partial { seed: 1 },
+        CrashOutcome::KeepAll,
+    ] {
+        check(fs.crash(outcome));
+    }
+    fs.crash_after(3);
+}
+fn crashes_at(fs: &FakeFs, after: usize) {
+    fs.crash_after(after);
+}
+fn sweeps_through_a_helper() {
+    for after in 0..=ops {
+        crashes_at(&fs, after);
+    }
+}
+fn sweeps_from(fs: &FakeFs, from: usize) {
+    let mut sweep = Sweep::new();
+    for after in from..9 {
+        fs.crash_after(after);
+        sweep.crash_point(fs);
+    }
+    sweep.interrupted_at_least(3); // check-bound
+}
+fn runs_whole_sweeps() {
+    for from in [0, 3] {
+        sweeps_from(&fs, from);
+    }
+}
+fn a_second_sweep_beside_one_floored() {
+    let mut sweep = Sweep::new();
+    for at in 0..9 {
+        fs.crash_after(at);
+        sweep.crash_point(&fs);
+    }
+    sweep.interrupted_at_least(3); // check-bound
+    /* Sweep::new() .interrupted_at_least(1) */
+    for at in 0..9 {
+        fs.fail_after(at, kind);
+    }
+}
+fn while_and_for_each() {
+    while at < ops {
+        fs.crash_after(at);
+    }
+    (0..ops).for_each(|at| {
+        fs.crash_after(at);
+    });
+}
+fn seed_from_an_expression() {
+    for i in 0..9 {
+        check(fs.crash(CrashOutcome::Partial { seed: i * 7 }));
+    }
+}
+fn fails_through_a_recording() {
+    for at in &points {
+        record(&fs, Recording { fail_at: Some(*at), ..plain });
+    }
+}
+fn runs_one_to_pass_one_to_fail() {
+    CrashTest::new(a, b, c).run()?;
+    let failure = CrashTest::new(a, b, c).run().unwrap_err();
+}
+fn checks_at(fs: &FakeFs, at: usize) {
+    crashes_at(fs, at);
+}
+fn sweeps_two_calls_deep() {
+    for at in 0..ops {
+        checks_at(&fs, at);
+    }
+}
+RUST
+cat >"$dir/tail.rs" <<'RUST'
+fn the_last_function() {
+    for at in 0..ops {
+        fs.crash_after(at);
+    }
+}
+RUST
+got=$(cd "$dir" && bypassing sweeps.rs tail.rs)
+want='sweeps.rs:1: bypasses runs 1 sweeps with 0 floors
+sweeps.rs:7: seeds_without runs 1 sweeps with 0 floors
+sweeps.rs:12: runs_without runs 1 sweeps with 0 floors
+sweeps.rs:50: sweeps_through_a_helper runs 1 sweeps with 0 floors
+sweeps.rs:68: a_second_sweep_beside_one_floored runs 2 sweeps with 1 floors
+sweeps.rs:80: while_and_for_each runs 2 sweeps with 0 floors
+sweeps.rs:88: seed_from_an_expression runs 1 sweeps with 0 floors
+sweeps.rs:93: fails_through_a_recording runs 1 sweeps with 0 floors
+sweeps.rs:98: runs_one_to_pass_one_to_fail runs 1 sweeps with 0 floors
+sweeps.rs:105: sweeps_two_calls_deep runs 1 sweeps with 0 floors
+tail.rs:1: the_last_function runs 1 sweeps with 0 floors'
+[[ $got == "$want" ]] || fail "the sweep guard found the wrong sweeps: $got"
+swept=(nota-recorder/src/journal/tests.rs nota-recorder/src/segment/tests.rs
+  nota-recorder/src/segment/tests/epochs.rs nota-recorder/src/segment/tests/disk_full.rs
+  nota-recorder/src/capture/stop_tests.rs nota/src/library/kept.rs)
+found=$(cd "$repo/crates" && bypassing "${swept[@]}")
+[[ -z $found ]] || fail "a sweep without the helper's floor:"$'\n'"$found"
+# Each floor the helper checks is a bound, wherever it is.
+tagged "the sweeps' floors" "$(grep -rhE --include='*.rs' \
+  '\.(interrupted_more_than|interrupted_at_least|saw_more_than|saw_each)\(' \
+  --exclude=sweep.rs "$repo/crates" || true)"
+
 floors=$(grep -E '^min_[a-z_]+=' "$scripts/real-capture-crash.sh" || true)
 [[ $(grep -c . <<<"$floors") -eq 2 ]] || fail "expected the script's 2 baseline floors: $floors"
 while IFS= read -r line; do

@@ -19,6 +19,7 @@ use super::publish::TempSegment;
 use super::*;
 use crate::fs::crash::{CrashCase, CrashTest};
 use crate::fs::fake::{CrashOutcome, FakeFs, Fault, Op};
+use crate::fs::sweep::Sweep;
 use crate::fs::{Fs, FsFile, StdFs};
 use crate::journal::format::{FRAME_HEADER_LEN, HEADER_LEN, encode_frame};
 use crate::journal::{JournalHeader, JournalId, JournalWriter, read_journal};
@@ -845,7 +846,7 @@ fn a_recording_whose_fsyncs_complete_late_crashed_anywhere_loses_nothing() {
         ])
         .run()
         .unwrap_or_else(|failure| panic!("{failure}"));
-    assert!(summary.scenario_ops > 100, "{summary:?}"); // check-bound
+    summary.scenario().interrupted_more_than(100); // check-bound
 }
 
 #[test]
@@ -853,12 +854,14 @@ fn a_failure_at_any_operation_while_fsyncs_complete_late_loses_nothing_promised(
     let clean = FakeFs::with_dirs([session(), db()]);
     let whole = record_late(&clean, None);
     let ops = clean.attempted();
-    let mut broke = 0;
+    let mut sweep = Sweep::new();
     for at in 0..ops {
         let fs = FakeFs::with_dirs([session(), db()]);
         let promised = record_late(&fs, Some(at));
-        if promised.captured != whole.captured {
-            broke += 1;
+        if promised.captured == whole.captured {
+            sweep.finished();
+        } else {
+            sweep.interrupted();
         }
         for outcome in [CrashOutcome::LoseUnsynced, CrashOutcome::KeepAll] {
             let crashed = fs.crash(outcome);
@@ -876,7 +879,7 @@ fn a_failure_at_any_operation_while_fsyncs_complete_late_loses_nothing_promised(
         }
     }
     // Not vacuous: some failures stopped the recording early.
-    assert!(broke > 0); // check-bound
+    sweep.interrupted_more_than(0); // check-bound
 }
 
 fn crash_test(how: Recording) -> CrashTest<impl Fn(&FakeFs) -> Promised, RecoverFn, CheckFn> {
@@ -946,9 +949,9 @@ fn recording_and_salvage_crashed_anywhere_end_as_an_uninterrupted_salvage() {
     .crash_rerun(RERUN)
     .run()
     .unwrap_or_else(|failure| panic!("{failure}"));
-    assert!(summary.scenario_ops > 100, "{summary:?}"); // check-bound
-    assert!(summary.recovery_crashed > 1_000, "{summary:?}"); // check-bound
-    assert!(summary.rerun_crashed > 100, "{summary:?}"); // check-bound
+    summary.scenario().interrupted_more_than(100); // check-bound
+    summary.recovery().interrupted_more_than(1_000); // check-bound
+    summary.reruns().interrupted_more_than(100); // check-bound
     // Not vacuous: some crash came with most of the sync interval unsynced.
     assert!(worst.get() >= 700, "{}", worst.get()); // check-bound
 }
@@ -981,7 +984,7 @@ fn a_recording_in_small_chunks_never_lags_past_the_limit_at_any_crash() {
     .outcomes(vec![CrashOutcome::LoseUnsynced, CrashOutcome::KeepAll])
     .run()
     .unwrap_or_else(|failure| panic!("{failure}"));
-    assert!(summary.scenario_ops > 240, "{summary:?}"); // check-bound
+    summary.scenario().interrupted_more_than(240); // check-bound
     // Within one chunk of the limit: the budget is what bounds the lag.
     assert!(worst.get() >= LAG_LIMIT - 25, "{}", worst.get()); // check-bound
 }
@@ -1003,11 +1006,13 @@ fn salvage_crashed_everywhere(disk: &FakeFs, promised: &Promised) -> usize {
     let uninterrupted = salvage_fake(&probe).unwrap();
     check_after(promised, &uninterrupted).unwrap();
     let ops = probe.attempted();
+    let mut sweep = Sweep::new();
     for after in 0..=ops {
         for outcome in CrashOutcome::standard() {
             let run = disk.copy_disk();
             run.crash_after(after);
             let _ = salvage_fake(&run);
+            sweep.crash_point(&run);
             let survived = run.crash(outcome);
             let rerun = salvage_fake(&survived)
                 .unwrap_or_else(|e| panic!("after {after} ops, {outcome:?}: {e}"));
@@ -1017,6 +1022,9 @@ fn salvage_crashed_everywhere(disk: &FakeFs, promised: &Promised) -> usize {
             );
         }
     }
+    // Not vacuous: the crash cut salvage short at every point but the last,
+    // under every outcome.
+    sweep.interrupted_at_least(ops * CrashOutcome::standard().len()); // check-bound
     ops
 }
 
@@ -1092,10 +1100,9 @@ fn recovery_crashed_at_every_point_of_a_short_recording() {
         .crash_recovery()
         .run()
         .unwrap_or_else(|failure| panic!("{failure}"));
-    assert!(
-        summary.recovery_crashed > 3 * (summary.scenario_ops + 1), // check-bound
-        "{summary:?}"
-    );
+    summary
+        .recovery()
+        .interrupted_more_than(3 * (summary.scenario_ops + 1)); // check-bound
 }
 
 /// The operation index of a journal frame write that comes straight after
@@ -1168,7 +1175,10 @@ fn overlapping_journals_resolve_to_the_newer_one() {
             CrashOutcome::Partial { seed: 6 },
         ])
         .run()
-        .unwrap();
+        .unwrap()
+        .scenario()
+        // Not vacuous: the recording is crashed after each of its operations.
+        .interrupted_at_least(60); // check-bound
 }
 
 /// The operation to fail (counting every one attempted) for a journal
@@ -1414,7 +1424,7 @@ fn a_failed_journal_fsync_then_a_crash_anywhere_publishes_the_newer_copy_once() 
         .dirs([session(), db()])
         .run()
         .unwrap_or_else(|failure| panic!("publish {publish}: {failure}"));
-        assert!(summary.scenario_ops > 60, "{summary:?}"); // check-bound
+        summary.scenario().interrupted_more_than(60); // check-bound
         assert_eq!(
             summary.cases,
             (summary.scenario_ops + 1) * CrashOutcome::standard().len() // check-bound
@@ -2214,7 +2224,10 @@ fn a_journal_break_while_publishing_live_loses_nothing_at_any_crash() {
             CrashOutcome::Partial { seed: 7 },
         ])
         .run()
-        .unwrap();
+        .unwrap()
+        .scenario()
+        // Not vacuous: the recording is crashed after each of its operations.
+        .interrupted_at_least(180); // check-bound
 }
 
 /// Plants a committed row on `fs` for `range` of `track`, hashed over
@@ -2375,11 +2388,13 @@ fn rows_that_claim_nothing_never_let_a_journal_go_at_any_crash() {
 
         // Crashed after every operation, under every outcome, then run
         // again: the same end state, findings file included.
+        let mut sweep = Sweep::new();
         for after in 0..=ops {
             for crash in CrashOutcome::standard() {
                 let run = disk.copy_disk();
                 run.crash_after(after);
                 let _ = salvage(&mut session_store(&run), length());
+                sweep.crash_point(&run);
                 let survived = run.crash(crash);
                 let mut again = session_store(&survived);
                 let rerun = salvage(&mut again, length())
@@ -2394,6 +2409,9 @@ fn rows_that_claim_nothing_never_let_a_journal_go_at_any_crash() {
                 );
             }
         }
+        // Not vacuous: the crash cut salvage short at every point but the
+        // last, under every outcome.
+        sweep.interrupted_at_least(ops * CrashOutcome::standard().len()); // check-bound
     }
 }
 
@@ -2598,10 +2616,12 @@ fn findings_survive_any_later_failure_and_their_own_never_stops_publishing() {
     let mut journal_reads = 0;
     let mut carried_on = 0;
     let unreadable = [(expected[0].0, Problem::Unreadable(ReadFailure::Other))];
+    let mut sweep = Sweep::new();
     for at in 0..ops {
         let run = fs.copy_disk();
         run.fail_after(at, io::ErrorKind::Other);
         let result = salvage(&mut session_store(&run), length());
+        sweep.failure_point(&run);
         let on_disk = read_findings(&session_dir(&run)).unwrap();
         if let Ok(done) = &result
             && as_found(done.findings()) == unreadable
@@ -2684,6 +2704,8 @@ fn findings_survive_any_later_failure_and_their_own_never_stops_publishing() {
     let durable_from = durable_from.unwrap();
     // Publishing comes after the findings, so failures there were tried.
     assert!(ops - durable_from > 20, "{durable_from} of {ops}"); // check-bound
+    // Not vacuous: the failure fired at every operation of salvage.
+    sweep.interrupted_at_least(ops); // check-bound
     assert!(unsaved >= 4, "{unsaved}"); // check-bound
     // Each journal's unlink.
     assert!(carried_on >= 4, "{carried_on}"); // check-bound
@@ -2869,6 +2891,7 @@ fn an_unreadable_segment_file_claims_nothing_until_it_reads_and_matches() {
         .position(|op| *op == Op::Read(path.clone()))
         .unwrap();
     let planted = BTreeMap::from([(path, Some(flac))]);
+    let mut sweep = Sweep::new();
     for kind in [
         io::ErrorKind::PermissionDenied,
         io::ErrorKind::IsADirectory,
@@ -2879,6 +2902,7 @@ fn an_unreadable_segment_file_claims_nothing_until_it_reads_and_matches() {
         // The read fails: the row claims nothing and is recorded, and
         // every segment outside its window is published.
         let done = salvage(&mut session_store(&run), length()).unwrap();
+        sweep.failure_point(&run);
         let expected = [(row, Problem::Unreadable(findings::read_failure(kind)))];
         assert_eq!(as_found(done.findings()), expected, "{kind:?}");
         assert_eq!(done.findings_unsaved(), None);
@@ -2916,6 +2940,8 @@ fn an_unreadable_segment_file_claims_nothing_until_it_reads_and_matches() {
             "{kind:?}: a third salvage changed the disk"
         );
     }
+    // Not vacuous: the read fails, whichever way it does.
+    sweep.interrupted_at_least(3); // check-bound
 }
 
 #[test]
@@ -2951,11 +2977,13 @@ fn a_directory_under_a_rows_name_never_lets_its_journals_go_at_any_crash() {
         "a second salvage changed the disk"
     );
 
+    let mut sweep = Sweep::new();
     for after in 0..=ops {
         for crash in CrashOutcome::standard() {
             let run = disk.copy_disk();
             run.crash_after(after);
             let _ = salvage(&mut session_store(&run), length());
+            sweep.crash_point(&run);
             let survived = run.crash(crash);
             let rerun = salvage(&mut session_store(&survived), length())
                 .unwrap_or_else(|e| panic!("after {after} ops, {crash:?}: {e}"));
@@ -2970,6 +2998,9 @@ fn a_directory_under_a_rows_name_never_lets_its_journals_go_at_any_crash() {
             );
         }
     }
+    // Not vacuous: the crash cut salvage short at every point but the last,
+    // under every outcome.
+    sweep.interrupted_at_least(ops * CrashOutcome::standard().len()); // check-bound
 }
 
 #[test]
@@ -3004,12 +3035,14 @@ fn a_transient_read_error_then_a_crash_anywhere_loses_nothing() {
     // after the restart reads the file, and ends where the uninterrupted
     // one does, with the finding recorded or not yet, never anything else.
     let mut kept = 0;
+    let mut sweep = Sweep::new();
     for after in 0..=ops {
         for crash in CrashOutcome::standard() {
             let run = fs.copy_disk();
             run.fail_after(at, io::ErrorKind::Other);
             run.crash_after(after);
             let _ = salvage(&mut session_store(&run), length());
+            sweep.crash_point(&run);
             let survived = run.crash(crash);
             let rerun = salvage(&mut session_store(&survived), length())
                 .unwrap_or_else(|e| panic!("after {after} ops, {crash:?}: {e}"));
@@ -3032,6 +3065,9 @@ fn a_transient_read_error_then_a_crash_anywhere_loses_nothing() {
     // Crashes landed both before the finding was durable and after.
     let runs = (ops + 1) * CrashOutcome::standard().len();
     assert!(kept > 0 && kept < runs, "{kept} of {runs}"); // check-bound
+    // Not vacuous: the crash cut salvage short at every point but the last,
+    // under every outcome.
+    sweep.interrupted_at_least(ops * CrashOutcome::standard().len()); // check-bound
 }
 
 /// Where salvage of `disk` first reads each journal, in order: its pass
@@ -3093,7 +3129,7 @@ fn a_journal_that_cant_be_read_is_kept_and_everything_else_published() {
         fail_at: Some(a_write_after_unsynced_frames(plain)),
         ..plain
     };
-    let mut tried = 0;
+    let mut sweep = Sweep::new();
     for (how, overlapping) in [(plain, false), (broken, true)] {
         let (fs, promised) = clean_run(how);
         let disk = fs.crash(CrashOutcome::KeepAll);
@@ -3142,11 +3178,11 @@ fn a_journal_that_cant_be_read_is_kept_and_everything_else_published() {
                 assert!(again.deleted().contains(&id));
                 check_after(&promised, &observe(&restarted))
                     .unwrap_or_else(|e| panic!("{}, {kind:?}, read: {e}", path.display()));
-                tried += 1;
+                sweep.interrupted();
             }
         }
     }
-    assert!(tried >= 24, "{tried}"); // check-bound
+    sweep.interrupted_at_least(24); // check-bound
 }
 
 #[test]
@@ -3193,11 +3229,13 @@ fn a_directory_under_a_journals_name_never_stops_publishing_at_any_crash() {
     // row and the directory as it was.
     check_after(&promised, &settled).unwrap();
     assert!(ops > 30, "{ops}"); // check-bound
+    let mut sweep = Sweep::new();
     for after in 0..=ops {
         for crash in CrashOutcome::standard() {
             let run = disk.copy_disk();
             run.crash_after(after);
             let _ = salvage(&mut session_store(&run), length());
+            sweep.crash_point(&run);
             let survived = run.crash(crash);
             let rerun = salvage(&mut session_store(&survived), length())
                 .unwrap_or_else(|e| panic!("after {after} ops, {crash:?}: {e}"));
@@ -3209,6 +3247,9 @@ fn a_directory_under_a_journals_name_never_stops_publishing_at_any_crash() {
             );
         }
     }
+    // Not vacuous: the crash cut salvage short at every point but the last,
+    // under every outcome.
+    sweep.interrupted_at_least(ops * CrashOutcome::standard().len()); // check-bound
 }
 
 #[test]
@@ -3239,12 +3280,14 @@ fn a_journal_read_failing_once_then_a_crash_anywhere_loses_nothing() {
     // Crashed after every operation of the failing run: the journal is as
     // it was (none of its samples is in a row yet), and the run after the
     // restart, reading it, ends as the uninterrupted one did.
+    let mut sweep = Sweep::new();
     for after in 0..=ops {
         for crash in CrashOutcome::standard() {
             let run = disk.copy_disk();
             run.fail_after(at, io::ErrorKind::Other);
             run.crash_after(after);
             let _ = salvage(&mut session_store(&run), length());
+            sweep.crash_point(&run);
             let survived = run.crash(crash);
             assert_eq!(
                 survived.read(&path).unwrap(),
@@ -3259,6 +3302,9 @@ fn a_journal_read_failing_once_then_a_crash_anywhere_loses_nothing() {
             );
         }
     }
+    // Not vacuous: the crash cut salvage short at every point but the last,
+    // under every outcome.
+    sweep.interrupted_at_least(ops * CrashOutcome::standard().len()); // check-bound
 }
 
 #[test]
@@ -3311,12 +3357,14 @@ fn an_unread_journal_of_an_overlapping_pair_then_a_crash_anywhere_loses_nothing(
         );
         assert!(!done.segments().is_empty());
         let ops = failed.attempted();
+        let mut sweep = Sweep::new();
         for after in 0..=ops {
             for crash in CrashOutcome::standard() {
                 let run = disk.copy_disk();
                 run.fail_after(*at, io::ErrorKind::Other);
                 run.crash_after(after);
                 let _ = salvage(&mut session_store(&run), length());
+                sweep.crash_point(&run);
                 let survived = run.crash(crash);
                 let rerun = salvage_fake(&survived).unwrap_or_else(|e| {
                     panic!("journal {}, after {after} ops, {crash:?}: {e}", id.get())
@@ -3331,6 +3379,9 @@ fn an_unread_journal_of_an_overlapping_pair_then_a_crash_anywhere_loses_nothing(
                 );
             }
         }
+        // Not vacuous: the crash cut salvage short at every point but the
+        // last, under every outcome.
+        sweep.interrupted_at_least(ops * CrashOutcome::standard().len()); // check-bound
     }
 }
 
@@ -3596,22 +3647,22 @@ fn a_resumed_session_crashed_anywhere_loses_nothing_and_never_reuses_an_id() {
         resume(&fs, &stale, &mut 0).unwrap();
         fs.attempted()
     };
-    let mut cases = 0;
+    let mut sweep = Sweep::new();
     for k in 0..total {
         for outcome in CrashOutcome::standard() {
             let fs = base.copy_disk();
             fs.crash_after(k);
             let mut durable = 1_200;
             let _ = resume(&fs, &stale, &mut durable);
+            sweep.crash_point(&fs);
             let mut used = created_journals(&fs);
             used.insert(JournalId::FIRST);
             let survived = fs.crash(outcome);
             check_resumed(&survived, durable, &used)
                 .unwrap_or_else(|e| panic!("crash after {k} ops, {outcome:?}: {e}"));
-            cases += 1;
         }
     }
-    assert!(cases > 100, "{cases}"); // check-bound
+    sweep.interrupted_more_than(100); // check-bound
 }
 
 /// Journal ids come from the session directory's marks file, never from the
@@ -3882,11 +3933,13 @@ fn sweep_salvage(
         "a second salvage changed the disk"
     );
     assert!(ops > 30, "{ops}"); // check-bound
+    let mut sweep = Sweep::new();
     for after in 0..=ops {
         for crash in CrashOutcome::standard() {
             let run = disk.copy_disk();
             run.crash_after(after);
             let _ = salvage(&mut session_store(&run), length());
+            sweep.crash_point(&run);
             let survived = run.crash(crash);
             let rerun = salvage(&mut session_store(&survived), length())
                 .unwrap_or_else(|e| panic!("after {after} ops, {crash:?}: {e}"));
@@ -3897,6 +3950,9 @@ fn sweep_salvage(
             );
         }
     }
+    // Not vacuous: the crash cut salvage short at every point but the last,
+    // under every outcome.
+    sweep.interrupted_at_least(ops * CrashOutcome::standard().len()); // check-bound
     done
 }
 
@@ -4172,10 +4228,13 @@ fn a_set_aside_is_reported_whatever_fails_after_it() {
     let ops = probe.attempted();
 
     let mut unsynced = 0;
+    let mut sweep = Sweep::new();
     for at in 0..ops {
         let run = disk.copy_disk();
         run.fail_after(at, io::ErrorKind::Other);
-        let Ok(done) = salvage(&mut session_store(&run), length()) else {
+        let salvaged = salvage(&mut session_store(&run), length());
+        sweep.failure_point(&run);
+        let Ok(done) = salvaged else {
             continue;
         };
         let renamed = run.paths().contains(&aside);
@@ -4191,6 +4250,8 @@ fn a_set_aside_is_reported_whatever_fails_after_it() {
         }
     }
     assert_eq!(unsynced, 1); // check-bound
+    // Not vacuous: the failure fired at every operation of salvage.
+    sweep.interrupted_at_least(ops); // check-bound
 }
 
 mod disk_full;

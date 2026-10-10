@@ -33,6 +33,7 @@ use super::*;
 use crate::fs::Fs;
 use crate::fs::crash::{CrashCase, CrashTest};
 use crate::fs::fake::{CrashOutcome, FakeFs};
+use crate::fs::sweep::Sweep;
 use crate::segment::{
     FakeStore, Publisher, SegmentLength, SegmentStore, needs_salvage, publish_journals, salvage,
     segment_file_name,
@@ -463,7 +464,7 @@ fn clean_ops() -> usize {
 fn a_stop_between_any_two_events_finalises_both_tracks() {
     let ops = clean_ops();
     assert!(ops > 150, "{ops}"); // check-bound
-    let mut stops = BTreeSet::new();
+    let mut sweep = Sweep::with_outcomes();
     for k in 0..=ops {
         let fs = FakeFs::with_dirs([session(), db()]);
         let promised = record(
@@ -473,17 +474,17 @@ fn a_stop_between_any_two_events_finalises_both_tracks() {
                 fail_at: None,
             },
         );
-        stops.insert(promised.captured.clone().into_iter().collect::<Vec<_>>());
+        sweep.saw(promised.captured.clone().into_iter().collect::<Vec<_>>());
         check_stopped(&promised, &fs).unwrap_or_else(|e| panic!("stopped after op {k}: {e}"));
     }
     // Stops landed at many places in the script, not a few.
-    assert!(stops.len() > 40, "{}", stops.len()); // check-bound
+    sweep.saw_more_than(40); // check-bound
 }
 
 #[test]
 fn a_stop_at_each_failpoint_keeps_the_loss_bound() {
     let ops = clean_ops();
-    let mut failed = 0;
+    let mut sweep = Sweep::new();
     for k in 0..ops {
         let fs = FakeFs::with_dirs([session(), db()]);
         let promised = record(
@@ -493,14 +494,18 @@ fn a_stop_at_each_failpoint_keeps_the_loss_bound() {
                 fail_at: Some(k),
             },
         );
-        failed += usize::from(promised.failures > 0 || !promised.finalised);
+        if promised.failures > 0 || !promised.finalised {
+            sweep.interrupted();
+        } else {
+            sweep.finished();
+        }
         check_stopped(&promised, &fs)
             .unwrap_or_else(|e| panic!("op {k} failed and the stop came: {e}"));
     }
     // Not vacuous: dozens of the failures broke a journal or left the
     // finalisation incomplete. (Most fall in publishing, which tries
     // again.)
-    assert!(failed >= 50, "{failed} of {ops}"); // check-bound
+    sweep.interrupted_at_least(50); // check-bound
 }
 
 /// What a crashed run promised, checked against salvage: durable audio
@@ -536,5 +541,5 @@ fn killed_while_finalising_salvage_completes_it_repeatably() {
     ])
     .run()
     .unwrap_or_else(|failure| panic!("{failure}"));
-    assert!(summary.scenario_ops > 100, "{summary:?}"); // check-bound
+    summary.scenario().interrupted_more_than(100); // check-bound
 }
