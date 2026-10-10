@@ -342,10 +342,10 @@ fn crash_after_every_operation_recovers_to_the_durable_position() {
     .run()
     .unwrap_or_else(|failure| panic!("{failure}"));
     // Not vacuous: some crash came with most of the sync interval unsynced.
-    assert!(worst.get() >= SampleCount::new(13_000), "{:?}", worst.get());
+    assert!(worst.get() >= SampleCount::new(13_000), "{:?}", worst.get()); // check-bound
     // Not vacuous: dozens of writes and several syncs of each journal, each
     // crashed at.
-    assert!(summary.scenario_ops > 40, "{summary:?}");
+    assert!(summary.scenario_ops > 40, "{summary:?}"); // check-bound
     let clean = FakeFs::with_dirs(["/session"]);
     let promised = record(&clean);
     for (id, track, _) in RECORDED {
@@ -354,7 +354,7 @@ fn crash_after_every_operation_recovers_to_the_durable_position() {
             .iter()
             .filter(|op| matches!(op, Op::Sync(p) if *p == journal_path(id)))
             .count();
-        assert!(syncs >= 4, "only {syncs} syncs of track {track:?}");
+        assert!(syncs >= 4, "only {syncs} syncs of track {track:?}"); // check-bound
     }
     assert_eq!(
         promised.started.keys().collect::<Vec<_>>(),
@@ -418,8 +418,8 @@ fn durable_stays_within_the_sync_interval_of_captured_in_a_timed_run() {
         .iter()
         .filter(|op| matches!(op, Op::Sync(_)))
         .count();
-    assert!((68..=73).contains(&syncs), "{syncs} syncs in 60 s");
-    assert!(worst >= SampleCount::new(13_000), "never lagged: {worst:?}");
+    assert!((68..=73).contains(&syncs), "{syncs} syncs in 60 s"); // check-bound
+    assert!(worst >= SampleCount::new(13_000), "never lagged: {worst:?}"); // check-bound
 }
 
 #[test]
