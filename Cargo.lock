@@ -1685,6 +1685,7 @@ dependencies = [
  "nota-core",
  "nota-recorder",
  "nota-store",
+ "pipewire",
  "proptest",
  "rusqlite",
  "rustix",

@@ -76,7 +76,8 @@ deny = [
   # no other crate can link sherpa-onnx, PipeWire or ALSA by depending on
   # them directly.
   { crate = "sherpa-onnx-sys", wrappers = ["sherpa-onnx"] },
-  { crate = "pipewire", wrappers = ["cpal"] },
+  # The recorder also watches PipeWire's graph itself, for device events.
+  { crate = "pipewire", wrappers = ["cpal", "nota-recorder"] },
   { crate = "pipewire-sys", wrappers = ["pipewire"] },
   { crate = "libspa", wrappers = ["pipewire"] },
   { crate = "libspa-sys", wrappers = ["libspa", "pipewire", "pipewire-sys"] },

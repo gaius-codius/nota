@@ -372,6 +372,8 @@ fn a_stream_without_a_timeline_waits_for_its_start() {
         events: rx,
         rate: rate(),
         tracks: test_tracks(&[MIC, SYSTEM]),
+        clock: Arc::new(FakeClock::new(SessionTime::ZERO)),
+        thresholds: BTreeMap::new(),
     };
     let mut reported = Vec::new();
     record_tracks(
@@ -424,6 +426,8 @@ fn a_track_that_cant_join_leaves_the_other_recording() {
         events: rx,
         rate: rate(),
         tracks: test_tracks(&[MIC, SYSTEM]),
+        clock: Arc::new(FakeClock::new(SessionTime::ZERO)),
+        thresholds: BTreeMap::new(),
     };
     let mut failed = Vec::new();
     record_tracks(
@@ -469,6 +473,8 @@ fn join_system_at(
         events: rx,
         rate: rate(),
         tracks: test_tracks(&[SYSTEM]),
+        clock: Arc::new(FakeClock::new(SessionTime::ZERO)),
+        thresholds: BTreeMap::new(),
     };
     let mut reported = Vec::new();
     record_tracks(&mut writer, &mut [], &events, &mut |_, e| reported.push(e)).unwrap();
@@ -721,6 +727,8 @@ fn a_closed_channel_ends_recording() {
         events: rx,
         rate: rate(),
         tracks: test_tracks(&[MIC]),
+        clock: Arc::new(FakeClock::new(SessionTime::ZERO)),
+        thresholds: BTreeMap::new(),
     };
     let mut audio = 0;
     record_tracks(
@@ -811,6 +819,8 @@ fn a_track_that_fails_first_leaves_the_other_recording_until_it_stops() {
         events: rx,
         rate: rate(),
         tracks: test_tracks(&[MIC, SYSTEM]),
+        clock: Arc::new(FakeClock::new(SessionTime::ZERO)),
+        thresholds: BTreeMap::new(),
     };
     let mut failed = Vec::new();
     record_tracks(&mut writer, &mut timelines, &events, &mut |t, e| {
@@ -867,6 +877,8 @@ fn events_from_a_stream_that_never_started_are_dropped() {
         events: rx,
         rate: rate(),
         tracks: test_tracks(&[SYSTEM]),
+        clock: Arc::new(FakeClock::new(SessionTime::ZERO)),
+        thresholds: BTreeMap::new(),
     };
     let mut reported = Vec::new();
     record_tracks(&mut writer, &mut timelines, &events, &mut |t, _| {
@@ -943,6 +955,8 @@ fn a_stalled_fsync_on_one_track_never_holds_up_the_other() {
         events: rx,
         rate: rate(),
         tracks: test_tracks(&[MIC, SYSTEM]),
+        clock: Arc::new(FakeClock::new(SessionTime::ZERO)),
+        thresholds: BTreeMap::new(),
     };
     let mic = events.progress(MIC).unwrap();
     let system = events.progress(SYSTEM).unwrap();
@@ -1042,6 +1056,8 @@ fn the_other_tracks_due_fsync_runs_as_soon_as_a_stream_ends() {
         events: rx,
         rate: rate(),
         tracks: test_tracks(&[MIC, SYSTEM]),
+        clock: Arc::new(FakeClock::new(SessionTime::ZERO)),
+        thresholds: BTreeMap::new(),
     };
     let system = events.progress(SYSTEM).unwrap();
     record_tracks(&mut writer, &mut timelines, &events, &mut |_, e| {

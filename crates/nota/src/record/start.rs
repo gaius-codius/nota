@@ -12,6 +12,7 @@ use nota_recorder::capture::{
     Capture, CaptureBackend, CaptureReceiver, RecordError, RecorderEvent, Source, TrackStarter,
     prepare_tracks, record_tracks,
 };
+use nota_recorder::detect::Thresholds;
 use nota_recorder::disk::{
     BALLAST_LEN, CHECK_INTERVAL, DiskMonitor, DiskReport, DiskWatch, MonitorConfig, Usage,
     WatchedFs, WatchedStore,
@@ -190,7 +191,10 @@ fn start_with_notes<B: CaptureBackend>(
     let disk = watch_disk(args, &session.audio(), sources.len(), &watch, &ui, clock)?;
     // The recorder runs before any stream opens: each track joins it as
     // its stream starts, while the next one opens.
-    let (starter, events) = prepare_tracks(&sources, RATE, clock);
+    let (starter, mut events) = prepare_tracks(&sources, RATE, clock);
+    // A pinned system device is a `Source::Device`, held to the
+    // microphone's 5 s of zeros unless it's told it's the system audio.
+    events.set_thresholds(SYSTEM, Thresholds::SYSTEM_AUDIO);
     let recorder = spawn_recorder(
         writer,
         events,

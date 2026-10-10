@@ -113,6 +113,26 @@
 //! stream was asked to start is early by its start-up latency, by a
 //! different amount on each track.
 //!
+//! # Detectors
+//!
+//! [`record_tracks`] runs the three detectors of [`crate::detect`] for
+//! each track and reports what they raise or clear as
+//! [`RecorderEvent::Detected`], with the track:
+//! - **Digital zeros and quiet** read the samples as they're recorded,
+//!   after the [`RecorderEvent::Audio`] they came in. A change is timed by
+//!   the track's timeline, so it's at the session time of the sample it
+//!   began or ended at.
+//! - **Stalled** reads the track's delivered count ([`Progress::now`]),
+//!   which the stream's thread moves, after every event and while the
+//!   recorder is idle. A recorder that's behind on its queue therefore
+//!   doesn't stall a track whose audio is waiting there. It's watched from
+//!   the stream's [`CaptureEvent::Started`], so a stream still opening
+//!   isn't stalled, and time spent suspended doesn't count.
+//!
+//! A track's detectors end with its stream, clearing what they raised. The
+//! thresholds come from the track's [`Source`] ([`prepare_tracks`]), or
+//! from [`CaptureReceiver::set_thresholds`].
+//!
 //! # The bound
 //!
 //! A track's durable position trails the audio the server delivered by at
@@ -168,15 +188,19 @@ use nota_core::{
     SessionTime, TrackId, TrackTimeline,
 };
 
-use crate::detect::Condition;
+use crate::detect::{Condition, Thresholds};
 use crate::fs::Fs;
 use crate::session::{FinishedJournal, SessionError, SessionWriter};
 
 #[cfg(test)]
 mod detect_tests;
+mod detectors;
 #[cfg(target_os = "linux")]
 mod pipewire;
 mod queue;
+// The route is followed by the PipeWire backend's watch; other platforms
+// have no backend yet.
+#[cfg(any(target_os = "linux", test))]
 mod route;
 #[cfg(test)]
 mod stop_tests;
@@ -189,6 +213,7 @@ mod tracks_tests;
 pub use pipewire::PipeWireBackend;
 pub use queue::{Positions, Progress};
 
+use detectors::Detectors;
 use queue::{Queue, QueueSender, Received};
 
 /// What to capture.
@@ -473,6 +498,11 @@ pub struct CaptureReceiver {
     rate: SampleRate,
     /// The tracks asked for, in order, with their progress.
     tracks: Vec<(TrackId, Progress)>,
+    /// The session clock, which the detectors read.
+    clock: Arc<dyn Clock>,
+    /// What each track's detectors hold it to. A track with none here is
+    /// held to [`Thresholds::MICROPHONE`].
+    thresholds: BTreeMap<TrackId, Thresholds>,
 }
 
 impl Drop for CaptureReceiver {
@@ -508,6 +538,16 @@ impl CaptureReceiver {
             .iter()
             .find(|(t, _)| *t == track)
             .map(|(_, progress)| progress.clone())
+    }
+
+    /// Holds `track`'s detectors to `thresholds`, for a caller that knows
+    /// more than its source says: a pinned device that's the system audio
+    /// ([`Thresholds::SYSTEM_AUDIO`]). Do it before [`record_tracks`] runs.
+    /// Nothing happens for a track that wasn't asked for.
+    pub fn set_thresholds(&mut self, track: TrackId, thresholds: Thresholds) {
+        if self.tracks.iter().any(|(t, _)| *t == track) {
+            self.thresholds.insert(track, thresholds);
+        }
     }
 
     /// The next event, waiting at most `timeout`.
@@ -671,9 +711,11 @@ pub fn prepare_tracks(
 ) -> (TrackStarter, CaptureReceiver) {
     let (queue, events) = Queue::new();
     let mut tracks: Vec<(TrackId, Progress)> = Vec::new();
-    for (track, _) in sources {
+    let mut thresholds = BTreeMap::new();
+    for (track, source) in sources {
         if !tracks.iter().any(|(t, _)| t == track) {
             tracks.push((*track, Progress::new(SampleIndex::ZERO, SampleIndex::ZERO)));
+            thresholds.insert(*track, thresholds_for(source));
         }
     }
     let starter = TrackStarter {
@@ -687,8 +729,19 @@ pub fn prepare_tracks(
         events: queue,
         rate,
         tracks,
+        clock: Arc::clone(clock),
+        thresholds,
     };
     (starter, receiver)
+}
+
+/// What the detectors hold a track on `source` to. A pinned device of no
+/// known kind gets the microphone's, which warns sooner.
+const fn thresholds_for(source: &Source) -> Thresholds {
+    match source {
+        Source::SystemAudio => Thresholds::SYSTEM_AUDIO,
+        Source::Microphone | Source::Device(_) => Thresholds::MICROPHONE,
+    }
 }
 
 impl TrackStarter {
@@ -1018,6 +1071,7 @@ pub fn record_tracks<S: Fs>(
     }
     note_durable(writer, events);
     let mut live: BTreeSet<TrackId> = events.tracks().into_iter().collect();
+    let mut detectors = Detectors::new(events);
     while !live.is_empty() {
         let (track, event) = match events.next(IDLE_SYNC_CHECK) {
             // A stream can report something before its start fails; its
@@ -1030,10 +1084,13 @@ pub fn record_tracks<S: Fs>(
             Received::Idle => {
                 settle(writer, Ok(()), report)?;
                 note_durable(writer, events);
+                detectors.check_stalls(events, &live, report);
                 continue;
             }
             Received::Closed => return Ok(()),
         };
+        // Before `admit`, which swallows a joining track's `Started`.
+        detectors.note(track, &event);
         let admitted = admit(&mut joining, track, event, events);
         if admitted.is_empty() {
             // It waits; the other tracks' fsyncs still run when due.
@@ -1041,36 +1098,41 @@ pub fn record_tracks<S: Fs>(
             note_durable(writer, events);
         }
         for event in admitted {
-            let outcome = match handle(writer, &mut timelines, track, event, report)? {
-                Handled::Recorded(outcome, spent) => {
-                    if let Some(buffer) = spent {
-                        // An append refused outright (`Overflow`) recorded
-                        // nothing: those samples still count as queued.
-                        if !matches!(outcome, Err((_, SessionError::Overflow))) {
-                            note_appended(writer, events, track, buffer.len());
+            let outcome =
+                match handle(writer, &mut timelines, &mut detectors, track, event, report)? {
+                    Handled::Recorded(outcome, spent) => {
+                        if let Some(buffer) = spent {
+                            // An append refused outright (`Overflow`) recorded
+                            // nothing: those samples still count as queued.
+                            if !matches!(outcome, Err((_, SessionError::Overflow))) {
+                                note_appended(writer, events, track, buffer.len());
+                            }
+                            events.events.recycle(buffer);
                         }
-                        events.events.recycle(buffer);
+                        outcome
                     }
-                    outcome
-                }
-                Handled::Joined => {
-                    note_started(writer, events, track);
-                    Ok(())
-                }
-                Handled::Refused(error) => {
-                    // Its later events are dropped; its `Stopped` ends it.
-                    joining.insert(track, Joining::Refused);
-                    report(Some(track), RecorderEvent::CaptureFailed(error));
-                    Ok(())
-                }
-                Handled::Ended => {
-                    live.remove(&track);
-                    Ok(())
-                }
-            };
+                    Handled::Joined => {
+                        note_started(writer, events, track);
+                        Ok(())
+                    }
+                    Handled::Refused(error) => {
+                        // Its later events are dropped; its `Stopped` ends it.
+                        joining.insert(track, Joining::Refused);
+                        report(Some(track), RecorderEvent::CaptureFailed(error));
+                        Ok(())
+                    }
+                    Handled::Ended => {
+                        let next = writer.next_sample(track);
+                        let timeline = timelines.get_mut(track).map(|(timeline, _)| &*timeline);
+                        detectors.end(track, next, timeline, report);
+                        live.remove(&track);
+                        Ok(())
+                    }
+                };
             settle(writer, outcome, report)?;
             note_durable(writer, events);
         }
+        detectors.check_stalls(events, &live, report);
     }
     Ok(())
 }
@@ -1254,16 +1316,24 @@ enum Handled {
 fn handle<S: Fs>(
     writer: &mut SessionWriter<S>,
     timelines: &mut Timelines<'_>,
+    detectors: &mut Detectors,
     track: TrackId,
     event: CaptureEvent,
     report: &mut dyn FnMut(Option<TrackId>, RecorderEvent),
 ) -> Result<Handled, RecordError> {
     let outcome = match event {
         CaptureEvent::Audio(samples) => {
-            return record_audio(writer, timelines, track, samples, None, report);
+            return record_audio(writer, timelines, detectors, track, (samples, None), report);
         }
         CaptureEvent::TimedAudio { samples, at } => {
-            return record_audio(writer, timelines, track, samples, Some(at), report);
+            return record_audio(
+                writer,
+                timelines,
+                detectors,
+                track,
+                (samples, Some(at)),
+                report,
+            );
         }
         CaptureEvent::Notice { notice, at } => {
             let lost = notice == CaptureNotice::Overrun;
@@ -1328,17 +1398,19 @@ fn handle<S: Fs>(
     Ok(Handled::Recorded(outcome.map_err(|e| (track, e)), None))
 }
 
-/// Records `track`'s `samples`, captured at `at` by the stream's stamp if
-/// it gave one: read against the track's epoch first, which may move it to
-/// a new one ([`time_buffer`]), then appended and reported.
+/// Records `track`'s `audio`: samples, and when the first was captured by
+/// the stream's stamp if it gave one. It's read against the track's epoch
+/// first, which may move it to a new one ([`time_buffer`]), then appended,
+/// reported, and fed to the track's detectors.
 fn record_audio<S: Fs>(
     writer: &mut SessionWriter<S>,
     timelines: &mut Timelines<'_>,
+    detectors: &mut Detectors,
     track: TrackId,
-    samples: Vec<i16>,
-    at: Option<SessionTime>,
+    audio: (Vec<i16>, Option<SessionTime>),
     report: &mut dyn FnMut(Option<TrackId>, RecorderEvent),
 ) -> Result<Handled, RecordError> {
+    let (samples, at) = audio;
     let Some((timeline, stamps)) = timelines.get_mut(track) else {
         return Err(RecordError::Session(SessionError::UnknownTrack(track)));
     };
@@ -1360,6 +1432,8 @@ fn record_audio<S: Fs>(
     if let Some(chunk) = AudioChunk::new(track, first, writer.rate(), samples.clone()) {
         report(Some(track), RecorderEvent::Audio(chunk));
     }
+    // Fed whatever the append did: the samples are numbered either way.
+    detectors.audio(track, writer.rate(), first, &samples, timeline, report);
     Ok(Handled::Recorded(
         appended.map_err(|e| (track, e)),
         Some(samples),

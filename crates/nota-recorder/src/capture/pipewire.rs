@@ -40,6 +40,8 @@ use thread_priority::{
 
 use super::{CaptureBackend, CaptureError, CaptureNotice, CaptureSender, Source};
 
+mod watch;
+
 /// The `SCHED_FIFO` priority the callback's thread asks for: `PipeWire`'s
 /// default for client threads, below its own (88).
 const RT_PRIORITY: u8 = 83;
@@ -88,7 +90,14 @@ impl Promotion {
 /// [`Source::SystemAudio`] captures the default output's monitor, and
 /// follows the default output when it changes; so does
 /// [`Source::Microphone`] for the default input. A [`Source::Device`]
-/// stays on that node.
+/// stays on that node: if it goes away, the track's stream ends rather
+/// than record whatever `PipeWire` moves it to.
+///
+/// Each stream has a watch on `PipeWire`'s graph, on a thread of its own,
+/// that reports which device the source is on as it changes
+/// ([`CaptureSender::device`]): a new default followed, or the device
+/// lost. A route change also opens an epoch, as cpal reports it
+/// ([`CaptureNotice::RouteChanged`]).
 ///
 /// The stream's thread asks for real-time priority on its first buffer:
 /// `SCHED_FIFO` directly where the user's rtprio limit allows it, and rtkit
@@ -97,9 +106,11 @@ impl Promotion {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PipeWireBackend;
 
-/// A running `PipeWire` stream. Capture stops when it's dropped.
+/// A running `PipeWire` stream. Capture stops when it's dropped, and then
+/// the watch on its device.
 pub struct PipeWireStream {
     _stream: cpal::Stream,
+    _watch: watch::Watch,
 }
 
 impl std::fmt::Debug for PipeWireStream {
@@ -135,6 +146,7 @@ impl CaptureBackend for PipeWireBackend {
             buffer_size: BufferSize::Default,
         };
         let errors = events.clone();
+        let watched = events.clone();
         let failed_source = source.clone();
         let mut promotion = Promotion::new();
         let promoted = Arc::clone(&promotion.promoted);
@@ -167,7 +179,10 @@ impl CaptureBackend for PipeWireBackend {
             )
             .map_err(|e| start_error(source, &e))?;
         stream.play().map_err(|e| start_error(source, &e))?;
-        Ok(PipeWireStream { _stream: stream })
+        Ok(PipeWireStream {
+            _stream: stream,
+            _watch: watch::watch(source.clone(), watched),
+        })
     }
 }
 

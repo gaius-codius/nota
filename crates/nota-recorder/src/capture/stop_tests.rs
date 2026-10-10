@@ -225,7 +225,8 @@ fn record_into(fs: &FakeFs, run: Run, promised: &mut Promised) -> Result<(), Str
             joined: Vec::new(),
             stamps: BTreeMap::new(),
         };
-        let handled = handle(&mut writer, &mut given, track, event, &mut report)
+        let mut d = Detectors::unwatched();
+        let handled = handle(&mut writer, &mut given, &mut d, track, event, &mut report)
             .map_err(|e| e.to_string())?;
         if let Handled::Recorded(outcome, _) = handled {
             settle(&mut writer, outcome, &mut report).map_err(|e| e.to_string())?;

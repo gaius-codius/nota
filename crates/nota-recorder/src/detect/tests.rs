@@ -461,3 +461,13 @@ fn the_fixture_raises_nothing() {
         assert_eq!(mic.changes, [], "at 1/{divisor} of its level");
     }
 }
+
+/// Samples numbered past the last sample number don't overflow the
+/// detectors: the writer refuses them, and they can't be counted, so they
+/// raise nothing.
+#[test]
+fn samples_past_the_last_number_dont_overflow() {
+    let mut levels = Levels::new(RATE, &Thresholds::MICROPHONE);
+    let changes = levels.push(SampleIndex::new(u64::MAX - 10), &zeros(6_000));
+    assert_eq!(changes, []);
+}

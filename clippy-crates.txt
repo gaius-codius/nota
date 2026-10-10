@@ -32,6 +32,10 @@
 cpal::traits::StreamTrait::now
 jiff::Timestamp::now
 jiff::Zoned::now
+# PipeWire's stream clock, and its thread loop's clock for a timed wait. The
+# recorder only watches PipeWire's graph with it, reading no time from it.
+pipewire::stream::Stream::time
+pipewire::thread_loop::ThreadLoop::get_time
 # Only with ratatui's `widget-calendar` feature, off today.
 ratatui_widgets::calendar::CalendarEventStore::today
 # Opening a database file creates it. nota-store opens the library; tests that
@@ -144,6 +148,9 @@ ratatui-termwiz termina vtparse wezterm-color-types wezterm-input-types
 [none: D-Bus IPC; nota asks logind for a sleep lock over the system bus, and no function reads the clock or writes files]
 dbus
 
+[none: PipeWire's SPA types, re-exported by pipewire as `pipewire::spa`: dictionaries, pods, results and hooks; no safe function reads the clock or writes files]
+libspa
+
 [none: audio, codecs, hashing, parsing, data types and system lookups; no function reads the clock or writes files]
 afl block-buffer claxon crc32fast crypto-common dasp_sample digest
 directories errno fallible-iterator fallible-streaming-iterator flacenc
@@ -168,7 +175,7 @@ hashlink heapless heck hex hmac home icu_collections icu_locale_core
 icu_normalizer icu_normalizer_data icu_properties icu_properties_data
 icu_provider ident_case idna idna_adapter indexmap indoc inout instability
 itertools itoa jni-sys-macros jobserver js-sys kasuari lab lazy_static
-libdbus-sys libloading libm libredox libspa libspa-sys line-clipping
+libdbus-sys libloading libm libredox libspa-sys line-clipping
 litemap litrs lock_api log lru lzma-rs lzma-sys mac_address mach2 md-5
 memchr memmem memoffset minimal-lexical miniz_oxide mio ndk ndk-context
 ndk-sys nix nom num-conv num-derive num_enum num_enum_derive num_threads
@@ -177,7 +184,7 @@ objc2-core-audio-types objc2-core-foundation objc2-encode objc2-foundation
 once_cell option-ext ordered-float palette palette_derive palette_math
 parking_lot parking_lot_core pbkdf2 percent-encoding pest pest_derive
 pest_generator pest_meta phf phf_codegen phf_generator phf_macros phf_shared
-pin-project-lite pipewire pipewire-sys pkg-config portable-atomic
+pin-project-lite pipewire-sys pkg-config portable-atomic
 portable-atomic-util potential_utf powerfmt ppv-lite86 proc-macro2
 proc-macro-crate quote rand_chacha rand_xorshift redox_syscall redox_users
 r-efi regex regex-automata regex-syntax ring rustc-hash rustc_version

@@ -19,6 +19,9 @@ disallowed-methods = [
   { path = "jiff::Zoned::now", reason = "read the calendar's time through wall_now in nota-core's clock module", allow-invalid = true },
   # cpal's stream clock; the session clock is the one time base.
   { path = "cpal::traits::StreamTrait::now", reason = "read time through the session clock in nota-core, so timing code can be tested with a fake clock", allow-invalid = true },
+  # PipeWire's own clocks; the recorder reads none of them.
+  { path = "pipewire::stream::Stream::time", reason = "read time through the session clock in nota-core, so timing code can be tested with a fake clock", allow-invalid = true },
+  { path = "pipewire::thread_loop::ThreadLoop::get_time", reason = "read time through the session clock in nota-core, so timing code can be tested with a fake clock", allow-invalid = true },
   # Only with ratatui's `widget-calendar` feature.
   { path = "ratatui_widgets::calendar::CalendarEventStore::today", reason = "read the calendar's time through wall_now in nota-core's clock module", allow-invalid = true },
   { path = "std::thread::sleep", reason = "sleeping hides races and makes tests slow and flaky; wait on a channel or the clock instead" },

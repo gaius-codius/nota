@@ -233,7 +233,10 @@ impl Levels {
     /// `first`, and returns what that raised or cleared, in order.
     pub fn push(&mut self, first: SampleIndex, samples: &[i16]) -> Vec<Change> {
         let mut changes = Vec::new();
-        for (sample, &value) in (first.get()..).map(SampleIndex::new).zip(samples) {
+        // Numbered by saturating: samples past the last number aren't
+        // recorded, and mustn't overflow here either.
+        let numbered = (0..).map(|n| first.saturating_add(SampleCount::new(n)));
+        for (sample, &value) in numbered.zip(samples) {
             changes.extend(self.zero_sample(sample, value));
             changes.extend(self.frame_sample(sample, value));
         }

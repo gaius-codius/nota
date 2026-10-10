@@ -14,6 +14,10 @@ publish = false
 # Audio capture: the PipeWire host on Linux. Only nota-recorder may use it
 # (deny.toml).
 cpal = { version = "0.18", default-features = false }
+# PipeWire's graph (registry and default-device metadata), which the recorder
+# watches for device events. The same pipewire-rs cpal's host is built on;
+# only the recorder and cpal may use it (deny.toml).
+pipewire = { version = "0.10", default-features = false }
 # Decodes FLAC segments in tests, to check what was encoded.
 claxon = "0.4"
 # The platform's data directory, where the library is kept. Brings in

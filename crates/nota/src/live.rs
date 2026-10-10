@@ -12,15 +12,25 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use nota_core::messages::{AudioChunk, Transcript};
-use nota_core::recorder::{Event, Level};
+use nota_core::recorder::{Cause, Event, Level, Warning};
 use nota_core::{Epoch, Gap, SessionTime, TrackId, TrackTimeline, Utterance, Word};
 use nota_recorder::capture::{CaptureNotice, RecorderEvent};
+use nota_recorder::detect::Condition;
 use nota_recorder::engine::EngineEvent;
 
 use crate::inhibit::{Slept, Unrecorded};
 
 /// How often each track's level is sent: well within the screen's 250 ms.
 const LEVEL_EVERY: Duration = Duration::from_millis(100);
+
+/// The warning's cause for what a detector noticed.
+const fn cause_of(condition: Condition) -> Cause {
+    match condition {
+        Condition::Stalled => Cause::Stalled,
+        Condition::DigitalZeros => Cause::DigitalZeros,
+        Condition::Quiet => Cause::Quiet,
+    }
+}
 
 /// What to do about one report.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -133,6 +143,22 @@ impl Live {
             }
             // The stream stopped: what the engine holds of it won't grow.
             (Some(track), RecorderEvent::CaptureFailed(_)) => actions.flush = Some(track),
+            (
+                Some(track),
+                RecorderEvent::Detected {
+                    condition,
+                    state,
+                    at,
+                },
+            ) => actions.updates.push(Event::Warning(Warning {
+                cause: cause_of(condition),
+                track: Some(track),
+                at,
+                state,
+            })),
+            (Some(track), RecorderEvent::Device { change, at }) => {
+                actions.updates.push(Event::Device { track, change, at });
+            }
             _ => {}
         }
         actions
