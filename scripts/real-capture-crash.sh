@@ -46,6 +46,14 @@
 # long that fsync and the track's one before it took, without failing on
 # them. Every other check still holds. Not on tmpfs.
 #
+# --ballast makes nota's 256 MB ballast (as the disk monitor's thread does)
+# a few seconds into a --measure-only run, so the journal fsyncs run while
+# it's written, and reports the worst lag behind the audio delivered and the
+# slowest fsync among the fsyncs that overlapped it against the 2 s bound
+# (reported, not failed). Use --seconds 12 or more, and put --scratch on the
+# disk to measure: a slow one (an HDD, an SD card, ext4 on either) is what
+# it's for.
+#
 # Run it on a real disk: on tmpfs every fsync is free, so the lag measures
 # nothing. The default scratch directory is under ~/.cache, and tmpfs is
 # refused unless --allow-tmpfs.
@@ -58,14 +66,16 @@
 #
 # Usage: scripts/real-capture-crash.sh [--mode kill|power|both] [--seconds S]
 #          [--segment-seconds K] [--tracks T] [--step K] [--from N] [--to N]
-#          [--measure-only] [--disk-load] [--scratch DIR] [--allow-tmpfs]
-#          [--keep]
+#          [--measure-only] [--disk-load] [--ballast] [--scratch DIR]
+#          [--allow-tmpfs] [--keep]
 #   --mode             which crashes (default both)
 #   --seconds S        recording length per point (default 8)
 #   --tracks T         tracks recorded at once (default 1)
 #   --segment-seconds  segment window, short so publishing runs (default 2)
 #   --step K           every Kth crash point (default 1: all of them)
 #   --disk-load        load the disk and report the lag (implies --measure-only)
+#   --ballast          write the ballast during the run and report the lag
+#                      (implies --measure-only)
 #   NOTA_TEST_MODELS   the test models (default ~/.local/share/nota/test-models)
 #   LAZYFS             the LazyFS binary
 #
@@ -82,6 +92,7 @@ SEGMENT=2
 TRACKS=1
 MEASURE_ONLY=0
 DISK_LOAD=0
+BALLAST=0
 STEP=1
 FROM=1
 TO=
@@ -99,6 +110,7 @@ while [[ $# -gt 0 ]]; do
     --tracks) TRACKS=$2; shift 2 ;;
     --measure-only) MEASURE_ONLY=1; shift ;;
     --disk-load) DISK_LOAD=1; MEASURE_ONLY=1; shift ;;
+    --ballast) BALLAST=1; MEASURE_ONLY=1; shift ;;
     --step) STEP=$2; shift 2 ;;
     --from) FROM=$2; shift 2 ;;
     --to) TO=$2; shift 2 ;;
@@ -281,7 +293,9 @@ PLAYER=$!
 WRITE_OPTS=(--source "$SINK" --seconds "$SECONDS_PER_POINT" --segment-seconds "$SEGMENT"
   --tracks "$TRACKS")
 CHECK_OPTS=(--segment-seconds "$SEGMENT")
-[[ $DISK_LOAD -eq 0 ]] || CHECK_OPTS+=(--under-load yes)
+[[ $DISK_LOAD -eq 0 && $BALLAST -eq 0 ]] || CHECK_OPTS+=(--under-load yes)
+# nota's ballast, BALLAST_LEN (256 * 1024 * 1024), starting 3 s in.
+[[ $BALLAST -eq 0 ]] || WRITE_OPTS+=(--ballast 268435456 --ballast-after 3)
 check() { "$BIN" check "$@" "${CHECK_OPTS[@]}"; }
 
 # How many operations an uncrashed run makes, on the plain disk.
@@ -311,6 +325,13 @@ if [[ $DISK_LOAD -eq 1 ]]; then
     "journal); $(field past_bound) fsyncs past 2 s, reported, not failed"
   field past_bound_fsyncs | tr ',' '\n' | grep -v '^none$' |
     sed 's/^\([0-9]*\)@\([^:]*\):\([^/]*\)\/fsync\([^/]*\)\/before\(.*\)$/  track \1 at \2: \3 behind; its fsync took \4, the one before \5/' || true
+fi
+if [[ $BALLAST -eq 1 ]]; then
+  # <ms to write>ms:<fsyncs overlapping>:<worst lag ms>:<slowest fsync ms>:<bound>
+  IFS=: read -r wrote overlapping lag took bound \
+    <<<"$(sed -n 's/.* ballast=\([^ ]*\).*/\1/p' "$WORK/count/check.out")"
+  echo "ballast written in $wrote: $overlapping fsyncs overlapped it, worst lag $lag ms behind" \
+    "the audio delivered, slowest fsync $took ms; bound check: $bound (2 s, reported, not failed)"
 fi
 if [[ $MEASURE_ONLY -eq 1 ]]; then
   slow=$(grep -c '^slow ' "$WORK/count/log" || true)

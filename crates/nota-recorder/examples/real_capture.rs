@@ -3,11 +3,17 @@
 //! and `scripts/real-engine-kill.sh`.
 //!
 //! - `write <dir> <log> <ref> --source NODE --seconds S --segment-seconds K
-//!   [--tracks T] [--stop-after N]` captures `T` tracks (default 1), each
+//!   [--tracks T] [--stop-after N] [--ballast BYTES] [--ballast-after S]`
+//!   captures `T` tracks (default 1), each
 //!   its own stream from the `PipeWire` node `NODE`, at 16 kHz for `S`
 //!   seconds into `<dir>/session`, with the store at
 //!   `<dir>/library.db`, publishing each finished journal on a publisher
-//!   thread as it goes, in `K`-second segment windows. Every recorder
+//!   thread as it goes, in `K`-second segment windows. With `--ballast`,
+//!   `S` seconds in (default 2) a thread makes a ballast of `BYTES` in
+//!   `<dir>`, as the disk monitor's thread does, so the recording's fsyncs
+//!   run while it's written; its start and end are logged, and `check`
+//!   reports the lag at the fsyncs that overlapped it (GAI-357). Keep it
+//!   out of the crash runs, which count operations. Every recorder
 //!   operation that changes the disk, and every row commit, is counted.
 //!   After the Nth, every thread stops before its next operation,
 //!   `<log>.stopped` is created, and the script SIGKILLs the process.
@@ -41,7 +47,10 @@
 //!   the lag is reported but not checked: the result names each fsync
 //!   that ended past 2 s behind the audio delivered, with how long that
 //!   fsync and the track's one before it took (a slow fsync also holds
-//!   back the next, which starts only once it completes).
+//!   back the next, which starts only once it completes). Whatever the
+//!   run, `ballast=` in the result says whether, and when, a ballast was
+//!   written, and the worst lag and fsync time among the fsyncs that
+//!   overlapped it.
 //! - `engine <dir> --source NODE --seconds S --engine PROGRAM --parakeet DIR
 //!   --vad FILE --said TEXT --kill-after-ms MS --ready PATH` captures from
 //!   `NODE` into journals and feeds every frame written to the real engine
@@ -101,6 +110,7 @@ mod linux {
         Capture, CaptureBackend, CaptureNotice, CaptureReceiver, PipeWireBackend, Progress,
         RecordError, RecorderEvent, Source, record_track, record_tracks, start, start_tracks,
     };
+    use nota_recorder::disk::Ballast;
     use nota_recorder::engine::{
         EngineCommand, EngineConfig, EngineEvent, EngineStatus, EngineSupervisor,
     };
@@ -292,6 +302,7 @@ mod linux {
     ///   stop <track> <op> <kind> <class> <t ns> <captured> <durable> <delivered>
     ///   end <track> <t ns> <captured> <durable> <delivered>
     ///   stopped <t ns>
+    ///   ballast <begin ns> <end ns> <made: 1, or 0 for none>
     ///
     /// A sync's captured is the journal's end when its fsync started: what
     /// the fsync covers. Its time and delivered are read when it completed,
@@ -833,6 +844,7 @@ mod linux {
             let fs = fs.clone();
             thread::spawn(move || record(writer, timelines, &events, &to_publish, &fs))
         };
+        let ballast = spawn_ballast(args, &fs, &clock, &dir)?;
         wait(Duration::from_secs(seconds));
         drop(captures);
         fs.0.note("stopped")?;
@@ -842,6 +854,11 @@ mod linux {
         // Finished even if the stream failed, so its last unsynced audio is
         // fsync'd before the error is reported.
         let last = writer.finish();
+        if let Some(ballast) = ballast {
+            ballast
+                .join()
+                .map_err(|_| "the ballast thread panicked")??;
+        }
         result?;
         if let Some(e) = unlogged {
             return Err(e.into());
@@ -870,6 +887,45 @@ mod linux {
             fs.total()
         )?;
         Ok(failures == 0)
+    }
+
+    /// Starts the `--ballast` thread, if the flag is given.
+    fn spawn_ballast(
+        args: &Args,
+        fs: &TapFs,
+        clock: &Arc<dyn Clock>,
+        dir: &Path,
+    ) -> Res<Option<thread::JoinHandle<Res<()>>>> {
+        let Some(len) = args.optional("ballast")? else {
+            return Ok(None);
+        };
+        let after = Duration::from_secs(args.optional("ballast-after")?.unwrap_or(2));
+        let (fs, clock, dir) = (fs.clone(), Arc::clone(clock), dir.to_path_buf());
+        Ok(Some(thread::spawn(move || {
+            make_ballast(&fs, &*clock, &dir, len, after)
+        })))
+    }
+
+    /// Makes a ballast of `len` bytes in `dir` after `after`, as the disk
+    /// monitor's thread does (fsynced every 8 MiB, on this thread), and
+    /// logs when it began and ended. Not through `fs`: its operations
+    /// aren't counted.
+    fn make_ballast(
+        fs: &TapFs,
+        clock: &dyn Clock,
+        dir: &Path,
+        len: u64,
+        after: Duration,
+    ) -> Res<()> {
+        wait(after);
+        let began = nanos(clock.now());
+        let made = Ballast::keep(&StdFs, dir, len, || false)?;
+        let ended = nanos(clock.now());
+        fs.0.log(&format!(
+            "ballast {began} {ended} {}",
+            u8::from(made.is_some())
+        ))?;
+        Ok(())
     }
 
     /// Publishes each batch of finished journals as it comes, logging the
@@ -1074,6 +1130,8 @@ mod linux {
         late: usize,
         /// When capture was stopped, if the run got that far.
         stopped: Option<u64>,
+        /// (began, ended, made), if a ballast was written during the run.
+        ballast: Option<(u64, u64, bool)>,
     }
 
     fn read_log(path: &Path) -> Res<Promised> {
@@ -1120,6 +1178,7 @@ mod linux {
                 Some("slow") => p.slow.push((format!("{}:{}", s(1)?, s(2)?), n(3)?, n(4)?)),
                 Some("late") => p.late += 1,
                 Some("stopped") => p.stopped = Some(n(1)?),
+                Some("ballast") => p.ballast = Some((n(1)?, n(2)?, n(3)? == 1)),
                 Some("journal-failed") => p.journal_failures += 1,
                 _ => return Err(format!("bad log line {line:?}").into()),
             }
@@ -1481,13 +1540,14 @@ mod linux {
             .max()
             .unwrap_or(0);
         let syncs: usize = promised.tracks.values().map(|t| t.syncs.len()).sum();
+        let ballast = ballast_report(promised);
         Ok(format!(
             "stop={} tracks={} durable={durable_min} recovered={recovered_min} loss_ms={:.1} \
              loss_delivered_ms={:.1} beyond_durable_ms={:.1} lag_max_ms={:.1} \
              delivered_lag_max_ms={:.1} wall_lag_max_ms={:.1} rotation_lag_max_ms={:.1} \
              lag_by_track={} past_bound={}/{} past_bound_fsyncs={} disk={} syncs={syncs} \
              rows={} salvaged={} deleted={} late_ops={} slowest_op={} peak_dbfs={:.1} \
-             state={}",
+             ballast={ballast} state={}",
             promised.stop.as_deref().unwrap_or("none"),
             promised.tracks.len(),
             ms(loss),
@@ -1521,6 +1581,48 @@ mod linux {
             20.0 * (f64::from(peak.max(1)) / 32_768.0).log10(),
             after.digest()
         ))
+    }
+
+    /// What the fsyncs that overlapped the ballast's writing showed, for
+    /// the result: `none` if none was written, else `<ms to write>ms` (or
+    /// `unmade`), the fsyncs that overlapped it, the worst lag behind the
+    /// audio delivered and the slowest fsync among them (ms), and whether
+    /// the lag stayed within the 2 s bound (`none-overlapped` if no fsync
+    /// overlapped the ballast, which then measured nothing).
+    fn ballast_report(p: &Promised) -> String {
+        let Some((began, ended, made)) = p.ballast else {
+            return "none".to_owned();
+        };
+        let (mut count, mut lag, mut took) = (0_usize, 0_u64, 0_u64);
+        // An fsync overlaps the ballast if it ended after the ballast began
+        // and began before it ended.
+        for &(t, _, durable, delivered, fsync_began) in
+            p.tracks.values().flat_map(|log| log.syncs.iter())
+        {
+            if t >= began && fsync_began <= ended {
+                count += 1;
+                lag = lag.max(delivered.saturating_sub(durable));
+                took = took.max(t.saturating_sub(fsync_began));
+            }
+        }
+        // Nanoseconds in a run are far below 2^52.
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "times in a measurement run are far below 2^52"
+        )]
+        let to_ms = |ns: u64| ns as f64 / 1_000_000.0;
+        format!(
+            "{:.0}ms{}:{count}:{:.0}:{:.0}:{}",
+            to_ms(ended.saturating_sub(began)),
+            if made { "" } else { "(unmade)" },
+            ms(lag),
+            to_ms(took),
+            match (count, lag > MAX_LAG) {
+                (0, _) => "none-overlapped",
+                (_, true) => "over",
+                (_, false) => "within",
+            }
+        )
     }
 
     /// The operations that took over 100 ms, for a failure message, timed
@@ -1984,5 +2086,64 @@ mod linux {
             said.len()
         )?;
         Ok(ok)
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// A promised log with one track whose syncs are
+        /// (t, durable, delivered, began), and the ballast written from
+        /// 2 s to 5 s.
+        fn promised(syncs: &[(u64, u64, u64, u64)], made: bool) -> Promised {
+            let mut track = TrackLog::default();
+            for &(t, durable, delivered, began) in syncs {
+                track.syncs.push((t, 0, durable, delivered, began));
+            }
+            let mut p = Promised::default();
+            p.tracks.insert(0, track);
+            p.ballast = Some((2_000_000_000, 5_000_000_000, made));
+            p
+        }
+
+        const SEC: u64 = 1_000_000_000;
+
+        #[test]
+        fn no_ballast_reports_none() {
+            assert_eq!(ballast_report(&Promised::default()), "none");
+        }
+
+        /// Only the fsyncs that overlapped the ballast count, and the worst
+        /// lag and the slowest fsync are taken among them.
+        #[test]
+        fn the_worst_of_the_overlapping_fsyncs() {
+            let p = promised(
+                &[
+                    // Ended before the ballast began: a huge lag, not counted.
+                    (SEC, 0, 100_000, SEC - 100_000_000),
+                    // Within it: 1 s behind (16 000 samples), 100 ms.
+                    (5 * SEC / 2, 1_000, 17_000, 5 * SEC / 2 - 100_000_000),
+                    // Began inside it, ended after: 0.5 s behind, 2.5 s.
+                    (11 * SEC / 2, 0, 8_000, 3 * SEC),
+                    // Began after it ended: not counted.
+                    (7 * SEC, 0, 100_000, 6 * SEC),
+                ],
+                true,
+            );
+            assert_eq!(ballast_report(&p), "3000ms:2:1000:2500:within");
+        }
+
+        #[test]
+        fn past_two_seconds_is_over() {
+            let p = promised(&[(3 * SEC, 0, 32_001, 3 * SEC - 1)], true);
+            assert!(ballast_report(&p).ends_with(":over"));
+            let p = promised(&[(3 * SEC, 0, 32_000, 3 * SEC - 1)], true);
+            assert!(ballast_report(&p).ends_with(":within"));
+        }
+
+        #[test]
+        fn an_unmade_ballast_and_no_overlap_say_so() {
+            let p = promised(&[(SEC, 0, 100_000, SEC - 1)], false);
+            assert_eq!(ballast_report(&p), "3000ms(unmade):0:0:0:none-overlapped");
+        }
     }
 }
