@@ -164,7 +164,8 @@ mod fake {
     use std::path::{Path, PathBuf};
 
     use nota_core::{
-        EpochAnchor, EpochId, SampleIndex, SampleRange, SampleRate, SessionId, SessionTime, TrackId,
+        Drift, EpochAnchor, EpochId, SampleIndex, SampleRange, SampleRate, SessionId, SessionTime,
+        TrackId,
     };
     use nota_store::{AudioDigest, SegmentRow, Sha256Digest};
 
@@ -178,8 +179,8 @@ mod fake {
     const ROW_LEN: usize = 8 + 4 + 4 + 8 + 8 + 32 + 1 + 32 + 4;
 
     /// Bytes in an epoch file: session, track, epoch, first sample, rate,
-    /// start, CRC-32.
-    const EPOCH_LEN: usize = 8 + 4 + 4 + 8 + 4 + 8 + 4;
+    /// start, drift, CRC-32.
+    const EPOCH_LEN: usize = 8 + 4 + 4 + 8 + 4 + 8 + 4 + 4;
 
     /// Segment rows as files on a [`FakeFs`], one per row, each published
     /// by temp file, fsync, rename and directory fsync: a commit that's
@@ -305,6 +306,7 @@ mod fake {
         out.extend_from_slice(&anchor.first_sample.get().to_le_bytes());
         out.extend_from_slice(&anchor.rate.hz().to_le_bytes());
         out.extend_from_slice(&anchor.start.as_nanos().to_le_bytes());
+        out.extend_from_slice(&anchor.drift.ppb().to_le_bytes());
         let crc = crc32fast::hash(&out);
         out.extend_from_slice(&crc.to_le_bytes());
         out
@@ -326,6 +328,7 @@ mod fake {
             id: EpochId::new(u32_at(12)?),
             first_sample: SampleIndex::new(u64_at(16)?),
             rate: SampleRate::new(u32_at(24)?)?,
+            drift: Drift::from_ppb(i32::from_le_bytes(body.get(36..40)?.try_into().ok()?))?,
             start: SessionTime::from_nanos(u64_at(28)?),
         };
         Some((SessionId::new(u64_at(0)?), TrackId::new(u32_at(8)?), anchor))
@@ -596,6 +599,7 @@ mod fake {
                 start: SessionTime::from_nanos(9),
                 first_sample: SampleIndex::new(u64::MAX),
                 rate: SampleRate::SPEECH,
+                drift: Drift::from_ppb(-123_456).unwrap(),
             };
             let bytes = encode_epoch(SESSION, TrackId::new(3), &anchor);
             assert_eq!(bytes.len(), EPOCH_LEN);
@@ -734,6 +738,7 @@ mod tests {
             start: SessionTime::from_nanos(start),
             first_sample: SampleIndex::ZERO,
             rate: SampleRate::SPEECH,
+            drift: nota_core::Drift::ZERO,
         }
     }
 

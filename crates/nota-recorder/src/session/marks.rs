@@ -11,32 +11,34 @@
 //!   resumed session must start each track's timeline above the epochs it
 //!   used, or two recordings would share an epoch. The highest epoch each
 //!   track has journaled is kept here, with its anchor (its first sample,
-//!   rate and start), durable before the first journal in it. A resumed
+//!   rate, start and drift), durable before the first journal in it. A resumed
 //!   session times its tracks on from that anchor, and resumes its clock
 //!   after the audio it times.
 //!
 //! The file is replaced whole: written to a temp file, fsync'd, renamed over
 //! the old one, and its directory fsync'd. A crash leaves the old marks or
 //! the new ones, never a mix. It's plain text; an epoch line gives the
-//! track, the epoch, then its first sample, rate in hertz and start in
-//! session-time nanoseconds:
+//! track, the epoch, then its first sample, rate in hertz, start in
+//! session-time nanoseconds and drift in parts per billion:
 //!
 //! ```text
-//! nota session marks 2
+//! nota session marks 3
 //! journals-below 64
-//! epoch 0 3 48000 16000 3000000000
+//! epoch 0 3 48000 16000 3000000000 -100000
 //! ```
 //!
-//! Version 1 files, written before epochs were timed, have only the track
-//! and epoch on each line. They're still read, and an epoch from one stays
-//! untimed until the track opens a newer one.
+//! Version 2 files, written before drift was measured, have no drift on
+//! each line; they're read as having none. Version 1 files, written before
+//! epochs were timed, have only the track and epoch on each line. Both are
+//! still read, and an epoch from a version 1 file stays untimed until the
+//! track opens a newer one.
 
 use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
 use std::io;
 use std::path::Path;
 
-use nota_core::{EpochAnchor, EpochId, SampleIndex, SampleRate, SessionTime, TrackId};
+use nota_core::{Drift, EpochAnchor, EpochId, SampleIndex, SampleRate, SessionTime, TrackId};
 
 use crate::fs::{Fs, FsFile};
 use crate::journal::JournalId;
@@ -46,9 +48,22 @@ pub const FILE_NAME: &str = "session-marks";
 /// Where a new version is written before it replaces the file.
 const TEMP_NAME: &str = "session-marks.tmp";
 /// The first line, naming the format and its version.
-const MAGIC: &str = "nota session marks 2";
-/// The first line of the older format, whose epochs aren't timed.
+const MAGIC: &str = "nota session marks 3";
+/// The first line of the older format whose epochs have no drift.
+const UNDRIFTED_MAGIC: &str = "nota session marks 2";
+/// The first line of the oldest format, whose epochs aren't timed.
 const UNTIMED_MAGIC: &str = "nota session marks 1";
+
+/// Which version of the format a file is in, by what its epoch lines hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Version {
+    /// Version 3: anchors with their drift.
+    Drifted,
+    /// Version 2: anchors, with no drift.
+    Undrifted,
+    /// Version 1: epoch numbers only.
+    Untimed,
+}
 
 /// Whether `path` is the marks' temp file: never the only copy of the
 /// marks, so salvage removes one a crash left.
@@ -133,12 +148,13 @@ impl Marks {
             let _ = match epoch {
                 MarkedEpoch::Timed(a) => writeln!(
                     out,
-                    "epoch {} {} {} {} {}",
+                    "epoch {} {} {} {} {} {}",
                     track.get(),
                     a.id.get(),
                     a.first_sample.get(),
                     a.rate.hz(),
-                    a.start.as_nanos()
+                    a.start.as_nanos(),
+                    a.drift.ppb()
                 ),
                 MarkedEpoch::Untimed(id) => writeln!(out, "epoch {} {}", track.get(), id.get()),
             };
@@ -152,9 +168,10 @@ impl Marks {
         let text = std::str::from_utf8(bytes).map_err(|_| BadMarks)?;
         let body = text.strip_suffix('\n').ok_or(BadMarks)?;
         let mut lines = body.split('\n');
-        let timed = match lines.next() {
-            Some(MAGIC) => true,
-            Some(UNTIMED_MAGIC) => false,
+        let version = match lines.next() {
+            Some(MAGIC) => Version::Drifted,
+            Some(UNDRIFTED_MAGIC) => Version::Undrifted,
+            Some(UNTIMED_MAGIC) => Version::Untimed,
             _ => return Err(BadMarks),
         };
         let below = lines
@@ -164,7 +181,7 @@ impl Marks {
             .ok_or(BadMarks)?;
         let mut epochs = BTreeMap::new();
         for line in lines {
-            let (track, epoch) = epoch_line(line, timed).ok_or(BadMarks)?;
+            let (track, epoch) = epoch_line(line, version).ok_or(BadMarks)?;
             // Tracks in order, each once, as written.
             if epochs
                 .last_key_value()
@@ -222,28 +239,36 @@ impl Marks {
     }
 }
 
-/// The track and epoch of an `epoch` line: timed, with five numbers, or
-/// untimed, with two (the only kind a version 1 file has, so only `timed`
-/// files may hold the first). `None` if it's neither.
-fn epoch_line(line: &str, timed: bool) -> Option<(TrackId, MarkedEpoch)> {
+/// The track and epoch of an `epoch` line in a file of `version`: timed,
+/// with six numbers (version 3) or five (version 2, no drift), or untimed,
+/// with two (the only kind a version 1 file has, though the later versions
+/// may keep one). `None` if it's none of those.
+fn epoch_line(line: &str, version: Version) -> Option<(TrackId, MarkedEpoch)> {
     let words: Vec<&str> = line.strip_prefix("epoch ")?.split(' ').collect();
     let track = TrackId::new(number(words.first()?)?);
     let id = EpochId::new(number(words.get(1)?)?);
-    let epoch = match *words.get(2..)? {
-        [] => MarkedEpoch::Untimed(id),
-        [first, hz, start] if timed => MarkedEpoch::Timed(EpochAnchor {
+    let timed = |first: &str, hz: &str, start: &str, drift: Drift| {
+        Some(MarkedEpoch::Timed(EpochAnchor {
             id,
             first_sample: SampleIndex::new(number(first)?),
             rate: SampleRate::new(number(hz)?)?,
             start: SessionTime::from_nanos(number(start)?),
-        }),
+            drift,
+        }))
+    };
+    let epoch = match (words.get(2..)?, version) {
+        ([], _) => MarkedEpoch::Untimed(id),
+        (&[first, hz, start, drift], Version::Drifted) => {
+            timed(first, hz, start, Drift::from_ppb(number(drift)?)?)?
+        }
+        (&[first, hz, start], Version::Undrifted) => timed(first, hz, start, Drift::ZERO)?,
         _ => return None,
     };
     Some((track, epoch))
 }
 
-/// A decimal number in its one canonical spelling: no sign, no leading
-/// zeros.
+/// A decimal number in its one canonical spelling: no leading zeros, and
+/// no sign but a minus on a negative number of a signed type.
 fn number<N: std::str::FromStr + ToString>(text: &str) -> Option<N> {
     let n: N = text.parse().ok()?;
     (n.to_string() == text).then_some(n)
@@ -269,6 +294,7 @@ mod tests {
             start: SessionTime::from_nanos(start),
             first_sample: SampleIndex::new(first),
             rate: SampleRate::SPEECH,
+            drift: Drift::ZERO,
         })
     }
 
@@ -285,23 +311,61 @@ mod tests {
     }
 
     /// Each epoch line gives the track, the epoch and, when it's timed, its
-    /// first sample, rate and start.
+    /// first sample, rate, start and drift.
     #[test]
     fn the_format_is_plain_text() {
         let mut m = marks(64, &[]);
-        m.epochs
-            .insert(TrackId::new(0), timed(3, 48_000, 3_000_000_000));
+        m.epochs.insert(
+            TrackId::new(0),
+            drifting(timed(3, 48_000, 3_000_000_000), -100_000),
+        );
         m.epochs
             .insert(TrackId::new(1), MarkedEpoch::Untimed(EpochId::new(0)));
+        m.epochs.insert(TrackId::new(2), timed(1, 0, 5));
         assert_eq!(
             m.encode(),
-            "nota session marks 2\njournals-below 64\nepoch 0 3 48000 16000 3000000000\n\
+            "nota session marks 3\njournals-below 64\nepoch 0 3 48000 16000 3000000000 -100000\n\
+             epoch 1 0\nepoch 2 1 0 16000 5 0\n"
+        );
+    }
+
+    /// `epoch`, timed, with a drift of `ppb`.
+    fn drifting(epoch: MarkedEpoch, ppb: i32) -> MarkedEpoch {
+        let MarkedEpoch::Timed(anchor) = epoch else {
+            return epoch;
+        };
+        MarkedEpoch::Timed(EpochAnchor {
+            drift: Drift::from_ppb(ppb).unwrap(),
+            ..anchor
+        })
+    }
+
+    /// A version 2 file, from before drift was measured, reads with its
+    /// epochs' drift zero, and is written back as version 3.
+    #[test]
+    fn a_version_2_file_reads_with_no_drift() {
+        let old = Marks::decode(
+            b"nota session marks 2\njournals-below 64\nepoch 0 3 48000 16000 3000000000\n\
+              epoch 1 0\n",
+        )
+        .unwrap();
+        assert_eq!(
+            old.epochs.get(&TrackId::new(0)),
+            Some(&timed(3, 48_000, 3_000_000_000))
+        );
+        assert_eq!(
+            old.epochs.get(&TrackId::new(1)),
+            Some(&MarkedEpoch::Untimed(EpochId::new(0)))
+        );
+        assert_eq!(
+            old.encode(),
+            "nota session marks 3\njournals-below 64\nepoch 0 3 48000 16000 3000000000 0\n\
              epoch 1 0\n"
         );
     }
 
     /// A version 1 file, from before epochs were timed, reads with its
-    /// epochs untimed, and is written back as version 2.
+    /// epochs untimed, and is written back as version 3.
     #[test]
     fn a_version_1_file_reads_with_untimed_epochs() {
         let old = Marks::decode(b"nota session marks 1\njournals-below 64\nepoch 0 3\n").unwrap();
@@ -311,7 +375,7 @@ mod tests {
         );
         assert_eq!(
             old.encode(),
-            "nota session marks 2\njournals-below 64\nepoch 0 3\n"
+            "nota session marks 3\njournals-below 64\nepoch 0 3\n"
         );
     }
 
@@ -453,7 +517,14 @@ mod tests {
             "nota session marks 2\njournals-below 64\nepoch 0 1 0 16000 0 0\n",
             "nota session marks 2\njournals-below 64\nepoch 0 1 00 16000 0\n",
             "nota session marks 2\njournals-below 64\nepoch 0\n",
-            "nota session marks 3\njournals-below 64\n",
+            // Version 3's have a drift too, within the limit, spelt plainly.
+            "nota session marks 3\njournals-below 64\nepoch 0 1 0 16000 0\n",
+            "nota session marks 3\njournals-below 64\nepoch 0 1 0 16000 0 1000001\n",
+            "nota session marks 3\njournals-below 64\nepoch 0 1 0 16000 0 -1000001\n",
+            "nota session marks 3\njournals-below 64\nepoch 0 1 0 16000 0 +5\n",
+            "nota session marks 3\njournals-below 64\nepoch 0 1 0 16000 0 -0\n",
+            "nota session marks 3\njournals-below 64\nepoch 0 1 0 16000 0 0 0\n",
+            "nota session marks 4\njournals-below 64\n",
         ] {
             assert_eq!(Marks::decode(text.as_bytes()), Err(BadMarks), "{text:?}");
         }
@@ -473,7 +544,7 @@ mod tests {
         }
 
         /// Whatever the bytes, decoding doesn't panic; what it accepts
-        /// encodes back to the same marks, and a version 2 file to the same
+        /// encodes back to the same marks, and a version 3 file to the same
         /// bytes.
         #[test]
         fn decoding_any_bytes_never_panics_and_round_trips_what_it_accepts(
@@ -488,8 +559,10 @@ mod tests {
             }
         }
 
-        /// A version 2 file of timed and untimed epochs, damaged by one
-        /// byte, never decodes to other marks with the same encoding.
+        /// A version 3 file of timed and untimed epochs, damaged by one
+        /// byte, is refused or read as written: as the marks it now spells,
+        /// or as the same marks under an older version's first line (a
+        /// file of untimed epochs reads the same in every version).
         #[test]
         fn a_changed_byte_is_refused_or_read_as_written(
             epochs in proptest::collection::btree_map(any::<u32>(), any_marked_epoch(), 1..4),
@@ -504,7 +577,7 @@ mod tests {
             let at = at.index(bytes.len());
             bytes[at] = to;
             if let Ok(read) = Marks::decode(&bytes) {
-                prop_assert_eq!(read.encode().into_bytes(), bytes);
+                prop_assert!(read == m || read.encode().into_bytes() == bytes, "{read:?}");
             }
         }
     }
@@ -517,14 +590,18 @@ mod tests {
                 any::<u32>(),
                 any::<u64>(),
                 1..=SampleRate::MAX_HZ,
-                any::<u64>()
+                any::<u64>(),
+                -Drift::MAX_PPB..=Drift::MAX_PPB,
             )
-                .prop_map(|(id, first, hz, start)| MarkedEpoch::Timed(EpochAnchor {
-                    id: EpochId::new(id),
-                    start: SessionTime::from_nanos(start),
-                    first_sample: SampleIndex::new(first),
-                    rate: SampleRate::new(hz).unwrap(),
-                })),
+                .prop_map(|(id, first, hz, start, ppb)| MarkedEpoch::Timed(
+                    EpochAnchor {
+                        id: EpochId::new(id),
+                        start: SessionTime::from_nanos(start),
+                        first_sample: SampleIndex::new(first),
+                        rate: SampleRate::new(hz).unwrap(),
+                        drift: Drift::from_ppb(ppb).unwrap(),
+                    }
+                )),
         ]
     }
 }

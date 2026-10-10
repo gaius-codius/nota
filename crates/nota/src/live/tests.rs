@@ -165,6 +165,36 @@ fn a_new_epoch_flushes_the_engine_and_places_later_text_after_the_gap() {
     );
 }
 
+/// A retimed epoch follows straight on, with no gap: the engine keeps what
+/// it's hearing, and later text is placed by the new epoch's drift.
+#[test]
+fn a_retimed_epoch_flushes_nothing() {
+    let recorder_mic = {
+        let mut t = opened(MIC, 0);
+        t.retime(
+            SampleIndex::new(1_000),
+            nota_core::Drift::from_ppb(-100_000).unwrap(),
+        )
+        .unwrap();
+        t
+    };
+    let mut live = Live::new(&[opened(MIC, 0)]);
+    let epoch = recorder_mic.epochs()[1];
+    let actions = live.recorder(Some(MIC), RecorderEvent::Epoch(epoch));
+    assert_eq!(actions.flush, None);
+    assert!(actions.updates.is_empty());
+    // 10 s of samples 100 ppm slow after the retime take 10.001 s.
+    let after = live.engine(heard(MIC, 1_000, 11_000, "after"));
+    assert_eq!(
+        texts(&after.updates),
+        [(
+            ms(1_000),
+            SessionTime::from_nanos(11_001_000_101),
+            "after".to_owned()
+        )]
+    );
+}
+
 #[test]
 fn a_failed_stream_flushes_its_track() {
     let mut live = Live::new(&[opened(MIC, 0)]);

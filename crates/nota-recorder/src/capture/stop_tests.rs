@@ -223,6 +223,7 @@ fn record_into(fs: &FakeFs, run: Run, promised: &mut Promised) -> Result<(), Str
         let mut given = Timelines {
             given: &mut timelines,
             joined: Vec::new(),
+            stamps: BTreeMap::new(),
         };
         let handled = handle(&mut writer, &mut given, track, event, &mut report)
             .map_err(|e| e.to_string())?;

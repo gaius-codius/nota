@@ -101,10 +101,18 @@ fn the_schema_has_exactly_these_tables() {
 #[test]
 fn epochs_keep_their_track() {
     let (_dir, store) = store("epoch");
-    let columns = "session_id, track, epoch, first_sample, rate, anchor_ns";
+    let columns = "session_id, track, epoch, first_sample, rate, anchor_ns, drift_ppb";
     let rows = [
-        vec![int(1), int(0), int(0), int(0), int(16_000), int(5)],
-        vec![int(1), int(1), int(0), int(0), int(16_000), Value::Null],
+        vec![int(1), int(0), int(0), int(0), int(16_000), int(5), int(0)],
+        vec![
+            int(1),
+            int(1),
+            int(0),
+            int(0),
+            int(16_000),
+            Value::Null,
+            int(-1_000_000),
+        ],
         vec![
             int(1),
             int(1),
@@ -112,26 +120,52 @@ fn epochs_keep_their_track() {
             int(9_600),
             int(16_000),
             int(900_000_000),
+            int(1_000_000),
         ],
     ];
     for row in &rows {
         write(&store, "epoch", columns, row);
     }
     assert_eq!(read(&store, "epoch"), rows);
-    // The same track and epoch twice, a rate of zero, another session.
+    // The same track and epoch twice, a rate of zero, another session, a
+    // drift past the limit either way.
     refused(&store, "epoch", columns, &rows[0]);
     refused(
         &store,
         "epoch",
         columns,
-        &[int(1), int(0), int(4), int(0), int(0), Value::Null],
+        &[int(1), int(0), int(4), int(0), int(0), Value::Null, int(0)],
     );
     refused(
         &store,
         "epoch",
         columns,
-        &[int(2), int(0), int(0), int(0), int(16_000), Value::Null],
+        &[
+            int(2),
+            int(0),
+            int(0),
+            int(0),
+            int(16_000),
+            Value::Null,
+            int(0),
+        ],
     );
+    for drift in [1_000_001, -1_000_001] {
+        refused(
+            &store,
+            "epoch",
+            columns,
+            &[
+                int(1),
+                int(0),
+                int(5),
+                int(0),
+                int(16_000),
+                int(0),
+                int(drift),
+            ],
+        );
+    }
 }
 
 #[test]

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc bc733a3ed20851bb34fa562dcc5a8d40f837fc7a15504f87f937edf77e46adcb # shrinks to j = Journal { header: JournalHeader { id: JournalId(0), track: TrackId(0), epoch: EpochId(0), rate: SampleRate(1), timing: Some(Timing { start: SessionTime(0), first_sample: SampleIndex(0), drift: Drift(0) }) }, bytes: [78, 79, 84, 65, 74, 82, 78, 76, 4, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 90, 73, 134, 109], frames: [], ends: [], next: 0 }, at = Index(0), flip = false

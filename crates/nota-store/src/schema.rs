@@ -16,7 +16,7 @@
 //! | `session` | number, title, language, state, when it started (V3) | `nota record`, and adopting a session found on disk |
 //! | `track` | each track's kind and source | `nota record`, and adopting a session found on disk with its row kept |
 //! | `segment` | each published segment: its track, epoch, samples, SHA-256, decoded-audio digest (V6) | the recorder's publish step and salvage |
-//! | `epoch` | each epoch's first sample, rate and session-time anchor ([`Store::insert_epoch`](crate::Store::insert_epoch)) | the recorder's publish step, before each segment row |
+//! | `epoch` | each epoch's first sample, rate, session-time anchor and drift (V7) ([`Store::insert_epoch`](crate::Store::insert_epoch)) | the recorder's publish step, before each segment row |
 //! | `utterance`, `word` | the heard text, as the engine confirmed it, with word times; never changed (V4's triggers) | `nota record`'s live text ([`crate::transcript`]) |
 //! | `revision`, `revision_text` | the displayed text: revision 0 is the heard text, each later one a new row holding only what it changes; never changed | revision 0 with the first utterance, later ones by term clean-up |
 //! | `proposal` | a proposed fix, with the revision, model, pack and thresholds it came from | term clean-up |
@@ -343,6 +343,15 @@ CREATE TABLE finding (
     status TEXT NOT NULL
 ) STRICT;
 CREATE INDEX finding_by_session ON finding (session_id, status);
+";
+
+/// Version 7: each epoch's drift (`epoch.drift_ppb`), how far its device's
+/// clock ran from the session clock in parts per billion, which its
+/// samples are timed by ([`Drift`](nota_core::Drift)). Rows stored before
+/// it read as having none, as every epoch did then.
+pub(crate) const V7: &str = "
+ALTER TABLE epoch ADD COLUMN drift_ppb INTEGER NOT NULL DEFAULT 0
+    CHECK (drift_ppb BETWEEN -1000000 AND 1000000);
 ";
 
 #[cfg(test)]

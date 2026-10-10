@@ -18,8 +18,8 @@ impl TrackId {
     }
 }
 
-/// One epoch of a track: the stretch from one opening of its stream, or one
-/// overrun that lost audio, to the next.
+/// One epoch of a track: the stretch from one opening of its stream, one
+/// loss of audio, or one correction of its drift, to the next.
 /// Numbered from zero within each track, in the order they were opened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EpochId(u32);

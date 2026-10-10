@@ -1,6 +1,6 @@
 //! The journal's acceptance tests: crash after every operation, the lag
-//! bound in a timed run, torn final frames, and the v3 header with its
-//! journal id and epoch anchor (and the v2 header, still read).
+//! bound in a timed run, torn final frames, and the v4 header with its
+//! journal id and epoch anchor (and the v3 and v2 headers, still read).
 
 use std::collections::BTreeMap;
 use std::io;
@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nota_core::{
-    Clock, EpochAnchor, EpochId, FakeClock, SampleCount, SampleIndex, SampleRange, SampleRate,
-    SessionTime, TrackId,
+    Clock, Drift, EpochAnchor, EpochId, FakeClock, SampleCount, SampleIndex, SampleRange,
+    SampleRate, SessionTime, TrackId,
 };
 
 use super::format::{FRAME_HEADER_LEN, HEADER_LEN, MAX_FRAME_SAMPLES, encode_frame, encode_header};
@@ -41,6 +41,7 @@ fn anchor(epoch: EpochId, rate: SampleRate) -> EpochAnchor {
         start: SessionTime::ZERO,
         first_sample: SampleIndex::ZERO,
         rate,
+        drift: Drift::ZERO,
     }
 }
 
@@ -755,16 +756,20 @@ fn header_problems_are_reported() {
 
 #[test]
 fn headers_with_a_valid_crc_but_bad_fields_are_refused() {
-    // Another version (an older or a future one) in the v3 layout, or a zero
-    // rate, with a correct CRC.
+    // Another version (an older or a future one) in the v4 layout, a zero
+    // rate, or a drift past the limit either way, with a correct CRC.
     let good = encode_header(header(0, MIC));
     let mut old = good.clone();
     old[8..10].copy_from_slice(&1_u16.to_le_bytes());
     let mut future = good.clone();
-    future[8..10].copy_from_slice(&4_u16.to_le_bytes());
-    let mut zero_rate = good;
+    future[8..10].copy_from_slice(&5_u16.to_le_bytes());
+    let mut zero_rate = good.clone();
     zero_rate[10..14].fill(0);
-    for mut bad in [old, future, zero_rate] {
+    let mut too_fast = good.clone();
+    too_fast[46..50].copy_from_slice(&1_000_001_i32.to_le_bytes());
+    let mut too_slow = good;
+    too_slow[46..50].copy_from_slice(&(-1_000_001_i32).to_le_bytes());
+    for mut bad in [old, future, zero_rate, too_fast, too_slow] {
         let crc_at = HEADER_LEN - 4;
         let crc = crc32fast::hash(&bad[..crc_at]);
         bad[crc_at..].copy_from_slice(&crc.to_le_bytes());
@@ -801,7 +806,7 @@ fn a_version_1_journal_is_refused() {
 }
 
 #[test]
-fn the_v3_header_round_trips_and_names_the_file() {
+fn the_v4_header_round_trips_and_names_the_file() {
     let fs = FakeFs::with_dirs(["/session"]);
     let (_clock, dyn_clock) = fake_clock();
     let rate = SampleRate::new(48_000).unwrap();
@@ -811,6 +816,7 @@ fn the_v3_header_round_trips_and_names_the_file() {
         start: SessionTime::from_nanos(3_000_000_000),
         first_sample: SampleIndex::new(4),
         rate,
+        drift: Drift::from_ppb(-87_654).unwrap(),
     };
     let wanted = [
         JournalHeader::new(JournalId::FIRST, MIC, anchor(EPOCH, SampleRate::SPEECH)),
@@ -831,7 +837,7 @@ fn the_v3_header_round_trips_and_names_the_file() {
         journal.finish().unwrap();
         let bytes = fs.read(&session().join(name)).unwrap();
         assert_eq!(&bytes[..HEADER_LEN], encode_header(want));
-        assert_eq!(&bytes[8..10], 3_u16.to_le_bytes(), "format version 3");
+        assert_eq!(&bytes[8..10], 4_u16.to_le_bytes(), "format version 4");
         let read = read_journal(&bytes);
         let got = read.header().unwrap();
         assert_eq!(
@@ -852,7 +858,7 @@ fn the_v3_header_round_trips_and_names_the_file() {
     );
 }
 
-/// The anchor is at bytes 26..46, as the format's table says.
+/// The anchor is at bytes 26..50, as the format's table says.
 #[test]
 fn the_anchor_sits_where_the_format_says() {
     let a = EpochAnchor {
@@ -860,13 +866,60 @@ fn the_anchor_sits_where_the_format_says() {
         start: SessionTime::from_nanos(0x0102_0304_0506_0708),
         first_sample: SampleIndex::new(0x1112_1314_1516_1718),
         rate: SampleRate::SPEECH,
+        drift: Drift::from_ppb(-0x0002_0304).unwrap(),
     };
     let bytes = encode_header(JournalHeader::new(JournalId::FIRST, MIC, a));
     assert_eq!(bytes.len(), HEADER_LEN);
     assert_eq!(bytes[26..30], 5_u32.to_le_bytes());
     assert_eq!(bytes[30..38], 0x1112_1314_1516_1718_u64.to_le_bytes());
     assert_eq!(bytes[38..46], 0x0102_0304_0506_0708_u64.to_le_bytes());
-    assert_eq!(bytes[46..], crc32fast::hash(&bytes[..46]).to_le_bytes());
+    assert_eq!(bytes[46..50], (-0x0002_0304_i32).to_le_bytes());
+    assert_eq!(bytes[50..], crc32fast::hash(&bytes[..50]).to_le_bytes());
+}
+
+/// `header` as a version 3 journal wrote it: no drift, and its CRC at
+/// 46..50.
+fn version_3(header: JournalHeader) -> Vec<u8> {
+    let mut bytes = encode_header(header);
+    bytes[8..10].copy_from_slice(&3_u16.to_le_bytes());
+    bytes.truncate(46);
+    let crc = crc32fast::hash(&bytes);
+    bytes.extend_from_slice(&crc.to_le_bytes());
+    bytes
+}
+
+/// A journal written before drift was measured, with a version 3 header,
+/// is still read, with its frames, and its epoch has no drift.
+#[test]
+fn a_version_3_journal_is_read_with_no_drift() {
+    let fast = EpochAnchor {
+        drift: Drift::from_ppb(55_000).unwrap(),
+        ..anchor(EPOCH, SampleRate::SPEECH)
+    };
+    let mut bytes = version_3(JournalHeader::new(JournalId::new(4), MIC, fast));
+    assert_eq!(bytes.len(), 50);
+    encode_frame(&mut bytes, 0, MIC, SampleIndex::ZERO, &samples(MIC, 0, 100));
+    let read = read_journal(&bytes);
+    let undrifted = EpochAnchor {
+        drift: Drift::ZERO,
+        ..fast
+    };
+    assert_eq!(
+        read.header().and_then(JournalHeader::anchor),
+        Some(undrifted)
+    );
+    // Its frames start after its own 50-byte header.
+    assert_eq!(read.frames().first().map(Frame::seq), Some(0));
+    assert_eq!(read.audio().unwrap().1, samples(MIC, 0, 100));
+    assert_eq!(
+        (read.end(), read.valid_len()),
+        (ReadEnd::Complete, bytes.len())
+    );
+    // Cut inside its header: torn.
+    assert_eq!(
+        read_journal(&bytes[..49]).end(),
+        ReadEnd::Incomplete { offset: 0 }
+    );
 }
 
 /// A journal an older nota wrote, with a version 2 header, is still read,
@@ -894,17 +947,17 @@ fn a_version_2_journal_is_read_untimed() {
         (read.end(), read.valid_len()),
         (ReadEnd::Complete, bytes.len())
     );
-    // Cut inside its header: torn, as a version 3 header is.
+    // Cut inside its header: torn, as a version 4 header is.
     assert_eq!(
         read_journal(&bytes[..33]).end(),
         ReadEnd::Incomplete { offset: 0 }
     );
 }
 
-/// A version 3 header cut before its end, but past its version, is torn,
+/// A version 4 header cut before its end, but past its version, is torn,
 /// not invalid: salvage removes a journal that never held audio.
 #[test]
-fn a_version_3_header_cut_short_is_torn() {
+fn a_version_4_header_cut_short_is_torn() {
     let bytes = encode_header(header(0, MIC));
     for cut in [0, 9, 10, 34, HEADER_LEN - 1] {
         let read = read_journal(&bytes[..cut]);

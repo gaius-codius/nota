@@ -111,8 +111,15 @@ impl Live {
                 // A follower that refuses is out of step; its text is then
                 // placed by the epochs it has, which is the best it knows.
                 if let Some(follower) = self.followers.get_mut(&track) {
-                    let _ = follower.follow(&epoch);
-                    actions.flush = Some(track);
+                    // An epoch that follows straight on (drift corrected)
+                    // breaks nothing the engine is hearing.
+                    let straight_on = follower
+                        .current()
+                        .and_then(|current| current.time_of(epoch.first_sample()))
+                        == Some(epoch.start());
+                    if follower.follow(&epoch).is_err() || !straight_on {
+                        actions.flush = Some(track);
+                    }
                 } else {
                     // The track joined: its first epoch, numbered above
                     // any a resumed session used, and nothing yet to flush.

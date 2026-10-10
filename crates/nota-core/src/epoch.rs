@@ -7,19 +7,26 @@
 //! between them is a gap with no audio, and a mark made during it maps to no
 //! sample.
 //!
+//! Each epoch also carries a [`Drift`], and maps its samples at its rate
+//! times `1 + drift`: the rate its device was measured running at, or a
+//! little off it while a correction closes a difference. When the drift is measured, or changes, the track moves to a new
+//! epoch that follows straight on from the old one
+//! ([`TrackTimeline::retime`]), with no gap; see [`crate::drift`].
+//!
 //! An epoch's [`EpochAnchor`] is what has to be kept to time its samples
-//! again later: its number, first sample, rate and start. The recorder
+//! again later: its number, first sample, rate, drift and start. The recorder
 //! stores it with the epoch's audio, and [`TrackTimeline::rebuild`] makes a
 //! timeline from the anchors again after a crash or for a resumed session.
 
 use std::time::Duration;
 
+use crate::drift::Drift;
 use crate::ids::{EpochId, TrackId};
 use crate::time::{SampleIndex, SampleRange, SampleRate, SessionTime};
 
 /// One epoch of a track: from `first_sample` on, sample `s` plays at
-/// `start + (s - first_sample) / rate`. It runs until the next epoch's first
-/// sample, or for the newest epoch, open-ended.
+/// `start + (s - first_sample) / (rate * (1 + drift))`. It runs until the
+/// next epoch's first sample, or for the newest epoch, open-ended.
 ///
 /// Only a [`TrackTimeline`] makes epochs, so every epoch has been checked
 /// against the one before it.
@@ -29,13 +36,15 @@ pub struct Epoch {
     start: SessionTime,
     first_sample: SampleIndex,
     rate: SampleRate,
+    drift: Drift,
     overrun: Duration,
 }
 
 impl Epoch {
     /// How far this epoch's start was pushed back because the previous
-    /// epoch's audio, at its nominal rate, ran past the requested start: the
-    /// drift measured at this reopening. Zero normally.
+    /// epoch's audio, at its rate and drift, ran past the requested start:
+    /// the error its mapping had built up by this reopening. Zero
+    /// normally.
     #[must_use]
     pub const fn overrun(&self) -> Duration {
         self.overrun
@@ -65,6 +74,13 @@ impl Epoch {
         self.rate
     }
 
+    /// How far the device's clock ran from the session clock, as this
+    /// epoch maps its samples.
+    #[must_use]
+    pub const fn drift(&self) -> Drift {
+        self.drift
+    }
+
     /// What has to be kept to time this epoch's samples again: everything
     /// but its overrun.
     #[must_use]
@@ -74,6 +90,7 @@ impl Epoch {
             start: self.start,
             first_sample: self.first_sample,
             rate: self.rate,
+            drift: self.drift,
         }
     }
 
@@ -83,7 +100,8 @@ impl Epoch {
     #[must_use]
     pub fn time_of(&self, sample: SampleIndex) -> Option<SessionTime> {
         let offset = sample.checked_count_since(self.first_sample)?;
-        self.start.checked_add(offset.duration_at(self.rate)?)
+        self.start
+            .checked_add(self.drift.duration_of(offset, self.rate)?)
     }
 
     /// Whether an epoch starting at `start` from `first_sample` may come
@@ -116,13 +134,13 @@ impl Epoch {
     #[must_use]
     pub fn sample_at(&self, time: SessionTime) -> Option<SampleIndex> {
         let elapsed = time.checked_duration_since(self.start)?;
-        let offset = crate::time::SampleCount::started_within(elapsed, self.rate)?;
+        let offset = self.drift.count_within(elapsed, self.rate)?;
         self.first_sample.checked_add(offset)
     }
 }
 
 /// An epoch as it's stored: from `first_sample` on, the track's samples
-/// play at `rate` from `start`. Unchecked: only
+/// play at `rate` under `drift` from `start`. Unchecked: only
 /// [`TrackTimeline::rebuild`] turns anchors back into epochs, checking each
 /// against the one before.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +153,9 @@ pub struct EpochAnchor {
     pub first_sample: SampleIndex,
     /// The stream's sampling rate in the epoch.
     pub rate: SampleRate,
+    /// How far the device's clock ran from the session clock, as the epoch
+    /// maps its samples. Zero in anchors kept before drift was measured.
+    pub drift: Drift,
 }
 
 /// The time between two epochs of a track, when there was no audio.
@@ -192,9 +213,9 @@ pub struct OpenedEpoch {
     /// Where it starts: the requested start, or later if the previous
     /// epoch's audio hadn't ended by then.
     pub start: SessionTime,
-    /// How far the previous epoch's audio, timed at its nominal rate, ran
+    /// How far the previous epoch's audio, timed at its rate and drift, ran
     /// past the requested start. Zero normally; more means the device's
-    /// clock ran fast against the session clock, and this is the drift it
+    /// clock ran faster than its drift says, and this is the error it
     /// built up.
     pub overrun: Duration,
 }
@@ -214,7 +235,7 @@ pub enum EpochError {
     /// audio ended that drift can't explain it: more audio arrived than
     /// time passed, by more than 1000 ppm plus 10 ms.
     ImplausibleOverrun {
-        /// When the previous epoch's audio ended, at its nominal rate.
+        /// When the previous epoch's audio ended, at its rate and drift.
         previous_end: SessionTime,
         /// The refused start.
         start: SessionTime,
@@ -223,6 +244,9 @@ pub enum EpochError {
     TimeOverflow,
     /// The track already has as many epochs as an [`EpochId`] can number.
     TooManyEpochs,
+    /// An epoch to follow straight on from another
+    /// ([`TrackTimeline::retime`]) was asked for before the track had one.
+    NoEpoch,
     /// An epoch to follow ([`TrackTimeline::follow`]) isn't the next one
     /// the timeline would open: one was missed, or came twice.
     NotNext {
@@ -265,6 +289,7 @@ impl std::fmt::Display for EpochError {
             ),
             Self::TimeOverflow => f.write_str("the previous epoch ends beyond the session clock"),
             Self::TooManyEpochs => f.write_str("the track has run out of epoch numbers"),
+            Self::NoEpoch => f.write_str("the track has no epoch to follow on from"),
             Self::NotNext { expected, got } => write!(
                 f,
                 "epoch {} came where epoch {} was due",
@@ -355,6 +380,7 @@ impl TrackTimeline {
                 start: anchor.start,
                 first_sample: anchor.first_sample,
                 rate: anchor.rate,
+                drift: anchor.drift,
                 overrun: Duration::ZERO,
             });
         }
@@ -389,18 +415,21 @@ impl TrackTimeline {
     }
 
     /// Records that the stream (re)opened at `start`, with `first_sample` as
-    /// the track's sample count so far, at `rate`.
+    /// the track's sample count so far, at `rate`. The new epoch keeps the
+    /// drift of the one before (a stream reopened on the same device runs
+    /// at the same rate), or none for the first; see
+    /// [`Self::open_epoch_drifting`] to give it.
     ///
     /// Opening without a sample in between (a stream that fails straight
     /// away) is allowed: the earlier epoch just holds no samples.
     ///
-    /// If the previous epoch's audio, timed at its nominal rate, runs past
-    /// `start` (a device clock running fast), the new epoch starts where
-    /// that audio ends instead, so no two samples share a moment, and the
-    /// overrun is reported. Correcting drift itself is the clock's later
-    /// work; this keeps the timeline consistent meanwhile. Until then, a
-    /// real gap shorter than the drift built up is absorbed: it shows as a
-    /// smaller overrun, not as a gap.
+    /// If the previous epoch's audio, timed at its rate and drift, runs
+    /// past `start` (a device clock running faster than its drift says),
+    /// the new epoch starts where that audio ends instead, so no two samples
+    /// share a moment, and the overrun is reported. A real gap shorter than
+    /// the error built up is absorbed: it shows as a smaller overrun, not
+    /// as a gap. With the drift measured ([`crate::drift`]) that error stays
+    /// within a few milliseconds.
     ///
     /// # Errors
     ///
@@ -415,6 +444,23 @@ impl TrackTimeline {
         start: SessionTime,
         first_sample: SampleIndex,
         rate: SampleRate,
+    ) -> Result<OpenedEpoch, EpochError> {
+        let drift = self.current().map_or(Drift::ZERO, Epoch::drift);
+        self.open_epoch_drifting(start, first_sample, rate, drift)
+    }
+
+    /// [`Self::open_epoch`], with the new epoch's samples mapped under
+    /// `drift`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::open_epoch`].
+    pub fn open_epoch_drifting(
+        &mut self,
+        start: SessionTime,
+        first_sample: SampleIndex,
+        rate: SampleRate,
+        drift: Drift,
     ) -> Result<OpenedEpoch, EpochError> {
         let id = self.next_id()?;
         let mut opened = OpenedEpoch {
@@ -453,9 +499,40 @@ impl TrackTimeline {
             start: opened.start,
             first_sample,
             rate,
+            drift,
             overrun: opened.overrun,
         });
         Ok(opened)
+    }
+
+    /// Opens an epoch at `first_sample` that follows straight on from the
+    /// current one, at its rate, with its samples from there on mapped
+    /// under `drift`: it starts when the current epoch says `first_sample`
+    /// plays, so there's no gap between them. For correcting drift, while
+    /// the audio runs on unbroken.
+    ///
+    /// # Errors
+    ///
+    /// [`EpochError::NoEpoch`] if there's no epoch to follow on from;
+    /// otherwise as [`Self::open_epoch`]. The timeline is unchanged when it
+    /// refuses.
+    pub fn retime(
+        &mut self,
+        first_sample: SampleIndex,
+        drift: Drift,
+    ) -> Result<OpenedEpoch, EpochError> {
+        let current = self.current().ok_or(EpochError::NoEpoch)?;
+        let rate = current.rate;
+        if first_sample < current.first_sample {
+            return Err(EpochError::SampleWentBack {
+                previous: current.first_sample,
+                first_sample,
+            });
+        }
+        let start = current
+            .time_of(first_sample)
+            .ok_or(EpochError::TimeOverflow)?;
+        self.open_epoch_drifting(start, first_sample, rate, drift)
     }
 
     /// A timeline that follows another from `epoch` on: its first epoch,
@@ -866,6 +943,7 @@ mod tests {
                 start: t(5),
                 first_sample: s(7),
                 rate: SPEECH,
+                drift: Drift::ZERO,
             })
         );
     }
@@ -905,6 +983,7 @@ mod tests {
             start: t(0),
             first_sample: s(0),
             rate: SPEECH,
+            drift: Drift::ZERO,
         };
         let mut rebuilt = TrackTimeline::rebuild(TrackId::new(0), [anchor]).unwrap();
         // Its second of audio ends at 1 s: an epoch requested well before
@@ -931,6 +1010,7 @@ mod tests {
             start: t(start),
             first_sample: s(first),
             rate: SPEECH,
+            drift: Drift::ZERO,
         };
         let track = TrackId::new(0);
         assert_eq!(
@@ -997,6 +1077,7 @@ mod tests {
             start: t(0),
             first_sample: s(0),
             rate: SPEECH,
+            drift: Drift::ZERO,
         };
         let mut timeline = TrackTimeline::rebuild(TrackId::new(0), [anchor]).unwrap();
         assert_eq!(
@@ -1028,6 +1109,83 @@ mod tests {
         assert_eq!(follower, timeline);
     }
 
+    /// A reopened stream keeps the drift its device was measured at; the
+    /// first epoch has none.
+    #[test]
+    fn a_new_epoch_keeps_the_drift_before_it() {
+        let mut timeline = TrackTimeline::new(TrackId::new(0));
+        timeline.open_epoch(t(0), s(0), SPEECH).unwrap();
+        let fast = Drift::from_ppb(100_000).unwrap();
+        timeline.retime(s(16_000), fast).unwrap();
+        timeline
+            .open_epoch(t(5_000_000_000), s(32_000), SPEECH)
+            .unwrap();
+        let drifts: Vec<Drift> = timeline.epochs().iter().map(Epoch::drift).collect();
+        assert_eq!(drifts, [Drift::ZERO, fast, fast]);
+    }
+
+    /// A retimed epoch starts where the one before says its first sample
+    /// plays, so there's no gap, and maps its samples under its own drift.
+    #[test]
+    fn a_retimed_epoch_follows_straight_on() {
+        let mut timeline = TrackTimeline::new(TrackId::new(0));
+        timeline.open_epoch(t(1_000), s(0), SPEECH).unwrap();
+        let fast = Drift::from_ppb(100_000).unwrap();
+        let opened = timeline.retime(s(16_000), fast).unwrap();
+        assert_eq!(
+            opened,
+            OpenedEpoch {
+                id: EpochId::new(1),
+                start: t(1_000_001_000),
+                overrun: Duration::ZERO
+            }
+        );
+        assert_eq!(timeline.gaps().count(), 0);
+        // 16,000 samples from a device 100 ppm fast take 1 s / 1.0001.
+        assert_eq!(timeline.time_of(s(32_000)), Some(t(1_999_901_010)));
+        assert_eq!(timeline.sample_at(t(1_999_901_010)), Some(s(32_000)));
+        assert_eq!(timeline.epochs()[1].anchor().drift, fast);
+    }
+
+    /// An epoch that holds no audio yet can be retimed at its own first
+    /// sample: the new one starts where it does.
+    #[test]
+    fn an_empty_epoch_can_be_retimed_at_its_first_sample() {
+        let mut timeline = TrackTimeline::new(TrackId::new(0));
+        timeline.open_epoch(t(7), s(100), SPEECH).unwrap();
+        let fast = Drift::from_ppb(100_000).unwrap();
+        assert_eq!(
+            timeline.retime(s(100), fast).map(|o| (o.id, o.start)),
+            Ok((EpochId::new(1), t(7)))
+        );
+    }
+
+    /// Retiming needs an epoch to follow on from, and a sample count that
+    /// doesn't go back; refused, the timeline is unchanged.
+    #[test]
+    fn retiming_refuses_what_it_cant_follow_on_from() {
+        let mut empty = TrackTimeline::new(TrackId::new(0));
+        assert_eq!(empty.retime(s(0), Drift::ZERO), Err(EpochError::NoEpoch));
+        let mut timeline = TrackTimeline::new(TrackId::new(0));
+        timeline.open_epoch(t(0), s(100), SPEECH).unwrap();
+        let before = timeline.clone();
+        assert_eq!(
+            timeline.retime(s(99), Drift::ZERO),
+            Err(EpochError::SampleWentBack {
+                previous: s(100),
+                first_sample: s(99)
+            })
+        );
+        let mut late = TrackTimeline::new(TrackId::new(0));
+        late.open_epoch(t(u64::MAX - 10), s(0), SPEECH).unwrap();
+        assert_eq!(
+            late.retime(s(16_000), Drift::ZERO),
+            Err(EpochError::TimeOverflow)
+        );
+        assert_eq!(timeline, before);
+        assert!(!EpochError::NoEpoch.to_string().is_empty());
+    }
+
     /// The anchor error names both epochs.
     #[test]
     fn not_after_describes_itself() {
@@ -1040,13 +1198,21 @@ mod tests {
     }
 
     /// One epoch to open: how long after the previous epoch's audio it
-    /// starts, how many samples it holds, and its rate.
+    /// starts, how many samples it holds, its rate and its drift.
     #[derive(Debug, Clone)]
     struct Opening {
         gap_nanos: u64,
         early_nanos: u64,
         samples: u64,
         rate: SampleRate,
+        drift: Drift,
+    }
+
+    fn any_drift() -> impl Strategy<Value = Drift> {
+        prop_oneof![
+            2 => Just(Drift::ZERO),
+            1 => (-Drift::MAX_PPB..=Drift::MAX_PPB).prop_map(|ppb| Drift::from_ppb(ppb).unwrap()),
+        ]
     }
 
     fn any_rate() -> impl Strategy<Value = SampleRate> {
@@ -1065,12 +1231,14 @@ mod tests {
             prop_oneof![4 => Just(0u64), 1 => 0..=MIN_OVERRUN_ALLOWED_NANOS],
             prop_oneof![Just(0u64), 0..10_000_000u64],
             any_rate(),
+            any_drift(),
         )
-            .prop_map(|(gap_nanos, early_nanos, samples, rate)| Opening {
+            .prop_map(|(gap_nanos, early_nanos, samples, rate, drift)| Opening {
                 gap_nanos,
                 early_nanos,
                 samples,
                 rate,
+                drift,
             });
         (
             0..1_000_000_000_000u64,
@@ -1105,7 +1273,9 @@ mod tests {
                 requested = t(asked.saturating_sub(opening.early_nanos));
                 start = t(ended.as_nanos() + effective_gap(opening));
             }
-            let opened = timeline.open_epoch(requested, first, opening.rate).unwrap();
+            let opened = timeline
+                .open_epoch_drifting(requested, first, opening.rate, opening.drift)
+                .unwrap();
             assert_eq!(opened.start, start);
             assert_eq!(
                 opened.overrun,
@@ -1118,8 +1288,9 @@ mod tests {
             spans.push((start, first, end));
             start = start
                 .checked_add(
-                    SampleCount::new(opening.samples)
-                        .duration_at(opening.rate)
+                    opening
+                        .drift
+                        .duration_of(SampleCount::new(opening.samples), opening.rate)
                         .unwrap(),
                 )
                 .unwrap();

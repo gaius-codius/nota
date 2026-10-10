@@ -1,17 +1,27 @@
-//! Epochs' timing through a crash: a track records two epochs with a gap
-//! between them, publishing live, and is crashed after every operation.
-//! Whatever survived, salvage leaves each committed segment's epoch timed
-//! in the store as it was recorded, so the track's samples map to session
-//! time as before and the gap is still a gap; and a writer reopening the
-//! session would resume its clock after the audio it kept.
+//! Epochs' timing through a crash: a track records three epochs, the
+//! second retimed for drift straight on from the first and the third after
+//! a gap, publishing live, and is crashed after every operation. Whatever
+//! survived, salvage leaves each committed segment's epoch timed in the
+//! store as it was recorded, drift included, so the track's samples map to
+//! session time as before and the gap is still a gap; and a writer
+//! reopening the session would resume its clock after the audio it kept.
 
 use std::cell::Cell;
 
-use nota_core::{Epoch, TrackTimeline};
+use nota_core::{Drift, Epoch, TrackTimeline};
 
 use super::*;
 
-/// When the second epoch opens: 1,750 samples in, with 3 s lost.
+/// When the second epoch opens, retimed for a device measured 250 ppm
+/// fast: 1,000 samples in, straight on from the first.
+const RETIME_AT: u64 = 1_000;
+const DRIFT: Drift = match Drift::from_ppb(250_000) {
+    Some(drift) => drift,
+    None => Drift::ZERO,
+};
+
+/// When the third epoch opens: 1,750 samples in, with 3 s lost. It keeps
+/// the second's drift.
 const REOPEN_AT: u64 = 1_750;
 const LOST: std::time::Duration = std::time::Duration::from_secs(3);
 
@@ -25,9 +35,9 @@ struct Timed {
 }
 
 /// Records `MIC` in 250-sample chunks, a quarter-second each: epoch 0 from
-/// 0 s, then, at sample [`REOPEN_AT`], [`LOST`] with no audio and epoch 1;
-/// 3,000 samples in all, publishing each journal as it ends. Stops at the
-/// first error.
+/// 0 s, epoch 1 at sample [`RETIME_AT`] under [`DRIFT`], then, at sample
+/// [`REOPEN_AT`], [`LOST`] with no audio and epoch 2; 3,000 samples in
+/// all, publishing each journal as it ends. Stops at the first error.
 fn record_two_epochs(fs: &FakeFs) -> Timed {
     let mut timed = Timed {
         timeline: TrackTimeline::new(MIC),
@@ -47,6 +57,11 @@ fn record_into(fs: &FakeFs, timed: &mut Timed) -> Result<(), Box<dyn Error>> {
     writer.start_track(MIC, &epoch)?;
     for _ in 0..12 {
         let from = writer.next_sample(MIC).ok_or("not started")?.get();
+        if from == RETIME_AT {
+            timed.timeline.retime(SampleIndex::new(from), DRIFT)?;
+            let retimed: Epoch = *timed.timeline.current().ok_or("no epoch")?;
+            writer.new_epoch(MIC, &retimed)?;
+        }
         if from == REOPEN_AT {
             clock.advance(LOST);
             timed.clock_end = clock.now();
@@ -138,7 +153,7 @@ fn check_timed(timed: &Timed, kept: &Result<Kept, String>) -> Result<(), String>
         }
     }
     let epochs_kept: BTreeSet<EpochId> = kept.rows.iter().map(SegmentRow::epoch).collect();
-    if epochs_kept.len() == 2
+    if epochs_kept.len() == timed.timeline.epochs().len()
         && rebuilt.gaps().collect::<Vec<_>>() != timed.timeline.gaps().collect::<Vec<_>>()
     {
         return Err("the gap between the epochs isn't kept".to_owned());
@@ -160,15 +175,18 @@ fn check_timed(timed: &Timed, kept: &Result<Kept, String>) -> Result<(), String>
     Ok(())
 }
 
-/// After a crash anywhere in a recording with two epochs and a gap,
-/// salvage rebuilds every kept epoch's mapping from samples to session
-/// time.
+/// After a crash anywhere in a recording with a drift-corrected epoch and
+/// a gap, salvage rebuilds every kept epoch's mapping from samples to
+/// session time, drift included.
 #[test]
 fn salvage_rebuilds_every_epoch_s_timing_after_a_crash_anywhere() {
     let fs = FakeFs::with_dirs([session(), db()]);
     let clean = record_two_epochs(&fs);
     let kept = salvage_and_read(&fs).unwrap();
-    // Not vacuous: uncrashed, both epochs publish, with the gap between.
+    // Not vacuous: uncrashed, every epoch publishes, the second and third
+    // with their drift, with the gap after the second.
+    let drifts: Vec<Drift> = kept.anchors.iter().map(|(_, a)| a.drift).collect();
+    assert_eq!(drifts, [Drift::ZERO, DRIFT, DRIFT]);
     assert_eq!(
         kept.anchors,
         clean
@@ -179,10 +197,11 @@ fn salvage_rebuilds_every_epoch_s_timing_after_a_crash_anywhere() {
             .collect::<Vec<_>>()
     );
     let gaps: Vec<_> = clean.timeline.gaps().map(|g| (g.from(), g.to())).collect();
+    // 750 samples at 1 kHz, 250 ppm fast, take 749,812,547 ns.
     assert_eq!(
         gaps,
         [(
-            SessionTime::from_nanos(1_750_000_000),
+            SessionTime::from_nanos(1_749_812_547),
             SessionTime::from_nanos(4_750_000_000)
         )]
     );
@@ -193,13 +212,11 @@ fn salvage_rebuilds_every_epoch_s_timing_after_a_crash_anywhere() {
         record_two_epochs,
         salvage_and_read,
         |_: &CrashCase, timed: &Timed, kept: &Result<Kept, String>| {
+            // Rows on both sides of the gap: the drifted second epoch's
+            // and the third's.
             if kept.as_ref().is_ok_and(|k| {
-                k.rows
-                    .iter()
-                    .map(SegmentRow::epoch)
-                    .collect::<BTreeSet<_>>()
-                    .len()
-                    == 2
+                let epochs: BTreeSet<EpochId> = k.rows.iter().map(SegmentRow::epoch).collect();
+                epochs.contains(&EpochId::new(1)) && epochs.contains(&EpochId::new(2))
             }) {
                 both.set(both.get() + 1);
             }
@@ -213,6 +230,6 @@ fn salvage_rebuilds_every_epoch_s_timing_after_a_crash_anywhere() {
     .unwrap_or_else(|failure| panic!("{failure}"));
     assert!(summary.scenario_ops > 60, "{summary:?}");
     assert!(summary.recovery_crashed > 100, "{summary:?}");
-    // Many crashes left rows in both epochs to time across the gap.
+    // Many crashes left rows either side of the gap to time across it.
     assert!(both.get() > 100, "{}", both.get());
 }

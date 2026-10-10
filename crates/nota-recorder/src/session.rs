@@ -1372,6 +1372,7 @@ impl<S: Fs> SessionWriter<S> {
             start: self.earlier_end(track).unwrap_or(SessionTime::ZERO),
             first_sample: at,
             rate: self.rate,
+            drift: nota_core::Drift::ZERO,
         };
         let timeline = TrackTimeline::rebuild(track, [anchor]).unwrap();
         *timeline.current().unwrap()

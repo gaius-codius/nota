@@ -42,6 +42,9 @@ fn samples(from: u64, len: u64) -> Vec<i16> {
 #[derive(Debug, Clone)]
 enum Step {
     Audio(Vec<i16>),
+    /// Audio the stream stamped: its first sample was captured at this
+    /// time on the clock that stops during suspend.
+    TimedAudio(Vec<i16>, Duration),
     Notice(CaptureNotice),
     Fail(CaptureError),
     /// Moves the session clock on.
@@ -99,6 +102,7 @@ impl CaptureBackend for Synthetic {
             for step in script {
                 match step {
                     Step::Audio(s) => feeder_events.audio(&s),
+                    Step::TimedAudio(s, stamp) => feeder_events.audio_captured(&s, stamp),
                     Step::Notice(n) => feeder_events.notice(n),
                     Step::Fail(e) => feeder_events.failed(e),
                     Step::Advance(by) => clock.advance(by),
@@ -1557,4 +1561,498 @@ fn audio_the_writer_refuses_outright_stays_delivered() {
     assert_eq!(positions.captured, last);
     assert_eq!(positions.queued(), SampleCount::new(1));
     assert_eq!(positions.delivered, SampleIndex::new(u64::MAX));
+}
+
+/// The epochs the timeline holds, as (id, start, first sample).
+fn epoch_starts(timeline: &TrackTimeline) -> Vec<(u32, SessionTime, u64)> {
+    timeline
+        .epochs()
+        .iter()
+        .map(|e| (e.id().get(), e.start(), e.first_sample().get()))
+        .collect()
+}
+
+/// The timeline's gaps, as (from, to).
+fn gap_spans(timeline: &TrackTimeline) -> Vec<(SessionTime, SessionTime)> {
+    timeline.gaps().map(|g| (g.from(), g.to())).collect()
+}
+
+/// `reported`'s epoch events, in order.
+fn epoch_events(reported: &[RecorderEvent]) -> Vec<Epoch> {
+    reported
+        .iter()
+        .filter_map(|e| match e {
+            RecorderEvent::Epoch(epoch) => Some(*epoch),
+            _ => None,
+        })
+        .collect()
+}
+
+/// How many times `reported` says the stream overran.
+fn overruns_reported(reported: &[RecorderEvent]) -> usize {
+    reported
+        .iter()
+        .filter(|e| matches!(e, RecorderEvent::Capture(CaptureNotice::Overrun)))
+        .count()
+}
+
+/// With stamps exact, an overrun's epoch starts at the stamp of the audio
+/// after the loss, not at the 2 s the overrun was reported: the tolerance
+/// is zero.
+#[test]
+fn an_overruns_epoch_starts_when_the_audio_after_it_was_captured() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let stamp = Duration::from_millis(1_800);
+    let script = vec![
+        Step::TimedAudio(samples(0, 500), Duration::ZERO),
+        Step::Advance(secs(2)),
+        Step::Notice(CaptureNotice::Overrun),
+        // The server lost 1.3 s; the next buffer says when it was captured,
+        // 0.2 s before the report.
+        Step::TimedAudio(samples(500, 300), stamp),
+    ];
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+
+    let epoch = run.timeline.current().copied().unwrap();
+    assert_eq!(epoch.id(), EpochId::new(1));
+    assert_eq!(epoch.start(), SessionTime::from_nanos(1_800_000_000));
+    assert_eq!(epoch.first_sample(), SampleIndex::new(500));
+    assert_eq!(
+        gap_spans(&run.timeline),
+        [(
+            SessionTime::from_nanos(500_000_000),
+            SessionTime::from_nanos(1_800_000_000)
+        )]
+    );
+    assert!(matches!(
+        epochs_reported(&run.reported)[..],
+        [
+            RecorderEvent::Capture(CaptureNotice::Overrun),
+            RecorderEvent::Epoch(e)
+        ] if *e == epoch
+    ));
+    let journals = all_journals(run.writer, &run.reported);
+    assert_eq!(journal_epochs(&fs, &journals), [(0, 0, 500), (1, 500, 800)]);
+    assert_eq!(journaled(&fs, &journals), samples(0, 800));
+}
+
+/// The server reports overruns of its whole graph: one whose next buffer
+/// on this stream is on time lost nothing here.
+#[test]
+fn an_overrun_that_lost_nothing_on_this_stream_opens_no_epoch() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let script = vec![
+        Step::TimedAudio(samples(0, 500), Duration::ZERO),
+        // Reported a second late, as the server's graph overran elsewhere:
+        // an epoch opened at the report would split on-time audio.
+        Step::Advance(secs(1)),
+        Step::Notice(CaptureNotice::Overrun),
+        // Exactly where the first buffer's 500 samples end.
+        Step::TimedAudio(samples(500, 300), Duration::from_millis(500)),
+    ];
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    assert_eq!(epoch_starts(&run.timeline), [(0, SessionTime::ZERO, 0)]);
+    assert!(gap_spans(&run.timeline).is_empty());
+    assert_eq!(overruns_reported(&run.reported), 1);
+    assert!(epoch_events(&run.reported).is_empty());
+}
+
+/// A stream whose overrun report was dropped (cpal can't always deliver
+/// one) still shows the loss in its stamps.
+#[test]
+fn a_loss_with_no_overrun_reported_still_opens_an_epoch() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let script = vec![
+        Step::TimedAudio(samples(0, 500), Duration::ZERO),
+        // No notice: only the stamp says 1 s was lost.
+        Step::TimedAudio(samples(500, 300), Duration::from_millis(1_500)),
+    ];
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    let lost = SessionTime::from_nanos(1_500_000_000);
+    assert_eq!(
+        epoch_starts(&run.timeline),
+        [(0, SessionTime::ZERO, 0), (1, lost, 500)]
+    );
+    assert_eq!(
+        gap_spans(&run.timeline),
+        [(SessionTime::from_nanos(500_000_000), lost)]
+    );
+    assert_eq!(overruns_reported(&run.reported), 0);
+}
+
+/// A script of 50-sample buffers, each stamped at its true capture time.
+/// It tracks the true time itself, so a loss can skip some of it.
+struct Buffers {
+    /// What the stream sends, in order.
+    script: Vec<Step>,
+    /// The next buffer's first sample.
+    sample: u64,
+    /// When the next buffer was captured, in milliseconds.
+    millis: u64,
+    /// Every buffer's first sample and stamp, in order.
+    stamps: Vec<(u64, Duration)>,
+}
+
+impl Buffers {
+    /// The samples in each buffer: 50 ms at [`rate`].
+    const LEN: u64 = 50;
+
+    /// An empty script, at sample zero and time zero.
+    fn new() -> Self {
+        Self {
+            script: Vec::new(),
+            sample: 0,
+            millis: 0,
+            stamps: Vec::new(),
+        }
+    }
+
+    /// Sends the next buffer, captured right after the last.
+    fn on_time(&mut self) {
+        let stamp = Duration::from_millis(self.millis);
+        self.script
+            .push(Step::TimedAudio(samples(self.sample, Self::LEN), stamp));
+        self.stamps.push((self.sample, stamp));
+        self.sample += Self::LEN;
+        self.millis += Self::LEN;
+    }
+
+    /// Loses `millis` of audio before the next buffer, and reports an
+    /// overrun for it.
+    fn lose(&mut self, millis: u64) {
+        self.script.push(Step::Notice(CaptureNotice::Overrun));
+        self.millis += millis;
+    }
+}
+
+/// Losses within one window of the first cost one epoch for the first and
+/// one for all the rest, not one each: the next buffer after the window
+/// opens it, so its epoch absorbs every loss since the first.
+#[test]
+fn a_burst_of_overruns_opens_one_epoch_then_one_for_the_rest() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let mut buffers = Buffers::new();
+    buffers.on_time();
+    buffers.on_time();
+    for _ in 0..5 {
+        buffers.lose(30);
+        buffers.on_time();
+    }
+    while buffers.millis <= 2_500 {
+        buffers.on_time();
+    }
+    let run = run(&fs, buffers.script.clone(), Vec::new(), |_| {});
+    run.result.unwrap();
+
+    // The first lost buffer is the third sent, 100 ms in plus 30 lost.
+    let first_loss = buffers.stamps[2];
+    assert_eq!(first_loss, (100, Duration::from_millis(130)));
+    // The first buffer a whole window after that one's epoch opened.
+    let after = buffers
+        .stamps
+        .iter()
+        .copied()
+        .find(|(_, stamp)| *stamp >= first_loss.1 + BURST_WINDOW)
+        .unwrap();
+    let start = |(_, stamp): (u64, Duration)| SessionTime::ZERO.checked_add(stamp).unwrap();
+    assert_eq!(
+        epoch_starts(&run.timeline),
+        [
+            (0, SessionTime::ZERO, 0),
+            (1, start(first_loss), first_loss.0),
+            (2, start(after), after.0)
+        ]
+    );
+    assert_eq!(epoch_events(&run.reported).len(), 2);
+    assert_eq!(overruns_reported(&run.reported), 5);
+
+    // The first loss is the gap before epoch 1; the other four, 120 ms,
+    // are the whole gap between epochs 1 and 2.
+    let ran = Duration::from_millis(after.0 - first_loss.0);
+    let ended = start(first_loss).checked_add(ran).unwrap();
+    assert_eq!(
+        gap_spans(&run.timeline),
+        [
+            (
+                SessionTime::from_nanos(100_000_000),
+                SessionTime::from_nanos(130_000_000)
+            ),
+            (ended, start(after))
+        ]
+    );
+    assert_eq!(
+        start(after).checked_duration_since(ended),
+        Some(Duration::from_millis(120))
+    );
+
+    // Journals also rotate at each window, so count where the epoch
+    // changes: twice.
+    let journals = all_journals(run.writer, &run.reported);
+    let ids: Vec<u32> = journal_epochs(&fs, &journals)
+        .iter()
+        .map(|(epoch, _, _)| *epoch)
+        .collect();
+    let mut changes = ids.clone();
+    changes.dedup();
+    assert_eq!(changes, [0, 1, 2], "{ids:?}");
+}
+
+/// When the buffer holding the stream's `sample`th sample was captured, if
+/// the device runs 400 ppm fast: its samples last a little less than the
+/// nominal time each.
+fn fast_stamp(sample: u64) -> Duration {
+    let nanos = u128::from(sample) * 1_000_000_000_000_000_000 / (1_000 * 1_000_400_000);
+    Duration::from_nanos(u64::try_from(nanos).unwrap())
+}
+
+/// A device 400 ppm fast is timed by the rate it ran at, so the recording
+/// stays in step with the session clock, and a drift past the limit is
+/// reported once.
+#[test]
+fn a_drifting_device_is_retimed_and_reported_past_the_limit() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let total = 90_000;
+    let script: Vec<Step> = (0..total / 100)
+        .map(|n| Step::TimedAudio(samples(n * 100, 100), fast_stamp(n * 100)))
+        .collect();
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+
+    // Each correction follows straight on from the epoch before it.
+    assert!(run.timeline.epochs().len() > 1);
+    assert!(gap_spans(&run.timeline).is_empty());
+    assert!(!epoch_events(&run.reported).is_empty());
+    let last = run.timeline.current().copied().unwrap();
+    assert!((last.drift().ppb() - 400_000).abs() <= 2, "{last:?}");
+    let drifted: Vec<Drift> = run
+        .reported
+        .iter()
+        .filter_map(|e| match e {
+            RecorderEvent::Capture(CaptureNotice::Drifted(d)) => Some(*d),
+            _ => None,
+        })
+        .collect();
+    let [reported] = drifted[..] else {
+        panic!("{drifted:?}");
+    };
+    assert_eq!(reported, Drift::from_ppb(400_000).unwrap());
+
+    // The last sample sits within 5 ms of when it was captured, where the
+    // nominal rate puts it about 36 ms late.
+    let end = total - 1;
+    let true_nanos = i128::from(u64::try_from(fast_stamp(end).as_nanos()).unwrap());
+    let timed = run.timeline.time_of(SampleIndex::new(end)).unwrap();
+    let off = i128::from(timed.as_nanos()) - true_nanos;
+    assert!(off.abs() <= 5_000_000, "{off} ns");
+    let nominal = i128::from(end) * 1_000_000;
+    assert!(nominal - true_nanos > 35_000_000, "{nominal} {true_nanos}");
+}
+
+/// A reopening whose first buffer is stamped starts its epoch at the
+/// stamp, not at the time the buffer reached the recorder.
+#[test]
+fn a_stamped_reopening_is_timed_by_its_stamp() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let script = vec![
+        Step::TimedAudio(samples(0, 500), Duration::ZERO),
+        Step::Advance(secs(5)),
+        Step::Notice(CaptureNotice::RouteChanged),
+        // Captured at 3 s, though the clock reads 5 s by the time it
+        // arrives.
+        Step::TimedAudio(samples(500, 300), secs(3)),
+    ];
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    assert_eq!(
+        reopenings(&run.reported),
+        [("route", 0, SessionTime::ZERO, 0), ("epoch", 1, at(3), 500)]
+    );
+    assert_eq!(
+        gap_spans(&run.timeline),
+        [(SessionTime::from_nanos(500_000_000), at(3))]
+    );
+}
+
+/// A sender given a stamp the session clock can't place falls back to
+/// timing the audio by the clock, as an unstamped stream's is.
+#[test]
+fn a_stamp_the_clock_cant_place_is_sent_unstamped() {
+    let (tx, rx) = test_channel();
+    let sender = CaptureSender {
+        events: tx,
+        track: MIC,
+        progress: Progress::new(SampleIndex::ZERO, SampleIndex::ZERO),
+        clock: Arc::new(FakeClock::new(SessionTime::ZERO)),
+        stopping: Arc::new(AtomicBool::new(false)),
+        // Begun already, so each call queues only its audio.
+        began: Arc::new(AtomicBool::new(true)),
+        rerouted: Arc::new(AtomicBool::new(false)),
+        asleep: Arc::new(AtomicU64::new(0)),
+        rate: rate(),
+    };
+    let rx = CaptureReceiver {
+        events: rx,
+        rate: rate(),
+        tracks: test_tracks(&[MIC]),
+    };
+    sender.audio_captured(&[1, 2], Duration::MAX);
+    sender.audio_captured(&[3, 4], Duration::from_millis(7));
+    let next = || rx.next(Duration::from_millis(1));
+    assert!(matches!(
+        next(),
+        Received::Event(MIC, CaptureEvent::Audio(s)) if s == [1, 2]
+    ));
+    assert!(matches!(
+        next(),
+        Received::Event(MIC, CaptureEvent::TimedAudio { samples, at: t })
+            if samples == [3, 4] && t == SessionTime::from_nanos(7_000_000)
+    ));
+}
+
+/// A track started first opens its epoch when its stream was asked to
+/// start; with stamps, its audio starts when it was captured, and the
+/// start-up before is a gap, not a loss found at its second buffer.
+#[test]
+fn a_started_track_s_stamped_audio_starts_when_it_was_captured() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let script = vec![
+        // 50 ms of start-up: the first buffer was captured at 50 ms.
+        Step::TimedAudio(samples(0, 100), Duration::from_millis(50)),
+        Step::TimedAudio(samples(100, 100), Duration::from_millis(150)),
+    ];
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    assert_eq!(
+        epoch_starts(&run.timeline),
+        [
+            (0, SessionTime::ZERO, 0),
+            (1, SessionTime::from_nanos(50_000_000), 0)
+        ]
+    );
+    assert_eq!(
+        run.timeline.time_of(SampleIndex::new(100)),
+        Some(SessionTime::from_nanos(150_000_000))
+    );
+    let journals = all_journals(run.writer, &run.reported);
+    assert_eq!(journal_epochs(&fs, &journals), [(1, 0, 200)]);
+}
+
+/// The most a drifting device's audio may be mapped from when it was
+/// captured, in nanoseconds: GAI-315's acceptance criterion.
+const DRIFT_ERROR_LIMIT: u64 = 20_000_000; // check-bound
+
+/// When sample `sample` of a device `ppb` parts per billion off was
+/// captured, at 1 kHz.
+fn stamp_at(sample: u64, ppb: i128) -> Duration {
+    let nanos = i128::from(sample) * 1_000_000_000_000_000_000 / (1_000 * (1_000_000_000 + ppb));
+    Duration::from_nanos(u64::try_from(nanos).unwrap())
+}
+
+/// Three hours of a device 100 ppm fast, and of one 100 ppm slow, recorded
+/// through the stamped stream: every buffer maps to within 20 ms of when it
+/// was captured, where the nominal rate would end over a second out.
+#[test]
+fn three_hours_at_100_ppm_record_within_20_ms() {
+    let buffer = 5_000;
+    let total = 3 * 3_600 * 1_000;
+    for ppb in [100_000, -100_000] {
+        let fs = FakeFs::with_dirs([dir()]);
+        let script: Vec<Step> = (0..total / buffer)
+            .map(|n| Step::TimedAudio(samples(n * buffer, buffer), stamp_at(n * buffer, ppb)))
+            .collect();
+        let run = run(&fs, script, Vec::new(), |_| {});
+        run.result.unwrap();
+        // Corrections follow straight on: nothing was lost.
+        assert!(gap_spans(&run.timeline).is_empty(), "{ppb}");
+        let worst = (0..total / buffer)
+            .map(|n| {
+                let sample = n * buffer;
+                let timed = run.timeline.time_of(SampleIndex::new(sample)).unwrap();
+                let captured = u64::try_from(stamp_at(sample, ppb).as_nanos()).unwrap();
+                timed.as_nanos().abs_diff(captured)
+            })
+            .max()
+            .unwrap();
+        assert!(worst < DRIFT_ERROR_LIMIT, "{ppb}: {worst} ns");
+        let end = total - 1;
+        let nominal = end * 1_000_000;
+        let captured = u64::try_from(stamp_at(end, ppb).as_nanos()).unwrap();
+        assert!(nominal.abs_diff(captured) > 1_000_000_000, "{ppb}");
+    }
+}
+
+/// A loss exactly a window after the last loss epoch opens its own: the
+/// window is over.
+#[test]
+fn a_loss_a_whole_window_after_the_last_opens_its_own_epoch() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let mut buffers = Buffers::new();
+    buffers.on_time();
+    buffers.on_time();
+    // The first loss: an epoch at 130 ms.
+    buffers.lose(30);
+    buffers.on_time();
+    while buffers.millis < 2_080 {
+        buffers.on_time();
+    }
+    // The second, captured at 2,130 ms: exactly the window after.
+    buffers.lose(50);
+    buffers.on_time();
+    buffers.on_time();
+    let run = run(&fs, buffers.script.clone(), Vec::new(), |_| {});
+    run.result.unwrap();
+    let starts: Vec<(u32, SessionTime)> = epoch_starts(&run.timeline)
+        .into_iter()
+        .map(|(id, start, _)| (id, start))
+        .collect();
+    assert_eq!(
+        starts,
+        [
+            (0, SessionTime::ZERO),
+            (1, SessionTime::from_nanos(130_000_000)),
+            (2, SessionTime::from_nanos(2_130_000_000)),
+        ]
+    );
+}
+
+/// An epoch opened after a loss maps its audio at the drift measured, not
+/// at a correction's slewed drift, nor none.
+#[test]
+fn a_loss_epoch_keeps_the_measured_drift() {
+    let fs = FakeFs::with_dirs([dir()]);
+    // 400 ppm fast; 40 s in, while a correction is slewing, a second is
+    // lost.
+    let loss = 40_000;
+    let script: Vec<Step> = (0..600)
+        .map(|n| {
+            let first = n * 100;
+            let shift = if first >= loss {
+                secs(1)
+            } else {
+                Duration::ZERO
+            };
+            Step::TimedAudio(samples(first, 100), fast_stamp(first) + shift)
+        })
+        .collect();
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    let opened = run
+        .timeline
+        .epochs()
+        .iter()
+        .find(|e| e.first_sample() == SampleIndex::new(loss))
+        .copied()
+        .unwrap();
+    let before = run
+        .timeline
+        .epoch_of(SampleIndex::new(loss - 1))
+        .copied()
+        .unwrap();
+    // The epoch before was slewing, off the measured drift.
+    assert!((before.drift().ppb() - 400_000).abs() > 1_000, "{before:?}");
+    assert!((opened.drift().ppb() - 400_000).abs() <= 2, "{opened:?}");
+    assert_eq!(gap_spans(&run.timeline).len(), 1);
 }

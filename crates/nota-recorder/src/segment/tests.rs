@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use nota_core::{
-    Clock, EpochAnchor, EpochId, FakeClock, SampleCount, SampleIndex, SampleRange, SampleRate,
-    SessionId, SessionTime, TrackId,
+    Clock, Drift, EpochAnchor, EpochId, FakeClock, SampleCount, SampleIndex, SampleRange,
+    SampleRate, SessionId, SessionTime, TrackId,
 };
 use nota_store::SegmentRow;
 use sha2::{Digest, Sha256};
@@ -39,6 +39,7 @@ fn anchor(epoch: EpochId, rate: SampleRate) -> EpochAnchor {
         start: SessionTime::ZERO,
         first_sample: SampleIndex::ZERO,
         rate,
+        drift: Drift::ZERO,
     }
 }
 

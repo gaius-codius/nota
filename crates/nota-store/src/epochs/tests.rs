@@ -1,4 +1,6 @@
-use nota_core::{EpochAnchor, EpochId, SampleIndex, SampleRate, SessionId, SessionTime, TrackId};
+use nota_core::{
+    Drift, EpochAnchor, EpochId, SampleIndex, SampleRate, SessionId, SessionTime, TrackId,
+};
 use rusqlite::params;
 
 use crate::test_dir::TestDir;
@@ -28,6 +30,7 @@ fn anchor(id: u32, first: u64, start: u64) -> EpochAnchor {
         start: SessionTime::from_nanos(start),
         first_sample: SampleIndex::new(first),
         rate: SampleRate::SPEECH,
+        drift: Drift::ZERO,
     }
 }
 
@@ -80,12 +83,22 @@ fn an_epoch_s_anchor_never_changes() {
             Err(StoreError::EpochConflict { track, epoch }) if track == MIC && epoch == EpochId::new(1)
         ));
     }
-    // Another rate is another anchor too.
+    // Another rate is another anchor too, and so is another drift: the
+    // same samples would be timed differently.
     let faster = EpochAnchor {
         rate: SampleRate::new(48_000).unwrap(),
         ..anchor(1, 10, 20)
     };
-    assert!(store.insert_epoch(S1, MIC, &faster).is_err());
+    let drifting = EpochAnchor {
+        drift: Drift::from_ppb(1).unwrap(),
+        ..anchor(1, 10, 20)
+    };
+    for other in [faster, drifting] {
+        assert!(matches!(
+            store.insert_epoch(S1, MIC, &other),
+            Err(StoreError::EpochConflict { track, epoch }) if track == MIC && epoch == EpochId::new(1)
+        ));
+    }
     assert_eq!(store.epochs(S1).unwrap(), [(MIC, anchor(1, 10, 20))]);
 }
 
@@ -136,14 +149,16 @@ fn untimed_rows_are_left_out_and_bad_ones_reported() {
         )
         .unwrap();
     assert_eq!(store.epochs(S1).unwrap(), [(MIC, anchor(1, 10, 20))]);
-    let cases: [(i64, i64, i64, i64, i64, &str); 5] = [
-        (-1, 5, 0, 16_000, 0, "track"),
-        (0, -1, 0, 16_000, 0, "epoch"),
-        (0, 5, -1, 16_000, 0, "first sample"),
-        (0, 5, 0, 0, 0, "rate"),
-        (0, 5, 0, 16_000, -1, "anchor"),
+    let cases: [(i64, i64, i64, i64, i64, i64, &str); 7] = [
+        (-1, 5, 0, 16_000, 0, 0, "track"),
+        (0, -1, 0, 16_000, 0, 0, "epoch"),
+        (0, 5, -1, 16_000, 0, 0, "first sample"),
+        (0, 5, 0, 0, 0, 0, "rate"),
+        (0, 5, 0, 16_000, -1, 0, "anchor"),
+        (0, 5, 0, 16_000, 0, 1_000_001, "drift"),
+        (0, 5, 0, 16_000, 0, -1_000_001, "drift"),
     ];
-    for (i, (track, epoch, first, rate, start, what)) in cases.into_iter().enumerate() {
+    for (i, (track, epoch, first, rate, start, drift, what)) in cases.into_iter().enumerate() {
         let dir = TestDir::new(&format!("epochs-bad{i}"));
         let store = open(&dir);
         // Past the table's checks, as a damaged file could be.
@@ -154,9 +169,10 @@ fn untimed_rows_are_left_out_and_bad_ones_reported() {
         store
             .conn
             .execute(
-                "INSERT INTO epoch (session_id, track, epoch, first_sample, rate, anchor_ns) \
-                 VALUES (2, ?1, ?2, ?3, ?4, ?5)",
-                params![track, epoch, first, rate, start],
+                "INSERT INTO epoch \
+                 (session_id, track, epoch, first_sample, rate, anchor_ns, drift_ppb) \
+                 VALUES (2, ?1, ?2, ?3, ?4, ?5, ?6)",
+                params![track, epoch, first, rate, start, drift],
             )
             .unwrap();
         let read = store.epochs(S2);

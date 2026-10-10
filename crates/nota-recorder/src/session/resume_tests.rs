@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nota_core::{
-    Clock, Epoch, EpochAnchor, EpochError, EpochId, FakeClock, SampleCount, SampleIndex,
+    Clock, Drift, Epoch, EpochAnchor, EpochError, EpochId, FakeClock, SampleCount, SampleIndex,
     SampleRate, SessionId, SessionTime, TrackId, TrackTimeline,
 };
 
@@ -251,6 +251,7 @@ fn a_track_resumes_when_its_newest_anchor_is_past_its_audio() {
             start: ms(0),
             first_sample: s(0),
             rate: rate(),
+            drift: Drift::ZERO,
         },
     );
     let mut bytes = crate::journal::format::encode_header(header);
@@ -300,7 +301,7 @@ fn untimed_marks_carry_on_above_their_epoch() {
     writer.finish().unwrap();
     // The marks now time the track's newest epoch.
     let marks = String::from_utf8(fs.read(&dir().join(MARKS_FILE_NAME)).unwrap()).unwrap();
-    assert!(marks.ends_with("epoch 0 4 0 1000 0\n"), "{marks}");
+    assert!(marks.ends_with("epoch 0 4 0 1000 0 0\n"), "{marks}");
 }
 
 /// A journal's anchor times an epoch the marks name untimed, and a newer
@@ -316,6 +317,7 @@ fn the_newest_timed_epoch_is_carried_on_from() {
         start: ms(2_000),
         first_sample: s(40),
         rate: rate(),
+        drift: Drift::ZERO,
     };
     // Its journal holds 10 samples from the epoch's first, to 2.01 s.
     let mut journal = fs
@@ -347,6 +349,7 @@ fn the_newest_timed_epoch_is_carried_on_from() {
         start: ms(5_000),
         first_sample: s(40),
         rate: rate(),
+        drift: Drift::ZERO,
     };
     fs.remove(&dir().join(MARKS_FILE_NAME)).unwrap();
     let mut file = fs.create(&dir().join(MARKS_FILE_NAME)).unwrap();

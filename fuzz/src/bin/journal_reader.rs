@@ -17,23 +17,22 @@ fn field<const N: usize>(data: &[u8], at: usize) -> [u8; N] {
 }
 
 /// The header's fields are the input's bytes, checked independently of the
-/// reader: magic, version 3 (or 2, with no anchor), a CRC that matches, and
-/// the id, track, epoch, rate and anchor where the layout puts them.
-fn check_header(data: &[u8], header: JournalHeader) {
+/// reader: magic, version 4 (or 3, with no drift, or 2, with no anchor), a
+/// CRC that matches, and the id, track, epoch, rate and anchor where the
+/// layout puts them. Returns how many bytes the header took.
+fn check_header(data: &[u8], header: JournalHeader) -> usize {
     let anchor = header.anchor();
-    let (version, len) = if anchor.is_some() {
-        (3, HEADER_LEN)
-    } else {
-        (2, 34)
+    assert!(data.len() >= 10, "a header from too few bytes");
+    let version = u16::from_le_bytes(field(data, 8));
+    assert!((2..=4).contains(&version), "header version {version}");
+    let len = match version {
+        4 => HEADER_LEN,
+        3 => 50,
+        _ => 34,
     };
-    assert_eq!(header.encoded_len(), len, "header length");
+    assert_eq!(anchor.is_some(), version > 2, "an anchor only from 3 on");
     assert!(data.len() >= len, "a header from too few bytes");
     assert_eq!(&data[..8], b"NOTAJRNL", "header magic");
-    assert_eq!(
-        u16::from_le_bytes(field(data, 8)),
-        version,
-        "header version"
-    );
     assert_eq!(
         u32::from_le_bytes(field(data, len - 4)),
         crc32fast::hash(&data[..len - 4]),
@@ -68,8 +67,24 @@ fn check_header(data: &[u8], header: JournalHeader) {
             u64::from_le_bytes(field(data, 38)),
             "anchor's start"
         );
+        let drift = if version == 4 {
+            i32::from_le_bytes(field(data, 46))
+        } else {
+            0
+        };
+        assert_eq!(anchor.drift.ppb(), drift, "anchor's drift");
+        assert!(drift.unsigned_abs() <= 1_000_000, "a drift past the limit");
     }
-    assert_eq!(encode_header(header), data[..len], "header re-encodes");
+    let encoded = encode_header(header);
+    if version == 3 {
+        // Written again, it's version 4, with no drift.
+        assert_eq!(encoded[..8], data[..8], "header re-encodes");
+        assert_eq!(encoded[10..46], data[10..46], "header re-encodes");
+        assert_eq!(encoded[46..50], [0; 4], "header re-encodes");
+    } else {
+        assert_eq!(encoded, data[..len], "header re-encodes");
+    }
+    len
 }
 
 fn check(data: &[u8]) {
@@ -82,9 +97,7 @@ fn check(data: &[u8]) {
         return;
     };
 
-    check_header(data, header);
-
-    let mut expected_len = header.encoded_len();
+    let mut expected_len = check_header(data, header);
     let mut previous_end = None;
     for (index, frame) in read.frames().iter().enumerate() {
         assert_eq!(frame.seq(), index as u64, "sequence numbers not 0,1,2,...");
