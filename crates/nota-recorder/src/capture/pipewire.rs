@@ -181,15 +181,37 @@ impl CaptureBackend for PipeWireBackend {
         stream.play().map_err(|e| start_error(source, &e))?;
         Ok(PipeWireStream {
             _stream: stream,
-            _watch: watch::watch(source.clone(), watched),
+            _watch: watch::watch(followed(source), watched),
         })
     }
+}
+
+/// `source` as the watch follows it: cpal's own names for the defaults,
+/// given as a device, follow the default as cpal does, rather than name a
+/// node the graph doesn't have.
+fn followed(source: &Source) -> Source {
+    match source {
+        Source::Device(name) if name == "sink_default" => Source::SystemAudio,
+        Source::Device(name) if name == "input_default" => Source::Microphone,
+        other => other.clone(),
+    }
+}
+
+/// Whether `source` follows a default rather than one device.
+fn follows(source: &Source) -> bool {
+    !matches!(followed(source), Source::Device(_))
 }
 
 /// What an error the running stream reports means: a notice, with
 /// capture going on, a failure that ends it, or nothing to report. With
 /// `promoted`, the thread is already real-time, so rtkit's refusal doesn't
 /// matter.
+///
+/// A device that went away ends a pinned stream. A followed one's only
+/// such report is cpal's when the session manager clears the default
+/// (no device of the kind is left): the stream isn't ended, so it follows
+/// the next default there is (cpal reports that as a change), and the
+/// watch reports the loss once its grace has run out.
 fn stream_error(
     source: &Source,
     error: &cpal::Error,
@@ -209,6 +231,7 @@ fn stream_error(
         ErrorKind::RealtimeDenied | ErrorKind::ResourceExhausted | ErrorKind::BackendError => {
             Ok(CaptureNotice::Warning(error.to_string()))
         }
+        ErrorKind::DeviceNotAvailable if follows(source) => return None,
         ErrorKind::DeviceNotAvailable => Err(CaptureError::DeviceNotAvailable(source.clone())),
         _ => Err(CaptureError::Backend(error.to_string())),
     })
@@ -264,6 +287,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// cpal's names for the defaults, given as a device, are followed as
+    /// defaults; any other name stays pinned.
+    #[test]
+    fn cpals_default_names_are_followed() {
+        let device = |name: &str| Source::Device(name.into());
+        assert_eq!(followed(&device("sink_default")), Source::SystemAudio);
+        assert_eq!(followed(&device("input_default")), Source::Microphone);
+        assert_eq!(
+            followed(&device("alsa_input.usb")),
+            device("alsa_input.usb")
+        );
+        assert_eq!(followed(&Source::Microphone), Source::Microphone);
     }
 
     #[test]
@@ -328,10 +365,11 @@ mod tests {
     #[test]
     fn other_stream_errors_are_failures() {
         let mic = Source::Microphone;
+        let usb = Source::Device("alsa_input.usb".into());
         for promoted in [false, true] {
             assert_eq!(
-                stream_error(&mic, &error(ErrorKind::DeviceNotAvailable), promoted),
-                Some(Err(CaptureError::DeviceNotAvailable(mic.clone())))
+                stream_error(&usb, &error(ErrorKind::DeviceNotAvailable), promoted),
+                Some(Err(CaptureError::DeviceNotAvailable(usb.clone())))
             );
             for kind in [ErrorKind::StreamInvalidated, ErrorKind::Other] {
                 assert_eq!(
@@ -340,6 +378,24 @@ mod tests {
                     "{kind:?}"
                 );
             }
+        }
+    }
+
+    /// A followed default cleared by the session manager doesn't end the
+    /// stream, which follows the next default; cpal's own default names
+    /// count as followed.
+    #[test]
+    fn a_followed_default_removed_does_not_end_the_stream() {
+        for source in [
+            Source::Microphone,
+            Source::SystemAudio,
+            Source::Device("input_default".into()),
+        ] {
+            assert_eq!(
+                stream_error(&source, &error(ErrorKind::DeviceNotAvailable), false),
+                None,
+                "{source:?}"
+            );
         }
     }
 

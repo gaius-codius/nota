@@ -24,15 +24,25 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/nota-pipewire.XXXXXX")
 pids=()
 
 cleanup() {
-  for pid in "${pids[@]}"; do
+  # Written so an empty list is no error under `set -u` in bash 3.2.
+  for pid in ${pids[@]+"${pids[@]}"}; do
     kill "$pid" 2>/dev/null || true
   done
-  for pid in "${pids[@]}"; do
+  for pid in ${pids[@]+"${pids[@]}"}; do
     wait "$pid" 2>/dev/null || true
   done
   rm -rf "$work"
 }
 trap cleanup EXIT
+
+# The no-hardware config below is WirePlumber 0.5's; 0.4 would ignore it
+# and open the user's real devices.
+wp_version=$(wireplumber --version | sed -n 's/.*libwireplumber \([0-9]*\)\.\([0-9]*\).*/\1 \2/p')
+read -r wp_major wp_minor <<<"${wp_version:-0 0}"
+if [ "$wp_major" -eq 0 ] && [ "$wp_minor" -lt 5 ]; then
+  echo "pipewire-devices.sh: needs WirePlumber 0.5 or later" >&2
+  exit 1
+fi
 
 # Built before the private instance's environment is set, so the build sees
 # the user's own.
@@ -41,9 +51,12 @@ cargo nextest run --locked -p nota-recorder --test pipewire_devices --no-run
 
 export XDG_RUNTIME_DIR=$work/run XDG_CONFIG_HOME=$work/config \
   XDG_STATE_HOME=$work/state XDG_DATA_HOME=$work/data
-# Nothing may point at the user's servers or session bus.
+# Nothing may point at the user's servers or session bus, nor start a bus
+# of its own that would outlive the script (D-Bus autolaunches one from a
+# display).
 unset PIPEWIRE_REMOTE PIPEWIRE_RUNTIME_DIR PULSE_SERVER PULSE_RUNTIME_PATH \
-  DBUS_SESSION_BUS_ADDRESS
+  DISPLAY WAYLAND_DISPLAY
+export DBUS_SESSION_BUS_ADDRESS=disabled:
 mkdir -p -m 700 "$XDG_RUNTIME_DIR" "$XDG_CONFIG_HOME/wireplumber/wireplumber.conf.d" \
   "$XDG_STATE_HOME" "$XDG_DATA_HOME"
 # No hardware: the instance sees only the test's null sinks.
@@ -82,6 +95,16 @@ case $server in
   "$XDG_RUNTIME_DIR"/*) ;;
   *) echo "pipewire-devices.sh: pactl reached $server, not the private instance" >&2; exit 1 ;;
 esac
+
+# And it has no hardware: only the test's own devices may come and go, beside
+# WirePlumber's fallback sink (auto_null), which stands in when there's none.
+if pactl list short sinks | grep -v auto_null | grep -q . ||
+  pactl list short sources | grep -v '\.monitor' | grep -q .; then
+  echo "pipewire-devices.sh: the private instance has devices before the test:" >&2
+  pactl list short sinks >&2
+  pactl list short sources >&2
+  exit 1
+fi
 
 NOTA_PRIVATE_PIPEWIRE=$XDG_RUNTIME_DIR \
   cargo nextest run --locked -p nota-recorder --test pipewire_devices --no-capture

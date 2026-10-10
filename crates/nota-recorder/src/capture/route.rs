@@ -142,15 +142,37 @@ enum On {
     Unseen,
     /// This device.
     Device(Node),
-    /// A followed default that went missing at `since`; it was `was`.
+    /// A followed default that went missing at `since`; it was `was`, or
+    /// had none yet at the first look.
     Missing {
         /// When it went missing.
-        since: SessionTime,
+        since: Moment,
         /// The device it was on.
-        was: Node,
+        was: Option<Node>,
     },
     /// No device: lost. For a pinned track, for good.
     Lost,
+}
+
+/// A moment a route looks at: the session time, and the clock's count of
+/// time spent suspended then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Moment {
+    /// The session time.
+    pub(super) at: SessionTime,
+    /// The time spent suspended, by then.
+    pub(super) asleep: Duration,
+}
+
+impl Moment {
+    /// How long the machine was awake from `earlier` to this moment.
+    fn awake_since(self, earlier: Self) -> Duration {
+        let waited = self
+            .at
+            .checked_duration_since(earlier.at)
+            .unwrap_or_default();
+        waited.saturating_sub(self.asleep.saturating_sub(earlier.asleep))
+    }
 }
 
 /// One track's source, followed through the graph.
@@ -170,6 +192,9 @@ pub(super) struct Changes {
     /// Whether the track's stream must end: its pinned device went away,
     /// and whatever the server moves it to isn't the track's.
     pub(super) ends_stream: bool,
+    /// When it happened: the look's time, or for a followed default lost
+    /// after its grace, when it went missing.
+    pub(super) at: SessionTime,
 }
 
 impl Route {
@@ -191,27 +216,46 @@ impl Route {
         !matches!(self.source, Source::Device(_))
     }
 
-    /// Looks at `graph` at session time `now`, and says what changed for
-    /// the track since the last look. The first look says nothing unless
-    /// the device is already gone: the stream has just opened on it.
-    pub(super) fn look(&mut self, graph: &Graph, now: SessionTime) -> Option<Changes> {
+    /// Looks at `graph` at `now`, and says what changed for the track since
+    /// the last look. The first look says nothing unless the device is
+    /// already gone: the stream has just opened on it. Time spent suspended
+    /// doesn't count towards a missing default's grace: a device swapped
+    /// as the machine slept is named again as it wakes.
+    pub(super) fn look(&mut self, graph: &Graph, now: Moment) -> Option<Changes> {
         let device = graph.device(&self.source).cloned();
+        let follows = self.follows();
+        let mut at = now.at;
         let (on, change) = match (std::mem::replace(&mut self.on, On::Unseen), device) {
-            (On::Lost, _) if !self.follows() => (On::Lost, None),
-            (On::Unseen, Some(node)) => (On::Device(node), None),
-            (On::Device(was) | On::Missing { was, .. }, Some(node)) if was.name == node.name => {
+            (On::Lost, _) if !follows => (On::Lost, None),
+            (On::Unseen | On::Missing { was: None, .. }, Some(node)) => (On::Device(node), None),
+            (On::Device(was) | On::Missing { was: Some(was), .. }, Some(node))
+                if was.name == node.name =>
+            {
                 (On::Device(node), None)
             }
             (On::Device(_) | On::Missing { .. } | On::Lost, Some(node)) => {
                 let change = DeviceChange::Changed(node.description.clone());
                 (On::Device(node), Some(change))
             }
-            (On::Device(was), None) if self.follows() => (On::Missing { since: now, was }, None),
+            (On::Device(was), None) if follows => {
+                let missing = On::Missing {
+                    since: now,
+                    was: Some(was),
+                };
+                (missing, None)
+            }
+            (On::Unseen, None) if follows => (
+                On::Missing {
+                    since: now,
+                    was: None,
+                },
+                None,
+            ),
             (On::Missing { since, was }, None) => {
-                let waited = now.checked_duration_since(since).unwrap_or_default();
-                if waited < LOST_GRACE {
+                if now.awake_since(since) < LOST_GRACE {
                     (On::Missing { since, was }, None)
                 } else {
+                    at = since.at;
                     (On::Lost, Some(DeviceChange::Lost))
                 }
             }
@@ -220,8 +264,9 @@ impl Route {
         };
         self.on = on;
         change.map(|change| Changes {
-            ends_stream: change == DeviceChange::Lost && !self.follows(),
+            ends_stream: change == DeviceChange::Lost && !follows,
             change,
+            at,
         })
     }
 }

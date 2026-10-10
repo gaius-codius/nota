@@ -1,6 +1,6 @@
-//! The three detectors that notice a track's capture going wrong. No audio
-//! server says when a device goes away or a sink stops playing, so nota
-//! watches each track's audio itself:
+//! The three detectors that notice a track's capture going wrong. The
+//! audio server doesn't say when a stream stops delivering or delivers only
+//! silence, so nota watches each track's audio itself:
 //! - **Stalled** ([`Stall`]): no samples arriving, as when a device is
 //!   removed or a stream stops.
 //! - **Digital zeros** ([`Levels`]): nothing but exact zeros, as when
@@ -205,7 +205,7 @@ struct Frame {
     /// How many samples it has.
     len: u64,
     /// The sum of their squares. At 16 kHz a frame's 800 squares, each
-    /// under 2^30, sum far below `u64::MAX`; it saturates rather than
+    /// at most 2^30, sum far below `u64::MAX`; it saturates rather than
     /// wrap at any rate.
     sum_squares: u64,
 }

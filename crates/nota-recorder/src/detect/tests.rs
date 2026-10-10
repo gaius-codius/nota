@@ -471,3 +471,22 @@ fn samples_past_the_last_number_dont_overflow() {
     let changes = levels.push(SampleIndex::new(u64::MAX - 10), &zeros(6_000));
     assert_eq!(changes, []);
 }
+
+/// The floor keeps a block of history every 20 frames, a second's worth,
+/// not every 21.
+#[test]
+fn the_floor_keeps_a_block_every_twenty_frames() {
+    let mut floor = NoiseFloor::default();
+    for _ in 0..FRAMES_PER_BLOCK - 1 {
+        floor.learn(500);
+    }
+    assert_eq!((floor.blocks.len(), floor.current), (0, Some(500)));
+    floor.learn(400);
+    assert_eq!(
+        (
+            floor.blocks.iter().copied().collect::<Vec<_>>(),
+            floor.current
+        ),
+        (vec![400], None)
+    );
+}

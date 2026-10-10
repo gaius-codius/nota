@@ -600,6 +600,7 @@ fn a_channel_with_no_senders_reads_as_stopped() {
         clock: Arc::new(FakeClock::new(SessionTime::ZERO)),
         stopping: Arc::new(AtomicBool::new(false)),
         failed: Arc::new(AtomicBool::new(false)),
+        lost: Arc::new(AtomicBool::new(false)),
         began: Arc::new(AtomicBool::new(false)),
         rerouted: Arc::new(AtomicBool::new(false)),
         asleep: Arc::new(AtomicU64::new(0)),
@@ -1179,6 +1180,7 @@ fn notices_carry_the_time_they_were_reported() {
         clock: Arc::clone(&clock) as Arc<dyn Clock>,
         stopping: Arc::new(AtomicBool::new(false)),
         failed: Arc::new(AtomicBool::new(false)),
+        lost: Arc::new(AtomicBool::new(false)),
         began: Arc::new(AtomicBool::new(false)),
         rerouted: Arc::new(AtomicBool::new(false)),
         asleep: Arc::new(AtomicU64::new(0)),
@@ -1902,6 +1904,7 @@ fn a_stamp_the_clock_cant_place_is_sent_unstamped() {
         clock: Arc::new(FakeClock::new(SessionTime::ZERO)),
         stopping: Arc::new(AtomicBool::new(false)),
         failed: Arc::new(AtomicBool::new(false)),
+        lost: Arc::new(AtomicBool::new(false)),
         // Begun already, so each call queues only its audio.
         began: Arc::new(AtomicBool::new(true)),
         rerouted: Arc::new(AtomicBool::new(false)),

@@ -45,7 +45,25 @@ struct FakeRegistry {
     graph: Graph,
     route: Route,
     now: SessionTime,
+    /// The time spent suspended so far.
+    asleep: Duration,
     seen: Vec<(SessionTime, Changes)>,
+}
+
+/// What a route told, without when: the time it was looked at is in
+/// [`FakeRegistry::seen`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Told {
+    change: DeviceChange,
+    ends_stream: bool,
+}
+
+/// A look at session time `at`, with nothing spent suspended.
+const fn moment(at: SessionTime) -> Moment {
+    Moment {
+        at,
+        asleep: Duration::ZERO,
+    }
 }
 
 impl FakeRegistry {
@@ -57,11 +75,12 @@ impl FakeRegistry {
             graph.apply(event);
         }
         let mut route = Route::new(source);
-        assert_eq!(route.look(&graph, ms(0)), None, "the first look");
+        assert_eq!(route.look(&graph, moment(ms(0))), None, "the first look");
         Self {
             graph,
             route,
             now: ms(0),
+            asleep: Duration::ZERO,
             seen: Vec::new(),
         }
     }
@@ -82,29 +101,46 @@ impl FakeRegistry {
         self.now = to;
     }
 
+    /// Suspends the machine for `long`: session time runs on, and so does
+    /// the count of time spent suspended. Nothing is looked at meanwhile.
+    fn sleep(&mut self, long: Duration) {
+        self.now = self.now.checked_add(long).unwrap();
+        self.asleep += long;
+    }
+
     fn look(&mut self) {
-        if let Some(changes) = self.route.look(&self.graph, self.now) {
+        let now = Moment {
+            at: self.now,
+            asleep: self.asleep,
+        };
+        if let Some(changes) = self.route.look(&self.graph, now) {
             self.seen.push((self.now, changes));
         }
     }
 
-    /// The changes seen, each with how long after `from` it came.
-    fn seen_after(&self, from: SessionTime) -> Vec<(Duration, Changes)> {
+    /// What was told, each with how long after `from` it was seen.
+    fn seen_after(&self, from: SessionTime) -> Vec<(Duration, Told)> {
         self.seen
             .iter()
-            .map(|(at, changes)| (at.checked_duration_since(from).unwrap(), changes.clone()))
+            .map(|(at, changes)| {
+                let told = Told {
+                    change: changes.change.clone(),
+                    ends_stream: changes.ends_stream,
+                };
+                (at.checked_duration_since(from).unwrap(), told)
+            })
             .collect()
     }
 }
 
-fn changed(description: &str) -> Changes {
-    Changes {
+fn changed(description: &str) -> Told {
+    Told {
         change: DeviceChange::Changed(description.to_owned()),
         ends_stream: false,
     }
 }
 
-const LOST_FOR_GOOD: Changes = Changes {
+const LOST_FOR_GOOD: Told = Told {
     change: DeviceChange::Lost,
     ends_stream: true,
 };
@@ -288,12 +324,14 @@ fn a_followed_default_that_stays_missing_is_lost_then_changed() {
     );
     registry.at(ms(5_100), default(Class::Source, "alsa_input.webcam"));
     let seen = registry.seen_after(removed);
-    let lost = Changes {
+    let lost = Told {
         change: DeviceChange::Lost,
         ends_stream: false,
     };
     assert_eq!(seen[0].1, lost, "{seen:?}");
     assert!((LOST_GRACE..=SHOWN_WITHIN).contains(&seen[0].0), "{seen:?}");
+    // Told when it went missing, not when the grace ran out.
+    assert_eq!(registry.seen[0].1.at, removed);
     assert_eq!(
         &seen[1..],
         [(Duration::from_millis(4_100), changed("Webcam"))]
@@ -349,7 +387,66 @@ fn a_default_names_only_its_own_kind() {
 #[test]
 fn a_device_gone_at_the_first_look_is_lost() {
     let mut route = Route::new(Source::Device("gone".into()));
-    assert_eq!(route.look(&Graph::default(), ms(0)), Some(LOST_FOR_GOOD));
+    assert_eq!(
+        route.look(&Graph::default(), moment(ms(0))),
+        Some(Changes {
+            change: DeviceChange::Lost,
+            ends_stream: true,
+            at: ms(0),
+        })
+    );
+}
+
+/// A followed default missing at the first look, as the server swaps one
+/// device for another, has the grace too: a device named within it is
+/// nothing to tell.
+#[test]
+fn a_followed_default_missing_at_the_first_look_has_the_grace() {
+    let mut graph = Graph::default();
+    let mut route = Route::new(Source::SystemAudio);
+    assert_eq!(route.look(&graph, moment(ms(0))), None);
+    graph.apply(GraphEvent::Added {
+        id: 1,
+        node: sink("alsa_output.speakers", "Speakers"),
+    });
+    graph.apply(default(Class::Sink, "alsa_output.speakers"));
+    assert_eq!(route.look(&graph, moment(ms(500))), None);
+    // And without one, it's lost once the grace has run out.
+    let mut route = Route::new(Source::SystemAudio);
+    let empty = Graph::default();
+    assert_eq!(route.look(&empty, moment(ms(0))), None);
+    let lost = route
+        .look(&empty, moment(ms(1_000)))
+        .map(|c| (c.change, c.at));
+    assert_eq!(lost, Some((DeviceChange::Lost, ms(0))));
+}
+
+/// Time spent suspended doesn't count towards a missing default's grace:
+/// a headset that went as the machine slept, named again as it wakes, is a
+/// change, not a loss.
+#[test]
+fn a_suspend_does_not_use_up_the_grace() {
+    let mut registry = FakeRegistry::new(Source::SystemAudio, with_headset());
+    registry.at(ms(1_000), GraphEvent::Removed { id: 70 });
+    registry.sleep(Duration::from_secs(600));
+    // Awake again: the next ticks come before the server names a default.
+    let woke = registry.now;
+    registry.run_to(woke.checked_add(Duration::from_millis(500)).unwrap());
+    registry.at(
+        woke.checked_add(Duration::from_millis(600)).unwrap(),
+        GraphEvent::Added {
+            id: 71,
+            node: sink("bluez_output.AA_BB.0", "Headset (HFP)"),
+        },
+    );
+    registry.at(
+        woke.checked_add(Duration::from_millis(700)).unwrap(),
+        default(Class::Sink, "bluez_output.AA_BB.0"),
+    );
+    assert_eq!(
+        registry.seen_after(woke),
+        [(Duration::from_millis(700), changed("Headset (HFP)"))]
+    );
 }
 
 /// The session manager's `default` values give their node name.
@@ -372,11 +469,39 @@ fn default_values_give_their_node_name() {
     assert_eq!(default_name(&long), None);
 }
 
+/// One part of a node name: a plain character, or an escape the name can
+/// hold, as written and as meant.
+fn any_name_part() -> impl Strategy<Value = (String, String)> {
+    prop_oneof![
+        "[a-z0-9_.]".prop_map(|c| (c.clone(), c)),
+        Just((r#"\""#.to_owned(), "\"".to_owned())),
+        Just((r"\\".to_owned(), r"\".to_owned())),
+        Just((r"\/".to_owned(), "/".to_owned())),
+    ]
+}
+
 proptest! {
     /// Any value at all reads as a name or nothing, without panicking.
     #[test]
     fn any_value_reads_without_panicking(value in ".{0,64}") {
         let _ = default_name(&value);
+    }
+
+    /// Values shaped like the session manager's, with another key before,
+    /// spaces, and the escapes a name can hold, give the name unescaped.
+    #[test]
+    fn shaped_values_give_their_name(
+        before in proptest::option::of("[a-z.]{1,8}".prop_filter("not the name", |k| k != "name")),
+        name in proptest::collection::vec(any_name_part(), 0..24),
+        space in "[ \t]{0,2}",
+    ) {
+        let other = before
+            .map(|key| format!(r#""{key}"{space}:{space}"x",{space}"#))
+            .unwrap_or_default();
+        let written: String = name.iter().map(|(escaped, _)| escaped.as_str()).collect();
+        let meant: String = name.iter().map(|(_, plain)| plain.as_str()).collect();
+        let value = format!(r#"{{{space}{other}"name"{space}:{space}"{written}"{space}}}"#);
+        prop_assert_eq!(default_name(&value), Some(meant), "{}", value);
     }
 
     /// Any name the session manager writes reads back as itself.
@@ -385,4 +510,26 @@ proptest! {
         let value = format!(r#"{{"name":"{name}"}}"#);
         prop_assert_eq!(default_name(&value), Some(name));
     }
+}
+
+/// A followed default is lost once it has been missing for the whole
+/// grace, and not a moment before.
+#[test]
+fn the_grace_ends_at_exactly_one_second() {
+    let mut route = Route::new(Source::SystemAudio);
+    let empty = Graph::default();
+    assert_eq!(route.look(&empty, moment(ms(0))), None);
+    assert_eq!(route.look(&empty, moment(ms(999))), None);
+    let lost = route.look(&empty, moment(ms(1_000))).map(|c| c.change);
+    assert_eq!(lost, Some(DeviceChange::Lost));
+}
+
+/// A value as long as the limit is read; one longer isn't.
+#[test]
+fn a_default_value_at_the_limit_is_read() {
+    let wrapper = r#"{"name":""}"#.len();
+    let name = "n".repeat(MAX_DEFAULT_VALUE - wrapper);
+    let value = format!(r#"{{"name":"{name}"}}"#);
+    assert_eq!(value.len(), MAX_DEFAULT_VALUE);
+    assert_eq!(default_name(&value), Some(name));
 }

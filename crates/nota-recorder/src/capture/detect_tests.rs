@@ -489,3 +489,130 @@ fn a_stream_is_reported_failed_once_and_sends_no_audio_after() {
         Some(SampleIndex::ZERO)
     );
 }
+
+/// The device events and failures `sends` gives a microphone's stream,
+/// as the recorder reports them, in order.
+fn device_reports(sends: impl FnOnce(&CaptureSender)) -> Vec<(Option<TrackId>, String)> {
+    let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let (starter, events) = prepare_tracks(&[(MIC, Source::Microphone)], rate(), &clock);
+    let backend = Senders::default();
+    let captures = starter.start(&backend);
+    sends(&backend.first());
+    drop(captures);
+    let mut writer = writer_with(&[]);
+    let mut seen = Vec::new();
+    record_tracks(
+        &mut writer,
+        &mut [],
+        &events,
+        &mut |track, event| match event {
+            RecorderEvent::Device { change, .. } => seen.push((track, format!("{change:?}"))),
+            RecorderEvent::CaptureFailed(error) => seen.push((track, format!("{error:?}"))),
+            _ => {}
+        },
+    )
+    .unwrap();
+    seen
+}
+
+/// A stream that fails because its device went away has the loss on its
+/// track's timeline before the failure ends it, whichever noticed first.
+#[test]
+fn a_device_failure_is_told_as_lost_first() {
+    let lost = |s: &CaptureSender| s.failed(CaptureError::DeviceNotAvailable(Source::Microphone));
+    let expected = [
+        (Some(MIC), "Lost".to_owned()),
+        (Some(MIC), "DeviceNotAvailable(Microphone)".to_owned()),
+    ];
+    assert_eq!(device_reports(lost), expected);
+    // The watch saw it first: the loss is told once.
+    let watched_first = |s: &CaptureSender| {
+        s.device(DeviceChange::Lost);
+        lost(s);
+    };
+    assert_eq!(device_reports(watched_first), expected);
+}
+
+/// Device events after a stream's failure aren't sent: its track has
+/// ended. Another failure, not a device's, tells no loss.
+#[test]
+fn nothing_is_told_of_a_device_after_its_stream_failed() {
+    let reports = device_reports(|s| {
+        s.failed(CaptureError::Backend("gone".into()));
+        s.device(DeviceChange::Changed("Headphones".into()));
+        s.device(DeviceChange::Lost);
+    });
+    assert_eq!(reports, [(Some(MIC), "Backend(\"gone\")".to_owned())]);
+}
+
+/// A loss after the device came back is told again.
+#[test]
+fn a_device_lost_again_after_a_change_is_told_again() {
+    let reports = device_reports(|s| {
+        s.device(DeviceChange::Lost);
+        s.device(DeviceChange::Lost);
+        s.device(DeviceChange::Changed("Webcam".into()));
+        s.device(DeviceChange::Lost);
+    });
+    let told: Vec<&str> = reports.iter().map(|(_, r)| r.as_str()).collect();
+    assert_eq!(told, ["Lost", "Changed(\"Webcam\")", "Lost"]);
+}
+
+/// Audio a stream's callback queued just after its failure, as a callback
+/// that checked before the failure was sent can, isn't recorded: its
+/// track has ended, though another records on.
+#[test]
+fn audio_queued_after_a_track_ended_is_not_recorded() {
+    let clock = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let reported = record(
+        &[MIC, SYSTEM],
+        &clock,
+        |tx| {
+            tx.send(
+                MIC,
+                CaptureEvent::Failed(CaptureError::Backend("gone".into())),
+            );
+            tx.audio(MIC, &tone(100));
+            tx.audio(SYSTEM, &tone(100));
+            tx.send(SYSTEM, CaptureEvent::Stopped);
+        },
+        &mut |_| {},
+    );
+    let audio: Vec<Option<TrackId>> = reported
+        .iter()
+        .filter(|(_, e)| matches!(e, RecorderEvent::Audio(_)))
+        .map(|(track, _)| *track)
+        .collect();
+    assert_eq!(audio, [Some(SYSTEM)]);
+}
+
+/// The system audio is held to the system's thresholds, and so is a pinned
+/// device a caller says is the system audio; a track it didn't ask for
+/// gets none.
+#[test]
+fn thresholds_can_be_set_for_a_track_asked_for() {
+    let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let followed = TrackId::new(2);
+    let sources = [
+        (MIC, Source::Microphone),
+        (SYSTEM, Source::Device("alsa_output.hdmi".into())),
+        (followed, Source::SystemAudio),
+    ];
+    let (_starter, mut events) = prepare_tracks(&sources, rate(), &clock);
+    assert_eq!(
+        events.thresholds.get(&SYSTEM),
+        Some(&Thresholds::MICROPHONE)
+    );
+    events.set_thresholds(SYSTEM, Thresholds::SYSTEM_AUDIO);
+    events.set_thresholds(TrackId::new(7), Thresholds::SYSTEM_AUDIO);
+    let held: Vec<(TrackId, Thresholds)> =
+        events.thresholds.iter().map(|(t, h)| (*t, *h)).collect();
+    assert_eq!(
+        held,
+        [
+            (MIC, Thresholds::MICROPHONE),
+            (SYSTEM, Thresholds::SYSTEM_AUDIO),
+            (followed, Thresholds::SYSTEM_AUDIO),
+        ]
+    );
+}

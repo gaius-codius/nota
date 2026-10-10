@@ -28,6 +28,7 @@ mod linux {
     use nota_recorder::segment::SegmentLength;
     use nota_recorder::session::{SessionDir, SessionWriter};
 
+    const MIC: TrackId = TrackId::new(0);
     const SYSTEM: TrackId = TrackId::new(1);
     const PINNED: TrackId = TrackId::new(2);
 
@@ -44,6 +45,9 @@ mod linux {
     /// The test's two null sinks, by node name, and their descriptions.
     const SINK_A: (&str, &str) = ("nota_test_a", "NotaTestA");
     const SINK_B: (&str, &str) = ("nota_test_b", "NotaTestB");
+    /// The test's microphones: sources remapped from sink A's monitor.
+    const MIC_1: (&str, &str) = ("nota_test_mic1", "NotaMic1");
+    const MIC_2: (&str, &str) = ("nota_test_mic2", "NotaMic2");
 
     /// The private instance's runtime directory, if the script started one
     /// and this process talks to it. `None` otherwise: the test skips.
@@ -92,6 +96,21 @@ mod linux {
                 "module-null-sink",
                 &format!("sink_name={name}"),
                 &format!("sink_properties=node.description={description}"),
+            ]);
+            let module = module.trim().to_owned();
+            self.modules.push(module.clone());
+            module
+        }
+
+        /// A source named `name`, described as `description`, that hears
+        /// what plays on the sink `master`.
+        fn source(&mut self, (name, description): (&str, &str), master: &str) -> String {
+            let module = pactl(&[
+                "load-module",
+                "module-remap-source",
+                &format!("master={master}.monitor"),
+                &format!("source_name={name}"),
+                &format!("source_properties=node.description={description}"),
             ]);
             let module = module.trim().to_owned();
             self.modules.push(module.clone());
@@ -203,17 +222,23 @@ mod linux {
             track: TrackId,
             wanted: impl Fn(&RecorderEvent) -> bool,
         ) -> SessionTime {
-            let from = self.seen.len();
-            if let Some((at, ..)) = self.seen[..from]
+            if let Some((at, ..)) = self
+                .seen
                 .iter()
                 .find(|(_, t, e)| *t == Some(track) && wanted(e))
             {
                 return *at;
             }
+            // One deadline for the whole wait: other tracks' audio keeps
+            // coming, so a wait per event would never end.
+            let until = self.clock.now().checked_add(PATIENCE).unwrap();
             loop {
+                let left = until
+                    .checked_duration_since(self.clock.now())
+                    .unwrap_or_else(|| panic!("nothing wanted on track {}", track.get()));
                 let (t, event) = self
                     .events
-                    .recv_timeout(PATIENCE)
+                    .recv_timeout(left)
                     .unwrap_or_else(|_| panic!("nothing wanted on track {}", track.get()));
                 let at = self.clock.now();
                 let hit = t == Some(track) && wanted(&event);
@@ -221,6 +246,30 @@ mod linux {
                 if hit {
                     return at;
                 }
+            }
+        }
+
+        /// How many audio events `track` reported that arrived after `at`.
+        fn audio_events_after(&self, track: TrackId, at: SessionTime) -> usize {
+            self.seen
+                .iter()
+                .filter(|(seen, t, e)| {
+                    *t == Some(track) && *seen > at && matches!(e, RecorderEvent::Audio(_))
+                })
+                .count()
+        }
+
+        /// The first sample from `from` on, on `track`, of the test's tone,
+        /// waiting for it to be recorded. Fails the test after
+        /// [`PATIENCE`].
+        fn wait_for_tone(&mut self, track: TrackId, from: u64) -> u64 {
+            let until = self.clock.now().checked_add(PATIENCE).unwrap();
+            loop {
+                if let Some(at) = self.tone_from(track, from) {
+                    return at;
+                }
+                assert!(self.clock.now() < until, "no tone on track {}", track.get());
+                self.listen(Duration::from_millis(100));
             }
         }
 
@@ -303,15 +352,72 @@ mod linux {
         Refused,
     }
 
+    /// The switch's epoch, if the timeline opened one, starts with B's
+    /// tone: no buffer of A's silence took it, which would put a buffer's
+    /// worth of zeros first. The timeline may refuse the epoch instead, when
+    /// B's first stamp is earlier than the end of A's audio already placed:
+    /// the track then carries on in its epoch, with no gap (filed as a
+    /// follow-up).
+    fn check_reopening(heard: &Heard, switched: SessionTime) {
+        match heard.reopening(SYSTEM, switched) {
+            Some(Reopening::Opened(epoch)) => {
+                let opening = heard.audio_from(SYSTEM, epoch.first_sample().get(), 160);
+                assert_eq!(opening.len(), 160, "10 ms recorded in the epoch");
+                assert!(
+                    opening.iter().any(|&s| s != 0),
+                    "A's silence began the switch's epoch"
+                );
+            }
+            Some(Reopening::Refused) => {}
+            None => panic!("the switch neither opened nor refused an epoch"),
+        }
+    }
+
+    /// The only microphone removed: the session manager clears the default
+    /// source (there's no stand-in source, as there is a sink). The followed
+    /// microphone is lost, but its stream isn't ended: a new microphone
+    /// named the default is followed, and recorded from.
+    fn follow_through_no_mic(
+        heard: &mut Heard,
+        fixtures: &mut Fixtures,
+        mic: &str,
+        clock: &SystemClock,
+    ) {
+        let gone = clock.now();
+        fixtures.remove(mic);
+        let lost = heard.wait_for(MIC, |e| is_device(e, &DeviceChange::Lost));
+        assert!(lost.checked_duration_since(gone).unwrap() <= SHOWN_WITHIN);
+        fixtures.source(MIC_2, SINK_A.0);
+        pactl(&["set-default-source", MIC_2.0]);
+        let back = heard.wait_for(MIC, |e| {
+            is_device(e, &DeviceChange::Changed(MIC_2.1.into()))
+        });
+        let until = clock.now().checked_add(PATIENCE).unwrap();
+        while heard.audio_events_after(MIC, back) == 0 {
+            assert!(
+                clock.now() < until,
+                "nothing recorded from the new microphone"
+            );
+            heard.listen(Duration::from_millis(100));
+        }
+        let mic_failed = heard
+            .seen
+            .iter()
+            .any(|(_, t, e)| *t == Some(MIC) && matches!(e, RecorderEvent::CaptureFailed(_)));
+        assert!(!mic_failed, "the followed microphone's track was ended");
+    }
+
     /// Whether `event` is the device change `change`.
     fn is_device(event: &RecorderEvent, change: &DeviceChange) -> bool {
         matches!(event, RecorderEvent::Device { change: c, .. } if c == change)
     }
 
     /// A followed default switched and a pinned sink removed, on the
-    /// private instance: each shows within 2 s, the pinned track ends, and
-    /// the capture moves to the new sink, its epoch (if one opens) starting
-    /// with the new sink's audio, not the old's.
+    /// private instance: each shows within 2 s, the pinned track ends with
+    /// nothing recorded after, and the capture moves to the new sink, its
+    /// epoch (if one opens) starting with the new sink's audio, not the
+    /// old's. With no microphone left, the followed microphone is lost but
+    /// follows the next default.
     #[test]
     fn device_changes_show_on_real_pipewire() {
         let Some(_private) = private_instance() else {
@@ -320,7 +426,9 @@ mod linux {
         let mut fixtures = Fixtures::default();
         fixtures.sink(SINK_A);
         let b = fixtures.sink(SINK_B);
+        let mic = fixtures.source(MIC_1, SINK_A.0);
         pactl(&["set-default-sink", SINK_A.0]);
+        pactl(&["set-default-source", MIC_1.0]);
         // B plays a tone; A plays nothing, so its monitor is exact zeros:
         // which sink a buffer came from shows in the buffer. The player
         // stays on B whatever the default, so the tone moves only if the
@@ -343,6 +451,7 @@ mod linux {
         .unwrap();
         let (starter, receiver) = prepare_tracks(
             &[
+                (MIC, Source::Microphone),
                 (SYSTEM, Source::SystemAudio),
                 (PINNED, Source::Device(SINK_B.0.into())),
             ],
@@ -362,7 +471,7 @@ mod linux {
             seen: Vec::new(),
             clock: Arc::clone(&clock),
         };
-        for track in [SYSTEM, PINNED] {
+        for track in [MIC, SYSTEM, PINNED] {
             heard.wait_for(track, |e| matches!(e, RecorderEvent::Audio(_)));
         }
         heard.listen(Duration::from_secs(1));
@@ -374,43 +483,24 @@ mod linux {
             is_device(e, &DeviceChange::Changed(SINK_B.1.into()))
         });
         assert!(changed.checked_duration_since(switched).unwrap() <= SHOWN_WITHIN);
-        heard.listen(Duration::from_secs(2));
         // The stream followed: A's silence, then B's tone.
         let switch_sample = heard.audio_end_before(SYSTEM, switched);
         let before = heard.audio_from(SYSTEM, switch_sample - 1_600, 1_600);
         assert!(before.iter().all(|&s| s == 0), "A's silence before");
-        let tone_from = heard
-            .tone_from(SYSTEM, switch_sample)
-            .expect("B's tone after the switch");
+        let tone_from = heard.wait_for_tone(SYSTEM, switch_sample);
         assert!(
             tone_from - switch_sample <= 32_000,
             "B's tone began 2 s after"
         );
-        // The switch's epoch, if the timeline opened one, starts with B's
-        // tone: no buffer of A's silence took it, which would put a
-        // buffer's worth of zeros first. The timeline may refuse the epoch
-        // instead, when B's first stamp is earlier than the end of A's
-        // audio already placed: the track then carries on in its epoch,
-        // with no gap (filed as a follow-up).
-        match heard.reopening(SYSTEM, switched) {
-            Some(Reopening::Opened(epoch)) => {
-                let opening = heard.audio_from(SYSTEM, epoch.first_sample().get(), 160);
-                assert_eq!(opening.len(), 160, "10 ms recorded in the epoch");
-                assert!(
-                    opening.iter().any(|&s| s != 0),
-                    "A's silence began the switch's epoch"
-                );
-            }
-            Some(Reopening::Refused) => {}
-            None => panic!("the switch neither opened nor refused an epoch"),
-        }
+        heard.listen(Duration::from_millis(500));
+        check_reopening(&heard, switched);
 
         // The pinned sink, now also the default, removed.
         let removed = clock.now();
         fixtures.remove(&b);
         let lost = heard.wait_for(PINNED, |e| is_device(e, &DeviceChange::Lost));
         assert!(lost.checked_duration_since(removed).unwrap() <= SHOWN_WITHIN);
-        heard.wait_for(PINNED, |e| {
+        let failed = heard.wait_for(PINNED, |e| {
             matches!(
                 e,
                 RecorderEvent::CaptureFailed(CaptureError::DeviceNotAvailable(_))
@@ -421,6 +511,13 @@ mod linux {
             is_device(e, &DeviceChange::Changed(SINK_A.1.into()))
         });
         assert!(back.checked_duration_since(removed).unwrap() <= SHOWN_WITHIN);
+
+        follow_through_no_mic(&mut heard, &mut fixtures, &mic, &clock);
+
+        // Nothing was recorded on the pinned track after it failed, from
+        // whatever device the server moved its stream to.
+        let after_failure = heard.audio_events_after(PINNED, failed);
+        assert_eq!(after_failure, 0, "audio on the pinned track after its loss");
 
         drop(streams);
         let outcome = recorder.join().unwrap();

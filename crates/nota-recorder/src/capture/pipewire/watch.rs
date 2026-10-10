@@ -243,20 +243,29 @@ impl Watcher {
         let Some(current) = watcher.current.clone() else {
             return;
         };
-        let now = watcher.events.clock.now();
+        let clock = &watcher.events.clock;
+        let now = route::Moment {
+            at: clock.now(),
+            asleep: clock.suspended(),
+        };
         let Some(changes) = watcher.route.look(&current.borrow().graph, now) else {
             return;
         };
-        watcher.events.device(changes.change);
-        // A followed default with nothing to follow keeps its stream: the
-        // server moves it to the next default there is. A pinned device's
-        // stream ends, so it records nothing the server moves it to.
-        if changes.ends_stream {
-            let source = watcher.route.source().clone();
-            watcher
-                .events
-                .failed(CaptureError::DeviceNotAvailable(source));
-        }
+        report(&watcher.events, watcher.route.source(), changes);
+    }
+}
+
+/// Reports `changes` to `source`'s track through `events`. A pinned
+/// device's stream ends, so it records nothing the server moves it to; the
+/// failure tells the loss first ([`CaptureSender::failed`]). A followed
+/// default with nothing to follow keeps its stream, for the next default
+/// there is (unless cpal ends it, as it does when the default is cleared
+/// altogether).
+fn report(events: &CaptureSender, source: &Source, changes: route::Changes) {
+    if changes.ends_stream {
+        events.failed(CaptureError::DeviceNotAvailable(source.clone()));
+    } else {
+        events.device_at(changes.change, changes.at);
     }
 }
 
@@ -449,6 +458,8 @@ fn default_event(key: Option<&str>, value: Option<&str>) -> Option<GraphEvent> {
 
 #[cfg(test)]
 mod tests {
+    use nota_core::SessionTime;
+    use nota_core::recorder::DeviceChange;
     use pw::properties::PropertiesBox;
 
     use super::*;
@@ -534,6 +545,76 @@ mod tests {
         assert!(pending.caught_up());
         // Answered again, it's nothing new.
         assert!(!pending.answered(AsyncSeq::from_seq(2)));
+    }
+
+    /// A sender for `MIC`'s stream, and the queue it sends into.
+    fn sender() -> (
+        CaptureSender,
+        std::sync::Arc<super::super::super::queue::Queue>,
+    ) {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicU64};
+
+        use nota_core::{FakeClock, SampleIndex, SampleRate, TrackId};
+
+        let (events, queue) = super::super::super::test_channel();
+        let sender = CaptureSender {
+            events,
+            track: TrackId::new(0),
+            progress: super::super::super::Progress::new(SampleIndex::ZERO, SampleIndex::ZERO),
+            clock: Arc::new(FakeClock::new(SessionTime::ZERO)),
+            stopping: Arc::new(AtomicBool::new(false)),
+            failed: Arc::new(AtomicBool::new(false)),
+            lost: Arc::new(AtomicBool::new(false)),
+            began: Arc::new(AtomicBool::new(false)),
+            rerouted: Arc::new(AtomicBool::new(false)),
+            asleep: Arc::new(AtomicU64::new(0)),
+            rate: SampleRate::SPEECH,
+        };
+        (sender, queue)
+    }
+
+    /// What `queue` holds, as text, in order.
+    fn queued(queue: &super::super::super::queue::Queue) -> Vec<String> {
+        use super::super::super::queue::Received;
+
+        let mut seen = Vec::new();
+        while let Received::Event(_, event) = queue.next(Duration::ZERO) {
+            seen.push(format!("{event:?}"));
+        }
+        seen
+    }
+
+    /// A pinned device's loss ends its stream, the loss told first; a
+    /// followed default's change is only told.
+    #[test]
+    fn a_pinned_loss_ends_the_stream_and_a_change_is_told() {
+        let usb = Source::Device("usb".into());
+        let (events, queue) = sender();
+        let lost = route::Changes {
+            change: DeviceChange::Lost,
+            ends_stream: true,
+            at: SessionTime::ZERO,
+        };
+        report(&events, &usb, lost);
+        assert_eq!(
+            queued(&queue),
+            [
+                "Device { change: Lost, at: SessionTime(0) }",
+                "Failed(DeviceNotAvailable(Device(\"usb\")))",
+            ]
+        );
+        let (events, queue) = sender();
+        let changed = route::Changes {
+            change: DeviceChange::Changed("Headphones".into()),
+            ends_stream: false,
+            at: SessionTime::from_nanos(7),
+        };
+        report(&events, &Source::Microphone, changed);
+        assert_eq!(
+            queued(&queue),
+            ["Device { change: Changed(\"Headphones\"), at: SessionTime(7) }"]
+        );
     }
 
     /// A watch that can't run says so, and why.

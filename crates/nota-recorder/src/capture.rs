@@ -365,6 +365,8 @@ pub struct CaptureSender {
     stopping: Arc<AtomicBool>,
     /// Set once the stream's failure is sent: it sends no audio after.
     failed: Arc<AtomicBool>,
+    /// Set once the device's loss is sent, until another device is.
+    lost: Arc<AtomicBool>,
     /// Set once the first audio is sent.
     began: Arc<AtomicBool>,
     /// Set when the stream followed a new device, until its next audio.
@@ -472,9 +474,29 @@ impl CaptureSender {
     }
 
     /// Reports something that happened to the stream's device, stamped
-    /// with the session time now.
+    /// with the session time now. Nothing is sent once the stream has
+    /// failed (its track has ended), and a loss only once until another
+    /// device follows.
     pub fn device(&self, change: DeviceChange) {
-        let at = self.clock.now();
+        self.device_at(change, self.clock.now());
+    }
+
+    /// [`Self::device`], for a change that happened at `at`, before it
+    /// was reported: a default that went missing and is lost once its
+    /// grace has run out.
+    fn device_at(&self, change: DeviceChange, at: SessionTime) {
+        if self.failed.load(Ordering::SeqCst) {
+            return;
+        }
+        let lost = change == DeviceChange::Lost;
+        if self.lost.swap(lost, Ordering::SeqCst) && lost {
+            return;
+        }
+        self.send_device(change, at);
+    }
+
+    /// Sends `change`, which happened at `at`.
+    fn send_device(&self, change: DeviceChange, at: SessionTime) {
         self.events
             .send(self.track, CaptureEvent::Device { change, at });
     }
@@ -482,11 +504,21 @@ impl CaptureSender {
     /// Reports that the stream failed, unless the capture is being stopped:
     /// a stream torn down on purpose may report that as a failure (cpal
     /// 0.18's `PipeWire` host says a named device disconnected). Only the
-    /// first failure is sent, and no audio after it.
+    /// first failure is sent, and no audio after it. A failure because the
+    /// device went away is told as [`DeviceChange::Lost`] first, unless the
+    /// loss was already sent: whichever notices it, the stream or a watch
+    /// on the audio server, the track's loss is on its timeline before it
+    /// ends.
     pub fn failed(&self, error: CaptureError) {
-        if !self.stopping.load(Ordering::SeqCst) && !self.failed.swap(true, Ordering::SeqCst) {
-            self.events.send(self.track, CaptureEvent::Failed(error));
+        if self.stopping.load(Ordering::SeqCst) || self.failed.swap(true, Ordering::SeqCst) {
+            return;
         }
+        if matches!(error, CaptureError::DeviceNotAvailable(_))
+            && !self.lost.swap(true, Ordering::SeqCst)
+        {
+            self.send_device(DeviceChange::Lost, self.clock.now());
+        }
+        self.events.send(self.track, CaptureEvent::Failed(error));
     }
 }
 
@@ -795,6 +827,7 @@ impl TrackStarter {
             clock: Arc::clone(&self.clock),
             stopping: Arc::clone(&stopping),
             failed: Arc::new(AtomicBool::new(false)),
+            lost: Arc::new(AtomicBool::new(false)),
             began: Arc::new(AtomicBool::new(false)),
             rerouted: Arc::new(AtomicBool::new(false)),
             // Suspends before the stream starts aren't its to report.
@@ -1076,7 +1109,9 @@ pub fn record_tracks<S: Fs>(
         let (track, event) = match events.next(IDLE_SYNC_CHECK) {
             // A stream can report something before its start fails; its
             // track was never started, so there's nothing to record it in.
-            Received::Event(track, event) if !events.tracks.iter().any(|(t, _)| *t == track) => {
+            // So can one whose track has ended: audio its callback sent as
+            // the failure was, or a device event after it.
+            Received::Event(track, event) if !live.contains(&track) => {
                 events.discard(event);
                 continue;
             }
