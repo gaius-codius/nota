@@ -22,9 +22,11 @@
 //! cpal stamps each buffer with when `PipeWire` captured it: the graph
 //! cycle's time less the stream's delay, on `CLOCK_MONOTONIC`, or the
 //! callback's time less the buffer's length when the driver hasn't started.
-//! Each buffer is sent with its stamp
-//! ([`CaptureSender::audio_captured`]), so the recorder times losses and
-//! drift by it.
+//! Each buffer is sent with its stamp and that delay, the cycle's time
+//! less the stamp ([`CaptureSender::audio_captured`]), so the recorder
+//! times losses and drift by them. The delay steps when the graph's
+//! quantum changes, and cpal holds the stamp back rather than let it go
+//! back; the cycle's time steps only when the graph does.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -161,8 +163,12 @@ impl CaptureBackend for PipeWireBackend {
                     promotion.on_buffer(promote_current_thread);
                     // cpal stamps the buffer with PipeWire's capture time,
                     // on CLOCK_MONOTONIC.
-                    match u64::try_from(info.timestamp().capture.as_nanos()) {
-                        Ok(nanos) => events.audio_captured(samples, Duration::from_nanos(nanos)),
+                    let stamp = info.timestamp();
+                    let delay = stamp.callback.duration_since(stamp.capture);
+                    match u64::try_from(stamp.capture.as_nanos()) {
+                        Ok(nanos) => {
+                            events.audio_captured(samples, Duration::from_nanos(nanos), delay);
+                        }
                         Err(_) => events.audio(samples),
                     }
                 },

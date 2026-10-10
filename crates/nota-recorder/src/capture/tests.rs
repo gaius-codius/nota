@@ -43,8 +43,11 @@ fn samples(from: u64, len: u64) -> Vec<i16> {
 enum Step {
     Audio(Vec<i16>),
     /// Audio the stream stamped: its first sample was captured at this
-    /// time on the clock that stops during suspend.
+    /// time on the clock that stops during suspend, with no delay.
     TimedAudio(Vec<i16>, Duration),
+    /// [`Self::TimedAudio`], captured the second time before the stream's
+    /// cycle.
+    Delayed(Vec<i16>, Duration, Duration),
     Notice(CaptureNotice),
     Fail(CaptureError),
     /// Moves the session clock on.
@@ -102,7 +105,12 @@ impl CaptureBackend for Synthetic {
             for step in script {
                 match step {
                     Step::Audio(s) => feeder_events.audio(&s),
-                    Step::TimedAudio(s, stamp) => feeder_events.audio_captured(&s, stamp),
+                    Step::TimedAudio(s, stamp) => {
+                        feeder_events.audio_captured(&s, stamp, Duration::ZERO);
+                    }
+                    Step::Delayed(s, stamp, delay) => {
+                        feeder_events.audio_captured(&s, stamp, delay);
+                    }
                     Step::Notice(n) => feeder_events.notice(n),
                     Step::Fail(e) => feeder_events.failed(e),
                     Step::Advance(by) => clock.advance(by),
@@ -1918,8 +1926,8 @@ fn a_stamp_the_clock_cant_place_is_sent_unstamped() {
         clock: Arc::new(FakeClock::new(SessionTime::ZERO)),
         thresholds: BTreeMap::new(),
     };
-    sender.audio_captured(&[1, 2], Duration::MAX);
-    sender.audio_captured(&[3, 4], Duration::from_millis(7));
+    sender.audio_captured(&[1, 2], Duration::MAX, Duration::ZERO);
+    sender.audio_captured(&[3, 4], Duration::from_millis(7), Duration::from_millis(2));
     let next = || rx.next(Duration::from_millis(1));
     assert!(matches!(
         next(),
@@ -1927,8 +1935,11 @@ fn a_stamp_the_clock_cant_place_is_sent_unstamped() {
     ));
     assert!(matches!(
         next(),
-        Received::Event(MIC, CaptureEvent::TimedAudio { samples, at: t })
-            if samples == [3, 4] && t == SessionTime::from_nanos(7_000_000)
+        Received::Event(MIC, CaptureEvent::TimedAudio { samples, stamp })
+            if samples == [3, 4] && stamp == Stamp {
+                at: SessionTime::from_nanos(7_000_000),
+                delay: Duration::from_millis(2),
+            }
     ));
 }
 
@@ -2075,4 +2086,113 @@ fn a_loss_epoch_keeps_the_measured_drift() {
     assert!((before.drift().ppb() - 400_000).abs() > 1_000, "{before:?}"); // check-bound
     assert!((opened.drift().ppb() - 400_000).abs() <= 2, "{opened:?}"); // check-bound
     assert_eq!(gap_spans(&run.timeline).len(), 1);
+}
+
+/// How far a stream's cycles stand from its samples `since` its start or
+/// the graph's last restart, in nanoseconds, as measured on a USB
+/// microphone: up to 14 ms by 2 s, easing back to 11.6 ms by 10 s.
+fn settling(since: Duration) -> u64 {
+    let ms = since.as_millis();
+    let micros = if ms < 2_000 {
+        ms * 7
+    } else {
+        14_000 - (ms.min(10_000) - 2_000) * 3 / 10
+    };
+    u64::try_from(micros).unwrap() * 1_000
+}
+
+/// One buffer of a stamped stream's script, at 1 kHz: its first sample,
+/// how long the graph paused before it in all, when the graph last
+/// restarted, and its delay.
+struct Cycle {
+    first: u64,
+    paused: Duration,
+    restarted: Duration,
+    delay: Duration,
+}
+
+impl Cycle {
+    /// The step: the buffer's 20 samples, its cycle 32 ms after they were
+    /// captured, by the samples and the pauses, plus how far the stream had
+    /// settled, and stamped `delay` before that cycle.
+    fn step(&self) -> Step {
+        let captured = Duration::from_millis(self.first) + self.paused;
+        let settled = Duration::from_nanos(settling(captured.checked_sub(self.restarted).unwrap()));
+        let cycle = captured + settled + Duration::from_millis(32);
+        Step::Delayed(
+            samples(self.first, 20),
+            cycle.checked_sub(self.delay).unwrap(),
+            self.delay,
+        )
+    }
+}
+
+/// When the quantum changes a minute into a recording, the stream's audio
+/// as measured: the graph pauses (`pause`), the delay steps from 32 ms to
+/// 8 ms over two buffers, and after a pause the stream settles again;
+/// three minutes in all.
+fn quantum_change(pause: Duration) -> Vec<Step> {
+    let change: u64 = 60_000;
+    (0..9_000)
+        .map(|n| {
+            let first = n * 20;
+            let after = first >= change;
+            let restarted = after && !pause.is_zero();
+            let delay = match first.checked_sub(change) {
+                None => 32,
+                Some(0..40) => 16,
+                Some(_) => 8,
+            };
+            Cycle {
+                first,
+                paused: if after { pause } else { Duration::ZERO },
+                restarted: if restarted {
+                    secs(60) + pause
+                } else {
+                    Duration::ZERO
+                },
+                delay: Duration::from_millis(delay),
+            }
+            .step()
+        })
+        .collect()
+}
+
+/// A quantum change as measured, the graph pausing 44 ms, opens one epoch
+/// for the audio it lost, at the first buffer after it, and nothing for
+/// the stamps' steps and settling either side of it.
+#[test]
+fn a_quantum_change_opens_one_epoch_for_the_audio_it_lost() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let run = run(
+        &fs,
+        quantum_change(Duration::from_millis(44)),
+        Vec::new(),
+        |_| {},
+    );
+    run.result.unwrap();
+
+    // Captured at 60.044 s, stamped 16 ms later as the delay steps down.
+    let resumed = SessionTime::from_nanos(60_060_000_000);
+    assert_eq!(
+        epoch_starts(&run.timeline),
+        [(0, SessionTime::ZERO, 0), (1, resumed, 60_000)]
+    );
+    assert_eq!(
+        gap_spans(&run.timeline),
+        [(SessionTime::from_nanos(60_000_000_000), resumed)]
+    );
+    let journals = all_journals(run.writer, &run.reported);
+    assert_eq!(journaled(&fs, &journals), samples(0, 180_000));
+}
+
+/// A step in the delay with no pause, as the measured quantum change
+/// without its loss, opens no epoch at all.
+#[test]
+fn a_step_in_the_delay_alone_opens_no_epoch() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let run = run(&fs, quantum_change(Duration::ZERO), Vec::new(), |_| {});
+    run.result.unwrap();
+    assert_eq!(epoch_starts(&run.timeline), [(0, SessionTime::ZERO, 0)]);
+    assert!(gap_spans(&run.timeline).is_empty());
 }
