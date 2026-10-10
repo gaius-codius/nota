@@ -1312,3 +1312,51 @@ fn startup_can_use_ballast_after_the_live_recording_stops() {
     drop(recording);
     assert!(startup_watch(&fs, &root, 1_024).unwrap().holds_ballast());
 }
+
+/// A recording that starts between recovery's steps, after recovery took
+/// the ballast and before it met the full disk, keeps the ballast.
+#[test]
+fn a_recording_started_during_recovery_keeps_its_ballast() {
+    use nota_recorder::disk::{Ballast, Freed};
+    use nota_recorder::fs::fake::FakeFs;
+    let root = PathBuf::from("/data");
+    let audio = root.join("sessions/2/audio");
+    let fs = FakeFs::with_dirs([root.join("sessions/1/audio"), audio.clone()]);
+    Ballast::keep(&fs, &root, 1_024, || false).unwrap();
+    let watch = startup_watch(&fs, &root, 1_024).unwrap();
+    assert!(watch.holds_ballast());
+    // Another nota starts recording while this one salvages.
+    let _recording = fs.lock_dir(&audio).unwrap();
+    fs.set_capacity(Some(1_024));
+    let mut output = watch.fs().create(&root.join("old-segment.tmp")).unwrap();
+    assert_eq!(
+        output.write_all(&[7; 20]).unwrap_err().kind(),
+        io::ErrorKind::StorageFull
+    );
+    assert_eq!(watch.full().map(|f| f.ballast), Some(Freed::None));
+    assert!(Ballast::find(&fs, &root, 1_024).unwrap().is_some());
+}
+
+/// The start's own watch, once its recording starts, frees the ballast
+/// for that recording, though its own session is locked by then.
+#[test]
+fn a_started_recording_frees_the_ballast_startup_held() {
+    use nota_recorder::disk::{Ballast, Freed};
+    use nota_recorder::fs::fake::FakeFs;
+    let root = PathBuf::from("/data");
+    let audio = root.join("sessions/1/audio");
+    let fs = FakeFs::with_dirs([audio.clone()]);
+    Ballast::keep(&fs, &root, 1_024, || false).unwrap();
+    let watch = startup_watch(&fs, &root, 1_024).unwrap();
+    // The start locks its own session, then starts recording.
+    let _own = fs.lock_dir(&audio).unwrap();
+    watch.start_recording();
+    fs.set_capacity(Some(1_024));
+    let mut journal = watch.fs().create(&audio.join("journal-000000")).unwrap();
+    assert_eq!(
+        journal.write_all(&[7; 20]).unwrap_err().kind(),
+        io::ErrorKind::StorageFull
+    );
+    assert_eq!(watch.full().map(|f| f.ballast), Some(Freed::Freed));
+    assert!(Ballast::find(&fs, &root, 1_024).unwrap().is_none());
+}

@@ -570,3 +570,72 @@ fn successful_startup_salvage_after_freeing_ballast_keeps_its_rows() {
     assert!(!done.segments().is_empty());
     check_after(&old.promised, &observe(&old.fs)).unwrap();
 }
+
+/// The audio directory of a recording that runs beside a startup salvage.
+fn live() -> PathBuf {
+    data().join("live")
+}
+
+/// A stopped recording on a full disk with its ballast, as
+/// [`stopped_full_disk`] leaves it, with a recording's audio directory,
+/// [`live`], beside it.
+fn beside_a_live_recording() -> StartupDisk {
+    let old = stopped_full_disk(StartupBallast::Existing);
+    old.fs.create_dir(&live()).unwrap();
+    old
+}
+
+/// A startup watch over `fs` whose ballast is shared with the recording
+/// into [`live`]: that recording claims it while it holds its lock, before
+/// any journal of its own.
+fn shared_watch(fs: &FakeFs) -> Arc<DiskWatch<FakeFs>> {
+    let watch = DiskWatch::new(fs.clone());
+    let under = fs.clone();
+    watch.share(move || {
+        under
+            .lock_dir(&live())
+            .is_err_and(|e| e.kind() == io::ErrorKind::WouldBlock)
+    });
+    watch
+}
+
+/// A recording that starts while startup salvage runs keeps the ballast:
+/// salvage meets the full disk, frees nothing, and leaves the stopped
+/// recording's journals as they were.
+#[test]
+fn startup_salvage_beside_a_live_recording_leaves_its_ballast_and_the_journals() {
+    let old = beside_a_live_recording();
+    let watch = shared_watch(&old.fs);
+    let journals: BTreeMap<_, _> = observe(&old.fs)
+        .files
+        .into_iter()
+        .filter(|(p, _)| is_journal(p))
+        .collect();
+    assert!(!journals.is_empty());
+    // It starts once the watch is made, before salvage meets the full disk.
+    let _recording = old.fs.lock_dir(&live()).unwrap();
+    assert!(startup_salvage_into(&old.fs, &watch).is_err());
+    assert_eq!(watch.full().map(|f| f.ballast), Some(Freed::None));
+    assert!(Ballast::find(&old.fs, &data(), BALLAST).unwrap().is_some());
+    let after = observe(&old.fs);
+    for (path, bytes) in journals {
+        assert_eq!(after.files.get(&path), Some(&bytes));
+    }
+    check_durable(&old.promised, &journal_samples(&after).unwrap()).unwrap();
+}
+
+/// Once that recording stops, the next startup salvage frees the ballast
+/// and publishes every stopped journal.
+#[test]
+fn startup_salvage_after_the_live_recording_stops_uses_its_ballast() {
+    let old = beside_a_live_recording();
+    let recording = old.fs.lock_dir(&live()).unwrap();
+    assert!(startup_salvage_into(&old.fs, &shared_watch(&old.fs)).is_err());
+    // The recording stops: its lock goes, and the ballast is no one's.
+    drop(recording);
+    let watch = shared_watch(&old.fs);
+    let done = startup_salvage_into(&old.fs, &watch).unwrap();
+    assert_eq!(watch.full().map(|f| f.ballast), Some(Freed::Freed));
+    assert!(!done.segments().is_empty());
+    check_after(&old.promised, &observe(&old.fs)).unwrap();
+}

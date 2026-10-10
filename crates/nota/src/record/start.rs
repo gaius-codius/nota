@@ -518,9 +518,9 @@ fn keep_session<S: Fs + Clone + 'static>(
 }
 
 /// Makes the session through the watch, retrying after the ballast freed.
-fn create_session(
+fn create_session<S: Fs + Clone + 'static>(
     library: &Library,
-    watch: &Arc<DiskWatch<StdFs>>,
+    watch: &Arc<DiskWatch<S>>,
 ) -> Result<SessionPaths, BoxError> {
     let first = library.create_on(&watch.fs());
     retry_start(first, watch, || library.create_on(&watch.fs())).map_err(start_error)
@@ -1332,6 +1332,124 @@ mod space_tests {
         watch.start_recording();
         assert!(watch.full().is_none());
         assert!(!watch.holds_ballast());
+    }
+
+    /// A library on a real directory of its own, which numbers new
+    /// sessions; the sessions themselves are made on a fake filesystem at
+    /// the same paths. Removed when dropped.
+    struct Numbering {
+        library: Library,
+        root: PathBuf,
+    }
+
+    impl Numbering {
+        /// The library under a fresh directory named for `name`.
+        #[expect(clippy::disallowed_methods, reason = "test scaffolding")]
+        fn new(name: &str) -> Self {
+            let root = std::env::temp_dir().join(format!("nota-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let library = Library::open(&root).unwrap();
+            Self { library, root }
+        }
+    }
+
+    impl Drop for Numbering {
+        #[expect(clippy::disallowed_methods, reason = "test scaffolding")]
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// A fake disk under `root` holding an earlier session, number 1: a
+    /// synced journal and its kept title. Its file names and bytes, too.
+    fn with_an_earlier_session(root: &std::path::Path) -> (FakeFs, Vec<(PathBuf, Vec<u8>)>) {
+        use nota_recorder::fs::FsFile;
+        let earlier = SessionPaths {
+            id: SessionId::new(1),
+            dir: root.join("sessions/1"),
+        };
+        let fs = FakeFs::with_dirs([earlier.audio()]);
+        let mut journal = fs.create(&earlier.audio().join("journal-000000")).unwrap();
+        journal.write_all(&[7; 40]).unwrap();
+        journal.sync().unwrap();
+        drop(journal);
+        fs.sync_dir(&earlier.audio()).unwrap();
+        let row = NewSession {
+            title: Some("Earlier".to_owned()),
+            ..NewSession::bare(earlier.id)
+        };
+        earlier.keep_on(&fs, &row).unwrap();
+        let files = fs
+            .paths()
+            .into_iter()
+            .map(|path| {
+                let bytes = fs.read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect();
+        (fs, files)
+    }
+
+    /// Makes a new session and keeps its row on `fs`, as a start does
+    /// before any stream opens, through a startup watch over `fs`.
+    fn start_session(numbering: &Numbering, fs: &FakeFs) -> Result<SessionPaths, BoxError> {
+        let watch = startup_watch(fs, &numbering.root, 1_024)?;
+        let session = create_session(&numbering.library, &watch)?;
+        let row = NewSession {
+            title: Some("New".to_owned()),
+            ..NewSession::bare(session.id)
+        };
+        keep_session(&watch, &session, &row).map_err(start_error)?;
+        Ok(session)
+    }
+
+    /// How many operations a start makes on a copy of `fs`, failed ones
+    /// (a session number already taken) included: each in turn gets a
+    /// fault.
+    fn start_operations(numbering: &Numbering, fs: &FakeFs) -> usize {
+        let probe = fs.copy_disk();
+        let made = start_session(numbering, &probe).unwrap();
+        // Number 1 is the earlier session's: the start tried it first.
+        assert_eq!(made.id, SessionId::new(2));
+        probe.attempted()
+    }
+
+    /// A full disk at each operation of a new start, every write of its
+    /// session and the sync after its title's rename included, rejects the
+    /// start: no new session is left, even after a crash, and the earlier
+    /// session's journal and title are as they were.
+    #[test]
+    fn a_start_failing_at_any_write_leaves_no_session_and_the_earlier_one_untouched() {
+        let numbering = Numbering::new("start-sweep");
+        let (fs, earlier) = with_an_earlier_session(&numbering.root);
+        let sessions = numbering.root.join("sessions");
+        let operations = start_operations(&numbering, &fs);
+        // Making both directories, keeping the title, and their syncs.
+        assert!(operations >= 10, "{operations}");
+        for at in 0..operations {
+            let run = fs.copy_disk();
+            run.fail_after(at, std::io::ErrorKind::StorageFull);
+            assert!(start_session(&numbering, &run).is_err(), "at {at}");
+            assert_eq!(
+                run.list(&sessions).unwrap(),
+                [sessions.join("1")],
+                "a fault at operation {at}"
+            );
+            for (path, bytes) in &earlier {
+                assert_eq!(&run.read(path).unwrap(), bytes, "{path:?}, at {at}");
+            }
+            for outcome in nota_recorder::fs::fake::CrashOutcome::standard() {
+                let crashed = run.crash(outcome);
+                assert_eq!(
+                    crashed.list(&sessions).unwrap(),
+                    [sessions.join("1")],
+                    "a fault at operation {at}, {outcome:?}"
+                );
+                for (path, bytes) in &earlier {
+                    assert_eq!(&crashed.read(path).unwrap(), bytes, "{path:?}, at {at}");
+                }
+            }
+        }
     }
 
     /// Cleanup refuses to remove any session containing recorded audio.

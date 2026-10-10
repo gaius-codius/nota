@@ -531,8 +531,10 @@ fn salvage_result<S: Fs + Clone + 'static, T: SegmentStore>(
     }
 }
 
-/// Holds the existing ballast before startup can write anything.
-pub(crate) fn startup_watch<S: Fs + Clone>(
+/// Holds the existing ballast before startup can write anything, unless
+/// a live recording owns it. Shared until the watch starts recording: a
+/// recording that starts meanwhile claims it, and it isn't freed.
+pub(crate) fn startup_watch<S: Fs + Clone + 'static>(
     fs: &S,
     root: &Path,
     len: u64,
@@ -544,6 +546,10 @@ pub(crate) fn startup_watch<S: Fs + Clone>(
     }
     if let Some(ballast) = Ballast::find(fs, root, len)? {
         watch.hold(ballast);
+        // Recovery takes a while: look again before freeing it. Sessions
+        // that can't be listed may hold a recording, so they keep it.
+        let (fs, root) = (fs.clone(), root.to_path_buf());
+        watch.share(move || startup_in_use(&fs, &root).unwrap_or(true));
     }
     Ok(watch)
 }

@@ -28,6 +28,9 @@
 //!   that failed for want of space the same way. A check that finds less
 //!   than [`FULL_FLOOR`] free, after an earlier check this recording found
 //!   more, marks it full too, for whatever else meets the full disk first.
+//!   A watch made at startup, to salvage or start before any recording
+//!   runs, can [share](DiskWatch::share) the ballast: before freeing it,
+//!   it asks again whether a live recording has claimed it since.
 //! - **The monitor** ([`DiskMonitor`]): a thread that makes the check every
 //!   [`CHECK_INTERVAL`], keeps the ballast, and reports the space, the
 //!   [low-disk warning](LOW_WARNING) and the full disk. Its first check, and
@@ -336,8 +339,9 @@ pub struct Full {
 pub enum Freed {
     /// It was freed: its room is the recording's.
     Freed,
-    /// None was held: the disk hadn't room for one, it couldn't be made,
-    /// or it was still being made.
+    /// None was freed: none was held (the disk hadn't room for one, it
+    /// couldn't be made, or it was still being made), or a live recording
+    /// claimed the one held (see [`DiskWatch::share`]), which kept it.
     None,
     /// Removing it failed, with this kind of error.
     Failed(io::ErrorKind),
@@ -359,6 +363,18 @@ struct WatchState {
     full: Option<Full>,
     /// The monitor was asked to stop.
     stopping: bool,
+    /// Asks whether a live recording claims the ballast, while it's
+    /// shared ([`DiskWatch::share`]).
+    claimed: Option<Claimed>,
+}
+
+/// Whether a live recording claims a shared ballast now: `true` keeps it.
+struct Claimed(Box<dyn Fn() -> bool + Send + Sync>);
+
+impl fmt::Debug for Claimed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Claimed(..)")
+    }
 }
 
 impl<S: Fs + Clone> DiskWatch<S> {
@@ -385,16 +401,28 @@ impl<S: Fs + Clone> DiskWatch<S> {
     /// Holds `ballast` to free when the disk fills, or frees it at once if
     /// the disk has filled already.
     pub fn hold(&self, ballast: Ballast) {
-        let mut state = self.lock();
+        let mut guard = self.lock();
+        let state = &mut *guard;
         match state.full.as_mut() {
             Some(full) => {
-                let freed = freed(ballast.free(&self.fs));
+                let freed = spend(&self.fs, state.claimed.as_ref(), ballast);
                 if full.ballast == Freed::None {
                     full.ballast = freed;
                 }
             }
             None => state.ballast = Some(ballast),
         }
+    }
+
+    /// Shares the ballast with the recordings in its data directory, until
+    /// [`Self::start_recording`]: before freeing it, asks `claimed` whether
+    /// a live recording claims it now, and if one does, leaves it on disk
+    /// for that recording and frees nothing ([`Freed::None`]). For a watch
+    /// made at startup, whose ballast a recording that starts meanwhile
+    /// needs to finish. `claimed` is asked with the watch locked, so it
+    /// mustn't use the watch: give it the filesystem under it.
+    pub fn share(&self, claimed: impl Fn() -> bool + Send + Sync + 'static) {
+        self.lock().claimed = Some(Claimed(Box::new(claimed)));
     }
 
     /// Notes that the disk is full, `path`'s operation having failed for
@@ -408,7 +436,7 @@ impl<S: Fs + Clone> DiskWatch<S> {
             return;
         }
         let ballast = match state.ballast.take() {
-            Some(ballast) => freed(ballast.free(&self.fs)),
+            Some(ballast) => spend(&self.fs, state.claimed.as_ref(), ballast),
             None => Freed::None,
         };
         state.full = Some(Full {
@@ -419,9 +447,13 @@ impl<S: Fs + Clone> DiskWatch<S> {
     }
 
     /// Starts recording after startup succeeded. A full disk startup got
-    /// past belongs to recovery, before the monitor or any writer runs.
+    /// past belongs to recovery, before the monitor or any writer runs. The
+    /// ballast is this recording's own from now on: no longer
+    /// [shared](Self::share).
     pub fn start_recording(&self) {
-        self.lock().full = None;
+        let mut state = self.lock();
+        state.full = None;
+        state.claimed = None;
     }
 
     /// Whether the disk has filled, and how.
@@ -462,6 +494,15 @@ impl<S: Fs + Clone> DiskWatch<S> {
     fn lock(&self) -> MutexGuard<'_, WatchState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+/// Frees `ballast`, unless `claimed` says a live recording claims it:
+/// then it's left on disk for that recording, and nothing is freed.
+fn spend<S: Fs>(fs: &S, claimed: Option<&Claimed>, ballast: Ballast) -> Freed {
+    if claimed.is_some_and(|claimed| (claimed.0)()) {
+        return Freed::None;
+    }
+    freed(ballast.free(fs))
 }
 
 fn freed(result: io::Result<()>) -> Freed {
