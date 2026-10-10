@@ -1360,3 +1360,63 @@ fn a_started_recording_frees_the_ballast_startup_held() {
     assert_eq!(watch.full().map(|f| f.ballast), Some(Freed::Freed));
     assert!(Ballast::find(&fs, &root, 1_024).unwrap().is_none());
 }
+
+/// Salvage locks the session it salvages through the startup watch: that
+/// lock is startup's own, so a full disk still frees the ballast.
+#[test]
+fn startup_frees_the_ballast_while_salvage_holds_its_session() {
+    use nota_recorder::disk::{Ballast, Freed};
+    use nota_recorder::fs::fake::FakeFs;
+    let root = PathBuf::from("/data");
+    let audio = root.join("sessions/1/audio");
+    let fs = FakeFs::with_dirs([audio.clone()]);
+    Ballast::keep(&fs, &root, 1_024, || false).unwrap();
+    let watch = startup_watch(&fs, &root, 1_024).unwrap();
+    // As `salvage_one` does, before it writes anything.
+    let _salvaging = watch.fs().lock_dir(&audio).unwrap();
+    fs.set_capacity(Some(1_024));
+    let mut output = watch.fs().create(&audio.join("seg.tmp")).unwrap();
+    assert_eq!(
+        output.write_all(&[7; 20]).unwrap_err().kind(),
+        io::ErrorKind::StorageFull
+    );
+    assert_eq!(watch.full().map(|f| f.ballast), Some(Freed::Freed));
+    assert!(Ballast::find(&fs, &root, 1_024).unwrap().is_none());
+}
+
+/// Once salvage lets a session go, a recording that locks it next claims
+/// the ballast: the watch counts only the locks it still holds as its own.
+#[test]
+fn a_session_salvage_let_go_is_claimed_by_the_recording_that_takes_it() {
+    use nota_recorder::disk::{Ballast, Freed};
+    use nota_recorder::fs::fake::FakeFs;
+    let root = PathBuf::from("/data");
+    let audio = root.join("sessions/1/audio");
+    let fs = FakeFs::with_dirs([audio.clone()]);
+    Ballast::keep(&fs, &root, 1_024, || false).unwrap();
+    let watch = startup_watch(&fs, &root, 1_024).unwrap();
+    drop(watch.fs().lock_dir(&audio).unwrap());
+    // Another nota resumes recording the session salvage just finished.
+    let _resumed = fs.lock_dir(&audio).unwrap();
+    watch.note_full(None);
+    assert_eq!(watch.full().map(|f| f.ballast), Some(Freed::None));
+    assert!(Ballast::find(&fs, &root, 1_024).unwrap().is_some());
+}
+
+/// If the sessions can't be listed when the disk fills, one of them may
+/// be recording: the ballast is kept.
+#[test]
+fn startup_keeps_the_ballast_when_it_cant_list_the_sessions() {
+    use nota_recorder::disk::{Ballast, Freed};
+    use nota_recorder::fs::fake::FakeFs;
+    let root = PathBuf::from("/data");
+    let sessions = root.join("sessions");
+    let fs = FakeFs::with_dirs([sessions.clone()]);
+    Ballast::keep(&fs, &root, 1_024, || false).unwrap();
+    let watch = startup_watch(&fs, &root, 1_024).unwrap();
+    // Gone by the time the disk fills: listing it fails.
+    fs.remove_dir(&sessions).unwrap();
+    watch.note_full(None);
+    assert_eq!(watch.full().map(|f| f.ballast), Some(Freed::None));
+    assert!(Ballast::find(&fs, &root, 1_024).unwrap().is_some());
+}

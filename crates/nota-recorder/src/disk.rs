@@ -366,10 +366,18 @@ struct WatchState {
     /// Asks whether a live recording claims the ballast, while it's
     /// shared ([`DiskWatch::share`]).
     claimed: Option<Claimed>,
+    /// The directories locked through [`DiskWatch::fs`] and not yet
+    /// unlocked: the watch's own, never a live recording's.
+    held: Vec<PathBuf>,
 }
 
-/// Whether a live recording claims a shared ballast now: `true` keeps it.
-struct Claimed(Box<dyn Fn() -> bool + Send + Sync>);
+/// Whether a live recording claims a shared ballast now, given the
+/// directories the watch holds itself: `true` keeps it.
+struct Claimed(Box<ClaimCheck>);
+
+/// What [`DiskWatch::share`] is given: told the directories the watch
+/// holds itself, whether a live recording claims the ballast.
+type ClaimCheck = dyn Fn(&[PathBuf]) -> bool + Send + Sync;
 
 impl fmt::Debug for Claimed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -405,7 +413,7 @@ impl<S: Fs + Clone> DiskWatch<S> {
         let state = &mut *guard;
         match state.full.as_mut() {
             Some(full) => {
-                let freed = spend(&self.fs, state.claimed.as_ref(), ballast);
+                let freed = spend(&self.fs, state.claimed.as_ref(), &state.held, ballast);
                 if full.ballast == Freed::None {
                     full.ballast = freed;
                 }
@@ -417,11 +425,14 @@ impl<S: Fs + Clone> DiskWatch<S> {
     /// Shares the ballast with the recordings in its data directory, until
     /// [`Self::start_recording`]: before freeing it, asks `claimed` whether
     /// a live recording claims it now, and if one does, leaves it on disk
-    /// for that recording and frees nothing ([`Freed::None`]). For a watch
-    /// made at startup, whose ballast a recording that starts meanwhile
-    /// needs to finish. `claimed` is asked with the watch locked, so it
-    /// mustn't use the watch: give it the filesystem under it.
-    pub fn share(&self, claimed: impl Fn() -> bool + Send + Sync + 'static) {
+    /// for that recording and frees nothing ([`Freed::None`]); this watch
+    /// lets it go, and the next startup finds it again. For a watch made at
+    /// startup, whose ballast a recording that starts meanwhile needs to
+    /// finish. `claimed` is given the directories locked through
+    /// [`Self::fs`] and still held, salvage's session among them: those are
+    /// the startup's own, not a recording's. It's asked with the watch
+    /// locked, so it mustn't use the watch: give it the filesystem under it.
+    pub fn share(&self, claimed: impl Fn(&[PathBuf]) -> bool + Send + Sync + 'static) {
         self.lock().claimed = Some(Claimed(Box::new(claimed)));
     }
 
@@ -436,7 +447,7 @@ impl<S: Fs + Clone> DiskWatch<S> {
             return;
         }
         let ballast = match state.ballast.take() {
-            Some(ballast) => spend(&self.fs, state.claimed.as_ref(), ballast),
+            Some(ballast) => spend(&self.fs, state.claimed.as_ref(), &state.held, ballast),
             None => Freed::None,
         };
         state.full = Some(Full {
@@ -496,10 +507,11 @@ impl<S: Fs + Clone> DiskWatch<S> {
     }
 }
 
-/// Frees `ballast`, unless `claimed` says a live recording claims it:
-/// then it's left on disk for that recording, and nothing is freed.
-fn spend<S: Fs>(fs: &S, claimed: Option<&Claimed>, ballast: Ballast) -> Freed {
-    if claimed.is_some_and(|claimed| (claimed.0)()) {
+/// Frees `ballast`, unless `claimed` says a live recording claims it, the
+/// watch holding `held` itself: then it's left on disk for that
+/// recording, and nothing is freed.
+fn spend<S: Fs>(fs: &S, claimed: Option<&Claimed>, held: &[PathBuf], ballast: Ballast) -> Freed {
+    if claimed.is_some_and(|claimed| (claimed.0)(held)) {
         return Freed::None;
     }
     freed(ballast.free(fs))
@@ -539,6 +551,31 @@ pub struct WatchedFile<S: Fs> {
     watch: Arc<DiskWatch<S>>,
 }
 
+/// A directory locked through a [`WatchedFs`]: counted as the watch's own
+/// (see [`DiskWatch::share`]) until it's dropped, which unlocks it.
+#[derive(Debug)]
+pub struct WatchedLock<S: Fs> {
+    /// Held until this is dropped.
+    _lock: S::Lock,
+    dir: PathBuf,
+    watch: Arc<DiskWatch<S>>,
+}
+
+impl<S: Fs> Drop for WatchedLock<S> {
+    /// No longer the watch's own: from here, whoever locks it next may be a
+    /// recording. (The lock itself goes just after, with the fields.)
+    fn drop(&mut self) {
+        let mut state = self
+            .watch
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(at) = state.held.iter().position(|d| *d == self.dir) {
+            state.held.swap_remove(at);
+        }
+    }
+}
+
 /// Fsyncs a [`WatchedFile`] from any thread.
 #[derive(Debug)]
 pub struct WatchedSyncer<S: Fs> {
@@ -563,7 +600,7 @@ fn seen<S: Fs + Clone, T>(
 
 impl<S: Fs + Clone + 'static> Fs for WatchedFs<S> {
     type File = WatchedFile<S>;
-    type Lock = S::Lock;
+    type Lock = WatchedLock<S>;
 
     fn create(&self, path: &Path) -> io::Result<Self::File> {
         let file = seen(&self.watch, path, self.inner.create(path))?;
@@ -611,8 +648,15 @@ impl<S: Fs + Clone + 'static> Fs for WatchedFs<S> {
         self.inner.list(dir)
     }
 
+    /// Locks `dir`, and counts it as the watch's own while it's held.
     fn lock_dir(&self, dir: &Path) -> io::Result<Self::Lock> {
-        self.inner.lock_dir(dir)
+        let lock = self.inner.lock_dir(dir)?;
+        self.watch.lock().held.push(dir.to_path_buf());
+        Ok(WatchedLock {
+            _lock: lock,
+            dir: dir.to_path_buf(),
+            watch: Arc::clone(&self.watch),
+        })
     }
 
     fn free_space(&self, dir: &Path) -> io::Result<u64> {

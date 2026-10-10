@@ -591,7 +591,7 @@ fn beside_a_live_recording() -> StartupDisk {
 fn shared_watch(fs: &FakeFs) -> Arc<DiskWatch<FakeFs>> {
     let watch = DiskWatch::new(fs.clone());
     let under = fs.clone();
-    watch.share(move || {
+    watch.share(move |_| {
         under
             .lock_dir(&live())
             .is_err_and(|e| e.kind() == io::ErrorKind::WouldBlock)
@@ -634,6 +634,30 @@ fn startup_salvage_after_the_live_recording_stops_uses_its_ballast() {
     // The recording stops: its lock goes, and the ballast is no one's.
     drop(recording);
     let watch = shared_watch(&old.fs);
+    let done = startup_salvage_into(&old.fs, &watch).unwrap();
+    assert_eq!(watch.full().map(|f| f.ballast), Some(Freed::Freed));
+    assert!(!done.segments().is_empty());
+    check_after(&old.promised, &observe(&old.fs)).unwrap();
+}
+
+/// Salvage's own lock on the session it salvages is no live recording's:
+/// with none running, a claim that looks at every session still lets
+/// salvage free the ballast and publish every stopped journal.
+#[test]
+fn startup_salvage_frees_a_shared_ballast_though_it_holds_its_session() {
+    let old = beside_a_live_recording();
+    let watch = DiskWatch::new(old.fs.clone());
+    let under = old.fs.clone();
+    // As startup does: any session locked but those the watch holds,
+    // salvage's own among them.
+    watch.share(move |own| {
+        [session(), live()].iter().any(|dir| {
+            !own.contains(dir)
+                && under
+                    .lock_dir(dir)
+                    .is_err_and(|e| e.kind() == io::ErrorKind::WouldBlock)
+        })
+    });
     let done = startup_salvage_into(&old.fs, &watch).unwrap();
     assert_eq!(watch.full().map(|f| f.ballast), Some(Freed::Freed));
     assert!(!done.segments().is_empty());

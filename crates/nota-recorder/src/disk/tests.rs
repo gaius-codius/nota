@@ -1060,7 +1060,7 @@ fn a_wrapper_without_directory_removal_refuses_cleanup() {
 fn shared(fs: &FakeFs, len: u64) -> Arc<DiskWatch<FakeFs>> {
     let watch = watched(fs, len);
     let under = fs.clone();
-    watch.share(move || {
+    watch.share(move |_| {
         under
             .lock_dir(&p("/data/live"))
             .is_err_and(|e| e.kind() == io::ErrorKind::WouldBlock)
@@ -1115,7 +1115,7 @@ fn a_ballast_held_once_full_is_kept_if_a_live_recording_claims_it() {
     let fs = FakeFs::with_dirs(["/data/live"]);
     let watch = DiskWatch::new(fs.clone());
     let under = fs.clone();
-    watch.share(move || under.lock_dir(&p("/data/live")).is_err());
+    watch.share(move |_| under.lock_dir(&p("/data/live")).is_err());
     watch.note_full(None);
     let _recording = fs.lock_dir(&p("/data/live")).unwrap();
     // Found after the disk filled, while the recording runs.
@@ -1125,4 +1125,14 @@ fn a_ballast_held_once_full_is_kept_if_a_live_recording_claims_it() {
     watch.hold(ballast);
     assert_eq!(watch.full().map(|f| f.ballast), Some(Freed::None));
     assert!(Ballast::find(&fs, &p("/data"), 100).unwrap().is_some());
+}
+
+/// A shared watch shows that it's shared when debugged, without trying
+/// to show the check itself.
+#[test]
+fn a_shared_watch_says_so_when_debugged() {
+    let fs = FakeFs::with_dirs(["/data/live"]);
+    let watch = shared(&fs, 100);
+    let shown = format!("{watch:?}");
+    assert!(shown.contains("claimed: Some(Claimed(..))"), "{shown}");
 }

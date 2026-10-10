@@ -483,8 +483,8 @@ fn recover(
 }
 
 /// A space failure rejects this start; other title failures remain notes.
-fn keep_before_recording(
-    watch: &Arc<DiskWatch<StdFs>>,
+fn keep_before_recording<S: Fs + Clone + 'static>(
+    watch: &Arc<DiskWatch<S>>,
     session: &SessionPaths,
     row: &NewSession,
     notes: &mut Vec<String>,
@@ -1344,11 +1344,14 @@ mod space_tests {
 
     impl Numbering {
         /// The library under a fresh directory named for `name`.
+        /// Session 1 is on it, as on the fake disk, so a start numbers its
+        /// session 2 straight away, as it would on a real one.
         #[expect(clippy::disallowed_methods, reason = "test scaffolding")]
         fn new(name: &str) -> Self {
             let root = std::env::temp_dir().join(format!("nota-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&root);
             let library = Library::open(&root).unwrap();
+            std::fs::create_dir_all(root.join("sessions/1/audio")).unwrap();
             Self { library, root }
         }
     }
@@ -1379,15 +1382,19 @@ mod space_tests {
             ..NewSession::bare(earlier.id)
         };
         earlier.keep_on(&fs, &row).unwrap();
-        let files = fs
-            .paths()
+        let files = files(&fs);
+        (fs, files)
+    }
+
+    /// Every file on `fs`, with its bytes.
+    fn files(fs: &FakeFs) -> Vec<(PathBuf, Vec<u8>)> {
+        fs.paths()
             .into_iter()
             .map(|path| {
                 let bytes = fs.read(&path).unwrap();
                 (path, bytes)
             })
-            .collect();
-        (fs, files)
+            .collect()
     }
 
     /// Makes a new session and keeps its row on `fs`, as a start does
@@ -1399,7 +1406,10 @@ mod space_tests {
             title: Some("New".to_owned()),
             ..NewSession::bare(session.id)
         };
-        keep_session(&watch, &session, &row).map_err(start_error)?;
+        let mut notes = Vec::new();
+        keep_before_recording(&watch, &session, &row, &mut notes)?;
+        // Only a full disk rejects a start; nothing here is anything else.
+        assert_eq!(notes, Vec::<String>::new());
         Ok(session)
     }
 
@@ -1409,7 +1419,6 @@ mod space_tests {
     fn start_operations(numbering: &Numbering, fs: &FakeFs) -> usize {
         let probe = fs.copy_disk();
         let made = start_session(numbering, &probe).unwrap();
-        // Number 1 is the earlier session's: the start tried it first.
         assert_eq!(made.id, SessionId::new(2));
         probe.attempted()
     }
@@ -1435,9 +1444,8 @@ mod space_tests {
                 [sessions.join("1")],
                 "a fault at operation {at}"
             );
-            for (path, bytes) in &earlier {
-                assert_eq!(&run.read(path).unwrap(), bytes, "{path:?}, at {at}");
-            }
+            // Nothing added anywhere, the earlier session's files as they were.
+            assert_eq!(files(&run), earlier, "at {at}");
             for outcome in nota_recorder::fs::fake::CrashOutcome::standard() {
                 let crashed = run.crash(outcome);
                 assert_eq!(
@@ -1445,10 +1453,57 @@ mod space_tests {
                     [sessions.join("1")],
                     "a fault at operation {at}, {outcome:?}"
                 );
-                for (path, bytes) in &earlier {
-                    assert_eq!(&crashed.read(path).unwrap(), bytes, "{path:?}, at {at}");
-                }
+                assert_eq!(files(&crashed), earlier, "at {at}, {outcome:?}");
             }
+        }
+    }
+
+    /// With the ballast held, a full disk at each of a new start's writes
+    /// frees it and the write is tried again: the start makes exactly one
+    /// new session, with its title kept, and leaves the earlier one as it
+    /// was. A fault in the watch's own look at the sessions, before any
+    /// write, rejects the start and leaves nothing.
+    #[test]
+    fn a_start_failing_at_any_write_with_a_ballast_makes_one_session() {
+        let numbering = Numbering::new("start-sweep-ballast");
+        let (fs, earlier) = with_an_earlier_session(&numbering.root);
+        Ballast::keep(&fs, &numbering.root, 1_024, || false).unwrap();
+        let sessions = numbering.root.join("sessions");
+        let looked = {
+            let probe = fs.copy_disk();
+            let _watch = startup_watch(&probe, &numbering.root, 1_024).unwrap();
+            probe.attempted()
+        };
+        let operations = start_operations(&numbering, &fs);
+        // Making both directories, keeping the title, and their syncs.
+        assert!(operations >= looked + 10, "{looked}, {operations}");
+        for at in 0..operations {
+            let run = fs.copy_disk();
+            run.fail_after(at, std::io::ErrorKind::StorageFull);
+            let made = start_session(&numbering, &run);
+            for (path, bytes) in &earlier {
+                assert_eq!(&run.read(path).unwrap(), bytes, "{path:?}, at {at}");
+            }
+            if at < looked {
+                assert!(made.is_err(), "at {at}");
+                assert_eq!(run.list(&sessions).unwrap(), [sessions.join("1")]);
+                continue;
+            }
+            // The fault freed the ballast; the retry found room.
+            let made = made.unwrap_or_else(|e| panic!("at {at}: {e}"));
+            assert_eq!(
+                run.list(&sessions).unwrap(),
+                [sessions.join("1"), made.dir.clone()],
+                "at {at}"
+            );
+            let kept = run.read(&made.dir.join("session.txt")).unwrap();
+            let kept = String::from_utf8(kept).unwrap();
+            assert!(kept.lines().any(|line| line == "title New"), "{kept}");
+            assert!(
+                Ballast::find(&run, &numbering.root, 1_024)
+                    .unwrap()
+                    .is_none()
+            );
         }
     }
 
