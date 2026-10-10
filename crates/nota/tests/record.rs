@@ -966,6 +966,25 @@ fn when_every_stream_fails_the_recording_stops_by_itself() {
     assert_saved(&tmp.0, 1, &[0, 1], 450);
 }
 
+/// A rejected start reports each input failure once.
+#[test]
+fn a_start_with_no_inputs_reports_each_failure_once() {
+    let tmp = TestDir::new("both-missing");
+    // Both inputs fail before capture opens, so startup owns both failure notes.
+    let mut nota = Running::start_with(&tmp.0, &["--mic", "missing", "--system", "missing"]);
+    let status = nota
+        .exits()
+        .expect("nota did not reject the missing inputs");
+    assert!(!status.success(), "{status:?}");
+    assert!(nota.terminal_restored());
+    let said = visible(&nota.output.lock().unwrap());
+    assert_eq!(
+        said.matches("not recording device missing").count(),
+        2,
+        "{said}"
+    );
+}
+
 #[test]
 fn a_stream_that_cant_start_leaves_the_other_recording() {
     let tmp = TestDir::new("one-missing");

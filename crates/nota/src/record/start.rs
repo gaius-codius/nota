@@ -147,7 +147,7 @@ fn start_with_outcome<B: CaptureBackend>(
         }
     }
     if captures.is_empty() {
-        return Err(format!("nothing to record: {}", outcome.notes.join("; ")).into());
+        return Err("nothing to record".into());
     }
     // Each track's first epoch starts when its own stream did: a stream
     // opened later doesn't push the first one's audio later.
