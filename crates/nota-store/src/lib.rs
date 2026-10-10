@@ -46,6 +46,7 @@ pub mod migrate;
 pub mod schema;
 mod segments;
 mod sessions;
+pub mod timeline;
 pub mod transcript;
 mod writer;
 
@@ -56,6 +57,7 @@ pub use jobs::{Job, JobEnd, JobId, JobKind, JobState, Progress, Wait};
 pub use migrate::Adopted;
 pub use segments::{AudioDigest, Inserted, RowKey, SegmentRow, Sha256Digest};
 pub use sessions::{NewSession, Session, SessionState, Track, TrackKind};
+pub use timeline::{Happened, TimelineEvent};
 pub use transcript::{Heard, Line, RevisionNumber, StoredUtterance, UtteranceId, Word};
 pub use writer::Writer;
 

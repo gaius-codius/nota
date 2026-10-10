@@ -85,6 +85,40 @@ pub enum Input {
     Device(String),
 }
 
+/// What a track records, which is what the screens call it and how they
+/// read its silence: exact zeros from a microphone mean it's muted, from
+/// the system audio that nothing is playing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackRole {
+    /// The microphone.
+    Microphone,
+    /// What the system plays.
+    System,
+}
+
+impl TrackRole {
+    /// The track's short name on the screens: `mic` or `system`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Microphone => "mic",
+            Self::System => "system",
+        }
+    }
+}
+
+/// A track as the Recording screen shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Track {
+    /// The track.
+    pub id: TrackId,
+    /// What it records.
+    pub role: TrackRole,
+    /// The footer's name for where it records from, until a route change
+    /// names another.
+    pub source: String,
+}
+
 /// A mark (◆): "this matters", at the moment `m` was pressed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Mark {

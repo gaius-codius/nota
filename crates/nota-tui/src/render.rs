@@ -33,7 +33,7 @@ use ratatui::text::{Line, Span};
 
 use crate::annotation::Annotation;
 use crate::band::column_of;
-use crate::screen::Recording;
+use crate::screen::{Recording, Shown, Tone};
 use crate::text::{display_width, graphemes, wrap};
 use crate::theme::Theme;
 
@@ -65,6 +65,11 @@ const FRAME_ROW_FIXED: usize = 8;
 const MARK: &str = "◆";
 const NOTE: &str = "◇";
 const TRANSCRIBING: &str = "░░░";
+/// A stretch of the band where no track recorded anything.
+const GAP: char = '·';
+/// A change on the band: a route change, a track lost or back, a fault
+/// starting.
+const CHANGE: char = '┊';
 
 impl Recording {
     /// Draws the screen over the whole frame: the main panel, and beside it
@@ -156,10 +161,16 @@ impl Recording {
             Span::styled(" · ", self.theme.text_hint),
             Span::styled(self.title.as_str(), self.theme.text),
         ];
-        let right = vec![
-            Span::styled("●", dot),
-            Span::styled(format!(" REC {h:02}:{m:02}:{s:02}"), self.theme.accent),
-        ];
+        let clock = format!("{h:02}:{m:02}:{s:02}");
+        // A warning takes `● REC`'s place and keeps the clock: the clock
+        // still counting is what shows the recording goes on.
+        let right = match self.warnings.top(self.clock.now()) {
+            Some(shown) => self.warning_spans(shown, clock),
+            None => vec![
+                Span::styled("●", dot),
+                Span::styled(format!(" REC {clock}"), self.theme.accent),
+            ],
+        };
         frame_row(
             Rect::new(area.x, area.y, area.width, 1),
             ('╭', '╮'),
@@ -171,9 +182,31 @@ impl Recording {
         );
     }
 
+    /// The top border's right side with `shown` in place of `● REC`:
+    /// `⚠ mic lost +1 · 01:12:48`.
+    fn warning_spans(&self, shown: Shown, clock: String) -> Vec<Span<'static>> {
+        let style = match shown.tone {
+            Tone::Accent => self.theme.accent,
+            Tone::Gold => self.theme.gold,
+            Tone::Plain => self.theme.text,
+            Tone::Good => self.theme.green,
+        };
+        let mut spans = vec![Span::styled(shown.text, style)];
+        if shown.more > 0 {
+            spans.push(Span::styled(format!(" +{}", shown.more), style));
+        }
+        spans.push(Span::styled(" · ", self.theme.text_hint));
+        spans.push(Span::styled(clock, self.theme.text));
+        spans
+    }
+
     fn draw_bottom(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
+        // The tracks' sources, as route changes leave them, if the screen
+        // was told of them.
+        let source = self.warnings.sources();
+        let source = source.as_deref().unwrap_or(&self.source);
         let right = vec![Span::styled(
-            format!("{} · {}", self.source, megabytes(self.recorded_bytes)),
+            format!("{source} · {}", megabytes(self.recorded_bytes)),
             self.theme.text_secondary,
         )];
         let row = Rect::new(area.x, area.bottom() - 1, area.width, 1);
@@ -266,14 +299,26 @@ impl Recording {
         }
         let columns = self.levels.columns(now, width);
         let live = columns.len().saturating_sub(1);
+        let mut changed = vec![false; width];
+        for &at in self.warnings.changes() {
+            changed[column_of(at, now, width).min(width - 1)] = true;
+        }
+        let heard_from = columns.iter().position(Option::is_some);
         for (i, (x, level)) in (area.x..).zip(&columns).enumerate() {
-            let style = if i == live {
-                self.theme.accent
-            } else {
-                self.theme.text_secondary
+            let (glyph, style) = match level {
+                Some(_) if changed[i] => (CHANGE, self.theme.text_secondary),
+                Some(level) if i == live => (crate::level::bar(*level), self.theme.accent),
+                Some(level) => (crate::level::bar(*level), self.theme.text_secondary),
+                // Nothing recorded here, since the first level: a gap,
+                // which wins over a change in the same column. The live
+                // end may be waiting for its first level, so it's left
+                // blank.
+                None if heard_from.is_some_and(|first| i > first) && i != live => {
+                    (GAP, self.theme.border)
+                }
+                None => (' ', self.theme.text_secondary),
             };
-            let bar = level.map_or(' ', crate::level::bar);
-            buf.set_string(x, area.y + 1, bar.encode_utf8(&mut [0; 4]), style);
+            buf.set_string(x, area.y + 1, glyph.encode_utf8(&mut [0; 4]), style);
         }
     }
 
