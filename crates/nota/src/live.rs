@@ -184,6 +184,22 @@ impl Live {
                 let cause = Cause::JournalFailed(error.to_string());
                 actions.updates.push(self.raised(cause, track));
             }
+            // A journal that broke on the regular fsync isn't tied to a
+            // track by the recorder; it's still a change worth keeping,
+            // dated where the latest audio ends.
+            (None, RecorderEvent::JournalFailed(error)) => {
+                actions.updates.push(Event::Warning(Warning {
+                    cause: Cause::JournalFailed(error.to_string()),
+                    track: None,
+                    at: self
+                        .heard_to
+                        .values()
+                        .max()
+                        .copied()
+                        .unwrap_or(SessionTime::ZERO),
+                    state: WarningState::Raised,
+                }));
+            }
             // Reported once per track and never cleared.
             (Some(track), RecorderEvent::Capture(CaptureNotice::Drifted(_))) => {
                 actions.updates.push(self.raised(Cause::Drift, track));

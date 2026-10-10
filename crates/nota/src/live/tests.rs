@@ -339,6 +339,28 @@ fn a_broken_journal_with_nothing_heard_is_dated_at_the_epochs_start() {
     assert_eq!(actions.updates, [raised(cause, SYSTEM, ms(300))]);
 }
 
+/// A journal that broke on the regular fsync comes without a track; it's
+/// still reported, without one, where the latest audio of any track ends.
+#[test]
+fn a_journal_broken_on_the_fsync_is_reported_without_a_track() {
+    let mut live = Live::new(&[opened(MIC, 0), opened(SYSTEM, 0)]);
+    live.recorder(Some(MIC), RecorderEvent::Audio(chunk(MIC, 0, vec![1; 70])));
+    live.recorder(
+        Some(SYSTEM),
+        RecorderEvent::Audio(chunk(SYSTEM, 0, vec![1; 40])),
+    );
+    let error = nota_recorder::session::SessionError::Marks(std::io::ErrorKind::Other.into());
+    let cause = Cause::JournalFailed(error.to_string());
+    let actions = live.recorder(None, RecorderEvent::JournalFailed(error));
+    let warning = Event::Warning(Warning {
+        cause,
+        track: None,
+        at: ms(70),
+        state: WarningState::Raised,
+    });
+    assert_eq!(actions.updates, [warning]);
+}
+
 /// Drift is reported once, as a warning the screen can ignore and the
 /// timeline stores.
 #[test]

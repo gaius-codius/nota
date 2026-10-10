@@ -127,10 +127,10 @@ mod summary;
 
 pub(crate) use signals::QuitSignals;
 pub(crate) use start::last_setup;
+use summary::show;
 #[cfg(test)]
 pub(crate) use summary::tests::cleanup_report;
 pub(crate) use summary::{Outcome, held_notes};
-use summary::{show, wait_stopped};
 
 use crate::final_pass::Engine;
 use crate::inhibit::Logind;
@@ -286,8 +286,7 @@ pub(crate) fn segment_length() -> SegmentLength {
 }
 
 /// Starts a recording as `setup` says, shows its screen until it's
-/// closed, then stops it. If a full disk stopped it and the app lent its
-/// terminal, the screen then shows what was saved until `⏎`.
+/// closed, then stops it.
 fn record_with<B: CaptureBackend>(
     args: &RecordArgs,
     setup: &Setup,
@@ -307,7 +306,7 @@ fn record_with<B: CaptureBackend>(
     let (started, screening) = start::start(args, setup, backend, clock, logind, given, library)?;
 
     // The screen, until it's closed.
-    let (mut shown, screen) = show(
+    let (shown, screen) = show(
         screening.screen,
         &setup.title,
         screening.tracks,
@@ -328,19 +327,9 @@ fn record_with<B: CaptureBackend>(
         _ => None,
     };
 
-    let stopped = shown.stopped.take();
-
     // Recorded, whatever stopping says: anything that went wrong is a
     // note on the outcome.
-    let outcome = stop::stop(started, shown);
-    // A full disk stopped it: the app shows what was saved before going
-    // Home. `nota record` has restored the terminal, and says it in the
-    // summary.
-    let screen = match (screen, stopped) {
-        (Some(screen), Some(mut recording)) => wait_stopped(screen, &mut recording, clock),
-        (screen, _) => screen,
-    };
-    Ok((outcome, screen))
+    Ok((stop::stop(started, shown), screen))
 }
 
 #[cfg(test)]

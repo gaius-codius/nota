@@ -292,3 +292,39 @@ fn a_slow_failing_store_is_tried_once_for_everything_waiting() {
     assert_eq!(report.lost_text, 500);
     assert!(fake.tries() <= 4, "{} tries", fake.tries());
 }
+
+/// A store that fails every other write can't grow what waits: a raise
+/// that comes while its own clear still waits takes the clear back, so
+/// the queue never holds more than what was given and one warning.
+#[test]
+fn a_store_that_fails_every_other_write_does_not_grow_the_queue() {
+    let (ui, _screen) = mpsc::channel();
+    let mut writes = 0_u32;
+    let mut saving = Saving {
+        // Fails the first write, then every other one.
+        write: move |_: &ToSave| {
+            writes += 1;
+            if writes % 2 == 1 {
+                Err(StoreError::Corrupt("busy".to_owned()))
+            } else {
+                Ok(())
+            }
+        },
+        ui,
+        clock: clock(),
+        pending: VecDeque::new(),
+        warned: false,
+        saved: Saved::default(),
+    };
+    for at in 1..=5 {
+        saving.queue(text(at));
+    }
+    let mut longest = 0;
+    for _ in 0..20 {
+        saving.write_pending();
+        longest = longest.max(saving.pending.len());
+    }
+    // The five given and the raise, at most.
+    assert_eq!(longest, 6);
+    assert_eq!(saving.saved.text, 5);
+}

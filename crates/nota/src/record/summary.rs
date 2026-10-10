@@ -27,9 +27,6 @@ pub(super) struct Shown {
     /// hangup), or the screen couldn't start. The recording stops all the
     /// same.
     pub(super) problem: Option<String>,
-    /// The screen as it closed, if a full disk stopped the recording: the
-    /// app shows it, stopped, until the listener has read what was saved.
-    pub(super) stopped: Option<Recording>,
 }
 
 /// Shows the Recording screen on `screen` until it's closed, handing each
@@ -53,7 +50,6 @@ pub(super) fn show(
             Shown {
                 marks: 0,
                 problem: Some(format!("the screen couldn't start: {e}")),
-                stopped: None,
             },
             None,
         ),
@@ -104,47 +100,13 @@ fn run_screen(
     let passed = passing.join().unwrap_or(0);
     let (more, problem) = ended(ran, save);
     let screen = problem.is_none().then_some(screen);
-    let stopped = screen.as_ref().and_then(|_| kept_if_stopped(recording));
     Ok((
         Shown {
             marks: passed + more,
             problem,
-            stopped,
         },
         screen,
     ))
-}
-
-/// `recording`, if a full disk stopped it, to show again once the
-/// recording has stopped.
-fn kept_if_stopped(recording: Recording) -> Option<Recording> {
-    recording.stopped_by_full_disk().map(|_| recording)
-}
-
-/// Shows `recording`, stopped by a full disk, on `screen` until the
-/// listener presses `⏎` (or nota is asked to quit, or the keyboard goes),
-/// with keys read afresh: the screen's own input thread has stopped. The
-/// terminal comes back as it is, or `None` if it failed, as from [`show`].
-pub(super) fn wait_stopped(
-    mut screen: Screen,
-    recording: &mut Recording,
-    clock: &Arc<dyn Clock>,
-) -> Option<Screen> {
-    let (keys, events) = mpsc::channel();
-    // Without keys there's no way to leave the screen: go Home at once.
-    let Ok(input) = InputThread::spawn(keys, Arc::clone(clock)) else {
-        return Some(screen);
-    };
-    // Drawn whole: the app's stopping line was drawn over it.
-    let waited = screen
-        .clear()
-        .map_err(RunError::Terminal)
-        .and_then(|()| recording.wait_stopped(screen.terminal(), &events));
-    let _ = input.stop();
-    match waited {
-        Ok(()) | Err(RunError::InputLost(_) | RunError::CommandsClosed(_)) => Some(screen),
-        Err(RunError::Terminal(_)) => None,
-    }
 }
 
 /// How the screen's loop ended: how many more marks and notes it gave
@@ -456,36 +418,6 @@ pub(super) mod tests {
         let system = track(1, TrackRole::System, "system audio");
         assert_eq!(footer(&[mic.clone(), system]), "mic + system audio");
         assert_eq!(footer(&[mic]), "mic");
-    }
-
-    /// Only a screen a full disk stopped is kept to show again after the
-    /// stop; any other closes for good.
-    #[test]
-    fn only_a_screen_stopped_by_a_full_disk_is_kept() {
-        use nota_core::recorder::{Cause, Event as RecorderEvent, Warning, WarningState};
-
-        let at = SessionTime::from_nanos(4_368_000_000_000);
-        let screen = || {
-            let clock = Arc::new(FakeClock::new(at));
-            Recording::new("T".into(), "mic".into(), clock, Theme::no_color())
-        };
-        let raised = |cause| {
-            RecorderEvent::Warning(Warning {
-                cause,
-                track: None,
-                at,
-                state: WarningState::Raised,
-            })
-        };
-        assert!(kept_if_stopped(screen()).is_none());
-        // A low disk doesn't stop the recording.
-        let mut low = screen();
-        low.update(raised(Cause::DiskLow));
-        assert!(kept_if_stopped(low).is_none());
-        let mut full = screen();
-        full.update(raised(Cause::DiskFull));
-        let kept = kept_if_stopped(full).map(|kept| kept.stopped_by_full_disk());
-        assert_eq!(kept, Some(Some(at)));
     }
 
     #[test]

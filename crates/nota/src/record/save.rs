@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use nota_core::recorder::{Cause, Event as RecorderEvent, Warning, WarningState};
 use nota_core::{Clock, SessionTime, Utterance, Word};
-use nota_store::{Annotation, StoreError, TimelineEvent};
+use nota_store::{Annotation, Happened, StoreError, TimelineEvent};
 use nota_tui::Event;
 
 /// How often unsaved items are tried again while nothing new comes.
@@ -236,8 +236,10 @@ impl<W: FnMut(&ToSave) -> Result<(), StoreError>> Saving<W> {
     /// Warns the screen, and queues the change for the timeline behind
     /// what's waiting, so it's stored once the database takes writes
     /// again. It's queued past [`MAX_PENDING`] rather than through the
-    /// bound, so a clear can't push out text: there's at most one more
-    /// for each time a write succeeded after a failure.
+    /// bound, so a clear can't push out text. A raise that comes while its
+    /// own clear still waits takes the clear back instead: the outage
+    /// went on, and a store that fails every other write can't grow the
+    /// queue that way.
     fn warn(&mut self, state: WarningState) {
         self.warned = state == WarningState::Raised;
         let at = self.clock.now();
@@ -247,7 +249,16 @@ impl<W: FnMut(&ToSave) -> Result<(), StoreError>> Saving<W> {
             at,
             state,
         });
-        if let Some(change) = TimelineEvent::of(&event, at) {
+        let clear_waits = matches!(
+            self.pending.back(),
+            Some(ToSave::Event(TimelineEvent {
+                happened: Happened::Cleared(Cause::LibraryUnavailable),
+                ..
+            }))
+        );
+        if state == WarningState::Raised && clear_waits {
+            self.pending.pop_back();
+        } else if let Some(change) = TimelineEvent::of(&event, at) {
             self.pending.push_back(ToSave::Event(change));
         }
         // The screen may have closed; the summary still says.

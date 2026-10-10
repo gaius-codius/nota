@@ -419,3 +419,53 @@ fn durations_read_as_the_spec_writes_them() {
     assert_eq!(minutes_seconds(Duration::from_secs(42)), "0:42");
     assert_eq!(minutes_seconds(Duration::from_secs(725)), "12:05");
 }
+
+/// A stalled track records nothing, so it counts as silent: with the
+/// other track quiet, quiet is counted behind `not responding`.
+#[test]
+fn a_stalled_track_counts_as_silent() {
+    let mut warnings = two_tracks();
+    raise(&mut warnings, Cause::Stalled, Some(MIC), 10);
+    raise(&mut warnings, Cause::Quiet, Some(SYSTEM), 20);
+    assert_eq!(
+        warnings.top(secs(30)),
+        Some(shown("⚠ mic not responding", Tone::Accent, 1))
+    );
+}
+
+/// A route change's device name is the audio server's: control and
+/// bidirectional formatting characters are dropped from the words and
+/// the footer.
+#[test]
+fn a_route_change_keeps_only_what_is_drawn() {
+    let mut warnings = two_tracks();
+    device(
+        &mut warnings,
+        MIC,
+        DeviceChange::Changed("Head\u{202e}set\u{7}".into()),
+        5,
+    );
+    assert_eq!(
+        warnings.top(secs(5)),
+        Some(shown("↪ mic: Headset", Tone::Plain, 0))
+    );
+    assert_eq!(
+        warnings.sources().as_deref(),
+        Some("Headset + system audio")
+    );
+}
+
+/// A journal broken with no track named is a change on the band, but no
+/// track is said not to record.
+#[test]
+fn a_journal_broken_without_a_track_is_only_a_change() {
+    let mut warnings = two_tracks();
+    raise(
+        &mut warnings,
+        Cause::JournalFailed("fsync".into()),
+        None,
+        40,
+    );
+    assert_eq!(warnings.top(secs(41)), None);
+    assert_eq!(warnings.changes(), [secs(40)]);
+}

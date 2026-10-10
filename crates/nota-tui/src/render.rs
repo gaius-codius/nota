@@ -195,7 +195,10 @@ impl Recording {
                 Span::styled(" · ", self.theme.text_hint),
                 Span::styled("disk full", self.theme.text),
             ],
-            Some(shown) => self.warning_spans(shown, clock),
+            Some(shown) => {
+                let room = usize::from(area.width).saturating_sub(FRAME_ROW_FIXED + 1);
+                self.warning_spans(shown, clock, room)
+            }
             None => vec![
                 Span::styled("●", dot),
                 Span::styled(format!(" REC {clock}"), self.theme.accent),
@@ -213,21 +216,27 @@ impl Recording {
     }
 
     /// The top border's right side with `shown` in place of `● REC`:
-    /// `⚠ mic lost +1 · 01:12:48`.
-    fn warning_spans(&self, shown: Shown, clock: String) -> Vec<Span<'static>> {
+    /// `⚠ mic lost +1 · 01:12:48`, in `room` columns at most. The words
+    /// are cut short before the count and the clock are: the clock still
+    /// counting is what shows the recording goes on.
+    fn warning_spans(&self, shown: Shown, clock: String, room: usize) -> Vec<Span<'static>> {
         let style = match shown.tone {
             Tone::Accent => self.theme.accent,
             Tone::Gold => self.theme.gold,
             Tone::Plain => self.theme.text,
             Tone::Good => self.theme.green,
         };
-        let mut spans = vec![Span::styled(shown.text, style)];
+        let mut rest = Vec::new();
         if shown.more > 0 {
-            spans.push(Span::styled(format!(" +{}", shown.more), style));
+            rest.push(Span::styled(format!(" +{}", shown.more), style));
         }
-        spans.push(Span::styled(" · ", self.theme.text_hint));
-        spans.push(Span::styled(clock, self.theme.text));
-        spans
+        rest.push(Span::styled(" · ", self.theme.text_hint));
+        rest.push(Span::styled(clock, self.theme.text));
+        let words = truncate(
+            vec![Span::styled(shown.text, style)],
+            room.saturating_sub(spans_width(&rest)),
+        );
+        words.into_iter().chain(rest).collect()
     }
 
     fn draw_bottom(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
@@ -324,7 +333,10 @@ impl Recording {
 
     /// The marks row and the level row, each `area.width` columns.
     fn draw_band(&self, area: Rect, buf: &mut Buffer) {
+        // A stopped recording's band ends where it stopped, rather than
+        // filling with time nothing was recorded in.
         let now = self.clock.now();
+        let now = self.stopped_by_full_disk().map_or(now, |at| at.min(now));
         let width = usize::from(area.width);
         // Marks over notes where both fall in one column: a mark is the
         // stronger signal.
@@ -349,6 +361,9 @@ impl Recording {
             changed[column_of(at, now, width).min(width - 1)] = true;
         }
         let heard_from = columns.iter().position(Option::is_some);
+        // Early on several columns share the bin `now` is in, and its first
+        // level may not have come yet: none of them is a gap.
+        let live_from = column_of(now, now, width);
         for (i, (x, level)) in (area.x..).zip(&columns).enumerate() {
             let (glyph, style) = match level {
                 Some(_) if changed[i] => (CHANGE, self.theme.text_secondary),
@@ -358,7 +373,7 @@ impl Recording {
                 // which wins over a change in the same column. The live
                 // end may be waiting for its first level, so it's left
                 // blank.
-                None if heard_from.is_some_and(|first| i > first) && i != live => {
+                None if heard_from.is_some_and(|first| i > first) && i < live_from => {
                     (GAP, self.theme.border)
                 }
                 None => (' ', self.theme.text_secondary),
@@ -771,7 +786,9 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use nota_core::recorder::{Event, Level, Mark, Note};
+    use nota_core::recorder::{
+        Cause, DeviceChange, Event, Level, Mark, Note, Warning, WarningState,
+    };
     use nota_core::{Clock, FakeClock, SessionTime, TrackId};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -816,6 +833,71 @@ mod tests {
 
     fn row(buf: &Buffer, y: u16) -> String {
         (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    /// A screen with a level every 100 ms up to `levels_to`, its clock at
+    /// `now`, both in milliseconds.
+    fn screen_at(levels_to: u64, now: u64) -> (Recording, Arc<FakeClock>) {
+        let ms = |ms: u64| SessionTime::from_nanos(ms * 1_000_000);
+        let clock = Arc::new(FakeClock::new(ms(now)));
+        let mut screen = Recording::new(
+            "Styles".into(),
+            "mic".into(),
+            Arc::clone(&clock) as Arc<dyn Clock>,
+            Theme::default(),
+        );
+        for at in (0..=levels_to).step_by(100) {
+            screen.update(Event::Level {
+                track: TrackId::new(0),
+                at: ms(at),
+                level: Level::from_peak(1_000),
+            });
+        }
+        (screen, clock)
+    }
+
+    /// A long device name is cut short before the clock is: the clock
+    /// still counting is what shows the recording goes on.
+    #[test]
+    fn a_long_warning_keeps_the_clock() {
+        let (mut screen, _clock) = screen_at(100_000, 100_000);
+        let name = "Family 17h/19h HD Audio Controller Analog Stereo";
+        screen.update(Event::Device {
+            track: TrackId::new(0),
+            change: DeviceChange::Changed(name.into()),
+            at: secs(100),
+        });
+        let top = row(&draw(&mut screen, 60), 0);
+        assert!(top.ends_with("… · 00:01:40 ─╮"), "{top}");
+        assert!(top.contains("↪ track 0: Family"), "{top}");
+    }
+
+    /// Early in a recording several columns share the bin the clock is in;
+    /// one whose level hasn't come yet isn't drawn as a gap.
+    #[test]
+    fn the_live_end_is_never_a_gap() {
+        let (mut screen, _clock) = screen_at(500, 800);
+        let band = row(&draw(&mut screen, 60), 2);
+        assert!(!band.contains(GAP), "{band}");
+        assert!(band.contains('▄'), "{band}");
+    }
+
+    /// Once a full disk has stopped the recording, the band ends where it
+    /// stopped, rather than filling with time nothing was recorded in.
+    #[test]
+    fn a_stopped_band_ends_where_it_stopped() {
+        let (mut screen, clock) = screen_at(100_000, 100_000);
+        screen.update(Event::Warning(Warning {
+            cause: Cause::DiskFull,
+            track: None,
+            at: secs(100),
+            state: WarningState::Raised,
+        }));
+        let before = row(&draw(&mut screen, 60), 2);
+        clock.advance(Duration::from_secs(100));
+        let after = row(&draw(&mut screen, 60), 2);
+        assert_eq!(after, before);
+        assert!(!after.contains(GAP), "{after}");
     }
 
     #[test]

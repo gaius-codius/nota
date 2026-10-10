@@ -22,6 +22,8 @@ use nota_core::recorder::{
 };
 use nota_core::{SessionTime, TrackId};
 
+use crate::text::is_drawn;
+
 /// How long an event shows in the top border: the spec's "about 10 s".
 /// A broken journal's `not recording` shows as long.
 pub(crate) const EVENT_SHOWN: Duration = Duration::from_secs(10);
@@ -131,7 +133,7 @@ impl TrackState {
     /// Whether it records nothing worth hearing: silent, or not recording
     /// at all.
     fn is_silent(&self) -> bool {
-        self.lost || self.failed || self.zeros.is_some() || self.quiet.is_some()
+        self.lost || self.failed || self.stalled || self.zeros.is_some() || self.quiet.is_some()
     }
 
     /// Whether its zeros mean nothing is playing rather than a muted mic.
@@ -227,6 +229,9 @@ impl Warnings {
                 self.track(track).journal_broke = Some(now);
                 self.changes_at(warning.at);
             }
+            // Broken on the regular fsync, with no track to name: a change
+            // on the band, but no track to say isn't recording.
+            (Cause::JournalFailed(_), None) if raised => self.changes_at(warning.at),
             (Cause::DiskLow, _) => self.disk_low = raised,
             (Cause::DiskFull, _) if raised => self.disk_full = Some(warning.at),
             (Cause::SleepNotHeld, _) => self.stand(Condition::MaySleep, raised),
@@ -246,12 +251,15 @@ impl Warnings {
         match change {
             DeviceChange::Lost => state.lost = true,
             DeviceChange::Changed(name) => {
+                // The name is the audio server's, which a Bluetooth device
+                // sets itself: only what's drawn is kept, as in the title.
+                let name: String = name.chars().filter(|&c| is_drawn(c)).collect();
                 let happening = if std::mem::take(&mut state.lost) {
                     Happening::Back(track)
                 } else {
                     Happening::Route(track, name.clone())
                 };
-                state.source = Some(name.clone());
+                state.source = Some(name);
                 self.happening = Some((happening, now));
             }
             DeviceChange::Format => {}
