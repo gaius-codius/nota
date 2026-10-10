@@ -461,7 +461,7 @@ fn clean_ops() -> usize {
 #[test]
 fn a_stop_between_any_two_events_finalises_both_tracks() {
     let ops = clean_ops();
-    assert!(ops > 150, "{ops}");
+    assert!(ops > 150, "{ops}"); // check-bound
     let mut stops = BTreeSet::new();
     for k in 0..=ops {
         let fs = FakeFs::with_dirs([session(), db()]);
@@ -476,7 +476,7 @@ fn a_stop_between_any_two_events_finalises_both_tracks() {
         check_stopped(&promised, &fs).unwrap_or_else(|e| panic!("stopped after op {k}: {e}"));
     }
     // Stops landed at many places in the script, not a few.
-    assert!(stops.len() > 40, "{}", stops.len());
+    assert!(stops.len() > 40, "{}", stops.len()); // check-bound
 }
 
 #[test]
@@ -499,7 +499,7 @@ fn a_stop_at_each_failpoint_keeps_the_loss_bound() {
     // Not vacuous: dozens of the failures broke a journal or left the
     // finalisation incomplete. (Most fall in publishing, which tries
     // again.)
-    assert!(failed >= 50, "{failed} of {ops}");
+    assert!(failed >= 50, "{failed} of {ops}"); // check-bound
 }
 
 /// What a crashed run promised, checked against salvage: durable audio
@@ -535,5 +535,5 @@ fn killed_while_finalising_salvage_completes_it_repeatably() {
     ])
     .run()
     .unwrap_or_else(|failure| panic!("{failure}"));
-    assert!(summary.scenario_ops > 100, "{summary:?}");
+    assert!(summary.scenario_ops > 100, "{summary:?}"); // check-bound
 }

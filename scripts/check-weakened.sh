@@ -50,21 +50,24 @@ done < <(git diff -U0 "$mb" "$head" -- '*.rs' \
   | sed 's/^+[[:space:]]*//' || true)
 
 # Bounds a test or harness checks (a crash test's loss limit, a capture
-# harness's lag bound) carry a `// check-bound` comment on the line that sets
-# them, so a change to that line is reported: a new value, a deleted
-# constant or a dropped tag. A bound loosened where it's compared, not where
-# it's set, is left to review. Lines are compared with their file's path, so
-# a tagged line moved unchanged within its file isn't counted, and two files
-# swapping values are.
+# harness's lag bound, a sweep's floor on the crash points it reached) carry
+# a check-bound comment on the line that sets them, so a change to that line
+# is reported: a new value, a deleted constant or a dropped tag. In Rust the
+# tag is a `//` comment anywhere on the line; in a shell script it's a `#`
+# comment that ends a line of code, so a tag quoted in a string or mentioned
+# in a comment isn't one. A bound loosened where it's compared, not where it's set, is left to
+# review. Lines are compared with their file's path, so a tagged line moved
+# unchanged within its file isn't counted, and two files swapping values are.
 bound_lines() { # - for the base's side, + for the branch's
-  git diff -U0 "$mb" "$head" -- '*.rs' \
+  git diff -U0 "$mb" "$head" -- '*.rs' '*.sh' \
     | awk -v side="$1" '
-        /^diff --git / { header = 1; next }
+        /^diff --git / { header = 1; shell = /\.sh$/; next }
         header && /^--- / { old = substr($0, 5); sub(/^a\//, "", old); next }
         header && /^\+\+\+ / { new = substr($0, 5); sub(/^b\//, "", new); next }
         /^@@/ { header = 0; next }
         header { next }
-        substr($0, 1, 1) == side && /\/\/[ \t]*check-bound([^A-Za-z0-9_-]|$)/ {
+        substr($0, 1, 1) != side { next }
+        shell ? /^.[ \t]*[^# \t].*[ \t]#[ \t]*check-bound[ \t]*$/ : /\/\/[ \t]*check-bound([^A-Za-z0-9_-]|$)/ {
           line = substr($0, 2); sub(/^[ \t]+/, "", line)
           print (side == "-" ? old : new) ": " line
         }' \

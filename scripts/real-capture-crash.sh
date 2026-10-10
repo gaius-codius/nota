@@ -320,7 +320,9 @@ echo "uncrashed: $(sed 's/^result //' "$WORK/count/check.out")"
 # its seconds, published as segments.
 base_recovered=$(sed -n 's/.* recovered=\([0-9]*\) .*/\1/p' "$WORK/count/check.out")
 base_rows=$(sed -n 's/.* rows=\([0-9]*\) .*/\1/p' "$WORK/count/check.out")
-[[ ${base_recovered:-0} -ge $(((SECONDS_PER_POINT - 1) * 16000)) && ${base_rows:-0} -ge 2 ]] ||
+min_recovered=$(((SECONDS_PER_POINT - 1) * 16000)) # check-bound
+min_rows=2 # check-bound
+[[ ${base_recovered:-0} -ge $min_recovered && ${base_rows:-0} -ge $min_rows ]] ||
   die "the uncrashed run recorded too little (recovered ${base_recovered:-0} samples, ${base_rows:-0} rows)"
 if [[ $DISK_LOAD -eq 1 ]]; then
   field() { sed -n "s/.* $1=\([^ ]*\).*/\1/p" "$WORK/count/check.out"; }
