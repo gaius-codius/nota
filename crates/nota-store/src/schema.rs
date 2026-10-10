@@ -23,7 +23,7 @@
 //! | `mark`, `note` | marks and notes made while recording, in session time | `nota record`, as each is made ([`crate::annotations`]) |
 //! | `job` | work queued after a stop: its kind, state, progress and what it waits for (V5) | the job queue ([`crate::jobs`]) |
 //! | `final_text`, `final_word`, `final_progress` | the final pass's text, by track and sample, beside the heard text and never in it; how far it has got on each track (V5) | the final pass ([`crate::final_text`]) |
-//! | `event` | the timeline: device changes, warnings, gaps | the detectors |
+//! | `event` | the timeline: warnings raised and cleared, device changes, the transcriber's state, gaps | `nota record`, as each is sent to the screen ([`crate::timeline`]) |
 //! | `finding` | an index of each session's findings file: rows whose file didn't prove them, and rows that don't parse (V6) | the app, from the findings files ([`Store::index_findings`](crate::Store::index_findings)) |
 //!
 //! Session times are nanoseconds from the session's start

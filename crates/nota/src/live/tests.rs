@@ -1,7 +1,8 @@
-use nota_core::recorder::{Cause, DeviceChange, Warning, WarningState};
-use nota_core::{SampleIndex, SampleRange, SampleRate};
-use nota_recorder::capture::CaptureNotice;
+use nota_core::recorder::{Cause, DeviceChange, EngineState, Warning, WarningState};
+use nota_core::{Drift, SampleIndex, SampleRange, SampleRate};
+use nota_recorder::capture::{CaptureError, CaptureNotice};
 use nota_recorder::detect::Condition;
+use nota_recorder::engine::OfflineReason;
 
 use super::*;
 
@@ -103,7 +104,7 @@ fn the_size_counts_what_was_captured_through_a_broken_journal() {
     assert_eq!(recorded(first), [200]);
     let broken = nota_recorder::session::SessionError::Marks(std::io::ErrorKind::Other.into());
     let failed = live.recorder(Some(MIC), RecorderEvent::JournalFailed(broken));
-    assert_eq!(failed, Actions::default());
+    assert_eq!(recorded(failed), Vec::<u64>::new());
     // Captured, not on disk: the stretch the journal dropped still counts.
     let next = live.recorder(
         Some(MIC),
@@ -172,11 +173,8 @@ fn a_new_epoch_flushes_the_engine_and_places_later_text_after_the_gap() {
 fn a_retimed_epoch_flushes_nothing() {
     let recorder_mic = {
         let mut t = opened(MIC, 0);
-        t.retime(
-            SampleIndex::new(1_000),
-            nota_core::Drift::from_ppb(-100_000).unwrap(),
-        )
-        .unwrap();
+        t.retime(SampleIndex::new(1_000), Drift::from_ppb(-100_000).unwrap())
+            .unwrap();
         t
     };
     let mut live = Live::new(&[opened(MIC, 0)]);
@@ -259,9 +257,295 @@ fn a_device_change_is_a_device_event_for_its_track() {
 #[test]
 fn a_failed_stream_flushes_its_track() {
     let mut live = Live::new(&[opened(MIC, 0)]);
-    let failed =
-        RecorderEvent::CaptureFailed(nota_recorder::capture::CaptureError::Backend("gone".into()));
+    let failed = RecorderEvent::CaptureFailed(CaptureError::Backend("gone".into()));
     assert_eq!(live.recorder(Some(MIC), failed).flush, Some(MIC));
+}
+
+/// The warning `Live` raises for a report that carries no time.
+fn raised(cause: Cause, track: TrackId, at: SessionTime) -> Event {
+    Event::Warning(Warning {
+        cause,
+        track: Some(track),
+        at,
+        state: WarningState::Raised,
+    })
+}
+
+/// A failed stream is a warning with the reason, dated where the track's
+/// audio ended, and the flush is still asked for.
+#[test]
+fn a_failed_stream_warns_with_its_reason_where_the_audio_ended() {
+    let mut live = Live::new(&[opened(MIC, 0)]);
+    live.recorder(Some(MIC), RecorderEvent::Audio(chunk(MIC, 0, vec![1; 40])));
+    let error = CaptureError::Backend("gone".into());
+    let cause = Cause::StreamFailed(error.to_string());
+    let actions = live.recorder(Some(MIC), RecorderEvent::CaptureFailed(error));
+    assert_eq!(
+        actions,
+        Actions {
+            flush: Some(MIC),
+            updates: vec![raised(cause, MIC, ms(40))],
+            ..Actions::default()
+        }
+    );
+}
+
+/// Before any audio, a report is dated at the start of the track's current
+/// epoch, which here isn't the session's start.
+#[test]
+fn a_failed_stream_before_any_audio_is_dated_at_its_epochs_start() {
+    let mut live = Live::new(&[opened(MIC, 250)]);
+    let error = CaptureError::Backend("gone".into());
+    let cause = Cause::StreamFailed(error.to_string());
+    let actions = live.recorder(Some(MIC), RecorderEvent::CaptureFailed(error));
+    assert_eq!(actions.updates, [raised(cause, MIC, ms(250))]);
+}
+
+/// A report about no track is no warning.
+#[test]
+fn a_failure_about_no_track_warns_of_nothing() {
+    let mut live = Live::new(&[opened(MIC, 0)]);
+    let error = CaptureError::Backend("gone".into());
+    let actions = live.recorder(None, RecorderEvent::CaptureFailed(error));
+    assert_eq!(actions, Actions::default());
+}
+
+/// A broken journal is a warning with the reason, for its track.
+#[test]
+fn a_broken_journal_warns_with_its_reason_where_the_audio_ended() {
+    let mut live = Live::new(&[opened(MIC, 0), opened(SYSTEM, 0)]);
+    live.recorder(Some(MIC), RecorderEvent::Audio(chunk(MIC, 0, vec![1; 70])));
+    let error = nota_recorder::session::SessionError::Marks(std::io::ErrorKind::Other.into());
+    let cause = Cause::JournalFailed(error.to_string());
+    let actions = live.recorder(Some(MIC), RecorderEvent::JournalFailed(error));
+    assert_eq!(
+        actions,
+        Actions {
+            updates: vec![raised(cause, MIC, ms(70))],
+            ..Actions::default()
+        }
+    );
+}
+
+/// With nothing heard on the track, the journal's warning is dated at its
+/// epoch's start, not at another track's audio.
+#[test]
+fn a_broken_journal_with_nothing_heard_is_dated_at_the_epochs_start() {
+    let mut live = Live::new(&[opened(MIC, 0), opened(SYSTEM, 300)]);
+    live.recorder(Some(MIC), RecorderEvent::Audio(chunk(MIC, 0, vec![1; 70])));
+    let error = nota_recorder::session::SessionError::Marks(std::io::ErrorKind::Other.into());
+    let cause = Cause::JournalFailed(error.to_string());
+    let actions = live.recorder(Some(SYSTEM), RecorderEvent::JournalFailed(error));
+    assert_eq!(actions.updates, [raised(cause, SYSTEM, ms(300))]);
+}
+
+/// A journal that broke on the regular fsync comes without a track; it's
+/// still reported, without one, where the latest audio of any track ends.
+#[test]
+fn a_journal_broken_on_the_fsync_is_reported_without_a_track() {
+    let mut live = Live::new(&[opened(MIC, 0), opened(SYSTEM, 0)]);
+    live.recorder(Some(MIC), RecorderEvent::Audio(chunk(MIC, 0, vec![1; 70])));
+    live.recorder(
+        Some(SYSTEM),
+        RecorderEvent::Audio(chunk(SYSTEM, 0, vec![1; 40])),
+    );
+    let error = nota_recorder::session::SessionError::Marks(std::io::ErrorKind::Other.into());
+    let cause = Cause::JournalFailed(error.to_string());
+    let actions = live.recorder(None, RecorderEvent::JournalFailed(error));
+    let warning = Event::Warning(Warning {
+        cause,
+        track: None,
+        at: ms(70),
+        state: WarningState::Raised,
+    });
+    assert_eq!(actions.updates, [warning]);
+}
+
+/// Drift is reported once, as a warning the screen can ignore and the
+/// timeline stores.
+#[test]
+fn drift_is_a_warning_for_its_track() {
+    let mut live = Live::new(&[opened(MIC, 0)]);
+    live.recorder(Some(MIC), RecorderEvent::Audio(chunk(MIC, 0, vec![1; 20])));
+    let drift = Drift::from_ppb(900_000).unwrap();
+    let actions = live.recorder(
+        Some(MIC),
+        RecorderEvent::Capture(CaptureNotice::Drifted(drift)),
+    );
+    assert_eq!(
+        actions,
+        Actions {
+            updates: vec![raised(Cause::Drift, MIC, ms(20))],
+            ..Actions::default()
+        }
+    );
+}
+
+fn online() -> EngineEvent {
+    EngineEvent::Status(EngineStatus::Online { pid: 1 })
+}
+
+fn offline() -> EngineEvent {
+    EngineEvent::Status(EngineStatus::Offline(OfflineReason::StartTimeout))
+}
+
+fn confirmed(track: TrackId, up_to: u64) -> EngineEvent {
+    EngineEvent::Confirmed {
+        track,
+        up_to: SampleIndex::new(up_to),
+    }
+}
+
+/// The transcribing marks among `updates`.
+fn marks(updates: Vec<Event>) -> Vec<Event> {
+    updates
+        .into_iter()
+        .filter(|u| matches!(u, Event::Transcribing(_)))
+        .collect()
+}
+
+/// Hands the engine `samples` of `track` from sample `from` and returns the
+/// transcribing marks that sent.
+fn hand(live: &mut Live, track: TrackId, from: u64, samples: usize) -> Vec<Event> {
+    let audio = chunk(track, from, vec![1; samples]);
+    let actions = live.recorder(Some(track), RecorderEvent::Audio(audio));
+    marks(actions.updates)
+}
+
+/// The engine coming up and going down reach the screen, the reason as the
+/// text the reason displays.
+#[test]
+fn the_engines_status_reaches_the_screen() {
+    let mut live = Live::new(&[opened(MIC, 0)]);
+    let text = OfflineReason::StartTimeout.to_string();
+    let up = live.engine(online());
+    let down = live.engine(offline());
+    assert_eq!(up.updates, [Event::Engine(EngineState::Online)]);
+    assert_eq!(down.updates, [Event::Engine(EngineState::Offline(text))]);
+}
+
+/// The mark turns on once a second of audio waits, and a later chunk
+/// doesn't send it again.
+#[test]
+fn transcribing_turns_on_once_with_a_second_unanswered() {
+    let mut live = Live::new(&[opened(MIC, 0)]);
+    live.engine(online());
+    assert_eq!(hand(&mut live, MIC, 0, 1_500), [Event::Transcribing(true)]);
+    assert_eq!(hand(&mut live, MIC, 1_500, 500), []);
+}
+
+/// The mark turns off when the engine has answered all the audio it was
+/// handed.
+#[test]
+fn transcribing_turns_off_when_the_engine_confirms_the_audio() {
+    let mut live = Live::new(&[opened(MIC, 0)]);
+    live.engine(online());
+    hand(&mut live, MIC, 0, 1_500);
+    let actions = live.engine(confirmed(MIC, 1_500));
+    assert_eq!(actions.updates, [Event::Transcribing(false)]);
+}
+
+/// Under a second unanswered the mark stays off, even with more audio
+/// handed over in all: it would flicker with every chunk.
+#[test]
+fn transcribing_stays_off_under_a_second_unanswered() {
+    let mut live = Live::new(&[opened(MIC, 0)]);
+    live.engine(online());
+    assert_eq!(hand(&mut live, MIC, 0, 999), []);
+    live.engine(confirmed(MIC, 500));
+    assert_eq!(hand(&mut live, MIC, 999, 500), []);
+}
+
+/// The engine going down while the mark is on turns it off, and its coming
+/// back with the audio still unanswered turns it on again.
+#[test]
+fn going_offline_turns_transcribing_off() {
+    let mut live = Live::new(&[opened(MIC, 0)]);
+    live.engine(online());
+    hand(&mut live, MIC, 0, 1_500);
+    let down = live.engine(offline());
+    let reason = OfflineReason::StartTimeout.to_string();
+    assert_eq!(
+        down.updates,
+        [
+            Event::Engine(EngineState::Offline(reason)),
+            Event::Transcribing(false)
+        ]
+    );
+    let up = live.engine(online());
+    assert_eq!(
+        up.updates,
+        [
+            Event::Engine(EngineState::Online),
+            Event::Transcribing(true)
+        ]
+    );
+}
+
+/// With no engine ever online, nothing is with it.
+#[test]
+fn transcribing_never_turns_on_without_an_engine() {
+    let mut live = Live::new(&[opened(MIC, 0)]);
+    assert_eq!(hand(&mut live, MIC, 0, 5_000), []);
+}
+
+/// Audio the engine skipped is answered as far as the skip reaches.
+#[test]
+fn skipped_audio_counts_as_confirmed() {
+    let mut live = Live::new(&[opened(MIC, 0)]);
+    live.engine(online());
+    hand(&mut live, MIC, 0, 2_000);
+    let range = SampleRange::new(SampleIndex::ZERO, SampleIndex::new(2_000)).unwrap();
+    let actions = live.engine(EngineEvent::Skipped { track: MIC, range });
+    assert_eq!(actions.updates, [Event::Transcribing(false)]);
+}
+
+/// A second's wait is judged at its own track's rate, not a fixed one.
+#[test]
+fn the_wait_is_measured_at_the_tracks_own_rate() {
+    let fast = SampleRate::new(48_000).unwrap();
+    let mut timeline = TrackTimeline::new(SYSTEM);
+    timeline.open_epoch(ms(0), SampleIndex::ZERO, fast).unwrap();
+    let mut live = Live::new(&[timeline]);
+    live.engine(online());
+    let short = AudioChunk::new(SYSTEM, SampleIndex::ZERO, fast, vec![1; 47_999]).unwrap();
+    let long = AudioChunk::new(SYSTEM, SampleIndex::new(47_999), fast, vec![1; 1]).unwrap();
+    let first = live.recorder(Some(SYSTEM), RecorderEvent::Audio(short));
+    let second = live.recorder(Some(SYSTEM), RecorderEvent::Audio(long));
+    assert_eq!(marks(first.updates), []);
+    assert_eq!(marks(second.updates), [Event::Transcribing(true)]);
+}
+
+/// A confirmation that arrives late, naming an older position, doesn't
+/// take the engine's progress back and turn the mark on again.
+#[test]
+fn an_older_confirmation_arriving_late_changes_nothing() {
+    let mut live = Live::new(&[opened(MIC, 0)]);
+    live.engine(online());
+    hand(&mut live, MIC, 0, 1_500);
+    live.engine(confirmed(MIC, 1_500));
+    let late = live.engine(confirmed(MIC, 200));
+    assert_eq!(late.updates, []);
+    assert_eq!(hand(&mut live, MIC, 1_500, 500), []);
+}
+
+/// A track whose samples start late holds nothing before its first chunk:
+/// 1.5 s from sample 160 000 turns the mark on once.
+#[test]
+fn a_track_that_starts_late_is_not_counted_from_sample_zero() {
+    let mut live = Live::new(&[opened(MIC, 0)]);
+    live.engine(online());
+    let first = hand(&mut live, MIC, 160_000, 1_500);
+    assert_eq!(first, [Event::Transcribing(true)]);
+    assert_eq!(hand(&mut live, MIC, 161_500, 100), []);
+}
+
+/// The same late start with under a second of audio leaves the mark off.
+#[test]
+fn a_short_first_chunk_that_starts_late_stays_off() {
+    let mut live = Live::new(&[opened(MIC, 0)]);
+    live.engine(online());
+    assert_eq!(hand(&mut live, MIC, 160_000, 900), []);
 }
 
 #[test]
@@ -292,7 +576,7 @@ fn two_tracks_text_is_placed_by_each_tracks_own_epochs() {
 
 #[test]
 fn text_for_a_track_nobody_follows_is_dropped() {
-    let live = Live::new(&[opened(MIC, 0)]);
+    let mut live = Live::new(&[opened(MIC, 0)]);
     assert!(live.engine(heard(SYSTEM, 0, 10, "x")).updates.is_empty());
     assert!(
         live.engine(EngineEvent::Confirmed {

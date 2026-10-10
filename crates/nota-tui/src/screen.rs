@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use nota_core::recorder::{Command, Event, Mark, Note};
+use nota_core::recorder::{Command, Event, Mark, Note, Track};
 use nota_core::{Clock, SessionTime, Utterance};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
@@ -11,6 +11,10 @@ use crate::annotation::Annotation;
 use crate::band::LevelHistory;
 use crate::text::{has_visible_text, is_drawn};
 use crate::theme::Theme;
+
+mod warnings;
+
+pub(crate) use warnings::{Shown, Tone, Warnings};
 
 /// How far ahead of the clock a level may be stamped. Levels stamped later
 /// than that are dropped: the band's history grows to the latest level, so
@@ -50,6 +54,9 @@ pub struct Recording {
     /// question is open.
     pub(crate) draft: Option<Draft>,
     pub(crate) stop: Stop,
+    /// What the top border warns about, the changes the band marks, and
+    /// the sources' names as route changes leave them.
+    pub(crate) warnings: Warnings,
 }
 
 /// How far stopping has gone.
@@ -96,13 +103,33 @@ impl Recording {
             panel_top: 0,
             draft: None,
             stop: Stop::No,
+            warnings: Warnings::default(),
         }
+    }
+
+    /// The screen, told what each of `tracks` records and where from: the
+    /// warnings name them `mic` and `system`, and the footer names their
+    /// sources in place of the one given to [`Recording::new`], following
+    /// route changes. Control and bidirectional formatting characters in
+    /// the sources' names are dropped, as in the title.
+    #[must_use]
+    pub fn with_tracks(mut self, tracks: Vec<Track>) -> Self {
+        let tracks = tracks
+            .into_iter()
+            .map(|track| Track {
+                source: track.source.chars().filter(|&c| is_drawn(c)).collect(),
+                ..track
+            })
+            .collect();
+        self.warnings.set_tracks(tracks);
+        self
     }
 
     /// Applies what the recorder reports. A level stamped more than 5 s
     /// ahead of the clock is dropped. Closing on [`Event::Stopping`] and
     /// [`Event::Stopped`] is [`run`](crate::run())'s business.
     pub fn update(&mut self, event: Event) {
+        self.warnings.update(&event, self.clock.now());
         match event {
             Event::Level { at, level, .. } => {
                 let limit = self.clock.now().checked_add(LEVEL_LEAD);
@@ -123,10 +150,9 @@ impl Recording {
             }
             Event::Transcribing(transcribing) => self.transcribing = transcribing,
             Event::Recorded(bytes) => self.recorded_bytes = bytes,
-            // Not shown yet. Warnings, device changes, the disk and the
-            // transcriber's state get their words and their place on the
-            // band with the UI spec's pending changes; durable progress,
-            // epochs and gaps go on the band with them.
+            // The warnings have these. The band shows a gap from the
+            // levels missing, so it needs no epochs or gaps, and durable
+            // progress isn't shown.
             Event::Engine(_)
             | Event::Warning(_)
             | Event::Device { .. }
@@ -313,6 +339,13 @@ impl Recording {
     #[cfg(test)]
     pub(crate) fn annotations(&self) -> &[Annotation] {
         &self.annotations
+    }
+
+    /// When a full disk stopped the recording, if one did
+    /// ([`Cause::DiskFull`](nota_core::recorder::Cause::DiskFull)).
+    #[must_use]
+    pub const fn stopped_by_full_disk(&self) -> Option<SessionTime> {
+        self.warnings.stopped_by_full_disk()
     }
 
     /// Whether a note is being typed.

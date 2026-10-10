@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
-use nota_core::recorder::{self, Cause, Input, Setup, Warning, WarningState};
+use nota_core::recorder::{self, Cause, Input, Setup, TrackRole, Warning, WarningState};
 use nota_core::{Clock, SessionId, TrackId, wall_now};
 use nota_recorder::capture::{
     Capture, CaptureBackend, CaptureReceiver, RecordError, RecorderEvent, Source, TrackStarter,
@@ -25,7 +25,7 @@ use nota_store::{Heard, NewSession, Track, TrackKind};
 use nota_tui::Event;
 
 use super::live::{LiveEnd, LiveInput, spawn_live};
-use super::save::{Saver, ToSave};
+use super::save::{Saver, ToSave, to_screen};
 use super::signals::{SignalThread, listen_for_signals};
 use super::summary::{Outcome, file_names, held_notes, track_name};
 use super::{BoxError, MIC, RATE, RecordArgs, SYSTEM, segment_length};
@@ -44,8 +44,8 @@ pub(super) struct Screening {
     /// Closes the screen, among other things.
     pub(super) ui: Sender<Event>,
     pub(super) ui_events: Receiver<Event>,
-    /// The footer: the sources recording.
-    pub(super) listening: String,
+    /// The tracks recording, with the sources the footer names.
+    pub(super) tracks: Vec<recorder::Track>,
     /// Where the screen's marks and notes go to be stored.
     pub(super) save: Sender<ToSave>,
 }
@@ -193,7 +193,8 @@ fn start_with_notes<B: CaptureBackend>(
     let (live_inputs, live) = start_live(args, clock, &ui, &saver)?;
     // Usage is reckoned for every track asked for: a little early with a
     // low disk if one doesn't start.
-    let disk = watch_disk(args, &session.audio(), sources.len(), &watch, &ui, clock)?;
+    let reports = Reporting::new(&ui, &saver, clock);
+    let disk = watch_disk(args, &session.audio(), sources.len(), &watch, reports)?;
     // The recorder runs before any stream opens: each track joins it as
     // its stream starts, while the next one opens.
     let (starter, mut events) = prepare_tracks(&sources, RATE, clock);
@@ -218,9 +219,11 @@ fn start_with_notes<B: CaptureBackend>(
     };
     // Before the first audio, so no stretch of the recording is unguarded.
     let sleep = inhibit::hold(logind);
-    let (captures, listening, ready) =
+    let (captures, tracks, ready) =
         open_streams(ready, starter, backend, &sources, (&ui, &ui_events), notes)?;
-    sleep.report(clock.as_ref(), &ui, notes);
+    if let Some(warning) = sleep.report(clock.as_ref(), notes) {
+        to_screen(&ui, &ready.saver.sender(), warning, clock.now());
+    }
     unmade.keep();
     keep_started(&rows, &watch, &session, &asked, &captures, notes);
     let Ready {
@@ -256,7 +259,7 @@ fn start_with_notes<B: CaptureBackend>(
         screen,
         ui,
         ui_events,
-        listening,
+        tracks,
         save: started_save,
     };
     Ok((running, screening))
@@ -334,35 +337,48 @@ fn open_streams<B: CaptureBackend>(
         ready.abandon();
         return Err(why.into());
     }
-    let (captures, listening) = start_streams(starter, backend, sources, notes);
+    let (captures, tracks) = start_streams(starter, backend, sources, notes);
     if captures.is_empty() {
         ready.abandon();
         return Err("nothing to record".into());
     }
-    Ok((captures, listening, ready))
+    Ok((captures, tracks, ready))
 }
 
 /// Opens each source's stream through `starter`, one after another,
 /// noting those that don't start. Returns the running captures and the
-/// footer's names for their sources.
+/// tracks they record, as the screen shows them.
 fn start_streams<B: CaptureBackend>(
     starter: TrackStarter,
     backend: &B,
     sources: &[(TrackId, Source)],
     notes: &mut Vec<String>,
-) -> (Vec<Capture<B::Stream>>, String) {
+) -> (Vec<Capture<B::Stream>>, Vec<recorder::Track>) {
     let mut captures = Vec::new();
-    let mut listening = Vec::new();
-    for (result, (_, source)) in starter.start(backend).into_iter().zip(sources) {
+    let mut tracks = Vec::new();
+    for (result, (track, source)) in starter.start(backend).into_iter().zip(sources) {
         match result {
             Ok(capture) => {
                 captures.push(capture);
-                listening.push(source_name(source));
+                tracks.push(screen_track(*track, source));
             }
             Err(e) => notes.push(format!("not recording {source}: {e}")),
         }
     }
-    (captures, listening.join(" + "))
+    (captures, tracks)
+}
+
+/// `track`, recording `source`, as the screen shows it.
+fn screen_track(track: TrackId, source: &Source) -> recorder::Track {
+    let role = match track_kind(track) {
+        TrackKind::Microphone => TrackRole::Microphone,
+        TrackKind::System => TrackRole::System,
+    };
+    recorder::Track {
+        id: track,
+        role,
+        source: source_name(source),
+    }
 }
 
 /// Starts the engine, if there are models, and the live thread that
@@ -387,14 +403,15 @@ fn start_live(
         live_received,
         ui.clone(),
         saver.sender(),
-        log.map(|log| (log, Arc::clone(clock))),
+        Arc::clone(clock),
+        log,
     )?;
     Ok((live_inputs, live))
 }
 
-/// The streams that started, the footer's names for their sources, and
-/// what started before them.
-type Opened<S> = (Vec<Capture<S>>, String, Ready);
+/// The streams that started, the tracks they record as the screen shows
+/// them, and what started before them.
+type Opened<S> = (Vec<Capture<S>>, Vec<recorder::Track>, Ready);
 
 /// What a start that fails before any stream opens says.
 const STOPPED_BEFORE: &str = "stopped before recording started; no session was made";
@@ -453,8 +470,10 @@ impl Ready {
         let _ = self.live_inputs.send(LiveInput::Done);
         drop(self.live_inputs);
         drop(self.live.join());
-        drop(self.saver.finish());
+        // The disk monitor holds a channel to the saver, which ends only
+        // once every one is dropped.
         drop(self.disk.stop());
+        drop(self.saver.finish());
         drop(self.lock);
     }
 }
@@ -633,15 +652,34 @@ fn ballast_length(args: &RecordArgs) -> u64 {
     }
 }
 
+/// Where the disk monitor's reports go: the screen, the saver (for the
+/// timeline) and the clock that times them.
+struct Reporting {
+    ui: Sender<Event>,
+    save: Sender<ToSave>,
+    clock: Arc<dyn Clock>,
+}
+
+impl Reporting {
+    /// Reports to `ui` and `saver`, timed by `clock`.
+    fn new(ui: &Sender<Event>, saver: &Saver, clock: &Arc<dyn Clock>) -> Self {
+        Self {
+            ui: ui.clone(),
+            save: saver.sender(),
+            clock: Arc::clone(clock),
+        }
+    }
+}
+
 /// Starts the disk monitor for a recording of `tracks` tracks into
-/// `audio`, with the ballast in the data directory.
+/// `audio`, with the ballast in the data directory, its `reports` going
+/// where [`Reporting`] says.
 fn watch_disk(
     args: &RecordArgs,
     audio: &std::path::Path,
     tracks: usize,
     watch: &Arc<DiskWatch<StdFs>>,
-    ui: &Sender<Event>,
-    clock: &Arc<dyn Clock>,
+    reports: Reporting,
 ) -> std::io::Result<DiskMonitor<StdFs>> {
     let config = MonitorConfig {
         data_dir: args.data.clone(),
@@ -650,14 +688,14 @@ fn watch_disk(
         ballast_len: ballast_length(args),
         interval: CHECK_INTERVAL,
     };
-    let reports = disk_reports(ui.clone(), Arc::clone(clock));
-    DiskMonitor::spawn(Arc::clone(watch), config, reports)
+    DiskMonitor::spawn(Arc::clone(watch), config, disk_reports(reports))
 }
 
 /// Turns what the disk monitor reports into the screens' events: the
 /// space, the low-disk warning, and on a full disk its warning and the
-/// stop.
-fn disk_reports(ui: Sender<Event>, clock: Arc<dyn Clock>) -> impl FnMut(DiskReport) + Send {
+/// stop. The warnings go to the timeline too.
+fn disk_reports(reporting: Reporting) -> impl FnMut(DiskReport) + Send {
+    let Reporting { ui, save, clock } = reporting;
     move |report| {
         let warning = |cause, state| {
             recorder::Event::Warning(Warning {
@@ -678,8 +716,7 @@ fn disk_reports(ui: Sender<Event>, clock: Arc<dyn Clock>) -> impl FnMut(DiskRepo
             DiskReport::Unchecked(_) | DiskReport::Ballast(_) => Vec::new(),
         };
         for event in events {
-            // The screen may have closed already.
-            let _ = ui.send(Event::Recorder(event));
+            to_screen(&ui, &save, event, clock.now());
         }
     }
 }
@@ -820,6 +857,7 @@ fn saving(
                 db.add_utterance(session, &heard).map(drop)
             }
             ToSave::Annotation(annotation) => db.add_annotation(session, annotation),
+            ToSave::Event(event) => db.add_event(session, event),
         })
     }
 }
@@ -1131,7 +1169,7 @@ mod tests {
         timeline
             .open_epoch(s(2_000_000_000), SampleIndex::ZERO, RATE)
             .unwrap();
-        let live = Live::new(&[timeline]);
+        let mut live = Live::new(&[timeline]);
         let range = |a, b| SampleRange::new(SampleIndex::new(a), SampleIndex::new(b)).unwrap();
         let word = |text: &str, a, b| HeardWord::new(text.to_owned(), range(a, b)).unwrap();
         let transcript = Transcript::new(SYSTEM, range(8_000, 40_000), "hello there".into())
@@ -1266,6 +1304,194 @@ mod tests {
             })]
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A logind that refuses the sleep lock.
+    struct Refuses;
+
+    impl Logind for Refuses {
+        fn inhibit_sleep(&self) -> Result<inhibit::SleepLock, inhibit::SleepNotHeld> {
+            Err(inhibit::SleepNotHeld::new("access denied"))
+        }
+    }
+
+    /// A timeline entry for `happened` on `track`, at `at` ms.
+    fn entry(
+        at: u64,
+        track: Option<TrackId>,
+        happened: nota_store::Happened,
+    ) -> nota_store::TimelineEvent {
+        nota_store::TimelineEvent {
+            at: nota_core::SessionTime::from_nanos(at * 1_000_000),
+            track,
+            happened,
+        }
+    }
+
+    /// The live thread's side of the timeline test. In a module of its
+    /// own, so its helper counts as test code to clippy.
+    #[cfg(test)]
+    mod feeding {
+        use super::*;
+
+        /// Hands the live thread, as the recorder would, a stalled microphone,
+        /// a quiet system track, a lost device and a wake from suspend, and
+        /// waits for it to be done: its changes go to `ui` and `saver`.
+        pub(super) fn through_live(saver: &Saver, ui: &Sender<Event>, clock: &Arc<dyn Clock>) {
+            use nota_core::messages::AudioChunk;
+            use nota_core::recorder::DeviceChange;
+            use nota_core::{SampleIndex, SessionTime, TrackTimeline};
+            use nota_recorder::capture::CaptureNotice;
+            use nota_recorder::detect::Condition;
+
+            let mut timeline = TrackTimeline::new(MIC);
+            timeline
+                .open_epoch(SessionTime::ZERO, SampleIndex::ZERO, RATE)
+                .unwrap();
+            let (inputs, received) = mpsc::channel();
+            let live = spawn_live(
+                Live::new(&[timeline]),
+                None,
+                received,
+                ui.clone(),
+                saver.sender(),
+                Arc::clone(clock),
+                None,
+            )
+            .unwrap();
+            let at = |ms: u64| SessionTime::from_nanos(ms * 1_000_000);
+            let detected = |track, condition, at| {
+                LiveInput::Recorder(
+                    Some(track),
+                    RecorderEvent::Detected {
+                        condition,
+                        state: WarningState::Raised,
+                        at,
+                    },
+                )
+            };
+            inputs
+                .send(detected(MIC, Condition::Stalled, at(1_000)))
+                .unwrap();
+            inputs
+                .send(detected(SYSTEM, Condition::Quiet, at(2_000)))
+                .unwrap();
+            let lost = RecorderEvent::Device {
+                change: DeviceChange::Lost,
+                at: at(3_000),
+            };
+            inputs.send(LiveInput::Recorder(Some(MIC), lost)).unwrap();
+            inputs
+                .send(LiveInput::Recorder(
+                    Some(MIC),
+                    RecorderEvent::Capture(CaptureNotice::Suspended),
+                ))
+                .unwrap();
+            // The first audio after the suspend, 4 s in, says the sleep ended.
+            let woke =
+                AudioChunk::new(MIC, SampleIndex::new(64_000), RATE, vec![1; 16_000]).unwrap();
+            inputs
+                .send(LiveInput::Recorder(Some(MIC), RecorderEvent::Audio(woke)))
+                .unwrap();
+            inputs.send(LiveInput::Done).unwrap();
+            drop(inputs);
+            live.join().unwrap();
+        }
+    }
+
+    use feeding::through_live;
+
+    /// Acceptance (GAI-320): what the detectors, the devices, the disk and
+    /// sleep report reaches the session's timeline in the library
+    /// database, with its track and its session time, through the real
+    /// saver and the tees the sources use. A machine's sleep is the live
+    /// view's, from the audio after a suspend.
+    #[test]
+    #[expect(clippy::disallowed_methods, reason = "test scaffolding")]
+    fn changes_from_every_source_reach_the_sessions_timeline() {
+        use nota_core::recorder::{DeviceChange, Disk};
+        use nota_core::{FakeClock, SessionTime};
+        use nota_store::Happened;
+
+        let root = std::env::temp_dir().join(format!("nota-timeline-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let library = Library::open(&root).unwrap();
+        let id = SessionId::new(5);
+        let rows = NewSessionRows::new(library.db().clone(), NewSession::bare(id));
+        let fake = Arc::new(FakeClock::new(SessionTime::from_nanos(5_000_000_000)));
+        let clock: Arc<dyn Clock> = Arc::clone(&fake) as Arc<dyn Clock>;
+        let (ui, screen) = mpsc::channel::<Event>();
+        let saver = Saver::spawn(saving(rows, id, None), ui.clone(), Arc::clone(&clock)).unwrap();
+
+        through_live(&saver, &ui, &clock);
+
+        // The disk monitor's report, at 5 s.
+        let mut report = disk_reports(Reporting {
+            ui: ui.clone(),
+            save: saver.sender(),
+            clock: Arc::clone(&clock),
+        });
+        report(DiskReport::Space(Disk {
+            free_bytes: 9,
+            left: None,
+        }));
+        report(DiskReport::Low(WarningState::Raised));
+        drop(report);
+
+        // Sleep logind refused, said once the streams started, at 6 s.
+        fake.advance(std::time::Duration::from_secs(1));
+        let mut notes = Vec::new();
+        let warning = inhibit::hold(&Refuses).report(clock.as_ref(), &mut notes);
+        to_screen(&ui, &saver.sender(), warning.unwrap(), clock.now());
+
+        drop(ui);
+        let report = saver.finish();
+        assert_eq!((report.events, report.lost_events), (6, 0));
+        let stored = library.db().with(|db| db.timeline(id)).unwrap();
+        let none = |cause, ms| entry(ms, None, Happened::Raised(cause));
+        assert_eq!(
+            stored,
+            [
+                entry(1_000, Some(MIC), Happened::Raised(Cause::Stalled)),
+                entry(2_000, Some(SYSTEM), Happened::Raised(Cause::Quiet)),
+                entry(3_000, Some(MIC), Happened::Device(DeviceChange::Lost)),
+                none(Cause::Slept, 4_000),
+                none(Cause::DiskLow, 5_000),
+                none(Cause::SleepNotHeld, 6_000),
+            ]
+        );
+        // The screen was told of each of them too, and of the space.
+        let warned = screen
+            .try_iter()
+            .filter(|e| matches!(e, Event::Recorder(recorder::Event::Warning(_))))
+            .count();
+        assert_eq!(warned, 5);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Each started capture is a track for the screen, its role from its
+    /// id and its source named as the footer names it.
+    #[test]
+    fn the_screen_is_told_each_track_s_role_and_source() {
+        use nota_core::recorder::Track;
+        assert_eq!(
+            [
+                screen_track(MIC, &Source::Microphone),
+                screen_track(SYSTEM, &Source::Device("speakers.monitor".to_owned())),
+            ],
+            [
+                Track {
+                    id: MIC,
+                    role: TrackRole::Microphone,
+                    source: "mic".to_owned()
+                },
+                Track {
+                    id: SYSTEM,
+                    role: TrackRole::System,
+                    source: "speakers.monitor".to_owned()
+                },
+            ]
+        );
     }
 
     #[test]

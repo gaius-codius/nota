@@ -7,12 +7,12 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use nota_core::recorder;
-use nota_core::{Clock, TrackId, Utterance, Word};
+use nota_core::{Clock, SessionTime, TrackId, Utterance, Word};
 use nota_recorder::capture::RecorderEvent;
 use nota_recorder::engine::{EngineEvent, EngineStatus, EngineSupervisor};
 use nota_tui::Event;
 
-use super::save::ToSave;
+use super::save::{ToSave, to_screen};
 use crate::inhibit::Slept;
 use crate::latency::{LatencyLog, Problem};
 use crate::live::{Actions, Live};
@@ -36,11 +36,13 @@ pub(super) struct LiveEnd {
 
 /// The live thread: feeds the engine and the screen until told recording
 /// is done, and hands each text placed for the screen to the saver
-/// (`save`). Then it shuts the engine down, and keeps handing on the text
+/// (`save`), and each change it tells the screen of (a warning, a device,
+/// a gap) as well, timed by `clock` where the change has no time of its
+/// own. Then it shuts the engine down, and keeps handing on the text
 /// the engine sends meanwhile (its answer to the last flush) until the
 /// engine's events end (waiting up to [`LATE_WAIT`] for each). With a
 /// latency log, notes when each text is handed to the screen, and anything
-/// that keeps text from it, by `clock`, including what the engine reports
+/// that keeps text from it, by the same clock, including what the engine reports
 /// after the screen has closed, and returns the log, with the sleeps the
 /// recording saw.
 pub(super) fn spawn_live(
@@ -49,7 +51,8 @@ pub(super) fn spawn_live(
     inputs: Receiver<LiveInput>,
     ui: Sender<Event>,
     save: Sender<ToSave>,
-    mut log: Option<(LatencyLog, Arc<dyn Clock>)>,
+    clock: Arc<dyn Clock>,
+    mut log: Option<LatencyLog>,
 ) -> io::Result<JoinHandle<LiveEnd>> {
     thread::Builder::new()
         .name("nota-live".into())
@@ -73,8 +76,8 @@ pub(super) fn spawn_live(
                 } else {
                     Vec::new()
                 };
-                apply(actions, engine.as_mut(), &ui, &save);
-                if let Some((log, clock)) = log.as_mut() {
+                apply(actions, engine.as_mut(), (&ui, &save), clock.now());
+                if let Some(log) = log.as_mut() {
                     let now = clock.now();
                     match noted {
                         Noted::Heard(track) if texts.is_empty() => {
@@ -96,7 +99,7 @@ pub(super) fn spawn_live(
                 engine.shutdown();
             }
             while let Ok(input) = inputs.recv_timeout(LATE_WAIT) {
-                if let Some((log, clock)) = log.as_mut() {
+                if let Some(log) = log.as_mut() {
                     // The screen has closed: text from now on never shows.
                     match Noted::of(&input) {
                         Noted::Heard(track) => log.problem(Problem::Late, Some(track), clock.now()),
@@ -109,7 +112,7 @@ pub(super) fn spawn_live(
                 }
             }
             LiveEnd {
-                log: log.map(|(log, _)| log),
+                log,
                 slept: live.slept().to_vec(),
             }
         })
@@ -153,11 +156,14 @@ impl Noted {
     }
 }
 
+/// Carries out `actions`: audio and flushes to the engine, text to the
+/// saver, and each update to the screen and, if it's a change, the
+/// timeline, at `now` if it has no time of its own.
 fn apply(
     actions: Actions,
     engine: Option<&mut EngineSupervisor>,
-    ui: &Sender<Event>,
-    save: &Sender<ToSave>,
+    (ui, save): (&Sender<Event>, &Sender<ToSave>),
+    now: SessionTime,
 ) {
     if let Some(engine) = engine {
         if let Some(chunk) = actions.transcribe {
@@ -171,7 +177,7 @@ fn apply(
     }
     save_heard(actions.heard, save);
     for update in actions.updates {
-        let _ = ui.send(Event::Recorder(update));
+        to_screen(ui, save, update, now);
     }
 }
 
@@ -190,6 +196,7 @@ mod tests {
 
     use nota_core::{FakeClock, SampleRate, TrackTimeline};
     use nota_recorder::capture::{CaptureBackend, CaptureError, CaptureSender, Source};
+    use nota_store::{Happened, TimelineEvent};
 
     use super::super::{MIC, RATE, SYSTEM};
     use super::*;
@@ -252,6 +259,8 @@ mod tests {
             /// The recorder events the screen got, without levels and byte
             /// counts.
             screen: Vec<recorder::Event>,
+            /// The timeline events the live thread handed to the saver.
+            timeline_events: Vec<TimelineEvent>,
             /// What the live thread left.
             end: LiveEnd,
             /// The mic's timeline as the recorder left it.
@@ -286,13 +295,14 @@ mod tests {
 
             let (inputs, received) = mpsc::channel();
             let (ui, screen) = mpsc::channel();
-            let (save, _saved) = mpsc::channel();
+            let (save, saved) = mpsc::channel();
             let live = spawn_live(
                 Live::new(&[timeline.clone()]),
                 None,
                 received,
                 ui,
                 save,
+                Arc::clone(&clock),
                 None,
             )
             .unwrap();
@@ -337,8 +347,16 @@ mod tests {
                     other => panic!("{other:?}"),
                 })
                 .collect();
+            let timeline_events = saved
+                .try_iter()
+                .map(|item| match item {
+                    ToSave::Event(event) => event,
+                    other => panic!("{other:?}"),
+                })
+                .collect();
             Recorded {
                 screen,
+                timeline_events,
                 end,
                 timeline,
             }
@@ -373,6 +391,24 @@ mod tests {
                     warning,
                     recorder::Event::Epoch { track: MIC, epoch },
                     recorder::Event::Gap { track: MIC, gap },
+                ]
+            );
+            // The saver is handed the same changes, for the timeline; the
+            // epoch isn't one.
+            let gap_event = Happened::Gap { until: gap.to() };
+            assert_eq!(
+                run.timeline_events,
+                [
+                    TimelineEvent {
+                        at: gap.to(),
+                        track: None,
+                        happened: Happened::Raised(Cause::Slept),
+                    },
+                    TimelineEvent {
+                        at: gap.from(),
+                        track: Some(MIC),
+                        happened: gap_event,
+                    },
                 ]
             );
             assert_eq!(run.end.slept.len(), 1);
@@ -438,7 +474,8 @@ mod tests {
             received,
             ui,
             save,
-            Some((log, Arc::clone(&clock))),
+            Arc::clone(&clock),
+            Some(log),
         )
         .unwrap();
         // A second of audio, which only shows a level.
@@ -476,7 +513,7 @@ mod tests {
             .try_iter()
             .map(|s| match s {
                 ToSave::Heard(u, _) => (u.track(), u.start(), u.end()),
-                ToSave::Annotation(_) => panic!("{s:?}"),
+                ToSave::Annotation(_) | ToSave::Event(_) => panic!("{s:?}"),
             })
             .collect();
         assert_eq!(
@@ -515,7 +552,17 @@ mod tests {
         let (inputs, received) = mpsc::channel();
         let (ui, screen) = mpsc::channel();
         let (save, saved) = mpsc::channel();
-        let live = spawn_live(Live::new(&[timeline]), None, received, ui, save, None).unwrap();
+        let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
+        let live = spawn_live(
+            Live::new(&[timeline]),
+            None,
+            received,
+            ui,
+            save,
+            clock,
+            None,
+        )
+        .unwrap();
         // The engine's events thread, still passing events on after Done.
         let engine_events = inputs.clone();
         inputs.send(LiveInput::Done).unwrap();

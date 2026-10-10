@@ -1,0 +1,24 @@
+---
+source: crates/nota-tui/tests/main_screen.rs
+expression: terminal.backend()
+---
+"╭─ ≈ nota · Woodwork workshop ─ ⚠ disk: 12m left · 01:12:48 ─╮"
+"│          ◆            ◇          ◆            ◇        ◆   │"
+"│ ▇▂█▂▄█▅▄▄▁▆██▅▄▆▄█▁█▄▇▇█▁▇████▇█▇▁▅▇▂▅▁█▅▇▇▆▂▅▂▂█▄▂▅▄▂▁█▅▅ │"
+"│                                                            │"
+"│   …and of course we need to sand along the grain first. If │"
+"│   the board is between eighteen and twenty millimetres we  │"
+"│   can plane it by hand.                                    │"
+"│   Anything thicker goes straight through the machine.      │"
+"│   …so the cupping could be from the drying shed, and we    │"
+"│   did look at that in the last session.                    │"
+"│ ◆ Remember that for a wide panel you check the moisture,   │"
+"│   the stain and the clamps before anything else.           │"
+"│ ◇ The table is getting full sun most days, so the joints   │"
+"│   may open up in summer as well.                           │"
+"│   Then we have the finish itself, and we want to rule out  │"
+"│   a reaction, so test the oil on a scrap first…            │"
+"│   ░░░                                                      │"
+"│                                                            │"
+"│                                                            │"
+"╰─ m mark  n note  s stop ──────────── mic + system · 14 MB ─╯"

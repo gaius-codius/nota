@@ -35,13 +35,11 @@
 //! | [`Event::Stopping`] | the recorder | The recording is stopping without a [`Command::Stop`]: on a signal, once every stream has ended, or when the disk is full (after its [`Cause::DiskFull`] warning). The screens close |
 //! | [`Event::Stopped`] | the recorder | Last: the session is finished, with its [`Outcome`] |
 //!
-//! Every kind of event M2's plan names is here, including those nothing
-//! sends yet: warnings (drift among them), device and disk events, durable
-//! progress, epochs and gaps, engine status and transcribing. The work that
-//! produces each fills in the sending side, and the screens' handling,
-//! without adding a variant. [`Event::Stopped`] isn't sent yet either: in
-//! `nota record` the screen has closed before the session is finished, so
-//! the [`Outcome`] is returned and printed as the summary instead.
+//! Every kind of event M2's plan names is here. Warnings, device and disk
+//! events, the engine's state, transcribing, epochs and gaps are sent;
+//! durable progress and [`Event::Stopped`] aren't. In `nota record` the
+//! screen has closed before the session is finished, so the [`Outcome`]
+//! is returned and printed as the summary instead of being sent.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -85,6 +83,40 @@ pub enum Input {
     Default,
     /// One device, by the audio server's name for it.
     Device(String),
+}
+
+/// What a track records, which is what the screens call it and how they
+/// read its silence: exact zeros from a microphone mean it's muted, from
+/// the system audio that nothing is playing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackRole {
+    /// The microphone.
+    Microphone,
+    /// What the system plays.
+    System,
+}
+
+impl TrackRole {
+    /// The track's short name on the screens: `mic` or `system`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Microphone => "mic",
+            Self::System => "system",
+        }
+    }
+}
+
+/// A track as the Recording screen shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Track {
+    /// The track.
+    pub id: TrackId,
+    /// What it records.
+    pub role: TrackRole,
+    /// The footer's name for where it records from, until a route change
+    /// names another.
+    pub source: String,
 }
 
 /// A mark (◆): "this matters", at the moment `m` was pressed.
@@ -361,6 +393,13 @@ mod tests {
         assert_eq!((note.at(), note.text()), (at, "bring clamps"));
         assert_eq!(Note::new(at, " \n\t "), None);
         assert_eq!(Note::new(at, ""), None);
+    }
+
+    /// The screens call the tracks `mic` and `system`.
+    #[test]
+    fn tracks_are_named_for_what_they_record() {
+        assert_eq!(TrackRole::Microphone.name(), "mic");
+        assert_eq!(TrackRole::System.name(), "system");
     }
 
     #[test]

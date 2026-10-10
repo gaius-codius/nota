@@ -1,6 +1,9 @@
 //! What the screen shows while recording, worked out from what the
-//! recorder and the engine report: levels, bytes recorded, and the text,
-//! each track's placed in session time through that track's epochs.
+//! recorder and the engine report: levels, bytes recorded, the text (each
+//! track's placed in session time through that track's epochs), whether the
+//! transcriber is up and whether speech is with it, and the warnings for
+//! what the detectors noticed, a sleep, a failed stream, a broken journal
+//! and drift.
 //!
 //! [`Live`] does no I/O: it says what to send where, and the live thread
 //! (in `record`) sends it. So each track's audio reaches the engine in the
@@ -12,16 +15,24 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use nota_core::messages::{AudioChunk, Transcript};
-use nota_core::recorder::{Cause, Event, Level, Warning};
-use nota_core::{Epoch, Gap, SessionTime, TrackId, TrackTimeline, Utterance, Word};
+use nota_core::recorder::{Cause, EngineState, Event, Level, Warning, WarningState};
+use nota_core::{
+    Epoch, Gap, SampleIndex, SampleRate, SessionTime, TrackId, TrackTimeline, Utterance, Word,
+};
 use nota_recorder::capture::{CaptureNotice, RecorderEvent};
 use nota_recorder::detect::Condition;
-use nota_recorder::engine::EngineEvent;
+use nota_recorder::engine::{EngineEvent, EngineStatus};
 
 use crate::inhibit::{Slept, Unrecorded};
 
 /// How often each track's level is sent: well within the screen's 250 ms.
 const LEVEL_EVERY: Duration = Duration::from_millis(100);
+
+/// How much audio the engine must hold, unanswered, on one track before
+/// the screen is told speech is with it. Under a second isn't a chunk of
+/// speech, and the mark would flicker on and off with every chunk handed
+/// over and confirmed.
+const TRANSCRIBING_AFTER: Duration = Duration::from_secs(1);
 
 /// The warning's cause for what a detector noticed.
 const fn cause_of(condition: Condition) -> Cause {
@@ -62,8 +73,8 @@ pub(crate) struct Live {
     meters: BTreeMap<TrackId, Meter>,
     /// Every sample captured, on every track, for the footer's size. The
     /// samples a broken journal dropped are counted too: nothing reports
-    /// how many there were. The summary after the stop says a journal
-    /// broke; the screen doesn't show warnings yet.
+    /// how many there were. The warning for the broken journal is sent
+    /// when it's reported.
     recorded_samples: u64,
     /// The tracks whose stream reported a suspend and hasn't sent audio
     /// since.
@@ -75,6 +86,16 @@ pub(crate) struct Live {
     slept: Vec<Slept>,
     /// The tracks that woke from the last sleep in `slept`.
     woke_from_last: BTreeSet<TrackId>,
+    /// Where the audio handed to the engine ends on each track, and at
+    /// what rate.
+    handed: BTreeMap<TrackId, (SampleIndex, SampleRate)>,
+    /// Where the engine has dealt with each track's audio up to: text,
+    /// silence or skipped. It starts at the first audio handed over.
+    confirmed: BTreeMap<TrackId, SampleIndex>,
+    /// Whether an engine is up: it said hello and hasn't gone down since.
+    engine_online: bool,
+    /// Whether the screen was last told speech is with the engine.
+    transcribing: bool,
 }
 
 impl Live {
@@ -89,6 +110,10 @@ impl Live {
             heard_to: BTreeMap::new(),
             slept: Vec::new(),
             woke_from_last: BTreeSet::new(),
+            handed: BTreeMap::new(),
+            confirmed: BTreeMap::new(),
+            engine_online: false,
+            transcribing: false,
         }
     }
 
@@ -115,6 +140,14 @@ impl Live {
                         .updates
                         .push(Event::Recorded(self.recorded_samples.saturating_mul(2)));
                 }
+                // A track whose samples don't start at 0 holds nothing
+                // before its first chunk.
+                self.confirmed
+                    .entry(chunk.track())
+                    .or_insert(chunk.range().start());
+                self.handed
+                    .insert(chunk.track(), (chunk.range().end(), chunk.rate()));
+                actions.updates.extend(self.transcribing_change());
                 actions.transcribe = Some(chunk);
             }
             (Some(track), RecorderEvent::Epoch(epoch)) => {
@@ -142,7 +175,35 @@ impl Live {
                 self.sleeping.insert(track);
             }
             // The stream stopped: what the engine holds of it won't grow.
-            (Some(track), RecorderEvent::CaptureFailed(_)) => actions.flush = Some(track),
+            (Some(track), RecorderEvent::CaptureFailed(error)) => {
+                actions.flush = Some(track);
+                let cause = Cause::StreamFailed(error.to_string());
+                actions.updates.push(self.raised(cause, track));
+            }
+            (Some(track), RecorderEvent::JournalFailed(error)) => {
+                let cause = Cause::JournalFailed(error.to_string());
+                actions.updates.push(self.raised(cause, track));
+            }
+            // A journal that broke on the regular fsync isn't tied to a
+            // track by the recorder; it's still a change worth keeping,
+            // dated where the latest audio ends.
+            (None, RecorderEvent::JournalFailed(error)) => {
+                actions.updates.push(Event::Warning(Warning {
+                    cause: Cause::JournalFailed(error.to_string()),
+                    track: None,
+                    at: self
+                        .heard_to
+                        .values()
+                        .max()
+                        .copied()
+                        .unwrap_or(SessionTime::ZERO),
+                    state: WarningState::Raised,
+                }));
+            }
+            // Reported once per track and never cleared.
+            (Some(track), RecorderEvent::Capture(CaptureNotice::Drifted(_))) => {
+                actions.updates.push(self.raised(Cause::Drift, track));
+            }
             (
                 Some(track),
                 RecorderEvent::Detected {
@@ -236,16 +297,91 @@ impl Live {
         }
     }
 
+    /// The warning that `cause` has been raised for `track`, for the
+    /// reports that carry no time.
+    fn raised(&self, cause: Cause, track: TrackId) -> Event {
+        Event::Warning(Warning {
+            cause,
+            track: Some(track),
+            at: self.reported_at(track),
+            state: WarningState::Raised,
+        })
+    }
+
+    /// The session time to give a report about `track` that carries none,
+    /// and that [`Live`] has no clock to date: where the track's audio so
+    /// far ends, else where its current epoch starts, else the session's
+    /// start.
+    fn reported_at(&self, track: TrackId) -> SessionTime {
+        self.heard_to
+            .get(&track)
+            .copied()
+            .or_else(|| {
+                let follower = self.followers.get(&track)?;
+                follower.current().map(Epoch::start)
+            })
+            .unwrap_or(SessionTime::ZERO)
+    }
+
     /// What to do about something the engine reported.
-    pub(crate) fn engine(&self, event: EngineEvent) -> Actions {
+    pub(crate) fn engine(&mut self, event: EngineEvent) -> Actions {
         let mut actions = Actions::default();
-        if let EngineEvent::Transcript(transcript) = event
-            && let Some((text, words)) = self.place(transcript)
-        {
-            actions.updates.push(Event::Text(text.clone()));
-            actions.heard = Some((text, words));
+        match event {
+            EngineEvent::Transcript(transcript) => {
+                if let Some((text, words)) = self.place(transcript) {
+                    actions.updates.push(Event::Text(text.clone()));
+                    actions.heard = Some((text, words));
+                }
+            }
+            EngineEvent::Status(status) => {
+                self.engine_online = matches!(status, EngineStatus::Online { .. });
+                actions.updates.push(Event::Engine(match status {
+                    EngineStatus::Online { .. } => EngineState::Online,
+                    EngineStatus::Offline(reason) => EngineState::Offline(reason.to_string()),
+                }));
+                actions.updates.extend(self.transcribing_change());
+            }
+            EngineEvent::Confirmed { track, up_to } => {
+                self.confirm(track, up_to);
+                actions.updates.extend(self.transcribing_change());
+            }
+            EngineEvent::Skipped { track, range } => {
+                self.confirm(track, range.end());
+                actions.updates.extend(self.transcribing_change());
+            }
         }
         actions
+    }
+
+    /// Notes that the engine has dealt with `track` up to `up_to`. It only
+    /// moves forward: a report that arrives late, naming an older position,
+    /// changes nothing.
+    fn confirm(&mut self, track: TrackId, up_to: SampleIndex) {
+        let confirmed = self.confirmed.entry(track).or_insert(up_to);
+        *confirmed = (*confirmed).max(up_to);
+    }
+
+    /// Whether speech is with the engine: it's online and holds at least
+    /// [`TRANSCRIBING_AFTER`] of some track's audio it hasn't answered.
+    fn is_transcribing(&self) -> bool {
+        self.engine_online
+            && self.handed.iter().any(|(track, &(end, rate))| {
+                let confirmed = self.confirmed.get(track).copied().unwrap_or_default();
+                let unanswered = end.saturating_count_since(confirmed);
+                unanswered
+                    .duration_at(rate)
+                    .is_some_and(|held| held >= TRANSCRIBING_AFTER)
+            })
+    }
+
+    /// The mark for the screen, if [`Self::is_transcribing`] changed since
+    /// it was last sent.
+    fn transcribing_change(&mut self) -> Option<Event> {
+        let now = self.is_transcribing();
+        (now != self.transcribing).then(|| {
+            self.transcribing = now;
+            Event::Transcribing(now)
+        })
     }
 
     /// `transcript` and its words placed in session time.
