@@ -3,12 +3,16 @@
 //! ```text
 //! Home ──r──▶ Setup ──⏎──▶ Recording ──s, y──▶ Processing ──esc──▶ Home
 //!  └──────────R (last settings)──▶ Recording
+//!                                  Recording ──disk full, ⏎──▶ Home
 //! ```
 //!
 //! The terminal is set up once, for Home, and lent to each recording: the
 //! Recording screen runs on it, and Home shows "finishing the recording"
 //! while the recording stops, then Processing shows its jobs and transcript.
-//! Home opens a session in Processing too. Setup (see `setup`) listens to
+//! Home opens a session in Processing too. A recording a full disk stops
+//! shows again once it has stopped, saying what was saved, and `⏎` goes
+//! Home, where the session needs you until there's space to process it.
+//! Setup (see `setup`) listens to
 //! both sources so their meters move before a session exists; `R` skips it
 //! and records with the last settings, which Setup keeps (see `remembered`).
 //!
@@ -25,22 +29,26 @@
 
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use jiff::Timestamp;
 use jiff::civil::Date;
 use jiff::tz::TimeZone;
-use nota_core::recorder::{Command, Setup};
+use nota_core::recorder::{Cause, Command, Setup};
 use nota_core::{Clock, SessionId, SessionTime, SystemClock, WallTime, wall_now};
-use nota_tui::{Action, Home, InputThread, RunError, Session, Status, Theme};
+use nota_store::{Happened, JobState, Wait};
+use nota_tui::{Action, Event, Home, InputThread, Recording, RunError, Session, Status, Theme};
+use ratatui::Terminal;
+use ratatui::backend::Backend;
 
 use crate::final_pass::Jobs;
-use crate::jobs::{Capture, FreeSpace, Runner};
+use crate::jobs::{Capture, FreeSpace, Room as _, Runner};
 use crate::library::{Library, Listed, Needs, Salvaged};
 use crate::record::{
-    BoxError, Lent, QuitSignals, RATE, RecordArgs, final_engine, record_in, segment_length,
+    BoxError, Lent, QuitSignals, RATE, RecordArgs, Returned, final_engine, record_in,
+    segment_length,
 };
 use crate::terminal::Screen;
 
@@ -101,6 +109,10 @@ fn run_app(args: &RecordArgs, said: &mut Vec<String>) -> Result<(), BoxError> {
         zone: TimeZone::system,
         clock: Arc::clone(&clock),
         wall: Box::new(wall_now),
+        room: Box::new({
+            let space = FreeSpace(args.data.clone());
+            move || space.room()
+        }),
         listed_at: None,
         said: None,
     };
@@ -189,6 +201,11 @@ impl Pages<'_> {
                 Recorded::Back(back, id) => {
                     screen = Some(back);
                     processing_session = Some(id);
+                }
+                // Home next, not Processing: there's no space to process it.
+                Recorded::Stopped(back, mut stopped) => {
+                    let clock = &self.listing.clock;
+                    screen = Some(show_stopped(back, &mut stopped, clock, self.quit)?);
                 }
                 Recorded::Failed(e) => self.notice = Some(format!("the recording failed: {e}")),
                 Recorded::TerminalGone => return Ok(()),
@@ -371,10 +388,14 @@ impl Capture for Recordings {
     }
 }
 
-/// How a recording from Home went, for what comes next.
-enum Recorded {
-    /// It was recorded, and the terminal is back for Home.
-    Back(Screen, SessionId),
+/// How a recording from Home went, for what comes next, with the app's
+/// terminal (`S`, a [`Screen`] but in tests).
+enum Recorded<S = Screen> {
+    /// It was recorded, and the terminal is back for Processing.
+    Back(S, SessionId),
+    /// A full disk stopped it, and the terminal is back with its Recording
+    /// screen, to show stopped before Home.
+    Stopped(S, Box<Recording>),
     /// It failed: the terminal was restored, and Home says why.
     Failed(String),
     /// It was recorded, but the terminal failed (as after a hangup):
@@ -422,10 +443,10 @@ fn record_from(
 }
 
 /// Keeps the recording's result for the next page and the closing report.
-fn recorded_result(
-    recorded: Result<(crate::record::Outcome, Option<Screen>), BoxError>,
+fn recorded_result<S>(
+    recorded: Result<(crate::record::Outcome, Option<Returned<S>>), BoxError>,
     said: &mut Vec<String>,
-) -> Recorded {
+) -> Recorded<S> {
     match recorded {
         Ok((outcome, back)) => {
             said.push(format!(
@@ -434,9 +455,17 @@ fn recorded_result(
                 outcome.segments
             ));
             said.extend(outcome.notes.iter().map(|note| format!("  {note}")));
-            back.map_or(Recorded::TerminalGone, |screen| {
-                Recorded::Back(screen, outcome.id)
-            })
+            match back {
+                None => Recorded::TerminalGone,
+                Some(Returned {
+                    screen,
+                    stopped: None,
+                }) => Recorded::Back(screen, outcome.id),
+                Some(Returned {
+                    screen,
+                    stopped: Some(stopped),
+                }) => Recorded::Stopped(screen, Box::new(stopped)),
+            }
         }
         Err(e) => {
             said.push(format!("nota: the recording failed: {e}"));
@@ -480,6 +509,73 @@ fn show_home(
     ran
 }
 
+/// How the stopped Recording screen was left.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Left {
+    /// `⏎`, or the keyboard was lost: Home next.
+    Home,
+    /// A signal asked nota to close.
+    Quit,
+    /// The terminal failed, for this reason.
+    TerminalGone(String),
+}
+
+/// Shows `recording`, which a full disk stopped, on `screen` until `⏎`, a
+/// lost keyboard or a signal (see [`wait_stopped`]), with keys read
+/// afresh: the recording's own input thread has stopped. The terminal
+/// comes back for Home.
+///
+/// # Errors
+///
+/// If the terminal fails, as Home's does.
+fn show_stopped(
+    mut screen: Screen,
+    recording: &mut Recording,
+    clock: &Arc<dyn Clock>,
+    quit: &QuitSignals,
+) -> Result<Screen, BoxError> {
+    let (ui, events) = mpsc::channel();
+    // Without keys there's no way to leave the screen: Home at once.
+    let Ok(input) = InputThread::spawn(ui.clone(), Arc::clone(clock)) else {
+        return Ok(screen);
+    };
+    // Drawn whole: Home's stopping line was drawn over it.
+    let left = match screen.clear() {
+        Ok(()) => wait_stopped(screen.terminal(), recording, (ui, &events), quit),
+        Err(e) => Left::TerminalGone(e.to_string()),
+    };
+    let _ = input.stop();
+    match left {
+        Left::TerminalGone(e) => Err(format!("the screen failed: {e}").into()),
+        Left::Home | Left::Quit => Ok(screen),
+    }
+}
+
+/// Shows the stopped `recording` on `terminal` until `⏎` is pressed, the
+/// keyboard is lost, or a signal asks nota to close: while it waits,
+/// signals reach its events (`ui`, read from `events`), as they reach
+/// Home's.
+fn wait_stopped<B: Backend>(
+    terminal: &mut Terminal<B>,
+    recording: &mut Recording,
+    (ui, events): (Sender<Event>, &Receiver<Event>),
+    quit: &QuitSignals,
+) -> Left {
+    quit.show_home(Some(ui));
+    // A signal before the wait was there to take it.
+    let waited = if quit.asked() {
+        Ok(())
+    } else {
+        recording.wait_stopped(terminal, events)
+    };
+    quit.show_home(None);
+    match waited {
+        Err(RunError::Terminal(e)) => Left::TerminalGone(e.to_string()),
+        _ if quit.asked() => Left::Quit,
+        Ok(()) | Err(RunError::InputLost(_) | RunError::CommandsClosed(_)) => Left::Home,
+    }
+}
+
 /// The engines named on Setup, which says when they hear: live and again
 /// after the stop.
 const fn engines_line(args: &RecordArgs) -> &'static str {
@@ -513,6 +609,9 @@ struct Listing<'a> {
     clock: Arc<dyn Clock>,
     /// The calendar's time, which says what day it is.
     wall: Box<dyn Fn() -> Option<WallTime>>,
+    /// Whether there's space for the jobs waiting for it, as the runner
+    /// judges it.
+    room: Box<dyn Fn() -> bool>,
     /// When the sessions were last listed, or a listing last failed, by
     /// `clock`, and the local date then, if the calendar's time could be
     /// read.
@@ -549,13 +648,38 @@ impl Listing<'_> {
         let jobs = self.library.db().with(|db| db.jobs());
         for shown in sessions.iter_mut().filter(|s| s.status == Status::Ready) {
             match &jobs {
-                Ok(jobs) => job_status(shown, jobs),
+                Ok(jobs) => job_status(shown, jobs, |id| self.no_space(id)),
                 Err(error) => {
                     shown.status = Status::NeedsYou;
                     shown.detail = Some(format!("processing status couldn't be read: {error}"));
                 }
             }
         }
+    }
+
+    /// What Home says of `id`, whose jobs wait for space, if there's
+    /// still none: that a full disk stopped its recording, if its timeline
+    /// says so (a timeline that can't be read says nothing), else that the
+    /// disk is full. `None` once there's space: the jobs then wait for
+    /// the runner, or for whatever else they lack.
+    fn no_space(&self, id: SessionId) -> Option<&'static str> {
+        if (self.room)() {
+            return None;
+        }
+        let stopped = self
+            .library
+            .db()
+            .with(|db| db.timeline(id))
+            .is_ok_and(|events| {
+                events
+                    .iter()
+                    .any(|event| event.happened == Happened::Raised(Cause::DiskFull))
+            });
+        Some(if stopped {
+            "stopped early: disk full · free space to finish"
+        } else {
+            "the disk is full · free space to finish"
+        })
     }
 
     /// Gives `home` the sessions again if a listing is due: [`RELIST`] has
@@ -624,19 +748,30 @@ fn stopping_home(home: &mut Home) {
     home.set_busy(Some(STOPPING.to_owned()));
 }
 
-/// Gives one ready session the status of its jobs.
-fn job_status(shown: &mut Session, jobs: &[nota_store::Job]) {
-    let own = || {
-        jobs.iter()
-            .filter(|job| job.session == SessionId::new(shown.id))
-    };
+/// Gives one ready session the status of its jobs. Jobs waiting for
+/// space need you to free some while there's none (`no_space` says what
+/// Home says of it then, see [`Listing::no_space`]).
+fn job_status(
+    shown: &mut Session,
+    jobs: &[nota_store::Job],
+    no_space: impl FnOnce(SessionId) -> Option<&'static str>,
+) {
+    let id = SessionId::new(shown.id);
+    let own = || jobs.iter().filter(|job| job.session == id);
     if let Some(why) = own().find_map(|job| match &job.state {
-        nota_store::JobState::Failed(why) => Some(why),
+        JobState::Failed(why) => Some(why),
         _ => None,
     }) {
         shown.status = Status::NeedsYou;
         shown.detail = Some(format!("processing failed: {why}"));
-    } else if own().any(|job| job.state != nota_store::JobState::Done) {
+    } else if let Some(why) = own()
+        .any(|job| job.state == JobState::Waiting(Some(Wait::Space)))
+        .then(|| no_space(id))
+        .flatten()
+    {
+        shown.status = Status::NeedsYou;
+        shown.detail = Some(why.to_owned());
+    } else if own().any(|job| job.state != JobState::Done) {
         shown.status = Status::Processing;
         shown.detail = Some("final transcript queued or running".into());
     }

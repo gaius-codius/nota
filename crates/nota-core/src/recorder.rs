@@ -31,7 +31,7 @@
 //! | [`Event::Disk`] | the recorder | The free space was checked, before and during the recording |
 //! | [`Event::Durable`] | the recorder | A track's audio is on disk, fsynced, up to a moment |
 //! | [`Event::Epoch`] | the recorder | A track's stream was reopened, or audio was lost: a new epoch |
-//! | [`Event::Gap`] | the recorder | With an epoch after the first: the time with no audio before it |
+//! | [`Event::Gap`] | the live thread | A track's new epoch opened on a hole (an overrun, a reopened stream, a sleep): the time with no audio before it. After a sleep it comes with the epoch, once the track's audio is back; otherwise on its own |
 //! | [`Event::Stopping`] | the recorder | The recording is stopping without a [`Command::Stop`]: on a signal, once every stream has ended, or when the disk is full (after its [`Cause::DiskFull`] warning). The screens close |
 //! | [`Event::Stopped`] | the recorder | Last: the session is finished, with its [`Outcome`] |
 //!
@@ -117,6 +117,10 @@ pub struct Track {
     /// The footer's name for where it records from, until a route change
     /// names another.
     pub source: String,
+    /// Whether its stream started. A track asked for that didn't start is
+    /// still given, so a warning can name its role; the footer names only
+    /// the sources of those that did.
+    pub recording: bool,
 }
 
 /// A mark (◆): "this matters", at the moment `m` was pressed.

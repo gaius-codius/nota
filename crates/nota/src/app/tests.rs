@@ -334,6 +334,7 @@ fn listing_of<'a>(
         zone: || TimeZone::UTC,
         clock: Arc::clone(clock) as Arc<dyn Clock>,
         wall: Box::new(move || WallTime::from_unix_seconds(wall.load(Ordering::SeqCst))),
+        room: Box::new(|| false),
         listed_at: None,
         said: None,
     }
@@ -679,4 +680,204 @@ fn the_default_title_is_the_local_date_and_time() {
         ..dates()
     };
     assert_eq!(unknown.title(), "Recording");
+}
+
+/// Session 3 stopped on a full disk: its jobs wait for space and, if
+/// `told`, its timeline has the full disk's warning.
+fn stopped_on_a_full_disk(library: &Library, told: bool) {
+    let id = SessionId::new(3);
+    if told {
+        let full = nota_store::TimelineEvent {
+            at: SessionTime::from_nanos(4_368_000_000_000),
+            track: None,
+            happened: Happened::Raised(Cause::DiskFull),
+        };
+        library.db().with(|db| db.add_event(id, &full)).unwrap();
+    }
+    library
+        .db()
+        .with(|db| db.finish_recording(id, Some(Wait::Space)))
+        .unwrap();
+}
+
+/// Acceptance (GAI-426): Home shows a session a full disk stopped as
+/// needing you, stopped early, until there's space to process it.
+#[test]
+fn home_shows_a_session_a_full_disk_stopped_as_stopped_early() {
+    let tmp = TestDir::new("stopped-early");
+    let library = library_of_three(&tmp.0);
+    stopped_on_a_full_disk(&library, true);
+    let shown = shown_job(&library);
+    assert_eq!(shown.status, Status::NeedsYou);
+    assert_eq!(
+        shown.detail.as_deref(),
+        Some("stopped early: disk full · free space to finish")
+    );
+}
+
+/// Jobs waiting for space with no full disk on the timeline (a job that
+/// ran out of it) need space too, without saying the recording stopped.
+#[test]
+fn home_shows_jobs_waiting_for_space_without_a_full_disk_stop() {
+    let tmp = TestDir::new("waits-for-space");
+    let library = library_of_three(&tmp.0);
+    stopped_on_a_full_disk(&library, false);
+    let shown = shown_job(&library);
+    assert_eq!(shown.status, Status::NeedsYou);
+    assert_eq!(
+        shown.detail.as_deref(),
+        Some("the disk is full · free space to finish")
+    );
+}
+
+/// Once there's space, jobs that still wait (for an engine, say) show as
+/// processing, as before: freeing space is no longer what they need.
+#[test]
+fn home_stops_asking_for_space_once_there_is_some() {
+    let tmp = TestDir::new("space-back");
+    let library = library_of_three(&tmp.0);
+    stopped_on_a_full_disk(&library, true);
+    let clock = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let wall = Arc::new(AtomicI64::new(day(3)));
+    let mut listing = listing_of(&library, &clock, &wall);
+    listing.room = Box::new(|| true);
+    let shown = listing
+        .sessions()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.id == 3)
+        .unwrap();
+    assert_eq!(shown.status, Status::Processing);
+}
+
+/// A Recording screen a full disk stopped.
+fn stopped_screen() -> Recording {
+    let at = SessionTime::from_nanos(4_368_000_000_000);
+    let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(at));
+    let mut screen = Recording::new("Workshop".into(), "mic".into(), clock, Theme::no_color());
+    screen.update(nota_core::recorder::Event::Warning(
+        nota_core::recorder::Warning {
+            cause: Cause::DiskFull,
+            track: None,
+            at,
+            state: nota_core::recorder::WarningState::Raised,
+        },
+    ));
+    screen
+}
+
+fn enter() -> Event {
+    Event::Key {
+        key: KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        at: SessionTime::ZERO,
+    }
+}
+
+/// Acceptance (GAI-426): `⏎` on the stopped screen goes Home.
+#[test]
+fn enter_on_the_stopped_screen_goes_home() {
+    // Other tests' signals don't reach this one's listener.
+    #[cfg(unix)]
+    let _turn = crate::record::RAISING
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let quit = QuitSignals::listen().unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(62, 20)).unwrap();
+    let (ui, events) = mpsc::channel();
+    ui.send(enter()).unwrap();
+    let left = wait_stopped(&mut terminal, &mut stopped_screen(), (ui, &events), &quit);
+    assert_eq!(left, Left::Home);
+    let shown = format!("{}", terminal.backend());
+    assert!(shown.contains("■ stopped · disk full"), "{shown}");
+}
+
+/// Sends `⏎` to `ui` 5 s from now, unless `done` is sent first, and says
+/// whether it had to: a wait that misses what a test sends it then ends,
+/// so the test fails rather than hangs. Before that, if `raise`, raises
+/// SIGHUP once the wait has had time to begin.
+#[cfg(unix)]
+fn enter_later(ui: Sender<Event>, raise: bool) -> (std::thread::JoinHandle<bool>, Sender<()>) {
+    let (done, finished) = mpsc::channel::<()>();
+    let thread = std::thread::spawn(move || {
+        if raise {
+            if finished.recv_timeout(Duration::from_millis(200)).is_ok() {
+                return false;
+            }
+            signal_hook::low_level::raise(signal_hook::consts::SIGHUP).unwrap();
+        }
+        let missed = finished.recv_timeout(Duration::from_secs(5)).is_err();
+        if missed {
+            let _ = ui.send(enter());
+        }
+        missed
+    });
+    (thread, done)
+}
+
+/// Acceptance (GAI-426): a signal while the stopped screen waits ends the
+/// wait, and nota closes.
+#[cfg(unix)]
+#[test]
+fn a_signal_while_the_stopped_screen_waits_closes_nota() {
+    // Other tests' signals don't reach this one's listener.
+    #[cfg(unix)]
+    let _turn = crate::record::RAISING
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let quit = QuitSignals::listen().unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(62, 20)).unwrap();
+    let (ui, events) = mpsc::channel();
+    let (raising, done) = enter_later(ui.clone(), true);
+    let left = wait_stopped(&mut terminal, &mut stopped_screen(), (ui, &events), &quit);
+    let _ = done.send(());
+    assert!(!raising.join().unwrap(), "the signal didn't end the wait");
+    assert_eq!(left, Left::Quit);
+}
+
+/// A signal that came before the stopped screen ends it at once.
+#[cfg(unix)]
+#[test]
+fn a_signal_before_the_stopped_screen_closes_nota_at_once() {
+    // Other tests' signals don't reach this one's listener.
+    #[cfg(unix)]
+    let _turn = crate::record::RAISING
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let quit = QuitSignals::listen().unwrap();
+    signal_hook::low_level::raise(signal_hook::consts::SIGHUP).unwrap();
+    for _ in 0..500 {
+        if quit.asked() {
+            break;
+        }
+        let (_keep, never) = mpsc::channel::<()>();
+        let _ = never.recv_timeout(Duration::from_millis(10));
+    }
+    let mut terminal = Terminal::new(TestBackend::new(62, 20)).unwrap();
+    let (ui, events) = mpsc::channel();
+    let (later, done) = enter_later(ui.clone(), false);
+    let left = wait_stopped(&mut terminal, &mut stopped_screen(), (ui, &events), &quit);
+    let _ = done.send(());
+    assert!(!later.join().unwrap(), "the signal didn't end the wait");
+    assert_eq!(left, Left::Quit);
+}
+
+/// Acceptance (GAI-426): a recording a full disk stopped comes back with
+/// its screen to show stopped, not for Processing; any other goes on to
+/// Processing.
+#[test]
+fn a_full_disk_stop_is_shown_stopped_rather_than_processed() {
+    let id = SessionId::new(4);
+    let recorded = |stopped| {
+        let outcome = crate::record::Outcome::new(id, PathBuf::from("/s/4"));
+        let back = Returned {
+            screen: (),
+            stopped,
+        };
+        recorded_result(Ok((outcome, Some(back))), &mut Vec::new())
+    };
+    assert!(matches!(
+        recorded(Some(stopped_screen())),
+        Recorded::Stopped((), _)
+    ));
+    assert!(matches!(recorded(None), Recorded::Back((), back) if back == id));
 }

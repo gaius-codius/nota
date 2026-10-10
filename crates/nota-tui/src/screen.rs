@@ -107,10 +107,11 @@ impl Recording {
         }
     }
 
-    /// The screen, told what each of `tracks` records and where from: the
-    /// warnings name them `mic` and `system`, and the footer names their
-    /// sources in place of the one given to [`Recording::new`], following
-    /// route changes. Control and bidirectional formatting characters in
+    /// The screen, told what each of `tracks` records: the warnings name
+    /// them `mic` and `system`, and the footer names the sources of those
+    /// recording in place of the one given to [`Recording::new`], following
+    /// route changes. A track that isn't recording is named by its
+    /// warnings only. Control and bidirectional formatting characters in
     /// the sources' names are dropped, as in the title.
     #[must_use]
     pub fn with_tracks(mut self, tracks: Vec<Track>) -> Self {

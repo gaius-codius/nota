@@ -18,11 +18,13 @@ fn two_tracks() -> Warnings {
             id: MIC,
             role: TrackRole::Microphone,
             source: "mic".to_owned(),
+            recording: true,
         },
         Track {
             id: SYSTEM,
             role: TrackRole::System,
             source: "system audio".to_owned(),
+            recording: true,
         },
     ]);
     warnings
@@ -323,6 +325,33 @@ fn a_sleep_shows_how_long_it_lasted() {
     assert_eq!(warnings.top(secs(210)), None);
 }
 
+/// A gap that began after the machine woke (an overrun soon after) isn't
+/// the sleep's: the sleep keeps its own length.
+#[test]
+fn a_later_gap_doesn_t_lengthen_the_sleep() {
+    let mut warnings = two_tracks();
+    raise(&mut warnings, Cause::Slept, None, 200);
+    let rate = SampleRate::new(1_000).unwrap();
+    let mut timeline = TrackTimeline::new(MIC);
+    timeline
+        .open_epoch(secs(0), SampleIndex::ZERO, rate)
+        .unwrap();
+    timeline
+        .open_epoch(secs(198), SampleIndex::new(196_000), rate)
+        .unwrap();
+    // The sleep's own 2 s, then a 5 s overrun after the machine woke.
+    timeline
+        .open_epoch(secs(207), SampleIndex::new(198_000), rate)
+        .unwrap();
+    for gap in timeline.gaps() {
+        warnings.update(&Event::Gap { track: MIC, gap }, secs(205));
+    }
+    assert_eq!(
+        warnings.top(secs(205)),
+        Some(shown("⚠ slept 2s", Tone::Gold, 0))
+    );
+}
+
 /// A broken journal shows `not recording` for 10 s: recording goes on in
 /// a new one.
 #[test]
@@ -468,4 +497,37 @@ fn a_journal_broken_without_a_track_is_only_a_change() {
     );
     assert_eq!(warnings.top(secs(41)), None);
     assert_eq!(warnings.changes(), [secs(40)]);
+}
+
+/// A track given as not recording keeps its role, so its failure to start
+/// reads `⚠ mic not recording`, but the footer names only the source still
+/// recording.
+#[test]
+fn a_track_that_didn_t_start_is_named_by_its_warning_but_not_the_footer() {
+    let mut warnings = Warnings::default();
+    warnings.set_tracks(vec![
+        Track {
+            id: MIC,
+            role: TrackRole::Microphone,
+            source: "mic".to_owned(),
+            recording: false,
+        },
+        Track {
+            id: SYSTEM,
+            role: TrackRole::System,
+            source: "system audio".to_owned(),
+            recording: true,
+        },
+    ]);
+    raise(
+        &mut warnings,
+        Cause::StreamFailed("permission refused".into()),
+        Some(MIC),
+        2,
+    );
+    assert_eq!(
+        warnings.top(secs(2)),
+        Some(shown("⚠ mic not recording", Tone::Accent, 0))
+    );
+    assert_eq!(warnings.sources(), Some("system audio".to_owned()));
 }

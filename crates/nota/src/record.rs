@@ -118,7 +118,9 @@ use nota_recorder::capture::CaptureBackend;
 use nota_recorder::engine::EngineCommand;
 use nota_recorder::segment::SegmentLength;
 use nota_store::HeardBy;
+use nota_tui::Recording;
 
+mod health;
 mod live;
 mod save;
 mod signals;
@@ -127,6 +129,8 @@ mod stop;
 mod summary;
 
 pub(crate) use signals::QuitSignals;
+#[cfg(all(test, unix))]
+pub(crate) use signals::RAISING;
 pub(crate) use start::{last_setup, source_of};
 use summary::show;
 #[cfg(test)]
@@ -236,9 +240,19 @@ pub(crate) struct Lent<'a> {
     pub(crate) stopping: &'a mut dyn FnMut(&mut Screen),
 }
 
+/// The app's terminal (`S`, a [`Screen`] but in tests), handed back once
+/// a recording has stopped.
+pub(crate) struct Returned<S = Screen> {
+    pub(crate) screen: S,
+    /// The Recording screen as it closed, if a full disk stopped the
+    /// recording: the app shows it again, stopped, until `⏎`.
+    pub(crate) stopped: Option<Recording>,
+}
+
 /// Records as [`record`] does. With `lent`, on the app's terminal: once
 /// the Recording screen closes, `stopping` draws on it while the recording
-/// stops, and the terminal comes back with the outcome (unless it failed).
+/// stops, and the terminal comes back with the outcome (unless it failed),
+/// with the Recording screen if a full disk stopped the recording.
 /// Without, the terminal is set up here and restored before the stop.
 ///
 /// # Errors
@@ -247,7 +261,7 @@ pub(crate) struct Lent<'a> {
 pub(crate) fn record_in(
     args: &RecordArgs,
     lent: Option<Lent<'_>>,
-) -> Result<(Outcome, Option<Screen>), BoxError> {
+) -> Result<(Outcome, Option<Returned>), BoxError> {
     let Command::Start(setup) = &args.start else {
         return Err("a recording starts only with a start command".into());
     };
@@ -295,7 +309,7 @@ fn record_with<B: CaptureBackend>(
     clock: &Arc<dyn Clock>,
     logind: &dyn Logind,
     lent: Option<Lent<'_>>,
-) -> Result<(Outcome, Option<Screen>), BoxError> {
+) -> Result<(Outcome, Option<Returned>), BoxError> {
     let (given, library, stopping) = match lent {
         Some(Lent {
             screen,
@@ -307,7 +321,7 @@ fn record_with<B: CaptureBackend>(
     let (started, screening) = start::start(args, setup, backend, clock, logind, given, library)?;
 
     // The screen, until it's closed.
-    let (shown, screen) = show(
+    let (mut shown, screen) = show(
         screening.screen,
         &setup.title,
         screening.tracks,
@@ -318,19 +332,23 @@ fn record_with<B: CaptureBackend>(
     );
     drop(screening.ui);
     drop(screening.save);
-    // `nota record` restores the terminal before stopping; the app keeps
-    // it, and shows that the recording is stopping.
-    let screen = match (screen, stopping) {
+    // `nota record` restores the terminal before stopping (and says in
+    // its summary if a full disk stopped it); the app keeps it, and shows
+    // that the recording is stopping.
+    let returned = match (screen, stopping) {
         (Some(mut screen), Some(stopping)) => {
             stopping(&mut screen);
-            Some(screen)
+            Some(Returned {
+                screen,
+                stopped: shown.stopped.take(),
+            })
         }
         _ => None,
     };
 
     // Recorded, whatever stopping says: anything that went wrong is a
     // note on the outcome.
-    Ok((stop::stop(started, shown), screen))
+    Ok((stop::stop(started, shown), returned))
 }
 
 #[cfg(test)]

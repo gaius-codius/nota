@@ -142,6 +142,9 @@ fn each_track_keeps_its_own_meter() {
     );
 }
 
+/// A new epoch after a hole (an overrun, a reopened stream) flushes the
+/// engine, sends the gap once, for the timeline, and places later text
+/// after it.
 #[test]
 fn a_new_epoch_flushes_the_engine_and_places_later_text_after_the_gap() {
     let recorder_mic = {
@@ -152,9 +155,11 @@ fn a_new_epoch_flushes_the_engine_and_places_later_text_after_the_gap() {
     };
     let mut live = Live::new(&[opened(MIC, 0)]);
     let epoch = recorder_mic.epochs()[1];
+    let gap = recorder_mic.gaps().next().unwrap();
     let actions = live.recorder(Some(MIC), RecorderEvent::Epoch(epoch));
     assert_eq!(actions.flush, Some(MIC));
-    assert!(actions.updates.is_empty());
+    assert_eq!(actions.updates, [Event::Gap { track: MIC, gap }]);
+    assert_eq!((gap.from(), gap.to()), (ms(1_000), ms(5_000)));
     let before = live.engine(heard(MIC, 500, 900, "before"));
     let after = live.engine(heard(MIC, 1_000, 1_200, "after"));
     assert_eq!(
@@ -653,6 +658,33 @@ fn slept_warning(at: SessionTime) -> Event {
     })
 }
 
+/// An overrun reported on the way back from a sleep opens its epoch before
+/// the sleep's notice comes, as the capture reports them: its gap is sent
+/// then, and not again with the sleep's warning, which still comes and
+/// still counts the stretch as the sleep's.
+#[test]
+fn an_overrun_before_the_sleep_s_notice_sends_its_gap_once() {
+    let timeline = reopened_at(5_000, 1_000);
+    let (epoch, gap) = (timeline.epochs()[1], timeline.gaps().next().unwrap());
+    let mut live = Live::new(&[opened(MIC, 0)]);
+    live.recorder(
+        Some(MIC),
+        RecorderEvent::Audio(chunk(MIC, 0, vec![1; 1_000])),
+    );
+    let overrun = live.recorder(Some(MIC), RecorderEvent::Epoch(epoch));
+    assert_eq!(overrun.updates, [Event::Gap { track: MIC, gap }]);
+    live.recorder(Some(MIC), suspended());
+    let woke = live.recorder(
+        Some(MIC),
+        RecorderEvent::Audio(chunk(MIC, 1_000, vec![1; 100])),
+    );
+    assert_eq!(told(woke.updates), [slept_warning(ms(5_000))]);
+    assert_eq!(
+        live.slept()[0].unrecorded.map(|u| (u.from, u.to)),
+        Some((gap.from(), gap.to()))
+    );
+}
+
 /// The first audio after a suspend brings the warning, and the epoch and
 /// gap the capture opened for it. Nothing is said before that audio.
 #[test]
@@ -666,7 +698,9 @@ fn the_first_audio_after_a_suspend_warns_and_reports_the_gap() {
     );
     let noticed = live.recorder(Some(MIC), suspended());
     assert_eq!(noticed.updates, []);
-    live.recorder(Some(MIC), RecorderEvent::Epoch(epoch));
+    // The sleep's gap waits for the warning, so it's sent once.
+    let reopened = live.recorder(Some(MIC), RecorderEvent::Epoch(epoch));
+    assert_eq!(reopened.updates, []);
     let woke = live.recorder(
         Some(MIC),
         RecorderEvent::Audio(chunk(MIC, 1_000, vec![1; 100])),

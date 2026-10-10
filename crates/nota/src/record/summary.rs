@@ -27,6 +27,10 @@ pub(super) struct Shown {
     /// hangup), or the screen couldn't start. The recording stops all the
     /// same.
     pub(super) problem: Option<String>,
+    /// The screen as it closed, if a full disk stopped the recording: the
+    /// app shows it, stopped, until the listener has read what was saved
+    /// (`nota record` has restored the terminal, and drops it).
+    pub(super) stopped: Option<Recording>,
 }
 
 /// Shows the Recording screen on `screen` until it's closed, handing each
@@ -50,15 +54,21 @@ pub(super) fn show(
             Shown {
                 marks: 0,
                 problem: Some(format!("the screen couldn't start: {e}")),
+                stopped: None,
             },
             None,
         ),
     }
 }
 
-/// The footer's text until a route changes: the tracks' sources, joined.
+/// The footer's text until a route changes: the sources of the tracks
+/// recording, joined.
 fn footer(tracks: &[Track]) -> String {
-    let sources: Vec<_> = tracks.iter().map(|track| track.source.as_str()).collect();
+    let sources: Vec<_> = tracks
+        .iter()
+        .filter(|track| track.recording)
+        .map(|track| track.source.as_str())
+        .collect();
     sources.join(" + ")
 }
 
@@ -100,13 +110,21 @@ fn run_screen(
     let passed = passing.join().unwrap_or(0);
     let (more, problem) = ended(ran, save);
     let screen = problem.is_none().then_some(screen);
+    let stopped = screen.as_ref().and_then(|_| kept_if_stopped(recording));
     Ok((
         Shown {
             marks: passed + more,
             problem,
+            stopped,
         },
         screen,
     ))
+}
+
+/// `recording`, if a full disk stopped it, to show again once the
+/// recording has stopped.
+fn kept_if_stopped(recording: Recording) -> Option<Recording> {
+    recording.stopped_by_full_disk().map(|_| recording)
 }
 
 /// How the screen's loop ended: how many more marks and notes it gave
@@ -413,11 +431,58 @@ pub(super) mod tests {
             id: TrackId::new(id),
             role,
             source: source.to_owned(),
+            recording: true,
         };
         let mic = track(0, TrackRole::Microphone, "mic");
         let system = track(1, TrackRole::System, "system audio");
         assert_eq!(footer(&[mic.clone(), system]), "mic + system audio");
         assert_eq!(footer(&[mic]), "mic");
+    }
+
+    /// Only a screen a full disk stopped is kept, for the app to show
+    /// again after the stop; any other closes for good.
+    #[test]
+    fn only_a_screen_a_full_disk_stopped_is_kept() {
+        use nota_core::recorder::{Cause, Event as RecorderEvent, Warning, WarningState};
+
+        let at = SessionTime::from_nanos(4_368_000_000_000);
+        let screen = || {
+            let clock = Arc::new(FakeClock::new(at));
+            Recording::new("T".into(), "mic".into(), clock, Theme::no_color())
+        };
+        let raised = |cause| {
+            RecorderEvent::Warning(Warning {
+                cause,
+                track: None,
+                at,
+                state: WarningState::Raised,
+            })
+        };
+        assert!(kept_if_stopped(screen()).is_none());
+        // A low disk doesn't stop the recording.
+        let mut low = screen();
+        low.update(raised(Cause::DiskLow));
+        assert!(kept_if_stopped(low).is_none());
+        let mut full = screen();
+        full.update(raised(Cause::DiskFull));
+        let kept = kept_if_stopped(full).map(|kept| kept.stopped_by_full_disk());
+        assert_eq!(kept, Some(Some(at)));
+    }
+
+    /// A track asked for that didn't start is left out of the footer.
+    #[test]
+    fn the_footer_leaves_out_a_track_that_isn_t_recording() {
+        let track = |id, role, source: &str, recording| Track {
+            id: TrackId::new(id),
+            role,
+            source: source.to_owned(),
+            recording,
+        };
+        let tracks = [
+            track(0, TrackRole::Microphone, "mic", false),
+            track(1, TrackRole::System, "system audio", true),
+        ];
+        assert_eq!(footer(&tracks), "system audio");
     }
 
     #[test]
