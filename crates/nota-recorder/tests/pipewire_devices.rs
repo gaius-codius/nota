@@ -2,7 +2,8 @@
 //! instance `scripts/pipewire-devices.sh` starts: a followed default output
 //! switched is `Changed` and opens an epoch that starts with the new
 //! sink's audio, a pinned sink removed is `Lost` and ends its track, within
-//! 2 s each. Skips (and says so) unless the script runs it: switching
+//! 2 s each. And the device snapshot Setup lists lists the instance's
+//! sinks and sources, and its defaults, as they come and go. Skips (and says so) unless the script runs it: switching
 //! a default anywhere else would change the user's (AGENTS.md section 8).
 
 // Test code throughout: clippy allows unwraps and panics in it.
@@ -22,7 +23,8 @@ mod linux {
         Clock, Epoch, EpochError, SampleRate, SessionId, SessionTime, SystemClock, TrackId,
     };
     use nota_recorder::capture::{
-        CaptureError, PipeWireBackend, RecorderEvent, Source, prepare_tracks, record_tracks,
+        CaptureBackend as _, CaptureError, Device, Devices, PipeWireBackend, RecorderEvent, Source,
+        prepare_tracks, record_tracks,
     };
     use nota_recorder::fs::StdFs;
     use nota_recorder::segment::SegmentLength;
@@ -541,5 +543,95 @@ mod linux {
         drop(streams);
         let outcome = recorder.join().unwrap();
         assert!(outcome.is_ok(), "{outcome:?}");
+    }
+
+    /// The snapshot's sinks and sources: two sinks and a source the test
+    /// makes, with names of their own.
+    const SNAP_SINK_A: (&str, &str) = ("nota_snap_a", "NotaSnapA");
+    const SNAP_SINK_B: (&str, &str) = ("nota_snap_b", "NotaSnapB");
+    const SNAP_MIC: (&str, &str) = ("nota_snap_mic", "NotaSnapMic");
+
+    /// The device `(name, description)` names.
+    fn device((name, description): (&str, &str)) -> Device {
+        Device {
+            name: name.into(),
+            description: description.into(),
+        }
+    }
+
+    /// Takes snapshots until one satisfies `wanted`, and returns it: the
+    /// session manager names a default a moment after `pactl` asks. Fails
+    /// the test with the last one after [`PATIENCE`].
+    fn snapshot_until(
+        clock: &SystemClock,
+        what: &str,
+        wanted: impl Fn(&Devices) -> bool,
+    ) -> Devices {
+        let until = clock.now().checked_add(PATIENCE).unwrap();
+        loop {
+            let devices = PipeWireBackend.devices().unwrap();
+            if wanted(&devices) {
+                return devices;
+            }
+            assert!(clock.now() < until, "{what}: {devices:#?}");
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// The device snapshot (`PipeWireBackend::devices`, which Setup lists)
+    /// on the private instance: each null sink made is an output and the
+    /// source an input, under their descriptions, with the defaults as
+    /// named; a node removed is gone from the next snapshot, and so is
+    /// the default it was.
+    #[test]
+    fn the_snapshot_lists_what_the_instance_has() {
+        let Some(_private) = private_instance() else {
+            return;
+        };
+        let clock = SystemClock::start().unwrap();
+        let mut fixtures = Fixtures::default();
+        fixtures.sink(SNAP_SINK_A);
+        let b = fixtures.sink(SNAP_SINK_B);
+        let mic = fixtures.source(SNAP_MIC, SNAP_SINK_A.0);
+        pactl(&["set-default-sink", SNAP_SINK_B.0]);
+        pactl(&["set-default-source", SNAP_MIC.0]);
+
+        let named = snapshot_until(&clock, "the defaults as named", |d| {
+            d.default_output.as_deref() == Some(SNAP_SINK_B.0)
+                && d.default_input.as_deref() == Some(SNAP_MIC.0)
+        });
+        for sink in [SNAP_SINK_A, SNAP_SINK_B] {
+            assert!(
+                named.outputs.contains(&device(sink)),
+                "{sink:?}: {named:#?}"
+            );
+            assert!(
+                !named.inputs.contains(&device(sink)),
+                "{sink:?}: {named:#?}"
+            );
+        }
+        assert!(named.inputs.contains(&device(SNAP_MIC)), "{named:#?}");
+        assert!(!named.outputs.contains(&device(SNAP_MIC)), "{named:#?}");
+
+        // The default sink removed: gone, and no longer the default.
+        fixtures.remove(&b);
+        let gone = snapshot_until(&clock, "sink B gone", |d| {
+            !d.outputs.iter().any(|o| o.name == SNAP_SINK_B.0)
+        });
+        assert_ne!(
+            gone.default_output.as_deref(),
+            Some(SNAP_SINK_B.0),
+            "{gone:#?}"
+        );
+        assert!(gone.outputs.contains(&device(SNAP_SINK_A)), "{gone:#?}");
+        assert!(gone.inputs.contains(&device(SNAP_MIC)), "{gone:#?}");
+
+        // The default source removed: gone, and no longer the default.
+        fixtures.remove(&mic);
+        let gone = snapshot_until(&clock, "the source gone", |d| {
+            !d.inputs.iter().any(|i| i.name == SNAP_MIC.0)
+        });
+        assert_ne!(gone.default_input.as_deref(), Some(SNAP_MIC.0), "{gone:#?}");
+        assert!(gone.outputs.contains(&device(SNAP_SINK_A)), "{gone:#?}");
     }
 }
