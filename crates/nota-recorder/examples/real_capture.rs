@@ -136,7 +136,7 @@ mod linux {
     /// The bounded-loss rule, durable behind the audio delivered on a quiet
     /// disk: 2 s at 16 kHz. The sync interval (850 ms) plus a slow fsync
     /// fits well inside it; under disk load it's reported, not checked.
-    const MAX_LAG: u64 = 32_000;
+    const MAX_LAG: u64 = 32_000; // check-bound
     /// An operation slower than this is logged.
     const SLOW: Duration = Duration::from_millis(100);
     /// The quietest peak that counts as audio playing: -70 dBFS.
@@ -1480,7 +1480,7 @@ mod linux {
         }
 
         // The writer's own budget: the sync interval's worth of audio.
-        let max_journal_lag = SampleCount::started_within(SYNC_INTERVAL, RATE)
+        let max_journal_lag = SampleCount::started_within(SYNC_INTERVAL, RATE) // check-bound
             .ok_or("the sync interval overflows")?
             .get();
         let mut worst = Lag::default();
