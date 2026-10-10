@@ -150,8 +150,8 @@ fn start_with_notes<B: CaptureBackend>(
     let library = library.map_or_else(|| Library::open(&args.data), Ok)?;
     show_recovering(&mut screen);
     let watch = recover(&library, args, notes)?;
-    if stop_asked(&ui, &ui_events) {
-        return Err(STOPPED_BEFORE.into());
+    if let Some(why) = stop_asked(&ui, &ui_events) {
+        return Err(why.into());
     }
     let session = create_session(&library, &watch)?;
     // From here, a start that fails removes the session again, unless
@@ -274,13 +274,24 @@ fn show_recovering(screen: &mut Screen) {
 /// The line shown while earlier sessions are checked.
 pub(super) const RECOVERING: &str = "Checking earlier recordings…";
 
-/// Whether a signal asked for a stop since the signals were first
-/// listened for. Whatever else is waiting (the disk monitor's first report,
-/// say) is put back on `ui` for the screen, after the others: it's read
-/// only once the screen runs.
-fn stop_asked(ui: &Sender<Event>, ui_events: &Receiver<Event>) -> bool {
+/// Why the start gives up, if a stop was asked for since the signals were
+/// first listened for: the full disk, when the disk monitor's warning came
+/// with it, otherwise [`STOPPED_BEFORE`]. Whatever else is waiting (the disk
+/// monitor's first report, say) is put back on `ui` for the screen, after
+/// the others: it's read only once the screen runs.
+fn stop_asked(ui: &Sender<Event>, ui_events: &Receiver<Event>) -> Option<&'static str> {
     // Taken first, so what is put back isn't read again.
     let waiting: Vec<Event> = ui_events.try_iter().collect();
+    let disk_full = waiting.iter().any(|event| {
+        matches!(
+            event,
+            Event::Recorder(recorder::Event::Warning(Warning {
+                cause: Cause::DiskFull,
+                state: WarningState::Raised,
+                ..
+            }))
+        )
+    });
     let mut asked = false;
     for event in waiting {
         if matches!(event, Event::Recorder(recorder::Event::Stopping)) {
@@ -290,7 +301,11 @@ fn stop_asked(ui: &Sender<Event>, ui_events: &Receiver<Event>) -> bool {
             let _ = ui.send(event);
         }
     }
-    asked
+    asked.then_some(if disk_full {
+        STOPPED_BY_FULL_DISK
+    } else {
+        STOPPED_BEFORE
+    })
 }
 
 /// Opens the streams once everything else has started, unless a stop was
@@ -305,10 +320,10 @@ fn open_streams<B: CaptureBackend>(
     notes: &mut Vec<String>,
 ) -> Result<Opened<B::Stream>, BoxError> {
     // A stop asked for while all that started: still no audio.
-    if stop_asked(ui, ui_events) {
+    if let Some(why) = stop_asked(ui, ui_events) {
         drop(starter);
         ready.abandon();
-        return Err(STOPPED_BEFORE.into());
+        return Err(why.into());
     }
     let (captures, listening) = start_streams(starter, backend, sources, notes);
     if captures.is_empty() {
@@ -374,6 +389,10 @@ type Opened<S> = (Vec<Capture<S>>, String, Ready);
 
 /// What a start that fails before any stream opens says.
 const STOPPED_BEFORE: &str = "stopped before recording started; no session was made";
+
+/// The same stop, when the disk monitor found the disk full first.
+const STOPPED_BY_FULL_DISK: &str =
+    "stopped before recording started because the disk is full; no session was made";
 
 /// The session a start made, removed again ([`discard_empty`]) when this
 /// is dropped, unless it's kept: a start that fails before any audio
@@ -917,7 +936,7 @@ mod tests {
         }));
         ui.send(disk.clone()).unwrap();
         ui.send(low_disk()).unwrap();
-        assert!(!stop_asked(&ui, &waiting));
+        assert_eq!(stop_asked(&ui, &waiting), None);
         assert_eq!(waiting.try_iter().collect::<Vec<_>>(), [disk, low_disk()]);
     }
 
@@ -928,10 +947,30 @@ mod tests {
         let (ui, waiting) = mpsc::channel::<Event>();
         ui.send(low_disk()).unwrap();
         ui.send(Event::Recorder(recorder::Event::Stopping)).unwrap();
-        assert!(stop_asked(&ui, &waiting));
+        assert_eq!(stop_asked(&ui, &waiting), Some(STOPPED_BEFORE));
         assert_eq!(waiting.try_iter().collect::<Vec<_>>(), [low_disk()]);
         // Asked once: nothing is left to ask again.
-        assert!(!stop_asked(&ui, &waiting));
+        assert_eq!(stop_asked(&ui, &waiting), None);
+    }
+
+    /// The disk monitor's full-disk warning, then its stop, as `disk_reports`
+    /// sends them: the start says the disk is full, and the warning stays for
+    /// the screen.
+    #[test]
+    fn a_stop_that_came_with_a_full_disk_says_the_disk_is_full() {
+        let (ui, waiting) = mpsc::channel::<Event>();
+        let full = Event::Recorder(recorder::Event::Warning(Warning {
+            cause: Cause::DiskFull,
+            track: None,
+            at: nota_core::SessionTime::ZERO,
+            state: WarningState::Raised,
+        }));
+        ui.send(full.clone()).unwrap();
+        ui.send(Event::Recorder(recorder::Event::Stopping)).unwrap();
+        let why = stop_asked(&ui, &waiting).unwrap();
+        assert_eq!(why, STOPPED_BY_FULL_DISK);
+        assert!(why.contains("disk is full"));
+        assert_eq!(waiting.try_iter().collect::<Vec<_>>(), [full]);
     }
 
     /// The setup a start command carries decides what each track records.

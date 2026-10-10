@@ -32,7 +32,7 @@
 //! | [`Event::Durable`] | the recorder | A track's audio is on disk, fsynced, up to a moment |
 //! | [`Event::Epoch`] | the recorder | A track's stream was reopened, or audio was lost: a new epoch |
 //! | [`Event::Gap`] | the recorder | With an epoch after the first: the time with no audio before it |
-//! | [`Event::Stopping`] | the recorder | The recording is stopping without a [`Command::Stop`]: on a signal, or once every stream has ended. The screens close |
+//! | [`Event::Stopping`] | the recorder | The recording is stopping without a [`Command::Stop`]: on a signal, once every stream has ended, or when the disk is full (after its [`Cause::DiskFull`] warning). The screens close |
 //! | [`Event::Stopped`] | the recorder | Last: the session is finished, with its [`Outcome`] |
 //!
 //! Every kind of event M2's plan names is here, including those nothing
