@@ -35,13 +35,11 @@
 //! | [`Event::Stopping`] | the recorder | The recording is stopping without a [`Command::Stop`]: on a signal, once every stream has ended, or when the disk is full (after its [`Cause::DiskFull`] warning). The screens close |
 //! | [`Event::Stopped`] | the recorder | Last: the session is finished, with its [`Outcome`] |
 //!
-//! Every kind of event M2's plan names is here, including those nothing
-//! sends yet: warnings (drift among them), device and disk events, durable
-//! progress, epochs and gaps, engine status and transcribing. The work that
-//! produces each fills in the sending side, and the screens' handling,
-//! without adding a variant. [`Event::Stopped`] isn't sent yet either: in
-//! `nota record` the screen has closed before the session is finished, so
-//! the [`Outcome`] is returned and printed as the summary instead.
+//! Every kind of event M2's plan names is here. Warnings, device and disk
+//! events, the engine's state, transcribing, epochs and gaps are sent;
+//! durable progress and [`Event::Stopped`] aren't. In `nota record` the
+//! screen has closed before the session is finished, so the [`Outcome`]
+//! is returned and printed as the summary instead of being sent.
 
 use std::path::PathBuf;
 use std::time::Duration;

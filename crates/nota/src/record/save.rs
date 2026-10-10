@@ -1,5 +1,5 @@
-//! The saver thread: stores the live text, and the marks and notes, as
-//! they come.
+//! The saver thread: stores the live text, the marks and notes, and the
+//! timeline's events, as they come.
 //!
 //! Whatever hands it something only puts it on a channel, so recording,
 //! the screen and the engine never wait on the library database. The
@@ -7,13 +7,17 @@
 //! given. When a write fails, the item waits with the ones after it and is
 //! tried again (every [`RETRY_EVERY`], and as more come), the screen is
 //! warned ([`Cause::LibraryUnavailable`]), and the warning is cleared once
-//! a write goes through. Each try takes everything waiting, so a store
-//! that fails slowly costs one try, not one per item. What's still unsaved
+//! a write goes through. The warning is kept on the session's timeline
+//! like every other change: it waits in the same line, so once the
+//! database takes writes again it's stored, raised and then cleared. Each
+//! try takes everything waiting, so a store that fails slowly costs one
+//! try, not one per item. What's still unsaved
 //! when the recording stops is tried once more, then counted as lost: the
 //! audio has it, and the final pass can rebuild the text from it.
 //!
-//! The screen doesn't show warnings yet (M2's warnings work, GAI-320,
-//! does); the summary says what wasn't saved.
+//! The Recording screen shows the warning (`⚠ library offline`); the
+//! summary says what wasn't saved. [`to_screen`] is how whatever else
+//! sends the screen a change also hands it to the saver for the timeline.
 
 use std::collections::VecDeque;
 use std::io;
@@ -23,8 +27,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use nota_core::recorder::{Cause, Event as RecorderEvent, Warning, WarningState};
-use nota_core::{Clock, Utterance, Word};
-use nota_store::{Annotation, StoreError};
+use nota_core::{Clock, SessionTime, Utterance, Word};
+use nota_store::{Annotation, StoreError, TimelineEvent};
 use nota_tui::Event;
 
 /// How often unsaved items are tried again while nothing new comes.
@@ -42,12 +46,8 @@ pub(super) enum ToSave {
     Heard(Utterance, Vec<Word>),
     /// A mark or a note.
     Annotation(Annotation),
-}
-
-impl ToSave {
-    const fn is_text(&self) -> bool {
-        matches!(self, Self::Heard(..))
-    }
+    /// A change to the recording, for the session's timeline.
+    Event(TimelineEvent),
 }
 
 /// What the saver stored, and what it couldn't.
@@ -61,8 +61,49 @@ pub(super) struct Saved {
     pub(super) lost_text: usize,
     /// Marks and notes never stored.
     pub(super) lost_annotations: usize,
+    /// Timeline events stored.
+    pub(super) events: usize,
+    /// Timeline events never stored.
+    pub(super) lost_events: usize,
     /// The last failure, if a write failed.
     pub(super) error: Option<String>,
+}
+
+impl Saved {
+    /// Counts `item` as stored.
+    fn stored(&mut self, item: &ToSave) {
+        match item {
+            ToSave::Heard(..) => self.text += 1,
+            ToSave::Annotation(_) => self.annotations += 1,
+            ToSave::Event(_) => self.events += 1,
+        }
+    }
+
+    /// Counts `item` as never stored.
+    fn lost(&mut self, item: &ToSave) {
+        match item {
+            ToSave::Heard(..) => self.lost_text += 1,
+            ToSave::Annotation(_) => self.lost_annotations += 1,
+            ToSave::Event(_) => self.lost_events += 1,
+        }
+    }
+}
+
+/// Sends `event` to the screen, and, if it's a change the timeline keeps,
+/// to the saver (`save`) first, so it's queued for storing whatever the
+/// screen does with it. `now` stands in for the time of an event that
+/// carries none. Either channel may be closed: the screen may have gone,
+/// and a saver that has stopped has said why in its report.
+pub(super) fn to_screen(
+    ui: &Sender<Event>,
+    save: &Sender<ToSave>,
+    event: RecorderEvent,
+    now: SessionTime,
+) {
+    if let Some(change) = TimelineEvent::of(&event, now) {
+        let _ = save.send(ToSave::Event(change));
+    }
+    let _ = ui.send(Event::Recorder(event));
 }
 
 /// The saver thread, and the channel to it.
@@ -157,7 +198,7 @@ impl<W: FnMut(&ToSave) -> Result<(), StoreError>> Saving<W> {
         // One last try, then what's left is lost.
         self.write_pending();
         for item in self.pending.drain(..) {
-            lose(&mut self.saved, &item);
+            self.saved.lost(&item);
         }
     }
 
@@ -165,7 +206,7 @@ impl<W: FnMut(&ToSave) -> Result<(), StoreError>> Saving<W> {
         if self.pending.len() >= MAX_PENDING
             && let Some(oldest) = self.pending.pop_front()
         {
-            lose(&mut self.saved, &oldest);
+            self.saved.lost(&oldest);
         }
         self.pending.push_back(item);
     }
@@ -175,11 +216,7 @@ impl<W: FnMut(&ToSave) -> Result<(), StoreError>> Saving<W> {
         while let Some(item) = self.pending.front() {
             match (self.write)(item) {
                 Ok(()) => {
-                    if item.is_text() {
-                        self.saved.text += 1;
-                    } else {
-                        self.saved.annotations += 1;
-                    }
+                    self.saved.stored(item);
                     self.pending.pop_front();
                     if self.warned {
                         self.warn(WarningState::Cleared);
@@ -196,25 +233,25 @@ impl<W: FnMut(&ToSave) -> Result<(), StoreError>> Saving<W> {
         }
     }
 
+    /// Warns the screen, and queues the change for the timeline behind
+    /// what's waiting, so it's stored once the database takes writes
+    /// again. It's queued past [`MAX_PENDING`] rather than through the
+    /// bound, so a clear can't push out text: there's at most one more
+    /// for each time a write succeeded after a failure.
     fn warn(&mut self, state: WarningState) {
         self.warned = state == WarningState::Raised;
+        let at = self.clock.now();
+        let event = RecorderEvent::Warning(Warning {
+            cause: Cause::LibraryUnavailable,
+            track: None,
+            at,
+            state,
+        });
+        if let Some(change) = TimelineEvent::of(&event, at) {
+            self.pending.push_back(ToSave::Event(change));
+        }
         // The screen may have closed; the summary still says.
-        let _ = self
-            .ui
-            .send(Event::Recorder(RecorderEvent::Warning(Warning {
-                cause: Cause::LibraryUnavailable,
-                track: None,
-                at: self.clock.now(),
-                state,
-            })));
-    }
-}
-
-fn lose(saved: &mut Saved, item: &ToSave) {
-    if item.is_text() {
-        saved.lost_text += 1;
-    } else {
-        saved.lost_annotations += 1;
+        let _ = self.ui.send(Event::Recorder(event));
     }
 }
 

@@ -4,7 +4,7 @@ use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc;
+use std::sync::mpsc::{self, Sender};
 #[cfg(target_os = "linux")]
 use std::thread;
 
@@ -84,42 +84,40 @@ fn slept(resumed: u64, unrecorded: Option<Unrecorded>) -> Slept {
 fn the_lock_is_held_until_it_is_dropped() {
     let logind = FakeLogind::new(false);
     let clock = FakeClock::new(SessionTime::ZERO);
-    let (ui, screen) = mpsc::channel();
     let mut notes = Vec::new();
     assert_eq!(logind.held(), 0);
     let sleep = hold(&logind);
     // The lock is taken now, before anything else is said of it.
     assert_eq!((logind.given(), logind.held()), (1, 1));
-    sleep.report(&clock, &ui, &mut notes);
+    let warning = sleep.report(&clock, &mut notes);
     drop(sleep);
     assert_eq!((logind.given(), logind.held()), (1, 0));
     // A lock given says nothing to the screen or the summary.
-    assert_eq!(screen.try_iter().count(), 0);
+    assert_eq!(warning, None);
     assert_eq!(notes, Vec::<String>::new());
 }
 
-/// A refusal is a warning and a note, said when the recording asks for
-/// them and not before; nothing is held, and nothing stops.
+/// A refusal is a warning, handed back for the caller to send, and a note,
+/// said when the recording asks for them and not before; nothing is held,
+/// and nothing stops.
 #[test]
 fn a_refusal_warns_and_holds_nothing() {
     let logind = FakeLogind::new(true);
     let clock = FakeClock::new(ms(1_500));
-    let (ui, screen) = mpsc::channel();
     let mut notes = Vec::new();
     let sleep = hold(&logind);
     assert_eq!(logind.held(), 0);
     // Nothing is said until the recording has started.
-    assert_eq!(screen.try_iter().count(), 0);
     assert_eq!(notes, Vec::<String>::new());
-    sleep.report(&clock, &ui, &mut notes);
+    let warning = sleep.report(&clock, &mut notes);
     assert_eq!(
-        screen.try_iter().collect::<Vec<_>>(),
-        [Event::Recorder(recorder::Event::Warning(Warning {
+        warning,
+        Some(recorder::Event::Warning(Warning {
             cause: Cause::SleepNotHeld,
             track: None,
             at: ms(1_500),
             state: WarningState::Raised,
-        }))]
+        }))
     );
     assert_eq!(
         notes,
@@ -128,18 +126,6 @@ fn a_refusal_warns_and_holds_nothing() {
           the recording has a gap there"
         ]
     );
-}
-
-/// A screen that has closed doesn't stop the recording from starting.
-#[test]
-fn a_refusal_with_the_screen_closed_still_notes() {
-    let logind = FakeLogind::new(true);
-    let clock = FakeClock::new(SessionTime::ZERO);
-    let (ui, screen) = mpsc::channel();
-    drop(screen);
-    let mut notes = Vec::new();
-    hold(&logind).report(&clock, &ui, &mut notes);
-    assert_eq!(notes.len(), 1);
 }
 
 /// D-Bus's error name is kept with its message, whichever is missing.

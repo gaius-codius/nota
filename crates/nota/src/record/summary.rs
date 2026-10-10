@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
-use nota_core::recorder::Command;
 pub(crate) use nota_core::recorder::Outcome;
+use nota_core::recorder::{Command, Track};
 use nota_core::{Clock, TrackId};
 use nota_recorder::segment::PublishReport;
 use nota_store::Annotation;
@@ -38,13 +38,13 @@ pub(super) struct Shown {
 pub(super) fn show(
     screen: Screen,
     title: &str,
-    listening: &str,
+    tracks: Vec<Track>,
     clock: &Arc<dyn Clock>,
     ui: &Sender<Event>,
     ui_events: &Receiver<Event>,
     save: &Sender<ToSave>,
 ) -> (Shown, Option<Screen>) {
-    match run_screen(screen, title, listening, clock, ui, ui_events, save) {
+    match run_screen(screen, title, tracks, clock, ui, ui_events, save) {
         Ok(shown) => shown,
         Err(e) => (
             Shown {
@@ -56,11 +56,17 @@ pub(super) fn show(
     }
 }
 
+/// The footer's text until a route changes: the tracks' sources, joined.
+fn footer(tracks: &[Track]) -> String {
+    let sources: Vec<_> = tracks.iter().map(|track| track.source.as_str()).collect();
+    sources.join(" + ")
+}
+
 /// [`show`], failing if a thread it needs can't start.
 fn run_screen(
     mut screen: Screen,
     title: &str,
-    listening: &str,
+    tracks: Vec<Track>,
     clock: &Arc<dyn Clock>,
     ui: &Sender<Event>,
     ui_events: &Receiver<Event>,
@@ -68,10 +74,11 @@ fn run_screen(
 ) -> io::Result<(Shown, Option<Screen>)> {
     let mut recording = Recording::new(
         title.to_owned(),
-        listening.to_owned(),
+        footer(&tracks),
         Arc::clone(clock),
         Theme::load(),
-    );
+    )
+    .with_tracks(tracks);
     let (commands, given) = mpsc::channel::<Command>();
     let passing = {
         let save = save.clone();
@@ -160,6 +167,12 @@ pub(super) fn note_saved(outcome: &mut Outcome, saved: &Saved, made: usize) {
         outcome.notes.push(format!(
             "{} of {made} marks and notes weren't saved to the library{why}",
             saved.lost_annotations
+        ));
+    }
+    if saved.lost_events > 0 {
+        outcome.notes.push(format!(
+            "{} timeline events weren't saved to the library{why}",
+            saved.lost_events
         ));
     }
 }
@@ -316,7 +329,7 @@ pub(super) fn track_name(track: Option<TrackId>) -> &'static str {
 
 #[cfg(test)]
 pub(super) mod tests {
-    use nota_core::recorder::{Input, Mark, Note, Setup};
+    use nota_core::recorder::{Input, Mark, Note, Setup, TrackRole};
     use nota_core::{FakeClock, SampleCount, SampleRate, SessionId, SessionTime};
     use nota_recorder::fs::fake::FakeFs;
     use nota_recorder::fs::{Fs as _, FsFile as _};
@@ -392,6 +405,21 @@ pub(super) mod tests {
         assert!(saved.try_iter().next().is_none());
     }
 
+    /// The footer names the sources of the tracks that started, in order,
+    /// as it did before the screen was given tracks.
+    #[test]
+    fn the_footer_names_the_sources_recording() {
+        let track = |id, role, source: &str| Track {
+            id: TrackId::new(id),
+            role,
+            source: source.to_owned(),
+        };
+        let mic = track(0, TrackRole::Microphone, "mic");
+        let system = track(1, TrackRole::System, "system audio");
+        assert_eq!(footer(&[mic.clone(), system]), "mic + system audio");
+        assert_eq!(footer(&[mic]), "mic");
+    }
+
     #[test]
     fn the_summary_says_what_wasn_t_saved() {
         let mut outcome = Outcome::new(SessionId::new(1), PathBuf::new());
@@ -402,6 +430,8 @@ pub(super) mod tests {
             annotations: 1,
             lost_text: 3,
             lost_annotations: 1,
+            events: 6,
+            lost_events: 2,
             error: Some("disk I/O error".to_owned()),
         };
         note_saved(&mut outcome, &saved, 2);
@@ -411,6 +441,8 @@ pub(super) mod tests {
                 "3 lines of live text weren't saved to the library \
                  (last error: disk I/O error); the audio has them",
                 "1 of 2 marks and notes weren't saved to the library \
+                 (last error: disk I/O error)",
+                "2 timeline events weren't saved to the library \
                  (last error: disk I/O error)"
             ]
         );

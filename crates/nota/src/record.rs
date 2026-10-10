@@ -309,7 +309,7 @@ fn record_with<B: CaptureBackend>(
     let (shown, screen) = show(
         screening.screen,
         &setup.title,
-        &screening.listening,
+        screening.tracks,
         clock,
         &screening.ui,
         &screening.ui_events,

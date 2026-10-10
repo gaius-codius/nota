@@ -26,7 +26,6 @@
 
 use std::error::Error;
 use std::fmt;
-use std::sync::mpsc::Sender;
 #[cfg(target_os = "linux")]
 use std::sync::mpsc::{self, RecvTimeoutError};
 #[cfg(target_os = "linux")]
@@ -35,7 +34,6 @@ use std::time::Duration;
 
 use nota_core::recorder::{self, Cause, Warning, WarningState};
 use nota_core::{Clock, SessionTime};
-use nota_tui::Event;
 
 /// Where a sleep lock comes from: logind, or a stand-in in tests.
 pub(crate) trait Logind: Send + Sync {
@@ -132,25 +130,27 @@ pub(crate) fn hold(logind: &dyn Logind) -> Sleep {
 
 impl Sleep {
     /// If logind refused: [`Cause::SleepNotHeld`] for the screen, raised at
-    /// `clock`'s now, and a note for the summary (`notes`). Said only once
-    /// the streams have started, so a start that fails doesn't leave a
-    /// warning about a recording that never was, and the screen's startup
-    /// checks (which drain the channel) can't swallow it.
-    pub(crate) fn report(&self, clock: &dyn Clock, ui: &Sender<Event>, notes: &mut Vec<String>) {
-        let Some(refused) = &self.refused else {
-            return;
-        };
+    /// `clock`'s now, and a note for the summary (`notes`). The caller
+    /// sends the warning, so it reaches the timeline as well as the
+    /// screen. Said only once the streams have started, so a start that
+    /// fails doesn't leave a warning about a recording that never was, and
+    /// the screen's startup checks (which drain the channel) can't swallow
+    /// it.
+    pub(crate) fn report(
+        &self,
+        clock: &dyn Clock,
+        notes: &mut Vec<String>,
+    ) -> Option<recorder::Event> {
+        let refused = self.refused.as_ref()?;
         notes.push(format!(
             "{refused}; if the machine sleeps, the recording has a gap there"
         ));
-        let warning = Warning {
+        Some(recorder::Event::Warning(Warning {
             cause: Cause::SleepNotHeld,
             track: None,
             at: clock.now(),
             state: WarningState::Raised,
-        };
-        // The screen may have closed already.
-        let _ = ui.send(Event::Recorder(recorder::Event::Warning(warning)));
+        }))
     }
 }
 

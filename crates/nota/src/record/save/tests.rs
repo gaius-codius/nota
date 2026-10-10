@@ -1,7 +1,8 @@
 use std::sync::Mutex;
 
-use nota_core::recorder::Mark;
+use nota_core::recorder::{DeviceChange, Mark};
 use nota_core::{FakeClock, SessionTime, TrackId};
+use nota_store::Happened;
 
 use super::*;
 
@@ -16,6 +17,29 @@ fn text(at: u64) -> ToSave {
 
 fn mark(at: u64) -> ToSave {
     ToSave::Annotation(Annotation::Mark(Mark { at: ms(at) }))
+}
+
+/// A device lost on track 1, at `at` ms, as the timeline keeps it.
+fn event(at: u64) -> ToSave {
+    ToSave::Event(TimelineEvent {
+        at: ms(at),
+        track: Some(TrackId::new(1)),
+        happened: Happened::Device(DeviceChange::Lost),
+    })
+}
+
+/// The timeline entry the saver makes of its own warning, at the clock's
+/// 7 ms.
+fn offline(state: WarningState) -> ToSave {
+    let cause = Cause::LibraryUnavailable;
+    ToSave::Event(TimelineEvent {
+        at: ms(7),
+        track: None,
+        happened: match state {
+            WarningState::Raised => Happened::Raised(cause),
+            WarningState::Cleared => Happened::Cleared(cause),
+        },
+    })
 }
 
 fn clock() -> Arc<dyn Clock> {
@@ -56,19 +80,27 @@ impl Fake {
     }
 }
 
-/// The warnings sent to the screen, as (raised?, at).
+/// The state of a warning sent to the screen, which must be the saver's.
+fn state_of(event: Event) -> WarningState {
+    match event {
+        Event::Recorder(RecorderEvent::Warning(w)) => {
+            assert_eq!(w.cause, Cause::LibraryUnavailable);
+            assert_eq!(w.track, None);
+            assert_eq!(w.at, ms(7));
+            w.state
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The warnings sent to the screen so far.
 fn warnings(ui: &Receiver<Event>) -> Vec<WarningState> {
-    ui.try_iter()
-        .map(|e| match e {
-            Event::Recorder(RecorderEvent::Warning(w)) => {
-                assert_eq!(w.cause, Cause::LibraryUnavailable);
-                assert_eq!(w.track, None);
-                assert_eq!(w.at, ms(7));
-                w.state
-            }
-            other => panic!("{other:?}"),
-        })
-        .collect()
+    ui.try_iter().map(state_of).collect()
+}
+
+/// The next warning sent to the screen, waiting up to 5 s for it.
+fn next_warning(ui: &Receiver<Event>) -> WarningState {
+    state_of(ui.recv_timeout(Duration::from_secs(5)).unwrap())
 }
 
 /// Waits until `done`, for up to 5 s.
@@ -83,12 +115,14 @@ fn eventually(mut done: impl FnMut() -> bool) {
     assert!(done(), "timed out");
 }
 
+/// Text, marks and timeline events are each stored, counted by kind, in
+/// the order given.
 #[test]
 fn everything_given_is_stored_in_order() {
     let fake = Fake::default();
     let (ui, screen) = mpsc::channel();
     let saver = Saver::spawn(fake.write(), ui, clock()).unwrap();
-    let given = [text(1), mark(2), text(3)];
+    let given = [text(1), mark(2), event(3), text(4)];
     let sender = saver.sender();
     for item in &given {
         sender.send(item.clone()).unwrap();
@@ -101,6 +135,7 @@ fn everything_given_is_stored_in_order() {
         Saved {
             text: 2,
             annotations: 1,
+            events: 1,
             ..Saved::default()
         }
     );
@@ -109,6 +144,9 @@ fn everything_given_is_stored_in_order() {
 
 /// A store that fails warns the screen once, keeps what it couldn't
 /// store, and stores it, in order, once it can; the warning is cleared.
+/// The warning is stored on the timeline too, behind what was waiting when
+/// it was raised, and its clear behind what was waiting when the store
+/// came back.
 #[test]
 fn what_fails_is_kept_tried_again_and_stored_once_it_can_be() {
     let fake = Fake::default();
@@ -119,19 +157,37 @@ fn what_fails_is_kept_tried_again_and_stored_once_it_can_be() {
     eventually(|| fake.stored().len() == 1);
     fake.fail(true);
     sender.send(mark(2)).unwrap();
+    // Text 3 is given once the raise is queued, so the order stored is
+    // the same on every run.
+    assert_eq!(next_warning(&screen), WarningState::Raised);
     sender.send(text(3)).unwrap();
     // Tried, refused, and tried again with nothing new given.
     eventually(|| fake.tries() >= 4);
     assert_eq!(fake.stored(), [text(1)]);
-    assert_eq!(warnings(&screen), [WarningState::Raised]);
     fake.fail(false);
-    eventually(|| fake.stored().len() == 3);
-    assert_eq!(fake.stored(), [text(1), mark(2), text(3)]);
+    eventually(|| fake.stored().len() == 5);
+    assert_eq!(
+        fake.stored(),
+        [
+            text(1),
+            mark(2),
+            offline(WarningState::Raised),
+            text(3),
+            offline(WarningState::Cleared)
+        ]
+    );
     assert_eq!(warnings(&screen), [WarningState::Cleared]);
     drop(sender);
     let report = saver.finish();
-    assert_eq!((report.text, report.annotations), (2, 1));
-    assert_eq!((report.lost_text, report.lost_annotations), (0, 0));
+    assert_eq!((report.text, report.annotations, report.events), (2, 1, 2));
+    assert_eq!(
+        (
+            report.lost_text,
+            report.lost_annotations,
+            report.lost_events
+        ),
+        (0, 0, 0)
+    );
     assert_eq!(
         report.error.as_deref(),
         Some("corrupt row: the disk is gone")
@@ -151,14 +207,17 @@ fn a_store_down_for_good_loses_what_it_was_given_and_says_so() {
         sender.send(text(at)).unwrap();
     }
     sender.send(mark(9)).unwrap();
+    sender.send(event(8)).unwrap();
     drop(sender);
     let report = saver.finish();
     assert!(fake.stored().is_empty());
+    // The events lost are the one given and the raise the saver queued.
     assert_eq!(
         report,
         Saved {
             lost_text: 3,
             lost_annotations: 1,
+            lost_events: 2,
             error: Some("corrupt row: the disk is gone".to_owned()),
             ..Saved::default()
         }
