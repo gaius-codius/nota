@@ -37,13 +37,14 @@
 //!
 //! Salvage of earlier sessions runs first, with a line on screen; a
 //! signal meanwhile ends nota before any session is made. Then the
-//! session, the publisher and the recorder start, and only then the
-//! streams, one after another: each track joins the recorder as its
-//! stream starts, so its audio is journaled while the next one opens,
-//! and its first epoch opens when its first audio was captured. The
-//! writer fsyncs inline while one track records and on a thread per
-//! track once a second joins (see [`nota_recorder::capture`]). If no
-//! stream starts, the session is removed again.
+//! session, the publisher and the recorder start, then the sleep lock is
+//! taken (see "Sleep" below), and only then the streams, one after
+//! another: each track joins the recorder as its stream starts, so its
+//! audio is journaled while the next one opens, and its first epoch opens
+//! when its first audio was captured. The writer fsyncs inline while one
+//! track records and on a thread per track once a second joins (see
+//! [`nota_recorder::capture`]). If no stream starts, the session is
+//! removed again.
 //!
 //! # Stopping
 //!
@@ -52,17 +53,16 @@
 //! or when the terminal fails (it's gone after a hangup). Whichever it is,
 //! the same steps follow: the terminal is restored (or, when the app lent
 //! it, kept, with Home showing that the recording is finishing), the
-//! streams stop, the
-//! recorder records what they had sent and returns, the writer finishes
-//! (a last fsync of every journal), the publisher publishes the last
-//! journals while the engine is shut down (its answer to the last flush
-//! is still saved), and the saver stores what it was given before the
-//! session is marked stopped and the jobs that follow a stop (the final
-//! pass) are queued; after a full disk they wait for space. The app runs
-//! them (see `jobs`). Further signals are ignored
-//! meanwhile: the default action would kill the process before the last
-//! segments are published. (The app listens for them too, for its whole
-//! life, and closes once the recording has stopped.) Anything left
+//! streams stop, the recorder records what they had sent and returns, the
+//! sleep lock is let go, the writer finishes (a last fsync of every
+//! journal), the publisher publishes the last journals while the engine is
+//! shut down (its answer to the last flush is still saved), and the saver
+//! stores what it was given before the session is marked stopped and the
+//! jobs that follow a stop (the final pass) are queued; after a full disk
+//! they wait for space. The app runs them (see `jobs`). Further signals
+//! are ignored meanwhile: the default action would kill the process before
+//! the last segments are published. (The app listens for them too, for its
+//! whole life, and closes once the recording has stopped.) Anything left
 //! unpublished (a disk error, say) is salvaged at the next start.
 //!
 //! # A full disk
@@ -76,6 +76,17 @@
 //! recording stopped early. A low disk never stops a start: nota records
 //! what fits, sending the low-disk warning from the start (the screen
 //! doesn't show warnings yet; the summary says the disk ran low).
+//!
+//! # Sleep
+//!
+//! The machine is kept awake while it records, by a logind lock held from
+//! before the first stream opens to the end of the recording. If logind
+//! refuses, the screen gets a warning once the streams have started and
+//! the summary says the machine may sleep; recording goes on. If the machine sleeps anyway,
+//! the capture opens a new epoch at the resume, and the live thread tells
+//! the screen (a warning, the epoch and its gap) and the summary says when
+//! and for how long (see `crate::inhibit` and `crate::live`). The screen
+//! doesn't show these warnings yet.
 //!
 //! # SIGXCPU
 //!
@@ -121,6 +132,9 @@ pub(crate) use summary::tests::cleanup_report;
 pub(crate) use summary::{Outcome, held_notes};
 
 use crate::final_pass::Engine;
+use crate::inhibit::Logind;
+#[cfg(target_os = "linux")]
+use crate::inhibit::SystemLogind;
 use crate::library::Library;
 use crate::terminal::Screen;
 
@@ -239,8 +253,10 @@ pub(crate) fn record_in(
         Arc::new(SystemClock::start().map_err(|_| "the system clock can't be read")?);
     #[cfg(feature = "fake-capture")]
     if args.tone {
-        let tone = crate::tone::Tone::new(Arc::clone(&clock));
-        let (mut outcome, screen) = record_with(args, setup, &tone, &clock, lent)?;
+        let happenings = crate::tone::Happenings::default();
+        let tone = crate::tone::Tone::new(Arc::clone(&clock), happenings.clone());
+        let logind = crate::tone::ToneLogind::new(happenings);
+        let (mut outcome, screen) = record_with(args, setup, &tone, &clock, &logind, lent)?;
         outcome.notes.extend(tone.report());
         return Ok((outcome, screen));
     }
@@ -253,6 +269,7 @@ pub(crate) fn record_in(
         setup,
         &nota_recorder::capture::PipeWireBackend,
         &clock,
+        &SystemLogind,
         lent,
     );
     #[cfg(not(target_os = "linux"))]
@@ -274,6 +291,7 @@ fn record_with<B: CaptureBackend>(
     setup: &Setup,
     backend: &B,
     clock: &Arc<dyn Clock>,
+    logind: &dyn Logind,
     lent: Option<Lent<'_>>,
 ) -> Result<(Outcome, Option<Screen>), BoxError> {
     let (given, library, stopping) = match lent {
@@ -284,7 +302,7 @@ fn record_with<B: CaptureBackend>(
         }) => (Some(screen), Some(library), Some(stopping)),
         None => (None, None, None),
     };
-    let (started, screening) = start::start(args, setup, backend, clock, given, library)?;
+    let (started, screening) = start::start(args, setup, backend, clock, logind, given, library)?;
 
     // The screen, until it's closed.
     let (shown, screen) = show(

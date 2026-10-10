@@ -39,6 +39,11 @@ ratatui.workspace = true
 [target.'cfg(unix)'.dependencies]
 signal-hook.workspace = true
 
+# The logind sleep inhibitor, over D-Bus (see `inhibit`). Already in the
+# tree through cpal.
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus.workspace = true
+
 [dev-dependencies]
 nota = { path = ".", features = ["fake-capture", "latency-log"] }
 nota-core = { path = "../nota-core", features = ["fake-clock"] }
