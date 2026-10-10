@@ -11,8 +11,8 @@
 //!
 //! Each row's `kind` says what happened and `detail` holds what goes with
 //! it (a reason, a device's name, where a gap ends). Both are parsed back
-//! into typed values in one place ([`decode`]), and a row that doesn't
-//! parse is [`StoreError::Corrupt`].
+//! into typed values in one place, and a row that doesn't parse is
+//! [`StoreError::Corrupt`].
 
 use nota_core::recorder::{Cause, DeviceChange, EngineState, Event, Warning, WarningState};
 use nota_core::{SessionId, SessionTime, TrackId};
