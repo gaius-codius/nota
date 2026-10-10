@@ -24,6 +24,11 @@ required-features = ["fake-engine"]
 name = "lazyfs_crash"
 test = true
 
+# So does the measurement's report of the lag under the ballast.
+[[example]]
+name = "real_capture"
+test = true
+
 [[test]]
 name = "supervisor"
 required-features = ["fake-engine"]
