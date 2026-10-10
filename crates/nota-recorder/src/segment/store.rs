@@ -179,7 +179,7 @@ mod fake {
     const ROW_LEN: usize = 8 + 4 + 4 + 8 + 8 + 32 + 1 + 32 + 4;
 
     /// Bytes in an epoch file: session, track, epoch, first sample, rate,
-    /// start, CRC-32.
+    /// start, drift, CRC-32.
     const EPOCH_LEN: usize = 8 + 4 + 4 + 8 + 4 + 8 + 4 + 4;
 
     /// Segment rows as files on a [`FakeFs`], one per row, each published

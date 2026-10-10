@@ -1911,3 +1911,148 @@ fn a_stamp_the_clock_cant_place_is_sent_unstamped() {
             if samples == [3, 4] && t == SessionTime::from_nanos(7_000_000)
     ));
 }
+
+/// A track started first opens its epoch when its stream was asked to
+/// start; with stamps, its audio starts when it was captured, and the
+/// start-up before is a gap, not a loss found at its second buffer.
+#[test]
+fn a_started_track_s_stamped_audio_starts_when_it_was_captured() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let script = vec![
+        // 50 ms of start-up: the first buffer was captured at 50 ms.
+        Step::TimedAudio(samples(0, 100), Duration::from_millis(50)),
+        Step::TimedAudio(samples(100, 100), Duration::from_millis(150)),
+    ];
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    assert_eq!(
+        epoch_starts(&run.timeline),
+        [
+            (0, SessionTime::ZERO, 0),
+            (1, SessionTime::from_nanos(50_000_000), 0)
+        ]
+    );
+    assert_eq!(
+        run.timeline.time_of(SampleIndex::new(100)),
+        Some(SessionTime::from_nanos(150_000_000))
+    );
+    let journals = all_journals(run.writer, &run.reported);
+    assert_eq!(journal_epochs(&fs, &journals), [(1, 0, 200)]);
+}
+
+/// The most a drifting device's audio may be mapped from when it was
+/// captured, in nanoseconds: GAI-315's acceptance criterion.
+const DRIFT_ERROR_LIMIT: u64 = 20_000_000; // check-bound
+
+/// When sample `sample` of a device `ppb` parts per billion off was
+/// captured, at 1 kHz.
+fn stamp_at(sample: u64, ppb: i128) -> Duration {
+    let nanos = i128::from(sample) * 1_000_000_000_000_000_000 / (1_000 * (1_000_000_000 + ppb));
+    Duration::from_nanos(u64::try_from(nanos).unwrap())
+}
+
+/// Three hours of a device 100 ppm fast, and of one 100 ppm slow, recorded
+/// through the stamped stream: every buffer maps to within 20 ms of when it
+/// was captured, where the nominal rate would end over a second out.
+#[test]
+fn three_hours_at_100_ppm_record_within_20_ms() {
+    let buffer = 5_000;
+    let total = 3 * 3_600 * 1_000;
+    for ppb in [100_000, -100_000] {
+        let fs = FakeFs::with_dirs([dir()]);
+        let script: Vec<Step> = (0..total / buffer)
+            .map(|n| Step::TimedAudio(samples(n * buffer, buffer), stamp_at(n * buffer, ppb)))
+            .collect();
+        let run = run(&fs, script, Vec::new(), |_| {});
+        run.result.unwrap();
+        // Corrections follow straight on: nothing was lost.
+        assert!(gap_spans(&run.timeline).is_empty(), "{ppb}");
+        let worst = (0..total / buffer)
+            .map(|n| {
+                let sample = n * buffer;
+                let timed = run.timeline.time_of(SampleIndex::new(sample)).unwrap();
+                let captured = u64::try_from(stamp_at(sample, ppb).as_nanos()).unwrap();
+                timed.as_nanos().abs_diff(captured)
+            })
+            .max()
+            .unwrap();
+        assert!(worst < DRIFT_ERROR_LIMIT, "{ppb}: {worst} ns");
+        let end = total - 1;
+        let nominal = end * 1_000_000;
+        let captured = u64::try_from(stamp_at(end, ppb).as_nanos()).unwrap();
+        assert!(nominal.abs_diff(captured) > 1_000_000_000, "{ppb}");
+    }
+}
+
+/// A loss exactly a window after the last loss epoch opens its own: the
+/// window is over.
+#[test]
+fn a_loss_a_whole_window_after_the_last_opens_its_own_epoch() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let mut buffers = Buffers::new();
+    buffers.on_time();
+    buffers.on_time();
+    // The first loss: an epoch at 130 ms.
+    buffers.lose(30);
+    buffers.on_time();
+    while buffers.millis < 2_080 {
+        buffers.on_time();
+    }
+    // The second, captured at 2,130 ms: exactly the window after.
+    buffers.lose(50);
+    buffers.on_time();
+    buffers.on_time();
+    let run = run(&fs, buffers.script.clone(), Vec::new(), |_| {});
+    run.result.unwrap();
+    let starts: Vec<(u32, SessionTime)> = epoch_starts(&run.timeline)
+        .into_iter()
+        .map(|(id, start, _)| (id, start))
+        .collect();
+    assert_eq!(
+        starts,
+        [
+            (0, SessionTime::ZERO),
+            (1, SessionTime::from_nanos(130_000_000)),
+            (2, SessionTime::from_nanos(2_130_000_000)),
+        ]
+    );
+}
+
+/// An epoch opened after a loss maps its audio at the drift measured, not
+/// at a correction's slewed drift, nor none.
+#[test]
+fn a_loss_epoch_keeps_the_measured_drift() {
+    let fs = FakeFs::with_dirs([dir()]);
+    // 400 ppm fast; 40 s in, while a correction is slewing, a second is
+    // lost.
+    let loss = 40_000;
+    let script: Vec<Step> = (0..600)
+        .map(|n| {
+            let first = n * 100;
+            let shift = if first >= loss {
+                secs(1)
+            } else {
+                Duration::ZERO
+            };
+            Step::TimedAudio(samples(first, 100), fast_stamp(first) + shift)
+        })
+        .collect();
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    let opened = run
+        .timeline
+        .epochs()
+        .iter()
+        .find(|e| e.first_sample() == SampleIndex::new(loss))
+        .copied()
+        .unwrap();
+    let before = run
+        .timeline
+        .epoch_of(SampleIndex::new(loss - 1))
+        .copied()
+        .unwrap();
+    // The epoch before was slewing, off the measured drift.
+    assert!((before.drift().ppb() - 400_000).abs() > 1_000, "{before:?}");
+    assert!((opened.drift().ppb() - 400_000).abs() <= 2, "{opened:?}");
+    assert_eq!(gap_spans(&run.timeline).len(), 1);
+}

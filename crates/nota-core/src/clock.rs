@@ -129,8 +129,11 @@ impl Clock for SystemClock {
             return None;
         }
         // On the clock that counts through suspend, by how far the two have
-        // parted so far.
-        let asleep = asleep_now(monotonic_now()?);
+        // parted so far. A delay between the two clocks' reads only ever
+        // makes them look closer, so the furthest apart they've been seen,
+        // which `suspended` keeps, is the truest: one slow read can't place
+        // a buffer early.
+        let asleep = self.asleep_before.checked_add(self.suspended())?;
         let elapsed = awake.checked_add(asleep)?.checked_sub(self.origin)?;
         self.base.checked_add(elapsed)
     }

@@ -9,7 +9,7 @@
 //! - it never returns samples past the first invalid frame: on a damaged
 //!   journal it returns exactly the frames before the damage.
 //! - it never returns a frame from before its epoch's first sample, which
-//!   a version 3 header gives.
+//!   a timed header gives.
 //!
 //! And the scan salvage uses to look past damage ([`frames_after`]): it
 //! never panics, finds every frame of a valid journal, and after damage
@@ -68,18 +68,34 @@ fn anchor(epoch: u32, rate: SampleRate) -> EpochAnchor {
     }
 }
 
-/// Any header: any id, track and epoch, any valid rate.
+/// Any header: any id, track and epoch, any valid rate and drift.
 fn header() -> impl Strategy<Value = JournalHeader> {
     (
         any::<u64>(),
         any::<u32>(),
         any::<u32>(),
         1..=SampleRate::MAX_HZ,
+        -Drift::MAX_PPB..=Drift::MAX_PPB,
     )
-        .prop_map(|(id, track, epoch, hz)| {
+        .prop_map(|(id, track, epoch, hz, ppb)| {
             let rate = SampleRate::new(hz).unwrap();
-            JournalHeader::new(JournalId::new(id), TrackId::new(track), anchor(epoch, rate))
+            let anchor = EpochAnchor {
+                drift: Drift::from_ppb(ppb).unwrap(),
+                ..anchor(epoch, rate)
+            };
+            JournalHeader::new(JournalId::new(id), TrackId::new(track), anchor)
         })
+}
+
+/// `bytes`, a version 4 journal, as version 3 wrote it: the same fields
+/// and frames, with no drift and the CRC at 46..50.
+fn as_version_3(bytes: &[u8]) -> Vec<u8> {
+    let mut out = bytes[..46].to_vec();
+    out[8..10].copy_from_slice(&3_u16.to_le_bytes());
+    let crc = crc32fast::hash(&out);
+    out.extend_from_slice(&crc.to_le_bytes());
+    out.extend_from_slice(&bytes[HEADER_LEN..]);
+    out
 }
 
 /// A journal under a random header: up to 12 frames of its track, the
@@ -172,6 +188,35 @@ fn check_contract(input: &[u8], read: &JournalRead) -> Result<(), TestCaseError>
 }
 
 proptest! {
+    /// A version 3 journal, whole, cut anywhere past its header or damaged
+    /// anywhere in its frames, reads the same frames as the version 4
+    /// journal it differs from only by its header: its frames start after
+    /// its own, shorter, header.
+    #[test]
+    fn a_version_3_journal_reads_as_its_version_4_twin(
+        j in journal(),
+        at in any::<prop::sample::Index>(),
+        flip in any::<bool>(),
+    ) {
+        let old = as_version_3(&j.bytes);
+        let shift = HEADER_LEN - 50;
+        let frames = j.bytes.len() - HEADER_LEN;
+        let at = at.index(frames + 1);
+        let (mut new, mut older) = (j.bytes.clone(), old);
+        if flip && at < frames {
+            new[HEADER_LEN + at] ^= 0x20;
+            older[50 + at] ^= 0x20;
+        } else {
+            new.truncate(HEADER_LEN + at);
+            older.truncate(50 + at);
+        }
+        let (read_new, read_old) = (read_journal(&new), read_journal(&older));
+        prop_assert_eq!(specs(&read_old), specs(&read_new));
+        prop_assert_eq!(read_old.valid_len() + shift, read_new.valid_len());
+        let undrifted = j.header.anchor().map(|a| EpochAnchor { drift: Drift::ZERO, ..a });
+        prop_assert_eq!(read_old.header().and_then(JournalHeader::anchor), undrifted);
+    }
+
     #[test]
     fn valid_journals_read_back_whole(j in journal()) {
         let read = read_journal(&j.bytes);

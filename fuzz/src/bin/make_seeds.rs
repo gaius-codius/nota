@@ -13,7 +13,7 @@ use nota_core::{
     Clock, Drift, EpochAnchor, EpochId, SampleIndex, SampleRate, SessionTime, SystemClock, TrackId,
 };
 use nota_recorder::fs::{Fs, FsFile, StdFile, StdFs};
-use nota_recorder::journal::format::MAX_FRAME_SAMPLES;
+use nota_recorder::journal::format::{HEADER_LEN, MAX_FRAME_SAMPLES};
 use nota_recorder::journal::{JournalHeader, JournalId, JournalWriter};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -141,9 +141,6 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Bytes in a version 4 header.
-const HEADER: usize = 54;
-
 /// Writes the seed `name` in `dir` as the journal of `version` an older
 /// nota wrote: the seed `from` with its header cut to the fields that
 /// version had (version 3 has no drift, bytes 46..50 of version 4;
@@ -160,7 +157,11 @@ fn older_copy(dir: &Path, from: &str, name: &str, version: u16) -> Result<()> {
         _ => return Err(format!("no older version {version}").into()),
     };
     let timed = StdFs.read(&dir.join(from))?;
-    let (Some(kept), Some(frames)) = (timed.get(..fields), timed.get(HEADER..)) else {
+    // A seed left by a run before version 4 would cut wrongly.
+    if timed.get(8..10) != Some(&4_u16.to_le_bytes()[..]) {
+        return Err(format!("{from} isn't a version 4 journal: delete in/ and run again").into());
+    }
+    let (Some(kept), Some(frames)) = (timed.get(..fields), timed.get(HEADER_LEN..)) else {
         return Err(format!("{from} is shorter than a header").into());
     };
     let mut bytes = kept.to_vec();

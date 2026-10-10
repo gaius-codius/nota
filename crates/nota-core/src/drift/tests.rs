@@ -15,6 +15,10 @@ use crate::ids::TrackId;
 
 const SPEECH: SampleRate = SampleRate::SPEECH;
 
+/// The most a drifting device's audio may be mapped from when it was
+/// captured: GAI-315's acceptance criterion.
+const WITHIN: Duration = Duration::from_millis(20); // check-bound
+
 fn ppm(ppm: i32) -> Drift {
     Drift::from_ppb(ppm * 1_000).unwrap()
 }
@@ -197,6 +201,24 @@ fn read_true(meter: &mut DriftMeter, timeline: &mut TrackTimeline, n: u64, ppb: 
     reading
 }
 
+/// A mapping exactly [`RETIME_AFTER`] off isn't retimed: only more is.
+#[test]
+fn a_mapping_off_by_the_retime_limit_is_left() {
+    let timeline = epoch_at(Drift::ZERO);
+    let mut meter = DriftMeter::new();
+    read(&mut meter, &timeline, 0, 0);
+    // Sample 160,000 plays at 10 s; it was captured 4 ms later.
+    assert_eq!(
+        read(&mut meter, &timeline, 160_000, 10_004_000_000),
+        Reading::Steady
+    );
+    assert!(meter.measured().is_some());
+    assert_eq!(
+        read(&mut meter, &timeline, 160_000, 10_004_000_001),
+        Reading::Retime(Drift(-399_841 - 66_666))
+    );
+}
+
 /// A mapping more than [`RETIME_AFTER`] behind the stream is retimed at a
 /// lower drift than measured, to catch up over [`SLEW`]; once that's run
 /// its course, the measured drift takes over.
@@ -249,21 +271,81 @@ fn a_mapping_ahead_slews_at_a_higher_drift() {
     );
 }
 
-/// A drift past the limit is reported once, with the drift measured.
+/// A drift past the limit, measured over a trusted window, is reported
+/// once, with the drift measured.
 #[test]
 fn a_drift_past_the_limit_is_reported_once() {
     let timeline = epoch_at(Drift::ZERO);
     let mut meter = DriftMeter::new();
     read(&mut meter, &timeline, 0, 0);
-    // 300 ppm exactly isn't past it.
-    read(&mut meter, &timeline, 160_048, 10_000_000_000);
+    // 300 ppm exactly over a minute isn't past it.
+    read(&mut meter, &timeline, 960_288, 60_000_000_000);
     assert_eq!(meter.measured(), Some(ppm(300)));
     assert_eq!(meter.past_limit(), None);
     let mut meter = DriftMeter::new();
     read(&mut meter, &timeline, 0, 0);
-    read(&mut meter, &timeline, 160_054, 10_000_000_000);
+    // 960,324 samples in a minute is 337.5 ppm.
+    read(&mut meter, &timeline, 960_324, 60_000_000_000);
     assert_eq!(meter.past_limit(), Some(Drift(337_500)));
     assert_eq!(meter.past_limit(), None);
+}
+
+/// A short window's estimate past the limit isn't reported: a quantum lost
+/// unseen early in a run moves it that far, and a minute's run settles it.
+#[test]
+fn a_short_window_past_the_limit_is_not_reported() {
+    let timeline = epoch_at(Drift::ZERO);
+    let mut meter = DriftMeter::new();
+    read(&mut meter, &timeline, 0, 0);
+    // 5 ms short over 10 s: 500 ppm slow, as one unseen loss makes it.
+    read(&mut meter, &timeline, 159_920, 10_000_000_000);
+    assert_eq!(meter.measured(), Some(ppm(-500)));
+    assert_eq!(meter.past_limit(), None);
+    // By a minute the same 5 ms is under 100 ppm.
+    read(&mut meter, &timeline, 959_920, 60_000_000_000);
+    assert_eq!(meter.measured().map(|d| d.ppb() / 1_000), Some(-83));
+    assert_eq!(meter.past_limit(), None);
+}
+
+/// After a restart, the earlier run's drift stays until the new run is as
+/// long as it, or a minute: a 10 s run's jitter doesn't replace an hour's
+/// estimate.
+#[test]
+fn a_new_run_takes_over_only_once_it_is_long_enough() {
+    let timeline = epoch_at(Drift::ZERO);
+    let mut meter = DriftMeter::new();
+    read(&mut meter, &timeline, 0, 0);
+    read(&mut meter, &timeline, 57_605_760, 3_600_000_000_000);
+    assert_eq!(meter.measured(), Some(ppm(100)));
+    meter.restart();
+    // Sample 58,000,000 plays at 3,625 s, where the new run starts.
+    let from = 3_625_000_000_000;
+    read(&mut meter, &timeline, 58_000_000, from);
+    // 10 s of a new run, 1 ms out: not yet.
+    read(&mut meter, &timeline, 58_160_000, from + 10_001_000_000);
+    assert_eq!(meter.measured(), Some(ppm(100)));
+    // A minute of it: it takes over.
+    read(&mut meter, &timeline, 58_960_000, from + 60_000_000_000);
+    assert_eq!(meter.measured(), Some(Drift::ZERO));
+}
+
+/// A drift at the limit means bad stamps, not a device: the meter doesn't
+/// correct by it, however far the mapping strays.
+#[test]
+fn no_retime_at_the_drift_limit() {
+    let timeline = epoch_at(Drift::ZERO);
+    let mut meter = DriftMeter::new();
+    read(&mut meter, &timeline, 0, 0);
+    // Twice the samples the time allows: clamped at 1000 ppm.
+    assert_eq!(
+        read(&mut meter, &timeline, 320_000, 10_000_000_000),
+        Reading::Steady
+    );
+    assert_eq!(meter.measured(), Some(Drift(Drift::MAX_PPB)));
+    assert_eq!(
+        read(&mut meter, &timeline, 640_000, 20_000_000_000),
+        Reading::Steady
+    );
 }
 
 /// One simulated recording: its worst difference between the timeline and
@@ -316,11 +398,7 @@ fn three_hours_at_100_ppm_stay_within_20_ms() {
     let three_hours = Duration::from_hours(3);
     for drift in [100_000, -100_000] {
         let run = simulate(drift, three_hours, 320, |_| 0);
-        assert!(
-            run.worst < Duration::from_millis(20),
-            "{drift}: {:?}",
-            run.worst
-        );
+        assert!(run.worst < WITHIN, "{drift}: {:?}", run.worst);
         // One epoch to slew, one to land.
         assert_eq!(run.epochs, 3, "{drift}");
     }
@@ -353,11 +431,7 @@ fn jittered_timestamps_stay_within_20_ms() {
     let three_hours = Duration::from_hours(3);
     for drift in [100_000, -100_000, 0] {
         let run = simulate(drift, three_hours, 320, jitter(1_000_000));
-        assert!(
-            run.worst < Duration::from_millis(20),
-            "{drift}: {:?}",
-            run.worst
-        );
+        assert!(run.worst < WITHIN, "{drift}: {:?}", run.worst);
         assert!(run.epochs < 20, "{drift}: {} epochs", run.epochs);
     }
 }
@@ -401,10 +475,12 @@ proptest! {
         drift in any_drift(),
     ) {
         let count = SampleCount::new(n);
+        // Only counts whose next sample still has a session time.
+        let next = drift.duration_of(SampleCount::new(n + 1), rate);
+        prop_assume!(next.is_some());
         let d = drift.duration_of(count, rate).unwrap();
         prop_assert_eq!(drift.count_within(d, rate), Some(count));
-        let next = drift.duration_of(SampleCount::new(n + 1), rate).unwrap();
-        prop_assert!(next > d);
+        prop_assert!(next.unwrap() > d);
     }
 
     /// A recording at any steady drift within 800 ppm, with up to a
@@ -415,6 +491,6 @@ proptest! {
         max_jitter in prop_oneof![Just(0i64), 0..=1_000_000i64],
     ) {
         let run = simulate(drift, Duration::from_secs(3_600), 1_600, jitter(max_jitter));
-        prop_assert!(run.worst < Duration::from_millis(20), "{:?}", run.worst);
+        prop_assert!(run.worst < WITHIN, "{:?}", run.worst);
     }
 }

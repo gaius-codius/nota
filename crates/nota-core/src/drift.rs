@@ -140,14 +140,21 @@ pub const RETIME_AFTER: Duration = Duration::from_millis(4);
 /// more than about 900 ppm off can build up enough to look like a loss.
 pub const MIN_WINDOW: Duration = Duration::from_secs(10);
 
+/// How long a run must be before its measured drift is trusted over a
+/// longer earlier run's, or is judged against [`DRIFT_LIMIT`]: 60 s. A
+/// quantum lost unseen, or a stamp a few milliseconds off, then moves the
+/// estimate by under about 100 ppm.
+pub const TRUSTED_WINDOW: Duration = Duration::from_secs(60);
+
 /// How long a correcting epoch takes to close the difference it was opened
 /// for: 60 s. A 4 ms difference closes at about 67 ppm on top of the
 /// measured drift.
 pub const SLEW: Duration = Duration::from_secs(60);
 
 /// The drift past which the meter reports the device as suspect
-/// ([`DriftMeter::past_limit`]): 300 ppm, three times a poor USB device's.
-/// Its audio is still timed by the drift measured.
+/// ([`DriftMeter::past_limit`]), measured over at least
+/// [`TRUSTED_WINDOW`]: 300 ppm, three times a poor USB device's. Its audio
+/// is still timed by the drift measured.
 pub const DRIFT_LIMIT: Drift = Drift(300_000);
 
 /// What the meter made of one buffer.
@@ -167,6 +174,9 @@ pub enum Reading {
     /// correction has run its course): open an epoch at the buffer's first
     /// sample that follows straight on from the current one, with this
     /// drift ([`TrackTimeline::retime`](crate::TrackTimeline::retime)).
+    /// Never asked for while the measured drift is at
+    /// [`Drift::MAX_PPB`], which only bad stamps give: correcting by it
+    /// would only open epoch after epoch.
     Retime(Drift),
 }
 
@@ -178,14 +188,19 @@ pub struct DriftMeter {
     /// Where the current run of unbroken audio started: its first buffer's
     /// first sample and capture time.
     run: Option<(SampleIndex, SessionTime)>,
-    /// The drift measured over the longest run so far that reached
-    /// [`MIN_WINDOW`], kept across a restart.
+    /// The drift measured over the current run, once it reached
+    /// [`MIN_WINDOW`]; or after a restart, the earlier run's, until the new
+    /// one is as long or reaches [`TRUSTED_WINDOW`].
     measured: Option<Drift>,
+    /// How long a run `measured` was measured over.
+    measured_over: Duration,
+    /// Whether `measured` comes from the current run.
+    from_this_run: bool,
     /// While a correcting epoch closes its difference: the sample at which
     /// it has, when the measured drift takes over.
     slewing_until: Option<SampleIndex>,
-    /// Whether the measured drift is past [`DRIFT_LIMIT`]; `reported` once
-    /// [`Self::past_limit`] has said so.
+    /// Whether the drift measured over a trusted window is past
+    /// [`DRIFT_LIMIT`]; `reported` once [`Self::past_limit`] has said so.
     beyond: bool,
     reported: bool,
 }
@@ -197,6 +212,8 @@ impl DriftMeter {
         Self {
             run: None,
             measured: None,
+            measured_over: Duration::ZERO,
+            from_this_run: false,
             slewing_until: None,
             beyond: false,
             reported: false,
@@ -216,10 +233,11 @@ impl DriftMeter {
     pub fn restart(&mut self) {
         self.run = None;
         self.slewing_until = None;
+        self.from_this_run = false;
     }
 
-    /// The measured drift, once, the first time it's past [`DRIFT_LIMIT`]
-    /// either way.
+    /// The measured drift, once, the first time a trusted window's is past
+    /// [`DRIFT_LIMIT`] either way.
     pub fn past_limit(&mut self) -> Option<Drift> {
         if self.beyond && !self.reported {
             self.reported = true;
@@ -254,7 +272,10 @@ impl DriftMeter {
             return self.measured.map_or(Reading::Steady, Reading::Retime);
         }
         match self.measured {
-            Some(measured) if off.abs() > nanos(RETIME_AFTER) => {
+            Some(measured)
+                if off.abs() > nanos(RETIME_AFTER)
+                    && measured.0.unsigned_abs() < Drift::MAX_PPB.unsigned_abs() =>
+            {
                 self.slewing_until = SampleCount::started_within(SLEW, epoch.rate())
                     .and_then(|n| first.checked_add(n));
                 // Behind the stream (`off` positive), the mapping must give
@@ -266,7 +287,9 @@ impl DriftMeter {
         }
     }
 
-    /// Updates the measured drift from the run so far, if it's long enough.
+    /// Updates the measured drift from the run so far, if it's long enough:
+    /// [`MIN_WINDOW`], and after a restart, as long as the run measured
+    /// before or [`TRUSTED_WINDOW`], whichever is shorter.
     fn learn(
         &mut self,
         first: SampleIndex,
@@ -278,13 +301,18 @@ impl DriftMeter {
         let Some(elapsed) = at.checked_duration_since(run_at) else {
             return;
         };
-        if elapsed < MIN_WINDOW {
+        let enough = self.from_this_run || elapsed >= self.measured_over.min(TRUSTED_WINDOW);
+        if elapsed < MIN_WINDOW || !enough {
             return;
         }
         let samples = first.saturating_count_since(run_first);
         if let Some(drift) = Drift::measured(samples, elapsed, rate) {
             self.measured = Some(drift);
-            self.beyond |= drift.0.unsigned_abs() > DRIFT_LIMIT.0.unsigned_abs();
+            self.measured_over = elapsed;
+            self.from_this_run = true;
+            if elapsed >= TRUSTED_WINDOW {
+                self.beyond = drift.0.unsigned_abs() > DRIFT_LIMIT.0.unsigned_abs();
+            }
         }
     }
 }

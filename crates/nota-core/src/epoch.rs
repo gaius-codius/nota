@@ -7,9 +7,9 @@
 //! between them is a gap with no audio, and a mark made during it maps to no
 //! sample.
 //!
-//! Each epoch also carries the [`Drift`] its device's clock was measured at
-//! when it opened, and maps its samples at the rate the device actually ran
-//! at. When the drift is measured, or changes, the track moves to a new
+//! Each epoch also carries a [`Drift`], and maps its samples at its rate
+//! times `1 + drift`: the rate its device was measured running at, or a
+//! little off it while a correction closes a difference. When the drift is measured, or changes, the track moves to a new
 //! epoch that follows straight on from the old one
 //! ([`TrackTimeline::retime`]), with no gap; see [`crate::drift`].
 //!
@@ -1145,6 +1145,19 @@ mod tests {
         assert_eq!(timeline.time_of(s(32_000)), Some(t(1_999_901_010)));
         assert_eq!(timeline.sample_at(t(1_999_901_010)), Some(s(32_000)));
         assert_eq!(timeline.epochs()[1].anchor().drift, fast);
+    }
+
+    /// An epoch that holds no audio yet can be retimed at its own first
+    /// sample: the new one starts where it does.
+    #[test]
+    fn an_empty_epoch_can_be_retimed_at_its_first_sample() {
+        let mut timeline = TrackTimeline::new(TrackId::new(0));
+        timeline.open_epoch(t(7), s(100), SPEECH).unwrap();
+        let fast = Drift::from_ppb(100_000).unwrap();
+        assert_eq!(
+            timeline.retime(s(100), fast).map(|o| (o.id, o.start)),
+            Ok((EpochId::new(1), t(7)))
+        );
     }
 
     /// Retiming needs an epoch to follow on from, and a sample count that

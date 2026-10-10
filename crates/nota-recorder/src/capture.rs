@@ -975,9 +975,7 @@ pub fn record_tracks<S: Fs>(
             // A stream can report something before its start fails; its
             // track was never started, so there's nothing to record it in.
             Received::Event(track, event) if !events.tracks.iter().any(|(t, _)| *t == track) => {
-                if let Some(buffer) = event.into_buffer() {
-                    events.events.recycle(buffer);
-                }
+                events.discard(event);
                 continue;
             }
             Received::Event(track, event) => (track, event),
@@ -1029,12 +1027,12 @@ pub fn record_tracks<S: Fs>(
     Ok(())
 }
 
-impl CaptureEvent {
-    /// The buffer this event's audio came in, if it's audio, to fill again.
-    fn into_buffer(self) -> Option<Vec<i16>> {
-        match self {
-            Self::Audio(samples) | Self::TimedAudio { samples, .. } => Some(samples),
-            _ => None,
+impl CaptureReceiver {
+    /// Drops `event`, unrecorded; if it's audio, its buffer goes back to be
+    /// filled again.
+    fn discard(&self, event: CaptureEvent) {
+        if let CaptureEvent::Audio(samples) | CaptureEvent::TimedAudio { samples, .. } = event {
+            self.events.recycle(samples);
         }
     }
 }
@@ -1118,9 +1116,7 @@ fn admit(
             return match event {
                 CaptureEvent::Stopped | CaptureEvent::Failed(_) => vec![CaptureEvent::Stopped],
                 event => {
-                    if let Some(buffer) = event.into_buffer() {
-                        events.events.recycle(buffer);
-                    }
+                    events.discard(event);
                     Vec::new()
                 }
             };
@@ -1135,9 +1131,7 @@ fn admit(
         }
         CaptureEvent::NotStarted => {
             for dropped in std::mem::take(held) {
-                if let Some(buffer) = dropped.into_buffer() {
-                    events.events.recycle(buffer);
-                }
+                events.discard(dropped);
             }
             joining.insert(track, Joining::Refused);
             vec![CaptureEvent::NotStarted]
@@ -1340,6 +1334,14 @@ fn time_buffer<S: Fs>(
     let Some(epoch) = timeline.current().copied() else {
         return Ok(());
     };
+    if first == epoch.first_sample() && at > epoch.start() {
+        // The epoch holds no audio yet, and starts before its first audio
+        // was captured: a track started first opens it when its stream was
+        // asked to start, early by the stream's start-up. Its audio starts
+        // when it was captured, as a joining track's does, and the time
+        // before is a gap.
+        return open_at_capture(writer, timeline, stamps, first, at, report);
+    }
     let moved = match stamps.meter.observe(&epoch, first, at) {
         Reading::Steady => Ok(()),
         // Within a burst, the next window's first buffer opens one epoch
@@ -1347,14 +1349,7 @@ fn time_buffer<S: Fs>(
         Reading::Lost { .. } if stamps.in_burst(at) => Ok(()),
         Reading::Lost { .. } => {
             stamps.last_loss = Some(at);
-            let drift = stamps.drift_for(timeline);
-            let moved = open_epoch_after_loss(writer, timeline, at, drift, report);
-            // A new run, from this buffer.
-            stamps.meter.restart();
-            if let Some(epoch) = timeline.current() {
-                stamps.meter.observe(epoch, first, at);
-            }
-            moved
+            open_at_capture(writer, timeline, stamps, first, at, report)
         }
         Reading::Retime(drift) => {
             let opened = timeline.retime(first, drift);
@@ -1421,6 +1416,27 @@ fn opened_since<S: Fs>(
         (Some(epoch), Some(next)) => next == epoch.first_sample() && epoch.start() >= at,
         _ => false,
     }
+}
+
+/// Moves `timeline`'s track to a new epoch at `at`, when the stamped
+/// buffer from sample `first` was captured, after a stretch with no audio,
+/// and starts the meter's new run with that buffer. Errors as
+/// [`open_epoch_after_loss`].
+fn open_at_capture<S: Fs>(
+    writer: &mut SessionWriter<S>,
+    timeline: &mut TrackTimeline,
+    stamps: &mut Stamps,
+    first: SampleIndex,
+    at: SessionTime,
+    report: &mut dyn FnMut(RecorderEvent),
+) -> Result<(), SessionError> {
+    let drift = stamps.drift_for(timeline);
+    let moved = open_epoch_after_loss(writer, timeline, at, drift, report);
+    stamps.meter.restart();
+    if let Some(epoch) = timeline.current() {
+        stamps.meter.observe(epoch, first, at);
+    }
+    moved
 }
 
 /// Moves `timeline`'s track to a new epoch starting at `at`, under

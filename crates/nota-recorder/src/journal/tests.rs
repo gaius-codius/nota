@@ -1,6 +1,6 @@
 //! The journal's acceptance tests: crash after every operation, the lag
-//! bound in a timed run, torn final frames, and the v3 header with its
-//! journal id and epoch anchor (and the v2 header, still read).
+//! bound in a timed run, torn final frames, and the v4 header with its
+//! journal id and epoch anchor (and the v3 and v2 headers, still read).
 
 use std::collections::BTreeMap;
 use std::io;
