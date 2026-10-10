@@ -727,11 +727,14 @@ fn torn_frame_with_a_corrupt_byte_fails_its_crc() {
 
 #[test]
 fn partial_crashes_of_the_unsynced_frame_never_misread() {
-    let (fs, _synced_len, _full) = journal_with_unsynced_frame();
+    let (fs, synced_len, full) = journal_with_unsynced_frame();
     let mut sweep = Sweep::with_outcomes();
+    let mut tails = Sweep::with_outcomes();
     for seed in 0..2_000 {
         let after = fs.crash(CrashOutcome::Partial { seed });
-        let read = read_journal(&after.read(&journal_path(0)).unwrap());
+        let bytes = after.read(&journal_path(0)).unwrap();
+        tails.saw(bytes.len() - synced_len);
+        let read = read_journal(&bytes);
         let n = read.frames().len();
         assert!(n == 3 || n == 4, "seed {seed}: {n} frames");
         let (_, got) = read.audio().unwrap();
@@ -742,6 +745,9 @@ fn partial_crashes_of_the_unsynced_frame_never_misread() {
     // part of it. Keeping all of it takes every byte, none zeroed, which
     // only 3 of these 2,000 seeds do: 200 seeds never kept it.
     sweep.saw_each([3, 4]); // check-bound
+    // And the unsynced frame was torn at every length, from none of it
+    // to all.
+    tails.saw_each(0..=full.len() - synced_len); // check-bound
 }
 
 #[test]

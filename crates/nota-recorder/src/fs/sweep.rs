@@ -13,11 +13,12 @@
 //! every outcome it must reach. The line stating a floor ends with the
 //! check-bound tag, so `scripts/check-weakened.sh` reports any change to
 //! it. A sweep dropped without a floor fails the test, and
-//! `scripts/check-weakened.test.sh` fails on a sweep in the crash tests that
-//! doesn't report into one.
+//! `scripts/check-weakened.test.sh` fails on a sweep without a floor in the
+//! crash test files it lists.
 //!
-//! [`CrashSummary`]'s sweeps come from [`CrashSummary::scenario`],
-//! [`CrashSummary::recovery`] and [`CrashSummary::reruns`].
+//! A [`CrashTest`](super::crash::CrashTest)'s sweeps don't report point by
+//! point: [`CrashSummary::scenario`], [`CrashSummary::recovery`] and
+//! [`CrashSummary::reruns`] build them from its counts.
 
 use std::fmt;
 use std::thread;
@@ -80,7 +81,9 @@ impl<K> Sweep<K> {
     }
 
     /// Records a point of a crash sweep, once the operation has run on
-    /// `fs`: interrupted if `fs` crashed before it finished.
+    /// `fs`: interrupted if `fs` crashed before it finished. Call it before
+    /// crashing `fs` yourself ([`FakeFs::crash`]), which counts as a crash
+    /// too.
     pub fn crash_point(&mut self, fs: &FakeFs) {
         if fs.has_crashed() {
             self.interrupted();
@@ -90,10 +93,9 @@ impl<K> Sweep<K> {
     }
 
     /// Records a point of a failure sweep, once the operation has run on
-    /// `fs` set to fail its operation numbered `at` (counting from 0):
-    /// interrupted if the operation got that far, so the failure fired.
-    pub fn failure_point(&mut self, fs: &FakeFs, at: usize) {
-        if fs.attempted() > at {
+    /// `fs`: interrupted if the failure [`FakeFs::fail_after`] set fired.
+    pub fn failure_point(&mut self, fs: &FakeFs) {
+        if fs.has_failed() {
             self.interrupted();
         } else {
             self.finished();
@@ -251,7 +253,9 @@ mod tests {
     #[test]
     fn a_sweep_counts_its_points_and_interruptions() {
         let mut sweep = swept(3, 2);
+        assert_eq!((sweep.points, sweep.interrupted), (5, 3));
         sweep.result(&Err::<(), ()>(()));
+        assert_eq!((sweep.points, sweep.interrupted), (6, 4));
         sweep.result(&Ok::<(), ()>(()));
         assert_eq!((sweep.points, sweep.interrupted), (7, 4));
         sweep.interrupted_at_least(4);
@@ -276,11 +280,14 @@ mod tests {
         let mut sweep = Sweep::new();
         for at in [0, 1, 2] {
             let fs = FakeFs::new();
+            // An operation before the failure is set doesn't count towards
+            // it.
+            fs.create_dir(Path::new("/a")).unwrap();
             fs.fail_after(at, io::ErrorKind::Other);
-            let _ = fs.create_dir(Path::new("/a"));
-            sweep.failure_point(&fs, at);
+            let _ = fs.create_dir(Path::new("/b"));
+            sweep.failure_point(&fs);
         }
-        // One operation: only failing the first one hits it.
+        // One operation after it: only failing the first one hits it.
         assert_eq!((sweep.points, sweep.interrupted), (3, 1));
         sweep.interrupted_at_least(1);
     }
@@ -298,7 +305,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "want more than 3 interrupted")]
+    #[should_panic(
+        expected = "want more than 3 interrupted: Sweep { points: 12, interrupted: 3, seen: [], .. }"
+    )]
     fn too_few_interruptions_fail_a_more_than_floor() {
         // The finished points don't count towards it.
         swept(3, 9).interrupted_more_than(3);

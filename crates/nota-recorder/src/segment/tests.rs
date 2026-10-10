@@ -2621,7 +2621,7 @@ fn findings_survive_any_later_failure_and_their_own_never_stops_publishing() {
         let run = fs.copy_disk();
         run.fail_after(at, io::ErrorKind::Other);
         let result = salvage(&mut session_store(&run), length());
-        sweep.failure_point(&run, at);
+        sweep.failure_point(&run);
         let on_disk = read_findings(&session_dir(&run)).unwrap();
         if let Ok(done) = &result
             && as_found(done.findings()) == unreadable
@@ -2902,7 +2902,7 @@ fn an_unreadable_segment_file_claims_nothing_until_it_reads_and_matches() {
         // The read fails: the row claims nothing and is recorded, and
         // every segment outside its window is published.
         let done = salvage(&mut session_store(&run), length()).unwrap();
-        sweep.failure_point(&run, at);
+        sweep.failure_point(&run);
         let expected = [(row, Problem::Unreadable(findings::read_failure(kind)))];
         assert_eq!(as_found(done.findings()), expected, "{kind:?}");
         assert_eq!(done.findings_unsaved(), None);
@@ -4233,7 +4233,7 @@ fn a_set_aside_is_reported_whatever_fails_after_it() {
         let run = disk.copy_disk();
         run.fail_after(at, io::ErrorKind::Other);
         let salvaged = salvage(&mut session_store(&run), length());
-        sweep.failure_point(&run, at);
+        sweep.failure_point(&run);
         let Ok(done) = salvaged else {
             continue;
         };
