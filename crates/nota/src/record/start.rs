@@ -274,12 +274,14 @@ fn show_recovering(screen: &mut Screen) {
 /// The line shown while earlier sessions are checked.
 pub(super) const RECOVERING: &str = "Checking earlier recordings…";
 
-/// Whether a signal asked for a stop since the signals were first
-/// listened for. Signals aren't all that can be waiting: the disk monitor
-/// starts before the streams and reports at once, so every other event is
-/// sent back to the channel (through `ui`, the receiver's own sender) for
-/// the screen. They're all taken out before any is sent back, so the
-/// check can't read its own events again.
+/// Whether a stop was asked for since the signals were first listened
+/// for: by a signal, or by the disk monitor on a full disk. Signals aren't
+/// all that can be waiting: the disk monitor starts before the streams and
+/// reports at once, so every other event is sent back to the channel
+/// (through `ui`, the receiver's own sender) for the screen. They're all
+/// taken out before any is sent back, so the check can't read its own
+/// events again. An event the monitor sends meanwhile lands ahead of them;
+/// the monitor's next report restates the disk, so nothing is lost.
 fn stop_asked(ui: &Sender<Event>, ui_events: &Receiver<Event>) -> bool {
     let (stops, kept): (Vec<_>, Vec<_>) = ui_events
         .try_iter()
