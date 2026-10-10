@@ -23,11 +23,12 @@ use nota_recorder::session::{SessionDir, SessionLock, SessionStore, SessionWrite
 use nota_store::{Heard, NewSession, Track, TrackKind};
 use nota_tui::Event;
 
-use super::live::{LiveInput, spawn_live};
+use super::live::{LiveEnd, LiveInput, spawn_live};
 use super::save::{Saver, ToSave};
 use super::signals::{SignalThread, listen_for_signals};
 use super::summary::{Outcome, file_names, held_notes, track_name};
 use super::{BoxError, MIC, RATE, RecordArgs, SYSTEM, segment_length};
+use crate::inhibit::{self, Logind, Sleep};
 use crate::latency::{DrawEnds, LatencyLog};
 use crate::library::{
     Library, NewSessionRows, Salvaged, SessionPaths, discard_empty, startup_watch,
@@ -66,12 +67,15 @@ pub(super) struct Started<B: CaptureBackend> {
     pub(super) session: SessionId,
     pub(super) lock: SessionLock<RecordFs>,
     pub(super) captures: Vec<Capture<B::Stream>>,
+    /// Keeps the machine from sleeping, if logind gave the lock; dropped
+    /// once recording has ended.
+    pub(super) sleep: Sleep,
     /// Checks the disk and keeps the ballast; stopped after publishing, so
     /// a full disk then is still in the summary.
     pub(super) disk: DiskMonitor<StdFs>,
     pub(super) publisher: Publisher,
     pub(super) live_inputs: Sender<LiveInput>,
-    pub(super) live: JoinHandle<Option<LatencyLog>>,
+    pub(super) live: JoinHandle<LiveEnd>,
     pub(super) saver: Saver,
     pub(super) recorder: JoinHandle<Recorded>,
 }
@@ -91,7 +95,8 @@ pub(super) type Recorded = (
 /// was asked for meanwhile, the session, the publisher and the recorder
 /// follow, and only then the streams, one after another, each track
 /// recorded as soon as its own has started; then the disk monitor, the
-/// saver, the engine and the live thread. The terminal is `screen` and
+/// saver, the engine and the live thread. Sleep is held off (`logind`)
+/// before the first stream opens. The terminal is `screen` and
 /// the library `library` if given (the app's, already set up and open),
 /// else they're set up here. A lent terminal was set up after the app's
 /// own signal listener, so the order holds for it too.
@@ -106,12 +111,21 @@ pub(super) fn start<B: CaptureBackend>(
     setup: &Setup,
     backend: &B,
     clock: &Arc<dyn Clock>,
+    logind: &dyn Logind,
     screen: Option<Screen>,
     library: Option<Library>,
 ) -> Result<(Started<B>, Screening), BoxError> {
     let mut notes = Vec::new();
-    start_with_notes(args, setup, backend, clock, screen, library, &mut notes)
+    let lent = Lent { screen, library };
+    start_with_notes(args, setup, backend, clock, logind, lent, &mut notes)
         .map_err(|error| startup_failure(error, notes))
+}
+
+/// What the app lent the recording: its terminal and its library, if it
+/// did.
+struct Lent {
+    screen: Option<Screen>,
+    library: Option<Library>,
 }
 
 /// Starts as [`start`] says, keeping recovery notes for a failed start.
@@ -120,8 +134,8 @@ fn start_with_notes<B: CaptureBackend>(
     setup: &Setup,
     backend: &B,
     clock: &Arc<dyn Clock>,
-    screen: Option<Screen>,
-    library: Option<Library>,
+    logind: &dyn Logind,
+    Lent { screen, library }: Lent,
     notes: &mut Vec<String>,
 ) -> Result<(Started<B>, Screening), BoxError> {
     let (ui, ui_events) = mpsc::channel::<Event>();
@@ -193,8 +207,11 @@ fn start_with_notes<B: CaptureBackend>(
         disk,
         lock,
     };
+    // Before the first audio, so no stretch of the recording is unguarded.
+    let sleep = inhibit::hold(logind);
     let (captures, listening, ready) =
         open_streams(ready, starter, backend, &sources, &ui_events, notes)?;
+    sleep.report(clock.as_ref(), &ui, notes);
     unmade.keep();
     keep_started(&rows, &watch, &session, &asked, &captures, notes);
     let Ready {
@@ -218,6 +235,7 @@ fn start_with_notes<B: CaptureBackend>(
         session: session.id,
         lock,
         captures,
+        sleep,
         disk,
         publisher,
         live_inputs,
@@ -319,7 +337,7 @@ fn start_live(
     clock: &Arc<dyn Clock>,
     ui: &Sender<Event>,
     saver: &Saver,
-) -> Result<(Sender<LiveInput>, JoinHandle<Option<LatencyLog>>), BoxError> {
+) -> Result<(Sender<LiveInput>, JoinHandle<LiveEnd>), BoxError> {
     let (live_inputs, live_received) = mpsc::channel::<LiveInput>();
     let engine = match &args.models {
         Some((parakeet, vad)) => Some(start_engine(parakeet, vad, clock, &live_inputs)?),
@@ -377,7 +395,7 @@ struct Ready {
     publisher: Publisher,
     saver: Saver,
     live_inputs: Sender<LiveInput>,
-    live: JoinHandle<Option<LatencyLog>>,
+    live: JoinHandle<LiveEnd>,
     disk: DiskMonitor<StdFs>,
     lock: SessionLock<RecordFs>,
 }
@@ -483,8 +501,8 @@ fn recover(
 }
 
 /// A space failure rejects this start; other title failures remain notes.
-fn keep_before_recording(
-    watch: &Arc<DiskWatch<StdFs>>,
+fn keep_before_recording<S: Fs + Clone + 'static>(
+    watch: &Arc<DiskWatch<S>>,
     session: &SessionPaths,
     row: &NewSession,
     notes: &mut Vec<String>,
@@ -518,9 +536,9 @@ fn keep_session<S: Fs + Clone + 'static>(
 }
 
 /// Makes the session through the watch, retrying after the ballast freed.
-fn create_session(
+fn create_session<S: Fs + Clone + 'static>(
     library: &Library,
-    watch: &Arc<DiskWatch<StdFs>>,
+    watch: &Arc<DiskWatch<S>>,
 ) -> Result<SessionPaths, BoxError> {
     let first = library.create_on(&watch.fs());
     retry_start(first, watch, || library.create_on(&watch.fs())).map_err(start_error)
@@ -1332,6 +1350,179 @@ mod space_tests {
         watch.start_recording();
         assert!(watch.full().is_none());
         assert!(!watch.holds_ballast());
+    }
+
+    /// A library on a real directory of its own, which numbers new
+    /// sessions; the sessions themselves are made on a fake filesystem at
+    /// the same paths. Removed when dropped.
+    struct Numbering {
+        library: Library,
+        root: PathBuf,
+    }
+
+    impl Numbering {
+        /// The library under a fresh directory named for `name`.
+        /// Session 1 is on it, as on the fake disk, so a start numbers its
+        /// session 2 straight away, as it would on a real one.
+        #[expect(clippy::disallowed_methods, reason = "test scaffolding")]
+        fn new(name: &str) -> Self {
+            let root = std::env::temp_dir().join(format!("nota-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let library = Library::open(&root).unwrap();
+            std::fs::create_dir_all(root.join("sessions/1/audio")).unwrap();
+            Self { library, root }
+        }
+    }
+
+    impl Drop for Numbering {
+        #[expect(clippy::disallowed_methods, reason = "test scaffolding")]
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// A fake disk under `root` holding an earlier session, number 1: a
+    /// synced journal and its kept title. Its file names and bytes, too.
+    fn with_an_earlier_session(root: &std::path::Path) -> (FakeFs, Vec<(PathBuf, Vec<u8>)>) {
+        use nota_recorder::fs::FsFile;
+        let earlier = SessionPaths {
+            id: SessionId::new(1),
+            dir: root.join("sessions/1"),
+        };
+        let fs = FakeFs::with_dirs([earlier.audio()]);
+        let mut journal = fs.create(&earlier.audio().join("journal-000000")).unwrap();
+        journal.write_all(&[7; 40]).unwrap();
+        journal.sync().unwrap();
+        drop(journal);
+        fs.sync_dir(&earlier.audio()).unwrap();
+        let row = NewSession {
+            title: Some("Earlier".to_owned()),
+            ..NewSession::bare(earlier.id)
+        };
+        earlier.keep_on(&fs, &row).unwrap();
+        let files = files(&fs);
+        (fs, files)
+    }
+
+    /// Every file on `fs`, with its bytes.
+    fn files(fs: &FakeFs) -> Vec<(PathBuf, Vec<u8>)> {
+        fs.paths()
+            .into_iter()
+            .map(|path| {
+                let bytes = fs.read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect()
+    }
+
+    /// Makes a new session and keeps its row on `fs`, as a start does
+    /// before any stream opens, through a startup watch over `fs`.
+    fn start_session(numbering: &Numbering, fs: &FakeFs) -> Result<SessionPaths, BoxError> {
+        let watch = startup_watch(fs, &numbering.root, 1_024)?;
+        let session = create_session(&numbering.library, &watch)?;
+        let row = NewSession {
+            title: Some("New".to_owned()),
+            ..NewSession::bare(session.id)
+        };
+        let mut notes = Vec::new();
+        keep_before_recording(&watch, &session, &row, &mut notes)?;
+        // Only a full disk rejects a start; nothing here is anything else.
+        assert_eq!(notes, Vec::<String>::new());
+        Ok(session)
+    }
+
+    /// How many operations a start makes on a copy of `fs`, failed ones
+    /// (a session number already taken) included: each in turn gets a
+    /// fault.
+    fn start_operations(numbering: &Numbering, fs: &FakeFs) -> usize {
+        let probe = fs.copy_disk();
+        let made = start_session(numbering, &probe).unwrap();
+        assert_eq!(made.id, SessionId::new(2));
+        probe.attempted()
+    }
+
+    /// A full disk at each operation of a new start, every write of its
+    /// session and the sync after its title's rename included, rejects the
+    /// start: no new session is left, even after a crash, and the earlier
+    /// session's journal and title are as they were.
+    #[test]
+    fn a_start_failing_at_any_write_leaves_no_session_and_the_earlier_one_untouched() {
+        let numbering = Numbering::new("start-sweep");
+        let (fs, earlier) = with_an_earlier_session(&numbering.root);
+        let sessions = numbering.root.join("sessions");
+        let operations = start_operations(&numbering, &fs);
+        // Making both directories, keeping the title, and their syncs.
+        assert!(operations >= 10, "{operations}");
+        for at in 0..operations {
+            let run = fs.copy_disk();
+            run.fail_after(at, std::io::ErrorKind::StorageFull);
+            assert!(start_session(&numbering, &run).is_err(), "at {at}");
+            assert_eq!(
+                run.list(&sessions).unwrap(),
+                [sessions.join("1")],
+                "a fault at operation {at}"
+            );
+            // Nothing added anywhere, the earlier session's files as they were.
+            assert_eq!(files(&run), earlier, "at {at}");
+            for outcome in nota_recorder::fs::fake::CrashOutcome::standard() {
+                let crashed = run.crash(outcome);
+                assert_eq!(
+                    crashed.list(&sessions).unwrap(),
+                    [sessions.join("1")],
+                    "a fault at operation {at}, {outcome:?}"
+                );
+                assert_eq!(files(&crashed), earlier, "at {at}, {outcome:?}");
+            }
+        }
+    }
+
+    /// With the ballast held, a full disk at each of a new start's writes
+    /// frees it and the write is tried again: the start makes exactly one
+    /// new session, with its title kept, and leaves the earlier one as it
+    /// was. A fault in the watch's own look at the sessions, before any
+    /// write, rejects the start and leaves nothing.
+    #[test]
+    fn a_start_failing_at_any_write_with_a_ballast_makes_one_session() {
+        let numbering = Numbering::new("start-sweep-ballast");
+        let (fs, earlier) = with_an_earlier_session(&numbering.root);
+        Ballast::keep(&fs, &numbering.root, 1_024, || false).unwrap();
+        let sessions = numbering.root.join("sessions");
+        let looked = {
+            let probe = fs.copy_disk();
+            let _watch = startup_watch(&probe, &numbering.root, 1_024).unwrap();
+            probe.attempted()
+        };
+        let operations = start_operations(&numbering, &fs);
+        // Making both directories, keeping the title, and their syncs.
+        assert!(operations >= looked + 10, "{looked}, {operations}");
+        for at in 0..operations {
+            let run = fs.copy_disk();
+            run.fail_after(at, std::io::ErrorKind::StorageFull);
+            let made = start_session(&numbering, &run);
+            for (path, bytes) in &earlier {
+                assert_eq!(&run.read(path).unwrap(), bytes, "{path:?}, at {at}");
+            }
+            if at < looked {
+                assert!(made.is_err(), "at {at}");
+                assert_eq!(run.list(&sessions).unwrap(), [sessions.join("1")]);
+                continue;
+            }
+            // The fault freed the ballast; the retry found room.
+            let made = made.unwrap_or_else(|e| panic!("at {at}: {e}"));
+            assert_eq!(
+                run.list(&sessions).unwrap(),
+                [sessions.join("1"), made.dir.clone()],
+                "at {at}"
+            );
+            let kept = run.read(&made.dir.join("session.txt")).unwrap();
+            let kept = String::from_utf8(kept).unwrap();
+            assert!(kept.lines().any(|line| line == "title New"), "{kept}");
+            assert!(
+                Ballast::find(&run, &numbering.root, 1_024)
+                    .unwrap()
+                    .is_none()
+            );
+        }
     }
 
     /// Cleanup refuses to remove any session containing recorded audio.

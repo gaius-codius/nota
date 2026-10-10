@@ -1,4 +1,6 @@
+use nota_core::recorder::{Cause, Warning, WarningState};
 use nota_core::{SampleIndex, SampleRange, SampleRate};
+use nota_recorder::capture::CaptureNotice;
 
 use super::*;
 
@@ -272,4 +274,285 @@ fn a_joining_track_of_a_resumed_session_is_followed_from_its_first_epoch() {
         texts(&live.engine(heard(SYSTEM, 1_500, 1_900, "again")).updates),
         [(ms(60_500), ms(60_900), "again".to_owned())]
     );
+}
+
+/// A mic timeline that was suspended after `audio` samples (a millisecond
+/// each) and reopened at `resumed` ms, as the capture does for the first
+/// audio after a sleep.
+fn reopened_at(resumed: u64, audio: u64) -> TrackTimeline {
+    let mut timeline = opened(MIC, 0);
+    timeline
+        .open_epoch(ms(resumed), SampleIndex::new(audio), rate())
+        .unwrap();
+    timeline
+}
+
+fn suspended() -> RecorderEvent {
+    RecorderEvent::Capture(CaptureNotice::Suspended)
+}
+
+/// What the screen is told apart from levels and sizes.
+fn told(updates: Vec<Event>) -> Vec<Event> {
+    updates
+        .into_iter()
+        .filter(|u| !matches!(u, Event::Level { .. } | Event::Recorded(_)))
+        .collect()
+}
+
+fn slept_warning(at: SessionTime) -> Event {
+    Event::Warning(Warning {
+        cause: Cause::Slept,
+        track: None,
+        at,
+        state: WarningState::Raised,
+    })
+}
+
+/// The first audio after a suspend brings the warning, and the epoch and
+/// gap the capture opened for it. Nothing is said before that audio.
+#[test]
+fn the_first_audio_after_a_suspend_warns_and_reports_the_gap() {
+    let timeline = reopened_at(5_000, 1_000);
+    let (epoch, gap) = (timeline.epochs()[1], timeline.gaps().next().unwrap());
+    let mut live = Live::new(&[opened(MIC, 0)]);
+    live.recorder(
+        Some(MIC),
+        RecorderEvent::Audio(chunk(MIC, 0, vec![1; 1_000])),
+    );
+    let noticed = live.recorder(Some(MIC), suspended());
+    assert_eq!(noticed.updates, []);
+    live.recorder(Some(MIC), RecorderEvent::Epoch(epoch));
+    let woke = live.recorder(
+        Some(MIC),
+        RecorderEvent::Audio(chunk(MIC, 1_000, vec![1; 100])),
+    );
+    assert_eq!(
+        told(woke.updates),
+        [
+            slept_warning(ms(5_000)),
+            Event::Epoch { track: MIC, epoch },
+            Event::Gap { track: MIC, gap },
+        ]
+    );
+    assert_eq!(
+        live.slept(),
+        [Slept {
+            resumed: ms(5_000),
+            gap: Some(gap)
+        }]
+    );
+}
+
+/// Both tracks wake from one sleep: the screen gets one warning, and each
+/// track's own epoch and gap.
+#[test]
+fn two_tracks_waking_from_one_sleep_warn_once() {
+    let mic = reopened_at(5_000, 1_000);
+    let mut system = opened(SYSTEM, 0);
+    system
+        .open_epoch(ms(5_040), SampleIndex::new(1_000), rate())
+        .unwrap();
+    let mut live = Live::new(&[opened(MIC, 0), opened(SYSTEM, 0)]);
+    for (track, timeline) in [(MIC, &mic), (SYSTEM, &system)] {
+        live.recorder(Some(track), suspended());
+        live.recorder(Some(track), RecorderEvent::Epoch(timeline.epochs()[1]));
+    }
+    let mic_woke = live.recorder(
+        Some(MIC),
+        RecorderEvent::Audio(chunk(MIC, 1_000, vec![1; 10])),
+    );
+    let system_woke = live.recorder(
+        Some(SYSTEM),
+        RecorderEvent::Audio(chunk(SYSTEM, 1_000, vec![1; 10])),
+    );
+    let warnings = |updates: Vec<Event>| {
+        told(updates)
+            .into_iter()
+            .filter(|u| matches!(u, Event::Warning(_)))
+            .count()
+    };
+    assert_eq!(warnings(mic_woke.updates), 1);
+    assert_eq!(warnings(system_woke.updates.clone()), 0);
+    // The second track still gets its own epoch and gap.
+    assert_eq!(
+        told(system_woke.updates),
+        [
+            Event::Epoch {
+                track: SYSTEM,
+                epoch: system.epochs()[1]
+            },
+            Event::Gap {
+                track: SYSTEM,
+                gap: system.gaps().next().unwrap()
+            },
+        ]
+    );
+    assert_eq!(live.slept().len(), 1);
+}
+
+/// A sleep a minute after another is a sleep of its own.
+#[test]
+fn a_later_sleep_warns_again() {
+    let mut timeline = reopened_at(5_000, 1_000);
+    timeline
+        .open_epoch(ms(65_000), SampleIndex::new(1_100), rate())
+        .unwrap();
+    let mut live = Live::new(&[opened(MIC, 0)]);
+    for (i, first) in [(1, 1_000), (2, 1_100)] {
+        live.recorder(Some(MIC), suspended());
+        live.recorder(Some(MIC), RecorderEvent::Epoch(timeline.epochs()[i]));
+        live.recorder(
+            Some(MIC),
+            RecorderEvent::Audio(chunk(MIC, first, vec![1; 100])),
+        );
+    }
+    let resumed: Vec<_> = live.slept().iter().map(|s| s.resumed).collect();
+    assert_eq!(resumed, [ms(5_000), ms(65_000)]);
+}
+
+/// If the timeline refused an epoch for the sleep, the machine slept all
+/// the same: the warning is raised, without a gap.
+#[test]
+fn a_suspend_the_timeline_refused_still_warns_without_a_gap() {
+    let mut live = Live::new(&[opened(MIC, 0)]);
+    live.recorder(Some(MIC), suspended());
+    live.recorder(
+        Some(MIC),
+        RecorderEvent::EpochRefused(nota_core::EpochError::TimeOverflow),
+    );
+    let woke = live.recorder(Some(MIC), RecorderEvent::Audio(chunk(MIC, 0, vec![1; 100])));
+    assert_eq!(told(woke.updates), [slept_warning(ms(0))]);
+    assert_eq!(
+        live.slept(),
+        [Slept {
+            resumed: ms(0),
+            gap: None
+        }]
+    );
+}
+
+/// A route change reopens the track too, but nothing slept: only a
+/// suspend notice makes the audio after it a sleep.
+#[test]
+fn a_reopened_epoch_with_no_suspend_is_not_a_sleep() {
+    let timeline = reopened_at(5_000, 1_000);
+    let mut live = Live::new(&[opened(MIC, 0)]);
+    live.recorder(Some(MIC), RecorderEvent::Epoch(timeline.epochs()[1]));
+    let woke = live.recorder(
+        Some(MIC),
+        RecorderEvent::Audio(chunk(MIC, 1_000, vec![1; 100])),
+    );
+    assert_eq!(told(woke.updates), []);
+    assert_eq!(live.slept(), []);
+}
+
+/// A track that wakes from a sleep a few seconds after the others, as a
+/// Bluetooth mic can, is the same sleep: its gap overlaps theirs, though
+/// its audio comes back more than a buffer later.
+#[test]
+fn a_track_slow_to_wake_is_still_the_same_sleep() {
+    let mic = reopened_at(5_000, 1_000);
+    let mut system = opened(SYSTEM, 0);
+    system
+        .open_epoch(ms(9_000), SampleIndex::new(1_000), rate())
+        .unwrap();
+    let mut live = Live::new(&[opened(MIC, 0), opened(SYSTEM, 0)]);
+    // The slow track's audio is handled first, and the quick one's after.
+    for (track, timeline) in [(SYSTEM, &system), (MIC, &mic)] {
+        live.recorder(Some(track), suspended());
+        live.recorder(Some(track), RecorderEvent::Epoch(timeline.epochs()[1]));
+        live.recorder(
+            Some(track),
+            RecorderEvent::Audio(chunk(track, 1_000, vec![1; 10])),
+        );
+    }
+    assert_eq!(live.slept().len(), 1);
+}
+
+/// One track that sleeps again just after waking is another sleep, though
+/// with no gap to compare (the timeline refused the second one's epoch) its
+/// audio comes back within two seconds of the first sleep's.
+#[test]
+fn a_second_sleep_on_one_track_just_after_the_first_warns_again() {
+    let timeline = reopened_at(5_000, 1_000);
+    let mut live = Live::new(&[opened(MIC, 0)]);
+    live.recorder(Some(MIC), suspended());
+    live.recorder(Some(MIC), RecorderEvent::Epoch(timeline.epochs()[1]));
+    live.recorder(
+        Some(MIC),
+        RecorderEvent::Audio(chunk(MIC, 1_000, vec![1; 100])),
+    );
+    live.recorder(Some(MIC), suspended());
+    live.recorder(
+        Some(MIC),
+        RecorderEvent::EpochRefused(nota_core::EpochError::TimeOverflow),
+    );
+    live.recorder(
+        Some(MIC),
+        RecorderEvent::Audio(chunk(MIC, 1_100, vec![1; 100])),
+    );
+    let resumed: Vec<_> = live.slept().iter().map(|s| s.resumed).collect();
+    assert_eq!(resumed, [ms(5_000), ms(5_100)]);
+}
+
+/// When the timeline refuses the epoch for a sleep, the track's older gap
+/// isn't taken for the sleep's: the warning comes without a gap, and the
+/// old epoch and gap aren't sent again.
+#[test]
+fn a_refused_epoch_does_not_borrow_an_earlier_gap() {
+    let timeline = reopened_at(5_000, 1_000);
+    let mut live = Live::new(&[opened(MIC, 0)]);
+    live.recorder(
+        Some(MIC),
+        RecorderEvent::Audio(chunk(MIC, 0, vec![1; 1_000])),
+    );
+    live.recorder(Some(MIC), RecorderEvent::Epoch(timeline.epochs()[1]));
+    // A route change's gap, and three seconds of audio after it.
+    live.recorder(
+        Some(MIC),
+        RecorderEvent::Audio(chunk(MIC, 1_000, vec![1; 3_000])),
+    );
+    live.recorder(Some(MIC), suspended());
+    live.recorder(
+        Some(MIC),
+        RecorderEvent::EpochRefused(nota_core::EpochError::TimeOverflow),
+    );
+    let woke = live.recorder(
+        Some(MIC),
+        RecorderEvent::Audio(chunk(MIC, 4_000, vec![1; 100])),
+    );
+    assert_eq!(told(woke.updates), [slept_warning(ms(8_000))]);
+    assert_eq!(
+        live.slept(),
+        [Slept {
+            resumed: ms(8_000),
+            gap: None
+        }]
+    );
+}
+
+/// With no gaps to compare (the timelines refused both epochs), tracks
+/// whose audio comes back within two seconds of each other, whichever
+/// first, woke from one sleep; three seconds apart, two.
+#[test]
+fn tracks_without_gaps_wake_from_one_sleep_if_they_resume_within_two_seconds() {
+    // A sample is a millisecond, so `at` is when the audio came back.
+    let wake = |first: (TrackId, u64), second: (TrackId, u64)| {
+        let mut live = Live::new(&[opened(MIC, 0), opened(SYSTEM, 0)]);
+        for (track, at) in [first, second] {
+            live.recorder(Some(track), suspended());
+            live.recorder(
+                Some(track),
+                RecorderEvent::EpochRefused(nota_core::EpochError::TimeOverflow),
+            );
+            live.recorder(
+                Some(track),
+                RecorderEvent::Audio(chunk(track, at, vec![1; 10])),
+            );
+        }
+        live.slept().len()
+    };
+    assert_eq!(wake((MIC, 1_000), (SYSTEM, 1_500)), 1);
+    assert_eq!(wake((SYSTEM, 1_500), (MIC, 1_000)), 1);
+    assert_eq!(wake((MIC, 1_000), (SYSTEM, 4_000)), 2);
 }

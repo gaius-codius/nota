@@ -531,29 +531,39 @@ fn salvage_result<S: Fs + Clone + 'static, T: SegmentStore>(
     }
 }
 
-/// Holds the existing ballast before startup can write anything.
-pub(crate) fn startup_watch<S: Fs + Clone>(
+/// Holds the existing ballast before startup can write anything, unless
+/// a live recording owns it. Shared until the watch starts recording: a
+/// recording that starts meanwhile claims it, and it isn't freed.
+pub(crate) fn startup_watch<S: Fs + Clone + 'static>(
     fs: &S,
     root: &Path,
     len: u64,
 ) -> io::Result<Arc<DiskWatch<S>>> {
     let watch = DiskWatch::new(fs.clone());
     // Recovery mustn't spend a live recording's finishing room.
-    if startup_in_use(fs, root)? {
+    if startup_in_use(fs, root, &[])? {
         return Ok(watch);
     }
     if let Some(ballast) = Ballast::find(fs, root, len)? {
         watch.hold(ballast);
+        // Recovery takes a while: look again before freeing it, past the
+        // sessions startup locked itself. Sessions that can't be listed
+        // may hold a recording, so they keep it.
+        let (fs, root) = (fs.clone(), root.to_path_buf());
+        watch.share(move |own| startup_in_use(&fs, &root, own).unwrap_or(true));
     }
     Ok(watch)
 }
 
-/// Checks locks even before a recording has made its first journal.
-fn startup_in_use<S: Fs>(fs: &S, root: &Path) -> io::Result<bool> {
+/// Checks locks even before a recording has made its first journal,
+/// passing over the audio directories in `own`, which startup holds itself.
+fn startup_in_use<S: Fs>(fs: &S, root: &Path, own: &[PathBuf]) -> io::Result<bool> {
     for session in fs.list(&root.join(SESSIONS))? {
-        if fs
-            .lock_dir(&session.join(AUDIO))
-            .is_err_and(|e| e.kind() == io::ErrorKind::WouldBlock)
+        let audio = session.join(AUDIO);
+        if !own.contains(&audio)
+            && fs
+                .lock_dir(&audio)
+                .is_err_and(|e| e.kind() == io::ErrorKind::WouldBlock)
         {
             return Ok(true);
         }

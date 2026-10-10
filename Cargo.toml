@@ -35,6 +35,10 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # SIGHUP, SIGTERM and SIGINT, read on a thread so a recording can stop in
 # order. Already in the tree through crossterm.
 signal-hook = "0.3"
+# The sleep inhibitor, taken from logind over D-Bus. Already in the tree
+# through cpal's real-time promotion (`realtime-dbus`), so the same
+# libdbus-1 is linked. Only nota and that promotion may use it (deny.toml).
+dbus = "0.6"
 # Each segment's checksum in its row.
 sha2 = { version = "0.10", default-features = false, features = ["std"] }
 # Real-time scheduling for the capture stream's thread, within the user's
