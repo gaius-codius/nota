@@ -160,8 +160,18 @@ impl Live {
                         .current()
                         .and_then(|current| current.time_of(epoch.first_sample()))
                         == Some(epoch.start());
-                    if follower.follow(&epoch).is_err() || !straight_on {
+                    let followed = follower.follow(&epoch).is_ok();
+                    if !followed || !straight_on {
                         actions.flush = Some(track);
+                    }
+                    // The hole before it goes on the timeline. A sleep's is
+                    // sent with the warning once the track wakes
+                    // (`woke_with`), so it isn't sent twice.
+                    if followed && !straight_on && !self.sleeping.contains(&track) {
+                        let gap = follower.gaps().last().filter(|g| g.to() == epoch.start());
+                        actions
+                            .updates
+                            .extend(gap.map(|gap| Event::Gap { track, gap }));
                     }
                 } else {
                     // The track joined: its first epoch, numbered above

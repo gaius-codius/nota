@@ -142,6 +142,9 @@ fn each_track_keeps_its_own_meter() {
     );
 }
 
+/// A new epoch after a hole (an overrun, a reopened stream) flushes the
+/// engine, sends the gap once, for the timeline, and places later text
+/// after it.
 #[test]
 fn a_new_epoch_flushes_the_engine_and_places_later_text_after_the_gap() {
     let recorder_mic = {
@@ -152,9 +155,11 @@ fn a_new_epoch_flushes_the_engine_and_places_later_text_after_the_gap() {
     };
     let mut live = Live::new(&[opened(MIC, 0)]);
     let epoch = recorder_mic.epochs()[1];
+    let gap = recorder_mic.gaps().next().unwrap();
     let actions = live.recorder(Some(MIC), RecorderEvent::Epoch(epoch));
     assert_eq!(actions.flush, Some(MIC));
-    assert!(actions.updates.is_empty());
+    assert_eq!(actions.updates, [Event::Gap { track: MIC, gap }]);
+    assert_eq!((gap.from(), gap.to()), (ms(1_000), ms(5_000)));
     let before = live.engine(heard(MIC, 500, 900, "before"));
     let after = live.engine(heard(MIC, 1_000, 1_200, "after"));
     assert_eq!(
@@ -666,7 +671,9 @@ fn the_first_audio_after_a_suspend_warns_and_reports_the_gap() {
     );
     let noticed = live.recorder(Some(MIC), suspended());
     assert_eq!(noticed.updates, []);
-    live.recorder(Some(MIC), RecorderEvent::Epoch(epoch));
+    // The sleep's gap waits for the warning, so it's sent once.
+    let reopened = live.recorder(Some(MIC), RecorderEvent::Epoch(epoch));
+    assert_eq!(reopened.updates, []);
     let woke = live.recorder(
         Some(MIC),
         RecorderEvent::Audio(chunk(MIC, 1_000, vec![1; 100])),
