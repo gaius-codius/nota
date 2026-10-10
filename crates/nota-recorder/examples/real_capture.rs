@@ -8,7 +8,11 @@
 //!   its own stream from the `PipeWire` node `NODE`, at 16 kHz for `S`
 //!   seconds into `<dir>/session`, with the store at
 //!   `<dir>/library.db`, publishing each finished journal on a publisher
-//!   thread as it goes, in `K`-second segment windows. With `--ballast`,
+//!   thread as it goes, in `K`-second segment windows. As in `nota
+//!   record`, the recorder starts first and each track joins it as its
+//!   stream starts, its first epoch opened at its first audio; with
+//!   several tracks, the first one's fsyncs move from inline to a thread
+//!   when the second joins. With `--ballast`,
 //!   `A` seconds in (default 2) a thread makes a ballast of `BYTES` in
 //!   `<dir>`, as the disk monitor's thread does, so the recording's fsyncs
 //!   run while it's written; its start and end are logged, and `check`
@@ -36,7 +40,9 @@
 //!   a row or a journal; after it, only segments and rows are
 //!   left, in order and without gaps from the first sample, holding at least
 //!   everything fsync'd and exactly the audio captured, and every committed
-//!   row; a second salvage changes nothing; the durable position was never
+//!   row; a second salvage changes nothing; each track that joined did so
+//!   at sample 0, in an epoch opened no later than its first frame was
+//!   written, which its first row carries; the durable position was never
 //!   more than the journal's sync interval (850 ms) behind the captured
 //!   one, nor more than 2 s behind the audio delivered or the wall clock
 //!   (all below); no audio was lost before the journal. It prints one `result` line
@@ -102,12 +108,11 @@ mod linux {
     use std::time::Duration;
 
     use nota_core::messages::AudioChunk;
-    use nota_core::{
-        Clock, SampleCount, SampleRate, SessionId, SessionTime, SystemClock, TrackId, TrackTimeline,
-    };
+    use nota_core::{Clock, SampleCount, SampleRate, SessionId, SessionTime, SystemClock, TrackId};
     use nota_recorder::capture::{
-        Capture, CaptureBackend, CaptureNotice, CaptureReceiver, PipeWireBackend, Progress,
-        RecordError, RecorderEvent, Source, record_track, record_tracks, start, start_tracks,
+        Capture, CaptureBackend, CaptureError, CaptureNotice, CaptureReceiver, PipeWireBackend,
+        Progress, RecordError, RecorderEvent, Source, TrackStarter, prepare_tracks, record_track,
+        record_tracks, start,
     };
     use nota_recorder::disk::Ballast;
     use nota_recorder::engine::{
@@ -290,7 +295,7 @@ mod linux {
 
     /// The log `write` keeps, one fsync'd line each:
     ///
-    ///   start <track> <first sample>
+    ///   start <track> <first sample> <epoch> <epoch start ns>
     ///   first <track> <t ns> <end of the first frame>
     ///   sync <track> <t ns> <captured> <durable before> <durable after> <delivered> <began ns>
     ///   row <track> <epoch> <start> <end> <sha256 hex>
@@ -829,7 +834,7 @@ mod linux {
         let session = SessionDir::new(SESSION, fs.clone(), &session_path).lock()?;
         // Fsyncs as `nota record` runs them: inline for one track, on a
         // thread per track for more.
-        let mut writer = SessionWriter::open(&session, RATE, length, Arc::clone(&clock))?
+        let writer = SessionWriter::open(&session, RATE, length, Arc::clone(&clock))?
             .with_syncing(Syncing::Auto);
         // Publishing runs on its own thread, so the recorder never waits
         // for an encode.
@@ -839,8 +844,11 @@ mod linux {
             thread::spawn(move || publish(&fs, session, store, length, &finished))
         };
 
-        let (captures, timelines, events) =
-            start_capture(&mut writer, &fs, &tracks, &source, &clock)?;
+        // As `nota record` starts: the recorder runs before any stream
+        // opens, and each track joins it as its stream starts, its first
+        // epoch opened at its first audio.
+        let sources: Vec<(TrackId, Source)> = tracks.iter().map(|&t| (t, source.clone())).collect();
+        let (starter, events) = prepare_tracks(&sources, RATE, &clock);
         let progress = tracks
             .iter()
             .filter_map(|&t| events.progress(t).map(|p| (t, p)))
@@ -849,7 +857,15 @@ mod linux {
         let recorder = {
             let to_publish = to_publish.clone();
             let fs = fs.clone();
-            thread::spawn(move || record(writer, timelines, &events, &to_publish, &fs))
+            thread::spawn(move || record(writer, &events, &to_publish, &fs))
+        };
+        let captures = match start_streams(starter) {
+            Ok(captures) => captures,
+            Err(e) => {
+                // The recorder ends once the streams that did start stop.
+                let _ = recorder.join();
+                return Err(e.into());
+            }
         };
         let ballast = spawn_ballast(ballast_plan, &fs, &clock, &dir);
         wait(Duration::from_secs(seconds));
@@ -975,34 +991,11 @@ mod linux {
         Ok(())
     }
 
-    /// The streams `write` records, one per track from `source`, each with
-    /// its timeline's first epoch opened as it started. The track starts in
-    /// `writer` in that epoch, and `fs`'s log notes it.
-    fn start_capture(
-        writer: &mut SessionWriter<TapFs>,
-        fs: &TapFs,
-        tracks: &[TrackId],
-        source: &Source,
-        clock: &Arc<dyn Clock>,
-    ) -> Res<(
-        Vec<Capture<PipeWireStream>>,
-        Vec<TrackTimeline>,
-        CaptureReceiver,
-    )> {
-        let sources: Vec<(TrackId, Source)> = tracks.iter().map(|&t| (t, source.clone())).collect();
-        let (started, events) = start_tracks(&PipeWireBackend, &sources, RATE, clock);
-        let mut captures = Vec::new();
-        let mut timelines = Vec::new();
-        for capture in started {
-            let capture = capture?;
-            let track = capture.track();
-            let (timeline, epoch) = writer.open_first_epoch(track, capture.started_at())?;
-            writer.start_track(track, &epoch)?;
-            fs.0.log(&format!("start {} 0", track.get()))?;
-            timelines.push(timeline);
-            captures.push(capture);
-        }
-        Ok((captures, timelines, events))
+    /// Opens each track's stream through `starter`, one after another, as
+    /// the recorder runs. If one doesn't start, the others are stopped and
+    /// its error returned.
+    fn start_streams(starter: TrackStarter) -> Result<Vec<Capture<PipeWireStream>>, CaptureError> {
+        starter.start(&PipeWireBackend).into_iter().collect()
     }
 
     /// A running `PipeWire` stream.
@@ -1019,12 +1012,13 @@ mod linux {
         Option<io::Error>,
     );
 
-    /// Records until every capture stops, handing finished journals to the
-    /// publisher and logging audio lost before the journal. A track's
-    /// stream failing fails the run, once the others have stopped.
+    /// Records until every capture stops, each track joining as its stream
+    /// starts, handing finished journals to the publisher, logging each
+    /// track's start at its first epoch and audio lost before the journal.
+    /// A track's stream failing fails the run, once the others have
+    /// stopped.
     fn record(
         mut writer: SessionWriter<TapFs>,
-        mut timelines: Vec<TrackTimeline>,
         events: &CaptureReceiver,
         to_publish: &mpsc::Sender<Vec<FinishedJournal>>,
         fs: &TapFs,
@@ -1033,8 +1027,19 @@ mod linux {
         let mut failures = 0_usize;
         let mut unlogged = None;
         let mut failed = None;
-        let result = record_tracks(&mut writer, &mut timelines, events, &mut |_, e| {
+        let mut joined = BTreeSet::new();
+        let result = record_tracks(&mut writer, &mut [], events, &mut |track, e| {
             let logged = match e {
+                // A track's first epoch is the one it joined in.
+                RecorderEvent::Epoch(epoch) if track.is_some_and(|t| joined.insert(t)) => {
+                    fs.0.log(&format!(
+                        "start {} {} {} {}",
+                        track.map_or(0, TrackId::get),
+                        epoch.first_sample().get(),
+                        epoch.id().get(),
+                        nanos(epoch.start())
+                    ))
+                }
                 RecorderEvent::Finished(j) => {
                     let _ = to_publish.send(j);
                     Ok(())
@@ -1123,6 +1128,9 @@ mod linux {
     #[derive(Debug, Default)]
     struct TrackLog {
         durable: u64,
+        /// (first sample, epoch, start ns) of the epoch the track joined
+        /// the recorder in, if it joined before the run ended.
+        joined: Option<(u64, u64, u64)>,
         /// (epoch, start, end, sha256 hex)
         rows: Vec<(u64, u64, u64, String)>,
         /// (t, end of the first frame)
@@ -1148,7 +1156,8 @@ mod linux {
 
     #[derive(Debug, Default)]
     struct Promised {
-        /// Each track recorded, from its `start` line.
+        /// Each track asked for, from its first line: its `start` once it
+        /// joined, or its `stop` at a crash before then.
         tracks: BTreeMap<u32, TrackLog>,
         /// The crash point, as `op:kind:class`.
         stop: Option<String>,
@@ -1182,7 +1191,7 @@ mod linux {
             let id = || -> Res<u32> { Ok(u32::try_from(n(1)?)?) };
             match w.first().copied() {
                 Some("start") => {
-                    p.tracks.entry(id()?).or_default();
+                    p.tracks.entry(id()?).or_default().joined = Some((n(2)?, n(3)?, n(4)?));
                 }
                 Some("first") => p.tracks.entry(id()?).or_default().first = Some((n(2)?, n(3)?)),
                 Some("sync") => {
@@ -1483,6 +1492,7 @@ mod linux {
             ends.insert(track, end);
         }
         rows_kept(session, promised, &after)?;
+        first_epochs(promised, &after)?;
 
         let second = salvage(&mut SessionStore::new(ours, &mut *store), length)?;
         if second != Published::default() || Observed::read(session, store)? != after {
@@ -1571,7 +1581,7 @@ mod linux {
         let syncs: usize = promised.tracks.values().map(|t| t.syncs.len()).sum();
         let ballast = ballast_report(promised);
         Ok(format!(
-            "stop={} tracks={} durable={durable_min} recovered={recovered_min} loss_ms={:.1} \
+            "stop={} tracks={} joined={} durable={durable_min} recovered={recovered_min} loss_ms={:.1} \
              loss_delivered_ms={:.1} beyond_durable_ms={:.1} lag_max_ms={:.1} \
              delivered_lag_max_ms={:.1} wall_lag_max_ms={:.1} rotation_lag_max_ms={:.1} \
              lag_by_track={} past_bound={}/{} past_bound_fsyncs={} disk={} syncs={syncs} \
@@ -1579,6 +1589,11 @@ mod linux {
              ballast={ballast} state={}",
             promised.stop.as_deref().unwrap_or("none"),
             promised.tracks.len(),
+            promised
+                .tracks
+                .values()
+                .filter(|t| t.joined.is_some())
+                .count(),
             ms(loss),
             ms(loss_delivered),
             ms(beyond),
@@ -1729,6 +1744,46 @@ mod linux {
             .find(|p| !named.contains(*p) && **p != marks)
         {
             return Err(format!("a file without a row: {}", orphan.display()).into());
+        }
+        Ok(())
+    }
+
+    /// Each track that joined the recorder did so in the epoch its log
+    /// names: that epoch opened at the track's first sample, no later than
+    /// its first frame was written (it's timed from when that audio was
+    /// captured), and the row holding that sample carries it.
+    fn first_epochs(promised: &Promised, after: &Observed) -> Res<()> {
+        for (&track, log) in &promised.tracks {
+            let Some((first_sample, epoch, start)) = log.joined else {
+                continue;
+            };
+            if first_sample != 0 {
+                return Err(
+                    format!("track {track} joined at sample {first_sample}, not at 0").into(),
+                );
+            }
+            if let Some((written, _)) = log.first
+                && start > written
+            {
+                return Err(format!(
+                    "track {track}'s first epoch starts {:.1} ms after its first frame was written",
+                    ms(samples_since(written, start))
+                )
+                .into());
+            }
+            let first_row = after
+                .rows
+                .iter()
+                .find(|r| r.track().get() == track && r.range().start().get() == first_sample);
+            if let Some(row) = first_row
+                && u64::from(row.epoch().get()) != epoch
+            {
+                return Err(format!(
+                    "track {track}'s first row is in epoch {}, but it joined in epoch {epoch}",
+                    row.epoch().get()
+                )
+                .into());
+            }
         }
         Ok(())
     }
