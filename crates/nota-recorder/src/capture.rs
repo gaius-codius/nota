@@ -199,8 +199,8 @@ mod detectors;
 mod pipewire;
 mod queue;
 // The route is followed by the PipeWire backend's watch; other platforms
-// have no backend yet.
-#[cfg(any(target_os = "linux", test))]
+// have no backend yet, and nothing there would use it.
+#[cfg(target_os = "linux")]
 mod route;
 #[cfg(test)]
 mod stop_tests;
