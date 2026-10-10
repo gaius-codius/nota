@@ -923,7 +923,7 @@ mod tests {
 
     /// A reopening stamped well before the old audio's end, as `PipeWire`
     /// stamps a new device's first buffer, starts at that end, late by the
-    /// overlap, with no gap; where open_epoch refuses it.
+    /// overlap, with no gap; where `open_epoch` refuses it.
     #[test]
     fn a_reopening_that_overlaps_starts_where_the_old_audio_ends() {
         let mut timeline = TrackTimeline::new(TrackId::new(0));

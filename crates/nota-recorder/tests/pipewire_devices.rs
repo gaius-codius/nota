@@ -573,8 +573,9 @@ mod linux {
             if wanted(&devices) {
                 return devices;
             }
+            // Each snapshot waits on the server's round trip, which paces
+            // the loop.
             assert!(clock.now() < until, "{what}: {devices:#?}");
-            thread::sleep(Duration::from_millis(100));
         }
     }
 
