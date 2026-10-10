@@ -610,8 +610,9 @@ fn the_first_track_records_while_the_second_stream_is_still_opening() {
     let starting = thread::spawn(move || starter.start(&backend));
     wait_for(&seen, audio_from(MIC, 0));
     // Written to the mic's journal, with the system audio's start still
-    // waiting.
-    assert_eq!(progress[&MIC].now().captured, SampleIndex::new(300));
+    // waiting. The recorder reports the audio before it counts it as
+    // captured, so wait for the count.
+    until_captured(&progress[&MIC], SampleIndex::new(300));
     let journal = read_journal(&fs.read(&dir().join(JournalId::FIRST.file_name())).unwrap());
     assert_eq!(
         journal.header().map(crate::journal::JournalHeader::track),
@@ -888,6 +889,21 @@ fn wait_for(
         if wanted(track, &event) {
             return;
         }
+    }
+}
+
+/// Waits up to 10 s for `progress` to count `captured` as captured.
+fn until_captured(progress: &Progress, captured: SampleIndex) {
+    let clock = nota_core::SystemClock::start().unwrap();
+    while progress.now().captured != captured {
+        assert!(
+            clock.now().elapsed() < Duration::from_secs(10),
+            "captured {:?}, never {captured:?}",
+            progress.now().captured
+        );
+        // A wait on a channel nothing sends on: a pause that isn't a sleep.
+        let (_keep, never) = mpsc::channel::<()>();
+        let _ = never.recv_timeout(Duration::from_millis(1));
     }
 }
 

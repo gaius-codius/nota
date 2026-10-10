@@ -8,7 +8,14 @@
 # failure can't be told apart there, and this file applies to every run.
 # The test asserts the promotion wherever the limit allows SCHED_FIFO, so
 # running it on such a machine (the development machine) checks it.
+#
+# How long the machine has been suspended is read from the kernel's two
+# monotonic clocks, and only a real suspend moves it: on an awake machine,
+# a CI runner's included, a reading of zero can't be told from the real
+# one. The capture tests drive suspends through the fake clock instead.
 exclude_re = [
   "impl .*Debug for PipeWireStream",
   "replace promote_current_thread -> bool with false",
+  "replace <impl Clock for SystemClock>::suspended -> Duration with Default::default\\(\\)",
+  "replace asleep_now -> Duration with Default::default\\(\\)",
 ]

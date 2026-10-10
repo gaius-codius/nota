@@ -1242,12 +1242,9 @@ impl<S: Fs> SessionWriter<S> {
             let block = JournalId::new(id.get().saturating_add(ID_BLOCK));
             wanted.journals_below = after.max(block);
         }
-        let used = wanted
-            .epochs
-            .entry(track)
-            .or_insert(MarkedEpoch::Timed(epoch));
-        if epoch.id > used.id() {
-            *used = MarkedEpoch::Timed(epoch);
+        let marked = MarkedEpoch::Timed(epoch);
+        if marked.supersedes(wanted.epochs.get(&track).copied()) {
+            wanted.epochs.insert(track, marked);
         }
         if wanted != self.marks {
             wanted
@@ -1451,16 +1448,10 @@ impl Earlier {
         self.end = self.end.max(Some(end));
     }
 
-    /// Takes `epoch` as the track's highest if it's above the one known,
-    /// or the same one with its anchor where that was missing.
+    /// Takes `epoch` as the track's highest if it supersedes the one
+    /// known ([`MarkedEpoch::supersedes`]).
     fn raise_epoch(&mut self, epoch: MarkedEpoch) {
-        let higher = match self.epoch {
-            None => true,
-            Some(known) => {
-                epoch.id() > known.id() || (epoch.id() == known.id() && known.anchor().is_none())
-            }
-        };
-        if higher {
+        if epoch.supersedes(self.epoch) {
             self.epoch = Some(epoch);
         }
     }

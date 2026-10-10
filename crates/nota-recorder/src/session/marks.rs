@@ -90,6 +90,16 @@ impl MarkedEpoch {
             Self::Untimed(_) => None,
         }
     }
+
+    /// Whether this epoch, not `known`, is the track's highest: it's
+    /// numbered above it, or it's the same epoch with the anchor `known`
+    /// lacks. An epoch's anchor never changes, so one already timed stays.
+    pub(crate) fn supersedes(self, known: Option<Self>) -> bool {
+        known.is_none_or(|known| {
+            self.id() > known.id()
+                || (self.id() == known.id() && known.anchor().is_none() && self.anchor().is_some())
+        })
+    }
 }
 
 impl Default for Marks {
@@ -303,6 +313,27 @@ mod tests {
             old.encode(),
             "nota session marks 2\njournals-below 64\nepoch 0 3\n"
         );
+    }
+
+    /// An epoch is the track's highest if it's numbered above the known
+    /// one, or the same one with the anchor the known one lacks; never
+    /// lower, and never a second anchor for an epoch already timed.
+    #[test]
+    fn the_highest_epoch_is_the_highest_number_timed_if_it_can_be() {
+        let untimed = |id| MarkedEpoch::Untimed(EpochId::new(id));
+        for (new, known, wins) in [
+            (timed(3, 0, 0), None, true),
+            (timed(4, 0, 0), Some(timed(3, 0, 0)), true),
+            (untimed(4), Some(timed(3, 0, 0)), true),
+            (timed(2, 0, 0), Some(timed(3, 0, 0)), false),
+            (timed(2, 0, 0), Some(untimed(3)), false),
+            (timed(3, 0, 0), Some(untimed(3)), true),
+            (timed(3, 5, 5), Some(timed(3, 0, 0)), false),
+            (untimed(3), Some(timed(3, 0, 0)), false),
+            (untimed(3), Some(untimed(3)), false),
+        ] {
+            assert_eq!(new.supersedes(known), wins, "{new:?} over {known:?}");
+        }
     }
 
     /// A marked epoch's number and anchor are what it was marked with.
