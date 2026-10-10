@@ -144,12 +144,12 @@ fi
 grep -q '^usage: check-weakened.sh BASE \[HEAD\]' <<<"$out" || fail "no usage without arguments: $out"
 
 # The bounds the crash harnesses check carry the tag, so changing one is
-# reported: the loss and lag limits, the real-capture harness's floor for
-# audio playing, and its script's baseline floors. The crash sweeps' floors
-# are too many to name one by one, so the guard checks each file still has
-# at least as many tags as this change gave it, and that the floors of the
-# common shapes (the crash summary's counts, the worst lag reached) have
-# theirs.
+# reported: the loss and lag limits, the capture harnesses' floors for
+# audio playing, and the real-capture script's baseline floors. The crash
+# sweeps' floors are too many to name one by one, so the guard checks each
+# file still has at least as many tags as it was given, and that the floors
+# of the common shapes (the crash summary's counts, the worst lag reached)
+# have theirs, wherever they are.
 repo=$scripts/..
 recorder=$repo/crates/nota-recorder
 tagged() { # what was searched for, the lines found
@@ -160,15 +160,20 @@ tagged() { # what was searched for, the lines found
   done <<<"$2"
 }
 bounds=$(grep -rE --include='*.rs' 'const (MAX_LAG|LAG_LIMIT|LOSS_LIMIT):' "$repo/crates" || true)
-bounds+=$'\n'$(grep -E 'const MIN_PEAK:' "$recorder/examples/real_capture.rs" || true)
+bounds+=$'\n'$(grep -E 'const MIN_PEAK:' "$recorder/examples/real_capture.rs" \
+  "$recorder/examples/capture_wall_time.rs" || true)
 tagged "the crash harnesses' limits" "$bounds"
-(( $(grep -c . <<<"$bounds") >= 5 )) || fail "expected at least 5 tagged bounds: $bounds"
-tagged "the crash sweeps' floors" "$(grep -E \
-  'summary\.(scenario_ops|recovery_crashed|rerun_crashed) >|worst\.get\(\) >=' \
-  "$recorder/src/segment/tests.rs" "$recorder/src/capture/stop_tests.rs" || true)"
-for want in segment/tests.rs:35 capture/stop_tests.rs:6; do
-  file=$recorder/src/${want%:*}
-  got=$(grep -cE '//[[:space:]]*check-bound([^A-Za-z0-9_-]|$)' "$file" || true)
+(( $(grep -c . <<<"$bounds") >= 6 )) || fail "expected at least 6 tagged bounds: $bounds"
+tagged "the crash sweeps' floors" "$(grep -rhE --include='*.rs' \
+  'summary\.(scenario_ops|recovery_crashed|rerun_crashed) >|worst(\.get\(\))? >=' \
+  "$repo/crates" || true)"
+for want in nota-recorder/src/segment/tests.rs:35 nota-recorder/src/capture/stop_tests.rs:6 \
+  nota-recorder/src/journal/tests.rs:6 nota-recorder/src/segment/tests/epochs.rs:3 \
+  nota-recorder/src/segment/tests/disk_full.rs:6 nota-recorder/src/capture/tests.rs:9 \
+  nota/src/library/kept.rs:1 nota-recorder/examples/capture_wall_time.rs:3; do
+  file=$repo/crates/${want%:*}
+  # Only a tag after code counts: a comment of its own sets no bound.
+  got=$(grep -cE '^[[:space:]]*[^/[:space:]].*//[[:space:]]*check-bound([^A-Za-z0-9_-]|$)' "$file" || true)
   (( got >= ${want#*:} )) || fail "${want%:*} has $got tagged bounds, expected at least ${want#*:}"
 done
 floors=$(grep -E '^min_[a-z_]+=' "$scripts/real-capture-crash.sh" || true)

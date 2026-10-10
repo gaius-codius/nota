@@ -45,11 +45,11 @@ mod linux {
 
     const TRACK: nota_core::TrackId = nota_core::TrackId::new(0);
     /// The drift allowed, in parts per million of the wall time.
-    const PPM: u128 = 1_000;
+    const PPM: u128 = 1_000; // check-bound
     /// Allowed on top: the stream's start-up and its last buffer.
-    const SLACK: Duration = Duration::from_millis(100);
+    const SLACK: Duration = Duration::from_millis(100); // check-bound
     /// The quietest peak that counts as audio playing: -70 dBFS.
-    const MIN_PEAK: i16 = 10;
+    const MIN_PEAK: i16 = 10; // check-bound
 
     pub(super) fn main() -> ExitCode {
         match run() {

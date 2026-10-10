@@ -1507,7 +1507,7 @@ fn audio_a_broken_journal_couldnt_keep_is_never_counted_durable() {
     drop(capture);
     let (writer, result, failed) = recorder.join().unwrap();
     result.unwrap();
-    assert!(failed > 0);
+    assert!(failed > 0); // check-bound
     assert_eq!(writer.durable(MIC), None);
     // All 50 samples moved the track on, and none of them is on disk.
     let positions = progress.now();
@@ -1836,11 +1836,11 @@ fn a_drifting_device_is_retimed_and_reported_past_the_limit() {
     run.result.unwrap();
 
     // Each correction follows straight on from the epoch before it.
-    assert!(run.timeline.epochs().len() > 1);
+    assert!(run.timeline.epochs().len() > 1); // check-bound
     assert!(gap_spans(&run.timeline).is_empty());
     assert!(!epoch_events(&run.reported).is_empty());
     let last = run.timeline.current().copied().unwrap();
-    assert!((last.drift().ppb() - 400_000).abs() <= 2, "{last:?}");
+    assert!((last.drift().ppb() - 400_000).abs() <= 2, "{last:?}"); // check-bound
     let drifted: Vec<Drift> = run
         .reported
         .iter()
@@ -1860,9 +1860,9 @@ fn a_drifting_device_is_retimed_and_reported_past_the_limit() {
     let true_nanos = i128::from(u64::try_from(fast_stamp(end).as_nanos()).unwrap());
     let timed = run.timeline.time_of(SampleIndex::new(end)).unwrap();
     let off = i128::from(timed.as_nanos()) - true_nanos;
-    assert!(off.abs() <= 5_000_000, "{off} ns");
+    assert!(off.abs() <= 5_000_000, "{off} ns"); // check-bound
     let nominal = i128::from(end) * 1_000_000;
-    assert!(nominal - true_nanos > 35_000_000, "{nominal} {true_nanos}");
+    assert!(nominal - true_nanos > 35_000_000, "{nominal} {true_nanos}"); // check-bound
 }
 
 /// A reopening whose first buffer is stamped starts its epoch at the
@@ -1997,7 +1997,7 @@ fn three_hours_at_100_ppm_record_within_20_ms() {
         let end = total - 1;
         let nominal = end * 1_000_000;
         let captured = u64::try_from(stamp_at(end, ppb).as_nanos()).unwrap();
-        assert!(nominal.abs_diff(captured) > 1_000_000_000, "{ppb}");
+        assert!(nominal.abs_diff(captured) > 1_000_000_000, "{ppb}"); // check-bound
     }
 }
 
@@ -2069,7 +2069,7 @@ fn a_loss_epoch_keeps_the_measured_drift() {
         .copied()
         .unwrap();
     // The epoch before was slewing, off the measured drift.
-    assert!((before.drift().ppb() - 400_000).abs() > 1_000, "{before:?}");
-    assert!((opened.drift().ppb() - 400_000).abs() <= 2, "{opened:?}");
+    assert!((before.drift().ppb() - 400_000).abs() > 1_000, "{before:?}"); // check-bound
+    assert!((opened.drift().ppb() - 400_000).abs() <= 2, "{opened:?}"); // check-bound
     assert_eq!(gap_spans(&run.timeline).len(), 1);
 }

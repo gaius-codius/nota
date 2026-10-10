@@ -249,7 +249,7 @@ fn clean_full_run(kind: Where) -> (FakeFs, FullRun) {
     let after = observe(&fs);
     check_after(&run.promised, &after).unwrap_or_else(|e| panic!("{kind:?}: {e}"));
     check_full(&case, &run, &recover_with_room(&fs.copy_disk())).unwrap();
-    assert!(run.promised.rows.len() >= 4, "{:?}", run.promised.rows);
+    assert!(run.promised.rows.len() >= 4, "{:?}", run.promised.rows); // check-bound
     (fs, run)
 }
 
@@ -322,7 +322,7 @@ fn crash_swept(kind: Where, partial: bool) {
     })
     .run()
     .unwrap_or_else(|failure| panic!("{kind:?}: {failure}"));
-    assert!(summary.scenario_ops > 100, "{summary:?}");
+    assert!(summary.scenario_ops > 100, "{summary:?}"); // check-bound
 }
 
 #[test]
@@ -351,7 +351,7 @@ fn enospc_at_any_operation_frees_the_ballast_and_loses_nothing_promised() {
     let rounds = 9;
     let clean = FakeFs::with_dirs([session(), db(), data()]);
     let whole = record_rounds(&clean, capacity, Some(BALLAST), rounds);
-    assert!(whole.promised.rows.len() >= 4, "{:?}", whole.promised.rows);
+    assert!(whole.promised.rows.len() >= 4, "{:?}", whole.promised.rows); // check-bound
     assert_eq!(whole.full, None);
     let ops = clean.attempted();
     let mut kinds = BTreeSet::new();
@@ -386,8 +386,9 @@ fn enospc_at_any_operation_frees_the_ballast_and_loses_nothing_promised() {
                 .unwrap_or_else(|e| panic!("op {at}, {outcome:?}: {e}"));
         }
     }
-    for kind in [Where::Journal, Where::Flac, Where::Row, Where::Marks] {
-        assert!(kinds.contains(&kind), "{kinds:?}");
+    let must_reach = [Where::Journal, Where::Flac, Where::Row, Where::Marks]; // check-bound
+    for kind in must_reach {
+        assert!(kinds.contains(&kind), "{kinds:?}"); // check-bound
     }
 }
 
@@ -526,7 +527,7 @@ fn startup_salvage_on_a_full_disk_crashed_anywhere_keeps_all_durable_audio() {
     let probe = old.fs.copy_disk();
     startup_salvage(&probe).published.unwrap();
     let operations = probe.attempted();
-    assert!(operations > 30, "{operations}");
+    assert!(operations > 30, "{operations}"); // check-bound
     let settled = observe(&probe);
     check_after(&old.promised, &settled).unwrap();
     // Crash both the first attempt and its reserve-backed retry at each operation.
