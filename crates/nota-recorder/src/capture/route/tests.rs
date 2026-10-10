@@ -533,3 +533,56 @@ fn a_default_value_at_the_limit_is_read() {
     assert_eq!(value.len(), MAX_DEFAULT_VALUE);
     assert_eq!(default_name(&value), Some(name));
 }
+
+/// Setup's list has the sinks and the sources apart, each by description
+/// then name, the defaults by name, and leaves duplex nodes out.
+#[test]
+fn the_graph_lists_its_sinks_and_sources() {
+    let mut graph = Graph::default();
+    let nodes = [
+        (1, sink("tv", "TV")),
+        (2, sink("spk-b", "Speakers")),
+        (3, sink("spk-a", "Speakers")),
+        (4, source("seiren", "Seiren Mini")),
+        (
+            5,
+            Node {
+                name: "both".to_owned(),
+                description: "Duplex".to_owned(),
+                class: Class::Other,
+            },
+        ),
+    ];
+    for (id, node) in nodes {
+        graph.apply(GraphEvent::Added { id, node });
+    }
+    graph.apply(default(Class::Sink, "spk-a"));
+    graph.apply(default(Class::Source, "seiren"));
+    let listed = |devices: &[Device]| {
+        devices
+            .iter()
+            .map(|d| (d.name.clone(), d.description.clone()))
+            .collect::<Vec<_>>()
+    };
+    let devices = graph.devices();
+    assert_eq!(
+        listed(&devices.outputs),
+        [
+            ("spk-a".to_owned(), "Speakers".to_owned()),
+            ("spk-b".to_owned(), "Speakers".to_owned()),
+            ("tv".to_owned(), "TV".to_owned()),
+        ]
+    );
+    assert_eq!(
+        listed(&devices.inputs),
+        [("seiren".to_owned(), "Seiren Mini".to_owned())]
+    );
+    assert_eq!(devices.default_output.as_deref(), Some("spk-a"));
+    assert_eq!(devices.default_input.as_deref(), Some("seiren"));
+}
+
+/// A graph with nothing in it lists nothing and has no defaults.
+#[test]
+fn an_empty_graph_lists_nothing() {
+    assert_eq!(Graph::default().devices(), Devices::default());
+}

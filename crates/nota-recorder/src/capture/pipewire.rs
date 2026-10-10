@@ -38,7 +38,7 @@ use thread_priority::{
     set_thread_priority_and_policy, thread_native_id,
 };
 
-use super::{CaptureBackend, CaptureError, CaptureNotice, CaptureSender, Source};
+use super::{CaptureBackend, CaptureError, CaptureNotice, CaptureSender, Devices, Source};
 
 mod watch;
 
@@ -121,6 +121,10 @@ impl std::fmt::Debug for PipeWireStream {
 
 impl CaptureBackend for PipeWireBackend {
     type Stream = PipeWireStream;
+
+    fn devices(&self) -> Result<Devices, CaptureError> {
+        watch::devices()
+    }
 
     fn start(
         &self,
