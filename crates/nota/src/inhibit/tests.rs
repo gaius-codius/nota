@@ -283,7 +283,10 @@ impl Drop for TestDir {
 }
 
 /// What a lock that arrives late holds: dropping it says so on a channel.
-struct Dropped(Sender<()>);
+struct Dropped(
+    /// Told when the lock is dropped.
+    Sender<()>,
+);
 
 impl Drop for Dropped {
     fn drop(&mut self) {
@@ -306,7 +309,8 @@ fn an_attempt_that_hangs_is_given_up_on() {
     .unwrap_err();
     assert_eq!(
         refused.to_string(),
-        "sleep couldn't be held off: logind didn't answer within less than a second"
+        "sleep couldn't be held off: the system bus or logind didn't answer \
+         within less than a second"
     );
     drop(release);
 }
@@ -322,23 +326,59 @@ fn a_lock_that_arrives_late_is_dropped() {
         let _ = released.recv();
         Ok(SleepLock::new(Dropped(dropped_tx)))
     });
-    assert!(result.is_err());
+    assert_eq!(
+        result.map(|_| ()).unwrap_err().to_string(),
+        "sleep couldn't be held off: the system bus or logind didn't answer \
+         within less than a second"
+    );
     // The start has gone on without it; now the lock arrives.
     release.send(()).unwrap();
     assert_eq!(dropped.recv_timeout(Duration::from_secs(10)), Ok(()));
 }
 
-/// An answer inside the wait is passed on as it is, a lock or a refusal.
+/// A lock that comes inside the wait is the one the attempt took, and
+/// isn't dropped on the way.
 #[cfg(target_os = "linux")]
 #[test]
-fn an_answer_in_time_is_passed_on() {
-    let wait = Duration::from_secs(10);
-    let lock = bounded(wait, || Ok(SleepLock::new(()))).map(|_| ());
-    assert!(lock.is_ok());
-    let refused = bounded(wait, || Err::<(), _>(SleepNotHeld::new("access denied"))).unwrap_err();
+fn a_lock_in_time_is_passed_on() {
+    let (dropped_tx, dropped) = mpsc::channel();
+    let lock = bounded(Duration::from_secs(10), move || {
+        Ok(SleepLock::new(Dropped(dropped_tx)))
+    })
+    .map_err(|e| e.to_string())
+    .unwrap();
+    // The lock is in hand and nothing has dropped it.
+    assert_eq!(dropped.try_recv(), Err(mpsc::TryRecvError::Empty));
+    drop(lock);
+    assert_eq!(dropped.try_recv(), Ok(()));
+}
+
+/// A refusal that comes inside the wait is passed on as it was said.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_refusal_in_time_is_passed_on() {
+    let refused = bounded(Duration::from_secs(10), || {
+        Err::<(), _>(SleepNotHeld::new("access denied"))
+    })
+    .unwrap_err();
     assert_eq!(
         refused.to_string(),
         "sleep couldn't be held off: access denied"
+    );
+}
+
+/// An attempt that dies without an answer is a refusal, not a wait for
+/// the timeout.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_attempt_that_dies_is_a_refusal() {
+    let refused = bounded(Duration::from_secs(10), || -> Result<(), SleepNotHeld> {
+        panic!("the attempt died")
+    })
+    .unwrap_err();
+    assert_eq!(
+        refused.to_string(),
+        "sleep couldn't be held off: the request to logind stopped early"
     );
 }
 
@@ -364,8 +404,28 @@ fn a_bus_that_only_accepts_is_given_up_on() {
     .unwrap_err();
     assert_eq!(
         refused.to_string(),
-        "sleep couldn't be held off: logind didn't answer within less than a second"
+        "sleep couldn't be held off: the system bus or logind didn't answer \
+         within less than a second"
     );
     drop(close_it);
     silent.join().unwrap();
+}
+
+/// Logind's reply holds the lock as its first item, a file descriptor;
+/// anything else is no lock, and says so.
+#[cfg(target_os = "linux")]
+#[test]
+fn only_a_file_descriptor_in_the_reply_is_a_lock() {
+    use dbus::{MessageItem, OwnedFd};
+    use std::os::fd::IntoRawFd;
+
+    let descriptor = || OwnedFd::new(std::fs::File::open("/dev/null").unwrap().into_raw_fd());
+    assert!(lock_in(vec![MessageItem::UnixFd(descriptor())]).is_ok());
+    for reply in [vec![], vec![MessageItem::Str("block".to_owned())]] {
+        let refused = lock_in(reply).map(|_| ()).unwrap_err();
+        assert_eq!(
+            refused.to_string(),
+            "sleep couldn't be held off: logind gave no lock"
+        );
+    }
 }

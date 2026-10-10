@@ -163,8 +163,10 @@ pub(crate) struct SystemLogind;
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The longest the `Inhibit` call waits for logind's answer, in the
-/// milliseconds D-Bus takes. It matches [`ATTEMPT_TIMEOUT`], so a late
-/// thread ends itself soon after the start has given up on it.
+/// milliseconds D-Bus takes: the same as [`ATTEMPT_TIMEOUT`], so a call
+/// that hangs ends its thread about when the start gives up on it. A
+/// connection that hangs holds its thread for libdbus's own wait, about
+/// 25 s, and the thread then ends on its own.
 #[cfg(target_os = "linux")]
 const CALL_TIMEOUT_MS: i32 = 2_000;
 
@@ -207,7 +209,7 @@ fn bounded<T: Send + 'static>(
     match given.recv_timeout(wait) {
         Ok(answer) => answer,
         Err(RecvTimeoutError::Timeout) => Err(SleepNotHeld::new(format!(
-            "logind didn't answer within {}",
+            "the system bus or logind didn't answer within {}",
             lasted(wait)
         ))),
         Err(RecvTimeoutError::Disconnected) => {
@@ -248,8 +250,19 @@ fn take_lock(bus: &Bus) -> Result<SleepLock, SleepNotHeld> {
     let reply = connection
         .send_with_reply_and_block(call, CALL_TIMEOUT_MS)
         .map_err(|e| SleepNotHeld::from_dbus(&e))?;
-    match reply.get_items().into_iter().next() {
-        Some(MessageItem::UnixFd(lock)) => Ok(SleepLock::new(lock)),
+    lock_in(reply.get_items())
+}
+
+/// The lock in logind's reply to `Inhibit`: the file descriptor it
+/// returns first.
+///
+/// # Errors
+///
+/// If the reply has no descriptor to start with.
+#[cfg(target_os = "linux")]
+fn lock_in(reply: Vec<dbus::MessageItem>) -> Result<SleepLock, SleepNotHeld> {
+    match reply.into_iter().next() {
+        Some(dbus::MessageItem::UnixFd(lock)) => Ok(SleepLock::new(lock)),
         _ => Err(SleepNotHeld::new("logind gave no lock")),
     }
 }
