@@ -187,8 +187,8 @@ mod fake {
     /// `synchronous=FULL`, and that a simulated crash can interrupt. Like
     /// SQLite, it keeps rows by session, and refuses a row whose samples
     /// overlap another row of the same session and track. Epochs' anchors
-    /// are files too, committed the same way, and refused if the epoch has
-    /// another.
+    /// are files too, committed the same way; an epoch stored already keeps
+    /// the anchor it has.
     ///
     /// It writes through any [`Fs`], a [`FakeFs`] by default: through one
     /// that wraps a fake (a [`WatchedFs`](crate::disk::WatchedFs), say),
@@ -249,8 +249,9 @@ mod fake {
             Ok(epochs)
         }
 
-        /// Commits `track`'s `anchor` for `session`: as it is if it's
-        /// there, refused if another is.
+        /// Commits `track`'s `anchor` for `session`, unless the epoch is
+        /// stored already: it keeps the anchor it has, as SQLite's store
+        /// does through [`SegmentStore::insert`].
         fn insert_epoch(
             &self,
             session: SessionId,
@@ -263,19 +264,13 @@ mod fake {
                 track.get(),
                 anchor.id.get()
             ));
-            let bytes = encode_epoch(session, track, anchor);
             match self.fs.read(&path) {
-                Ok(stored) if stored == bytes => return Ok(()),
-                Ok(_) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::AlreadyExists,
-                        "the epoch is stored with another anchor",
-                    ));
+                Ok(_) => Ok(()),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    self.commit(&path, &encode_epoch(session, track, anchor))
                 }
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e),
+                Err(e) => Err(e),
             }
-            self.commit(&path, &bytes)
         }
 
         /// Writes `bytes` to `path` as a commit: temp file, fsync, rename,
@@ -420,12 +415,7 @@ mod fake {
 
         fn insert(&mut self, session: SessionId, segment: &DurableSegment) -> io::Result<()> {
             if let Some(anchor) = segment.anchor() {
-                match self.insert_epoch(session, segment.row().track(), anchor) {
-                    // As SQLite's store: the epoch keeps the anchor it has,
-                    // and the row still commits.
-                    Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-                    other => other?,
-                }
+                self.insert_epoch(session, segment.row().track(), anchor)?;
             }
             let row = segment.row();
             let path = self.row_path(session, row);
