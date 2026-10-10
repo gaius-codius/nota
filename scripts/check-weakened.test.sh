@@ -176,6 +176,117 @@ for want in nota-recorder/src/segment/tests.rs:35 nota-recorder/src/capture/stop
   got=$(grep -cE '^[[:space:]]*[^/[:space:]].*//[[:space:]]*check-bound([^A-Za-z0-9_-]|$)' "$file" || true)
   (( got >= ${want#*:} )) || fail "${want%:*} has $got tagged bounds, expected at least ${want#*:}"
 done
+
+# Every crash or seed sweep in these files reports into the sweep helper
+# (`nota-recorder/src/fs/sweep.rs`), whose floor fails a sweep that reached
+# too little. A sweep is a function that crashes, fails or stops the fake
+# filesystem at a point a `for` loop varies, or crashes it with a seed the
+# loop varies, or that runs a crash test expecting it to pass. One that
+# never names the helper fails here, so a new sweep can't be added without
+# a floor; the helper fails at run time one that names it but checks no
+# floor. A loop over a list of outcomes written out in full isn't a sweep:
+# nothing in it can go unreached.
+# shellcheck disable=SC2016 # the awk program's `$` aren't the shell's.
+bypassing() { # files; prints each sweep that doesn't use the helper
+  awk '
+    function flush() {
+      if (name != "" && (sweep || (runs && !negative)) && !helper)
+        printf "%s:%d: %s sweeps without the helper\n", FILENAME, start, name
+    }
+    /^[[:space:]]*(pub(\([a-z]+\))? )?fn [a-z_0-9]+/ {
+      flush()
+      match($0, /fn [a-z_0-9]+/)
+      name = substr($0, RSTART + 3, RLENGTH - 3)
+      start = FNR; sweep = 0; runs = 0; negative = 0; helper = 0; loops = 0
+    }
+    {
+      # Braces and markers in strings and comments are not code.
+      code = $0
+      gsub(/"([^"\\]|\\.)*"/, "\"\"", code)
+      sub(/\/\/.*/, "", code)
+      if (code ~ /^[[:space:]]*for .* in /) {
+        loops++; at[loops] = depth; opened[loops] = 0
+      }
+      if (loops && code ~ /crash_after\(|fail_after\(|(fail_at|stop_after_ops): Some\([a-z_]|Partial \{ seed(: [a-z_][a-z_0-9]*)? \}/)
+        sweep = 1
+      # A crash test run, its result unwrapped (the chain may go on to
+      # the next line). The run of a sync job returns no result to unwrap.
+      # (No apostrophes in this program: it is quoted.)
+      if (code ~ /\.run\(\)[[:space:]]*($|\.unwrap)/) runs = 1
+      if (code ~ /\.unwrap_err\(\)/) negative = 1
+      if (code ~ /Sweep|\.(scenario|recovery|reruns)\(\)\.(interrupted|saw)_/) helper = 1
+      depth += gsub(/\{/, "{", code) - gsub(/\}/, "}", code)
+      # A loop ends when its body closes; its head may span lines.
+      while (loops) {
+        if (depth > at[loops]) opened[loops] = 1
+        if (!opened[loops] || depth > at[loops]) break
+        loops--
+      }
+    }
+    ENDFILE { flush(); name = ""; depth = 0 }
+  ' "$@"
+}
+cat >"$dir/sweeps.rs" <<'RUST'
+fn bypasses() {
+    for at in 0..ops {
+        let fs = FakeFs::new();
+        fs.crash_after(at);
+    }
+}
+fn seeds_without() {
+    for seed in 0..9 {
+        check(fs.crash(CrashOutcome::Partial { seed }), "{x}");
+    }
+}
+fn runs_without() {
+    let summary = CrashTest::new(a, b, c)
+        .run()
+        .unwrap();
+    let done = job.run();
+}
+fn runs_a_job() {
+    let done = job.run();
+}
+fn uses_it() {
+    let mut sweep = Sweep::new();
+    for at in 0..ops {
+        fs.fail_after(at, kind);
+        sweep.interrupted();
+    }
+    sweep.interrupted_at_least(3); // check-bound
+}
+fn floors_a_crash_test() {
+    let summary = CrashTest::new(a, b, c).run().unwrap();
+    summary.scenario().interrupted_more_than(40); // check-bound
+}
+fn expects_a_failure() {
+    let failure = CrashTest::new(a, b, c).run().unwrap_err();
+}
+fn lists_its_outcomes() {
+    for outcome in [
+        CrashOutcome::Partial { seed: 1 },
+        CrashOutcome::KeepAll,
+    ] {
+        check(fs.crash(outcome));
+    }
+    fs.crash_after(3);
+}
+RUST
+got=$(bypassing "$dir/sweeps.rs" | sed 's/^[^:]*://')
+want='1: bypasses sweeps without the helper
+7: seeds_without sweeps without the helper
+12: runs_without sweeps without the helper'
+[[ $got == "$want" ]] || fail "the sweep guard found the wrong sweeps: $got"
+swept=(nota-recorder/src/journal/tests.rs nota-recorder/src/segment/tests.rs
+  nota-recorder/src/segment/tests/epochs.rs nota-recorder/src/segment/tests/disk_full.rs
+  nota-recorder/src/capture/stop_tests.rs nota/src/library/kept.rs)
+found=$(cd "$repo/crates" && bypassing "${swept[@]}")
+[[ -z $found ]] || fail "a sweep without the helper's floor:"$'\n'"$found"
+# Each floor the helper checks is a bound, wherever it is.
+tagged "the sweeps' floors" "$(grep -rhE --include='*.rs' \
+  '\.(interrupted_more_than|interrupted_at_least|saw_more_than|saw_each)\(' \
+  --exclude=sweep.rs "$repo/crates" || true)"
+
 floors=$(grep -E '^min_[a-z_]+=' "$scripts/real-capture-crash.sh" || true)
 [[ $(grep -c . <<<"$floors") -eq 2 ]] || fail "expected the script's 2 baseline floors: $floors"
 while IFS= read -r line; do

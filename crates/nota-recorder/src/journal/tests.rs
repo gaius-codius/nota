@@ -17,6 +17,7 @@ use super::format::{FRAME_HEADER_LEN, HEADER_LEN, MAX_FRAME_SAMPLES, encode_fram
 use super::*;
 use crate::fs::crash::{CrashCase, CrashTest};
 use crate::fs::fake::{CrashOutcome, FakeFs, Op};
+use crate::fs::sweep::Sweep;
 use crate::fs::{Fs, FsFile, StdFs};
 use crate::test_dir::TestDir;
 
@@ -345,7 +346,7 @@ fn crash_after_every_operation_recovers_to_the_durable_position() {
     assert!(worst.get() >= SampleCount::new(13_000), "{:?}", worst.get()); // check-bound
     // Not vacuous: dozens of writes and several syncs of each journal, each
     // crashed at.
-    assert!(summary.scenario_ops > 40, "{summary:?}"); // check-bound
+    summary.scenario().interrupted_more_than(40); // check-bound
     let clean = FakeFs::with_dirs(["/session"]);
     let promised = record(&clean);
     for (id, track, _) in RECORDED {
@@ -564,12 +565,15 @@ fn a_long_append_never_leaves_more_than_the_sync_interval_unsynced() {
     // One append of ten seconds, crashed after every operation: whatever
     // the writer reports, captured is never more than the sync interval
     // ahead of durable, and the durable part survives.
+    let mut sweep = Sweep::<()>::new();
     for crash_at in 0..60 {
         let fs = FakeFs::with_dirs(["/session"]);
         let (_clock, dyn_clock) = fake_clock();
         let mut journal = create(&fs, 0, MIC, 0, dyn_clock).unwrap();
         fs.crash_after(crash_at);
-        let done = journal.append(&samples(MIC, 0, 160_000)).is_ok();
+        let appended = journal.append(&samples(MIC, 0, 160_000));
+        sweep.result(&appended);
+        let done = appended.is_ok();
         let captured = journal.captured();
         let durable = durable_end(&journal);
         let lag = captured.checked_count_since(durable).unwrap();
@@ -582,6 +586,9 @@ fn a_long_append_never_leaves_more_than_the_sync_interval_unsynced() {
             assert_eq!(captured, SampleIndex::new(160_000));
         }
     }
+    // Not vacuous: the append takes 35 operations, and a crash after each
+    // one cut it short.
+    sweep.interrupted_at_least(35); // check-bound
 }
 
 #[test]
@@ -721,14 +728,20 @@ fn torn_frame_with_a_corrupt_byte_fails_its_crc() {
 #[test]
 fn partial_crashes_of_the_unsynced_frame_never_misread() {
     let (fs, _synced_len, _full) = journal_with_unsynced_frame();
-    for seed in 0..200 {
+    let mut sweep = Sweep::new();
+    for seed in 0..2_000 {
         let after = fs.crash(CrashOutcome::Partial { seed });
         let read = read_journal(&after.read(&journal_path(0)).unwrap());
         let n = read.frames().len();
         assert!(n == 3 || n == 4, "seed {seed}: {n} frames");
         let (_, got) = read.audio().unwrap();
         assert_eq!(got, samples(MIC, 0, 100 * n as u64), "seed {seed}");
+        sweep.saw(n);
     }
+    // Not vacuous: some seeds kept the whole unsynced frame, and some lost
+    // part of it. Keeping all of it takes every byte, none zeroed, which
+    // only 3 of these 2,000 seeds do: 200 seeds never kept it.
+    sweep.saw_each([3, 4]); // check-bound
 }
 
 #[test]
@@ -1280,15 +1293,18 @@ fn create_needs_a_directory() {
 fn a_failed_create_removes_its_file_so_a_retry_works() {
     // Fail each step after the file exists: the header write, its fsync,
     // the directory fsync.
+    let mut sweep = Sweep::<()>::new();
     for step in 1..=3 {
         let fs = FakeFs::with_dirs(["/session"]);
         let (_clock, dyn_clock) = fake_clock();
         fs.fail_after(step, io::ErrorKind::StorageFull);
         let first = create(&fs, 0, MIC, 0, Arc::clone(&dyn_clock));
+        sweep.result(&first);
         assert!(matches!(first, Err(JournalError::Io(_))), "step {step}");
         assert_eq!(fs.paths(), Vec::<PathBuf>::new(), "step {step}");
         create(&fs, 0, MIC, 0, dyn_clock).unwrap();
     }
+    sweep.interrupted_at_least(3); // check-bound
 }
 
 #[test]

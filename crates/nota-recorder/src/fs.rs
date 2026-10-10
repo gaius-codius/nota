@@ -57,6 +57,8 @@ pub mod crash;
 #[cfg(any(test, feature = "fake-fs"))]
 pub mod fake;
 mod real;
+#[cfg(any(test, feature = "fake-fs"))]
+pub mod sweep;
 
 pub use real::{StdFile, StdFs, StdLock, StdSyncer};
 
