@@ -84,13 +84,29 @@
 //! - **Epoch ids:** each track's epochs must be higher than any it has
 //!   journaled ([`SessionWriter::highest_epoch`]), so two recordings never
 //!   share one.
+//! - **Session time:** a track's first epoch must start no earlier than
+//!   its earlier audio ends ([`SessionWriter::earlier_end`]), so the new
+//!   recording comes after the old one. Start the session's clock at
+//!   [`SessionWriter::resume_from`], and each track's timeline from
+//!   [`SessionWriter::resumed_timeline`], which carries on from the newest
+//!   epoch the marks keep.
+//!
+//! # Epoch anchors
+//!
+//! Every journal's header holds its epoch's anchor, and the marks hold each
+//! track's newest, both written before the epoch's first sample. Salvage
+//! times any journal it finds by its header; a resumed session times its
+//! tracks on from the marks.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use nota_core::{Clock, EpochId, SampleCount, SampleIndex, SampleRate, SessionId, TrackId};
+use nota_core::{
+    Clock, Epoch, EpochAnchor, EpochError, EpochId, SampleCount, SampleIndex, SampleRate,
+    SessionId, SessionTime, TrackId, TrackTimeline,
+};
 
 use crate::fs::{Fs, FsFile};
 use crate::journal::format::frames_after;
@@ -106,9 +122,9 @@ mod syncs;
 use handle::InUse;
 pub(crate) use handle::Rows;
 pub use handle::{SessionDir, SessionLock, SessionStore, Use};
-use marks::Marks;
 pub(crate) use marks::is_temp as is_marks_temp;
 pub use marks::{BadMarks, FILE_NAME as MARKS_FILE_NAME};
+use marks::{MarkedEpoch, Marks};
 pub use syncs::Syncing;
 use syncs::TrackSyncs;
 
@@ -179,6 +195,23 @@ pub enum SessionError {
         /// The epoch asked for.
         epoch: EpochId,
     },
+    /// A track started, or moved to an epoch, that doesn't fit it: at
+    /// another rate than the writer's, or, for a new epoch, not starting at
+    /// the track's next sample.
+    EpochMisplaced {
+        /// The track.
+        track: TrackId,
+        /// The epoch asked for.
+        epoch: EpochId,
+    },
+    /// A track started in an epoch that starts before its earlier
+    /// recordings' audio ends: the session's clock wasn't resumed.
+    TimeWentBack {
+        /// The track.
+        track: TrackId,
+        /// When its earlier audio ends.
+        earlier_end: SessionTime,
+    },
     /// A track started before the end of what it already holds.
     Covered {
         /// The track.
@@ -211,6 +244,18 @@ impl fmt::Display for SessionError {
                 "track {} has already used epoch {} or a later one",
                 track.get(),
                 epoch.get()
+            ),
+            Self::EpochMisplaced { track, epoch } => write!(
+                f,
+                "epoch {} doesn't fit track {}: another rate, or not at its next sample",
+                epoch.get(),
+                track.get()
+            ),
+            Self::TimeWentBack { track, earlier_end } => write!(
+                f,
+                "track {} would start before its earlier audio ends at {} ns",
+                track.get(),
+                earlier_end.as_nanos()
             ),
             Self::Covered { track, first_free } => write!(
                 f,
@@ -294,9 +339,8 @@ impl std::error::Error for FinishError {
 
 #[derive(Debug)]
 struct Track<F: FsFile> {
-    epoch: EpochId,
-    /// The first sample of `epoch`.
-    epoch_start: SampleIndex,
+    /// The epoch the track records in.
+    epoch: Epoch,
     /// The next sample to record.
     next: SampleIndex,
     /// The journal being written.
@@ -352,8 +396,8 @@ pub struct SessionWriter<S: Fs> {
 struct Earlier {
     /// The first sample after every journal and published segment.
     end: Option<SampleIndex>,
-    /// The highest epoch journaled.
-    epoch: Option<EpochId>,
+    /// The highest epoch journaled, with its anchor if one was kept.
+    epoch: Option<MarkedEpoch>,
 }
 
 impl<S: Fs> SessionWriter<S> {
@@ -407,7 +451,7 @@ impl<S: Fs> SessionWriter<S> {
         };
         let mut earlier: BTreeMap<TrackId, Earlier> = BTreeMap::new();
         for (&track, &epoch) in &marks.epochs {
-            earlier.entry(track).or_default().epoch = Some(epoch);
+            earlier.entry(track).or_default().raise_epoch(epoch);
         }
         for (track, end) in crate::segment::published_ends(&fs, &dir, &paths, length) {
             earlier.entry(track).or_default().raise_end(end);
@@ -433,7 +477,11 @@ impl<S: Fs> SessionWriter<S> {
             // can publish, so nothing new can collide with it.
             if let Some(header) = read.header() {
                 let held = earlier.entry(header.track()).or_default();
-                held.epoch = held.epoch.max(Some(header.epoch()));
+                held.raise_epoch(
+                    header
+                        .anchor()
+                        .map_or(MarkedEpoch::Untimed(header.epoch()), MarkedEpoch::Timed),
+                );
                 if let Some(range) = read.range() {
                     held.raise_end(range.end());
                 }
@@ -488,36 +536,99 @@ impl<S: Fs> SessionWriter<S> {
     /// if any: it must start in a higher one.
     #[must_use]
     pub fn highest_epoch(&self, track: TrackId) -> Option<EpochId> {
-        self.earlier.get(&track).and_then(|e| e.epoch)
+        self.earlier
+            .get(&track)
+            .and_then(|e| e.epoch)
+            .map(MarkedEpoch::id)
     }
 
-    /// Starts `track` in `epoch`; its first sample will be `at`. With
+    /// The session time `track`'s earlier recordings end at: where the
+    /// audio before [`Self::first_free_sample`] ends, timed by the newest
+    /// epoch's anchor, or that epoch's start if no audio in it was kept.
+    /// `None` if the track has no earlier epoch, or the newest wasn't timed
+    /// (marked by an older nota).
+    #[must_use]
+    pub fn earlier_end(&self, track: TrackId) -> Option<SessionTime> {
+        let anchor = self.earlier.get(&track)?.epoch?.anchor()?;
+        let end = TrackTimeline::rebuild(track, [anchor])
+            .ok()?
+            .time_of(self.first_free_sample(track));
+        Some(end.map_or(anchor.start, |end| end.max(anchor.start)))
+    }
+
+    /// The session time a resumed session's clock starts at: the latest
+    /// [`Self::earlier_end`] of any track, or zero for a new session.
+    #[must_use]
+    pub fn resume_from(&self) -> SessionTime {
+        self.earlier
+            .keys()
+            .filter_map(|&track| self.earlier_end(track))
+            .max()
+            .unwrap_or(SessionTime::ZERO)
+    }
+
+    /// A timeline for `track` to open its first epoch on: one that carries
+    /// on from its newest earlier epoch, so the first is numbered above it
+    /// and starts no earlier than its audio ends. If that epoch's anchor
+    /// wasn't kept, one numbered above it with no earlier epochs; for a
+    /// track with none, a new one.
+    ///
+    /// # Errors
+    ///
+    /// [`EpochError::TooManyEpochs`] if the newest earlier epoch is the
+    /// last [`EpochId`].
+    pub fn resumed_timeline(&self, track: TrackId) -> Result<TrackTimeline, EpochError> {
+        match self.earlier.get(&track).and_then(|e| e.epoch) {
+            Some(MarkedEpoch::Timed(anchor)) => TrackTimeline::rebuild(track, [anchor]),
+            Some(MarkedEpoch::Untimed(id)) => TrackTimeline::starting_after(track, id),
+            None => Ok(TrackTimeline::new(track)),
+        }
+    }
+
+    /// `track`'s timeline as [`Self::resumed_timeline`] gives it, with its
+    /// first epoch in this writer opened `at`, from
+    /// [`Self::first_free_sample`], and that epoch: what
+    /// [`Self::start_track`] takes.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::resumed_timeline`], and as
+    /// [`TrackTimeline::open_epoch`] refuses the epoch: one starting well
+    /// before the track's earlier audio ends.
+    pub fn open_first_epoch(
+        &self,
+        track: TrackId,
+        at: SessionTime,
+    ) -> Result<(TrackTimeline, Epoch), EpochError> {
+        let mut timeline = self.resumed_timeline(track)?;
+        timeline.open_epoch(at, self.first_free_sample(track), self.rate)?;
+        // Just opened, so there's a current epoch.
+        let epoch = timeline
+            .current()
+            .copied()
+            .ok_or(EpochError::TooManyEpochs)?;
+        Ok((timeline, epoch))
+    }
+
+    /// Starts `track` in `epoch`, from its first sample. With
     /// [`Syncing::Auto`], a second track moves every track's fsyncs to
     /// threads.
     ///
     /// # Errors
     ///
     /// [`SessionError::TrackExists`]; [`SessionError::EpochUsed`] unless
-    /// `epoch` is above [`Self::highest_epoch`]; [`SessionError::Covered`]
-    /// if `at` is before [`Self::first_free_sample`]; [`SessionError::Io`]
-    /// if a sync thread can't start (the track isn't started, and tracks
-    /// already moved to threads stay there).
-    pub fn start_track(
-        &mut self,
-        track: TrackId,
-        epoch: EpochId,
-        at: SampleIndex,
-    ) -> Result<(), SessionError> {
+    /// `epoch` is above [`Self::highest_epoch`];
+    /// [`SessionError::EpochMisplaced`] unless it's at the writer's rate;
+    /// [`SessionError::Covered`] if it starts before
+    /// [`Self::first_free_sample`]; [`SessionError::TimeWentBack`] if it
+    /// starts before [`Self::earlier_end`]; [`SessionError::Io`] if a sync
+    /// thread can't start (the track isn't started, and tracks already
+    /// moved to threads stay there).
+    pub fn start_track(&mut self, track: TrackId, epoch: &Epoch) -> Result<(), SessionError> {
         if self.tracks.contains_key(&track) {
             return Err(SessionError::TrackExists(track));
         }
-        if self.highest_epoch(track).is_some_and(|used| epoch <= used) {
-            return Err(SessionError::EpochUsed { track, epoch });
-        }
-        let first_free = self.first_free_sample(track);
-        if at < first_free {
-            return Err(SessionError::Covered { track, first_free });
-        }
+        self.check_first_epoch(track, epoch)?;
         let syncing = match self.syncing {
             Syncing::Auto if !self.tracks.is_empty() => {
                 // A second track: every track's fsyncs move to threads.
@@ -535,15 +646,37 @@ impl<S: Fs> SessionWriter<S> {
         self.tracks.insert(
             track,
             Track {
-                epoch,
-                epoch_start: at,
-                next: at,
+                epoch: *epoch,
+                next: epoch.first_sample(),
                 journal: None,
                 ending: VecDeque::new(),
                 waiting: Vec::new(),
                 syncs,
             },
         );
+        Ok(())
+    }
+
+    /// Whether `epoch` may be `track`'s first in this writer: above the
+    /// epochs it used, at the writer's rate, and after its earlier audio in
+    /// samples and in session time.
+    fn check_first_epoch(&self, track: TrackId, epoch: &Epoch) -> Result<(), SessionError> {
+        let id = epoch.id();
+        if self.highest_epoch(track).is_some_and(|used| id <= used) {
+            return Err(SessionError::EpochUsed { track, epoch: id });
+        }
+        if epoch.rate() != self.rate {
+            return Err(SessionError::EpochMisplaced { track, epoch: id });
+        }
+        let first_free = self.first_free_sample(track);
+        if epoch.first_sample() < first_free {
+            return Err(SessionError::Covered { track, first_free });
+        }
+        if let Some(earlier_end) = self.earlier_end(track)
+            && epoch.start() < earlier_end
+        {
+            return Err(SessionError::TimeWentBack { track, earlier_end });
+        }
         Ok(())
     }
 
@@ -555,26 +688,31 @@ impl<S: Fs> SessionWriter<S> {
         self.tracks.get(&track).map(|state| state.syncs.syncing())
     }
 
-    /// Moves `track` to `epoch` (its stream reopened): its journal ends, and
-    /// the next sample starts a new one. Audio still waiting for an fsync
-    /// is written first, in the old epoch: a journal full while its fsync
-    /// runs is ended, and the rest goes to another journal, so this never
-    /// waits on an fsync.
+    /// Moves `track` to `epoch` (its stream reopened), which starts at the
+    /// track's next sample: its journal ends, and the next sample starts a
+    /// new one. Audio still waiting for an fsync is written first, in the
+    /// old epoch: a journal full while its fsync runs is ended, and the
+    /// rest goes to another journal, so this never waits on an fsync.
     ///
     /// # Errors
     ///
-    /// [`SessionError::UnknownTrack`]; [`SessionError::EpochUsed`], with
-    /// nothing changed, unless `epoch` is above the track's current one;
+    /// With nothing changed: [`SessionError::UnknownTrack`];
+    /// [`SessionError::EpochUsed`] unless `epoch` is above the track's
+    /// current one; [`SessionError::EpochMisplaced`] unless it starts at
+    /// [`Self::next_sample`], at the writer's rate. Otherwise
     /// [`SessionError::Journal`] if the ending journal's last fsync failed
     /// and its replacement failed too.
-    pub fn new_epoch(&mut self, track: TrackId, epoch: EpochId) -> Result<(), SessionError> {
-        let current = self
+    pub fn new_epoch(&mut self, track: TrackId, epoch: &Epoch) -> Result<(), SessionError> {
+        let state = self
             .tracks
             .get(&track)
-            .ok_or(SessionError::UnknownTrack(track))?
-            .epoch;
-        if epoch <= current {
-            return Err(SessionError::EpochUsed { track, epoch });
+            .ok_or(SessionError::UnknownTrack(track))?;
+        let id = epoch.id();
+        if id <= state.epoch.id() {
+            return Err(SessionError::EpochUsed { track, epoch: id });
+        }
+        if epoch.first_sample() != state.next || epoch.rate() != self.rate {
+            return Err(SessionError::EpochMisplaced { track, epoch: id });
         }
         let drained = self.write_out(track);
         let ended = self.end_journal(track);
@@ -582,16 +720,15 @@ impl<S: Fs> SessionWriter<S> {
             .tracks
             .get_mut(&track)
             .ok_or(SessionError::UnknownTrack(track))?;
-        state.epoch = epoch;
-        state.epoch_start = state.next;
+        state.epoch = *epoch;
         drained.and(ended)
     }
 
-    /// The epoch `track` is recording in and the sample it started at, or
-    /// `None` if the track wasn't started.
+    /// The epoch `track` is recording in, or `None` if the track wasn't
+    /// started.
     #[must_use]
-    pub fn epoch(&self, track: TrackId) -> Option<(EpochId, SampleIndex)> {
-        self.tracks.get(&track).map(|t| (t.epoch, t.epoch_start))
+    pub fn epoch(&self, track: TrackId) -> Option<Epoch> {
+        self.tracks.get(&track).map(|t| t.epoch)
     }
 
     /// The rate stamped on every journal this writer starts.
@@ -741,7 +878,7 @@ impl<S: Fs> SessionWriter<S> {
                     usize::try_from(n.get()).unwrap_or(usize::MAX)
                 });
             let Some(open) = state.journal.as_mut() else {
-                let epoch = state.epoch;
+                let epoch = state.epoch.anchor();
                 // No journal: start one here, which is replaced if writing
                 // to it fails. If none can start, this window's waiting
                 // samples are a gap.
@@ -1005,7 +1142,7 @@ impl<S: Fs> SessionWriter<S> {
         &mut self,
         track: TrackId,
         at: SampleIndex,
-        epoch: EpochId,
+        epoch: EpochAnchor,
         replay: Vec<i16>,
         mut held: Vec<FinishedJournal>,
     ) -> Result<Open<S::File>, SessionError> {
@@ -1024,6 +1161,7 @@ impl<S: Fs> SessionWriter<S> {
         let fresh = !held.is_empty();
         let mut open = Open {
             writer,
+            epoch,
             unsynced: replay,
             unsynced_from: at,
             held,
@@ -1040,14 +1178,14 @@ impl<S: Fs> SessionWriter<S> {
         &mut self,
         track: TrackId,
         at: SampleIndex,
-        epoch: EpochId,
+        epoch: EpochAnchor,
         replay: &[i16],
         held: &mut Vec<FinishedJournal>,
     ) -> Result<JournalWriter<S::File>, SessionError> {
         let id = self.next_id.ok_or(SessionError::Overflow)?;
         self.mark(id, track, epoch)?;
         self.next_id = id.next();
-        let header = JournalHeader::new(id, track, epoch, self.rate);
+        let header = JournalHeader::new(id, track, epoch);
         let mut writer =
             JournalWriter::create(&self.fs, &self.dir, header, at, Arc::clone(&self.clock))
                 .map_err(SessionError::Journal)?;
@@ -1069,7 +1207,7 @@ impl<S: Fs> SessionWriter<S> {
         &mut self,
         track: TrackId,
         at: SampleIndex,
-        epoch: EpochId,
+        epoch: EpochAnchor,
         replay: Vec<i16>,
         held: Vec<FinishedJournal>,
     ) -> Result<(), SessionError> {
@@ -1089,9 +1227,14 @@ impl<S: Fs> SessionWriter<S> {
     }
 
     /// Makes sure the marks on disk cover journal `id` and `track`'s
-    /// `epoch` before a journal uses them, reserving a block of ids at a
-    /// time.
-    fn mark(&mut self, id: JournalId, track: TrackId, epoch: EpochId) -> Result<(), SessionError> {
+    /// `epoch`, with its anchor, before a journal uses them, reserving a
+    /// block of ids at a time.
+    fn mark(
+        &mut self,
+        id: JournalId,
+        track: TrackId,
+        epoch: EpochAnchor,
+    ) -> Result<(), SessionError> {
         let mut wanted = self.marks.clone();
         if id >= wanted.journals_below {
             // The last id is never used, so every used id is below the mark.
@@ -1099,8 +1242,13 @@ impl<S: Fs> SessionWriter<S> {
             let block = JournalId::new(id.get().saturating_add(ID_BLOCK));
             wanted.journals_below = after.max(block);
         }
-        let used = wanted.epochs.entry(track).or_insert(epoch);
-        *used = (*used).max(epoch);
+        let used = wanted
+            .epochs
+            .entry(track)
+            .or_insert(MarkedEpoch::Timed(epoch));
+        if epoch.id > used.id() {
+            *used = MarkedEpoch::Timed(epoch);
+        }
         if wanted != self.marks {
             wanted
                 .write(&self.fs, &self.dir)
@@ -1204,6 +1352,21 @@ impl<S: Fs> SessionWriter<S> {
     pub(crate) fn waiting(&self, track: TrackId) -> usize {
         self.tracks.get(&track).map_or(0, |t| t.waiting.len())
     }
+
+    /// Epoch `id` of `track` from sample `at`, at the writer's rate,
+    /// starting where the track's earlier audio ends (zero if it has
+    /// none): one [`Self::start_track`] takes, or, with `at` the track's
+    /// next sample, [`Self::new_epoch`].
+    pub(crate) fn test_epoch(&self, track: TrackId, id: EpochId, at: SampleIndex) -> Epoch {
+        let anchor = EpochAnchor {
+            id,
+            start: self.earlier_end(track).unwrap_or(SessionTime::ZERO),
+            first_sample: at,
+            rate: self.rate,
+        };
+        let timeline = TrackTimeline::rebuild(track, [anchor]).unwrap();
+        *timeline.current().unwrap()
+    }
 }
 
 /// A journal still to hand out: being written, or ended and waiting for
@@ -1211,6 +1374,8 @@ impl<S: Fs> SessionWriter<S> {
 #[derive(Debug)]
 struct Open<F: FsFile> {
     writer: JournalWriter<F>,
+    /// The epoch its header names: a replacement is in the same one.
+    epoch: EpochAnchor,
     /// The samples from its durable position on that were given to it:
     /// what a replacement must write again if it breaks. After a failed
     /// write they run past its captured position.
@@ -1239,11 +1404,14 @@ impl<F: FsFile> Open<F> {
     /// Gives up a broken journal: where its replacement starts, in which
     /// epoch, the samples it must write again, and the broken journals it
     /// must be handed out with, this one last.
-    fn retire(self, session: SessionId) -> (SampleIndex, EpochId, Vec<i16>, Vec<FinishedJournal>) {
+    fn retire(
+        self,
+        session: SessionId,
+    ) -> (SampleIndex, EpochAnchor, Vec<i16>, Vec<FinishedJournal>) {
         let header = self.writer.header();
         let mut held = self.held;
         held.push(FinishedJournal::new(session, header.id()));
-        (self.unsynced_from, header.epoch(), self.unsynced, held)
+        (self.unsynced_from, self.epoch, self.unsynced, held)
     }
 }
 
@@ -1278,8 +1446,23 @@ fn is_set_aside(path: &std::path::Path) -> bool {
 }
 
 impl Earlier {
+    /// Takes `end` as the track's end if it's past the one known.
     fn raise_end(&mut self, end: SampleIndex) {
         self.end = self.end.max(Some(end));
+    }
+
+    /// Takes `epoch` as the track's highest if it's above the one known,
+    /// or the same one with its anchor where that was missing.
+    fn raise_epoch(&mut self, epoch: MarkedEpoch) {
+        let higher = match self.epoch {
+            None => true,
+            Some(known) => {
+                epoch.id() > known.id() || (epoch.id() == known.id() && known.anchor().is_none())
+            }
+        };
+        if higher {
+            self.epoch = Some(epoch);
+        }
     }
 }
 

@@ -175,7 +175,10 @@ fn record_into(fs: &FakeFs, run: Run, promised: &mut Promised) -> Result<(), Str
     let mut timelines = Vec::new();
     for track in [MIC, SYSTEM] {
         writer
-            .start_track(track, EpochId::new(0), SampleIndex::ZERO)
+            .start_track(
+                track,
+                &writer.test_epoch(track, EpochId::new(0), SampleIndex::ZERO),
+            )
             .map_err(|e| e.to_string())?;
         let mut timeline = TrackTimeline::new(track);
         timeline

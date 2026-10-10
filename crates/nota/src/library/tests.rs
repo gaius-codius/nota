@@ -88,9 +88,10 @@ fn leave_a_journal(session: &SessionPaths) {
         .unwrap();
     let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
     let mut writer = SessionWriter::open(&lock, SampleRate::SPEECH, length(), clock).unwrap();
-    writer
-        .start_track(TrackId::new(0), EpochId::new(0), SampleIndex::ZERO)
+    let (_, epoch) = writer
+        .open_first_epoch(TrackId::new(0), SessionTime::ZERO)
         .unwrap();
+    writer.start_track(TrackId::new(0), &epoch).unwrap();
     writer.append(TrackId::new(0), &[1, 2, 3]).unwrap();
     writer.finish().unwrap();
 }
@@ -215,9 +216,8 @@ fn leave_a_journal_damaged_in_the_middle(session: &SessionPaths, window: Segment
     let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
     let mut writer =
         SessionWriter::open(&lock, SampleRate::new(1_000).unwrap(), window, clock).unwrap();
-    writer
-        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
-        .unwrap();
+    let (_, epoch) = writer.open_first_epoch(MIC, SessionTime::ZERO).unwrap();
+    writer.start_track(MIC, &epoch).unwrap();
     for k in 0..20_i16 {
         let audio: Vec<i16> = (0..50).map(|i| k * 50 + i).collect();
         writer.append(MIC, &audio).unwrap();
@@ -271,10 +271,13 @@ fn record(session: &SessionPaths, count: u64) -> (SessionLock<StdFs>, Vec<Finish
     let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
     let mut writer = SessionWriter::open(&lock, SampleRate::SPEECH, length(), clock).unwrap();
     let from = writer.first_free_sample(MIC);
-    let epoch = writer
-        .highest_epoch(MIC)
-        .map_or(EpochId::new(0), |e| EpochId::new(e.get() + 1));
-    writer.start_track(MIC, epoch, from).unwrap();
+    // The new epoch starts where the earlier audio ends.
+    let resumed_at = SampleCount::new(from.get())
+        .duration_at(SampleRate::SPEECH)
+        .and_then(|d| SessionTime::ZERO.checked_add(d))
+        .unwrap();
+    let (_, epoch) = writer.open_first_epoch(MIC, resumed_at).unwrap();
+    writer.start_track(MIC, &epoch).unwrap();
     let samples: Vec<i16> = (from.get()..from.get() + count).map(sample).collect();
     writer.append(MIC, &samples).unwrap();
     (lock, writer.finish().unwrap())

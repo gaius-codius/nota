@@ -39,7 +39,10 @@ fn recorded(windows: u64) -> (FakeFs, SessionLock<FakeFs>, Vec<FinishedJournal>)
     let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
     let mut writer = SessionWriter::open(&lock, rate(), length(), clock).unwrap();
     writer
-        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .start_track(
+            MIC,
+            &writer.test_epoch(MIC, EpochId::new(0), SampleIndex::ZERO),
+        )
         .unwrap();
     let audio: Vec<i16> = (0..1_000 * windows).map(|i| (i % 1_000) as i16).collect();
     writer.append(MIC, &audio).unwrap();
@@ -231,7 +234,10 @@ fn finishing_a_recording_hands_on_what_finished_even_if_finishing_failed() {
     let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
     let mut writer = SessionWriter::open(&lock, rate(), length(), clock).unwrap();
     writer
-        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .start_track(
+            MIC,
+            &writer.test_epoch(MIC, EpochId::new(0), SampleIndex::ZERO),
+        )
         .unwrap();
     // The first window's journal finishes; the second's is still open.
     let audio: Vec<i16> = (0..1_500).map(|i| (i % 1_000) as i16).collect();
@@ -269,7 +275,10 @@ fn finishing_a_recording_publishes_every_journal() {
     let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
     let mut writer = SessionWriter::open(&lock, rate(), length(), clock).unwrap();
     writer
-        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .start_track(
+            MIC,
+            &writer.test_epoch(MIC, EpochId::new(0), SampleIndex::ZERO),
+        )
         .unwrap();
     let audio: Vec<i16> = (0..1_500).map(|i| (i % 1_000) as i16).collect();
     writer.append(MIC, &audio).unwrap();
@@ -295,7 +304,10 @@ fn a_journal_corrupt_in_the_middle_is_set_aside_and_the_report_incomplete() {
     let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
     let mut writer = SessionWriter::open(&lock, rate(), length(), clock).unwrap();
     writer
-        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .start_track(
+            MIC,
+            &writer.test_epoch(MIC, EpochId::new(0), SampleIndex::ZERO),
+        )
         .unwrap();
     // Twenty frames of 50 samples: the window, 1,000 samples.
     for k in 0..20_i16 {
@@ -339,7 +351,10 @@ fn a_set_aside_is_reported_whatever_fails_after_it() {
     let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
     let mut writer = SessionWriter::open(&lock, rate(), length(), clock).unwrap();
     writer
-        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .start_track(
+            MIC,
+            &writer.test_epoch(MIC, EpochId::new(0), SampleIndex::ZERO),
+        )
         .unwrap();
     for k in 0..20_i16 {
         let audio: Vec<i16> = (0..50).map(|i| k * 50 + i).collect();

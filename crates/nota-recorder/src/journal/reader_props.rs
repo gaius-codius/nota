@@ -16,7 +16,7 @@
 //! A failure proptest finds is saved in `proptest-regressions/` and replayed
 //! on every run; commit that file with the fix.
 
-use nota_core::{EpochId, SampleIndex, SampleRate, TrackId};
+use nota_core::{EpochAnchor, EpochId, SampleIndex, SampleRate, SessionTime, TrackId};
 use proptest::prelude::*;
 
 use super::format::{HEADER_LEN, MAX_FRAME_SAMPLES, encode_frame, encode_header, frames_after};
@@ -54,6 +54,17 @@ impl Journal {
     }
 }
 
+/// The anchor of epoch `epoch` at `rate`, starting at session time zero and
+/// sample zero, so any frame the strategies make falls inside the epoch.
+fn anchor(epoch: u32, rate: SampleRate) -> EpochAnchor {
+    EpochAnchor {
+        id: EpochId::new(epoch),
+        start: SessionTime::ZERO,
+        first_sample: SampleIndex::ZERO,
+        rate,
+    }
+}
+
 /// Any header: any id, track and epoch, any valid rate.
 fn header() -> impl Strategy<Value = JournalHeader> {
     (
@@ -64,12 +75,7 @@ fn header() -> impl Strategy<Value = JournalHeader> {
     )
         .prop_map(|(id, track, epoch, hz)| {
             let rate = SampleRate::new(hz).unwrap();
-            JournalHeader::new(
-                JournalId::new(id),
-                TrackId::new(track),
-                EpochId::new(epoch),
-                rate,
-            )
+            JournalHeader::new(JournalId::new(id), TrackId::new(track), anchor(epoch, rate))
         })
 }
 
@@ -83,7 +89,7 @@ fn journal() -> impl Strategy<Value = Journal> {
     )
         .prop_map(|(header, runs, start)| {
             let track = header.track();
-            let mut bytes = encode_header(header).to_vec();
+            let mut bytes = encode_header(header);
             let mut next = start;
             let mut frames = Vec::new();
             let mut ends = Vec::new();
@@ -312,7 +318,7 @@ proptest! {
         header in header(),
         noise in prop::collection::vec(any::<u8>(), 0..2_000),
     ) {
-        let mut input = encode_header(header).to_vec();
+        let mut input = encode_header(header);
         input.extend_from_slice(&noise);
         let read = read_journal(&input);
         check_contract(&input, &read)?;
@@ -328,12 +334,7 @@ proptest! {
         hz in 1..=SampleRate::MAX_HZ,
     ) {
         let rate = SampleRate::new(hz).unwrap();
-        let header = JournalHeader::new(
-            JournalId::new(id),
-            TrackId::new(track),
-            EpochId::new(epoch),
-            rate,
-        );
+        let header = JournalHeader::new(JournalId::new(id), TrackId::new(track), anchor(epoch, rate));
         let bytes = encode_header(header);
         prop_assert_eq!(bytes.len(), HEADER_LEN);
         let read = read_journal(&bytes);

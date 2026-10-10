@@ -231,6 +231,7 @@ mod tests {
             track: TrackId::new(track),
             epoch: EpochId::new(epoch),
             rate: SampleRate::SPEECH,
+            anchor: None,
             range: r,
             parts: Vec::new(),
         }

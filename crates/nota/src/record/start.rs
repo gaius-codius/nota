@@ -1177,7 +1177,7 @@ mod salvage_note_tests {
     /// Startup names the real directory that prevents a segment being published.
     #[test]
     fn startup_names_a_directory_blocking_salvage() {
-        use nota_core::{FakeClock, SampleIndex, SessionTime};
+        use nota_core::{FakeClock, SessionTime};
         let root = std::env::temp_dir().join(format!("nota-start-held-{}", std::process::id()));
         remove_fixture(&root);
         let library = Library::open(&root).unwrap();
@@ -1187,9 +1187,8 @@ mod salvage_note_tests {
             .unwrap();
         let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
         let mut writer = SessionWriter::open(&lock, RATE, segment_length(), clock).unwrap();
-        writer
-            .start_track(MIC, nota_core::EpochId::new(0), SampleIndex::ZERO)
-            .unwrap();
+        let (_, epoch) = writer.open_first_epoch(MIC, SessionTime::ZERO).unwrap();
+        writer.start_track(MIC, &epoch).unwrap();
         writer.append(MIC, &[7; 50]).unwrap();
         writer.finish().unwrap();
         // Release the recording lock so startup can salvage, rather than report in use.

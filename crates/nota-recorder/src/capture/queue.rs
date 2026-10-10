@@ -187,19 +187,22 @@ impl QueueSender {
     /// is one.
     #[cfg(test)]
     pub(super) fn audio(&self, track: TrackId, samples: &[i16]) {
-        self.first_audio(track, samples, None);
+        self.first_audio(track, samples, None, None);
     }
 
     /// Queues a copy of `samples` from `track`, in a spare buffer if there
     /// is one; first [`CaptureEvent::Began`], at the time `first` gives,
-    /// if its flag isn't set yet. The flag is set and `Began` queued under
-    /// the queue's lock, so no audio from `track` can come before it,
-    /// however many senders the stream sends through.
+    /// if its flag isn't set yet, or else [`CaptureEvent::Reopened`] at
+    /// `reopened`, if given. The flag is set and `Began` queued under the
+    /// queue's lock, so no audio from `track` can come before it, however
+    /// many senders the stream sends through; a stream's first audio opens
+    /// its first epoch, so it's never also a reopening.
     pub(super) fn first_audio(
         &self,
         track: TrackId,
         samples: &[i16],
         first: Option<(&AtomicBool, SessionTime)>,
+        reopened: Option<SessionTime>,
     ) {
         let mut state = self.0.lock();
         if state.closed {
@@ -209,6 +212,10 @@ impl QueueSender {
             && !began.swap(true, Ordering::SeqCst)
         {
             state.events.push_back((track, CaptureEvent::Began { at }));
+        } else if let Some(at) = reopened {
+            state
+                .events
+                .push_back((track, CaptureEvent::Reopened { at }));
         }
         let mut buffer = if let Some(buffer) = state.spare.pop() {
             buffer
@@ -521,7 +528,7 @@ mod tests {
                 .map(|sender| {
                     let began = Arc::clone(&began);
                     std::thread::spawn(move || {
-                        sender.first_audio(MIC, &[1], Some((&began, SessionTime::ZERO)));
+                        sender.first_audio(MIC, &[1], Some((&began, SessionTime::ZERO)), None);
                     })
                 })
                 .collect();

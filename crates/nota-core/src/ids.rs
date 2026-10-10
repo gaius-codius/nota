@@ -36,6 +36,15 @@ impl EpochId {
     pub const fn get(self) -> u32 {
         self.0
     }
+
+    /// The epoch numbered one above this one, or `None` after the last.
+    #[must_use]
+    pub const fn next(self) -> Option<Self> {
+        match self.0.checked_add(1) {
+            Some(id) => Some(Self(id)),
+            None => None,
+        }
+    }
 }
 
 /// One recording session: a lecture or workshop, recorded into its own
@@ -67,5 +76,12 @@ mod tests {
         assert_eq!(EpochId::new(9).get(), 9);
         assert_eq!(SessionId::new(u64::MAX).get(), u64::MAX);
         assert!(EpochId::new(1) < EpochId::new(2));
+    }
+
+    /// Epoch numbers count up by one, and the last has no next.
+    #[test]
+    fn the_next_epoch_is_one_higher_until_the_last() {
+        assert_eq!(EpochId::new(4).next(), Some(EpochId::new(5)));
+        assert_eq!(EpochId::new(u32::MAX).next(), None);
     }
 }

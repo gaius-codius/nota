@@ -233,7 +233,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
-    use nota_core::{Clock, EpochId, FakeClock, SampleIndex, SampleRate, SessionTime};
+    use nota_core::{Clock, EpochAnchor, EpochId, FakeClock, SampleIndex, SampleRate, SessionTime};
 
     use super::*;
     use crate::fs::FsFile;
@@ -244,8 +244,13 @@ mod tests {
 
     fn journal(fs: &FakeFs) -> JournalWriter<FakeFile> {
         let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
-        let header =
-            JournalHeader::new(JournalId::FIRST, TRACK, EpochId::new(0), SampleRate::SPEECH);
+        let anchor = EpochAnchor {
+            id: EpochId::new(0),
+            start: SessionTime::ZERO,
+            first_sample: SampleIndex::ZERO,
+            rate: SampleRate::SPEECH,
+        };
+        let header = JournalHeader::new(JournalId::FIRST, TRACK, anchor);
         JournalWriter::create(fs, Path::new("/s"), header, SampleIndex::ZERO, clock).unwrap()
     }
 

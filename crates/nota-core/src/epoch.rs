@@ -6,6 +6,11 @@
 //! next sample to a session time. The sample count carries on across epochs, so the time
 //! between them is a gap with no audio, and a mark made during it maps to no
 //! sample.
+//!
+//! An epoch's [`EpochAnchor`] is what has to be kept to time its samples
+//! again later: its number, first sample, rate and start. The recorder
+//! stores it with the epoch's audio, and [`TrackTimeline::rebuild`] makes a
+//! timeline from the anchors again after a crash or for a resumed session.
 
 use std::time::Duration;
 
@@ -60,6 +65,18 @@ impl Epoch {
         self.rate
     }
 
+    /// What has to be kept to time this epoch's samples again: everything
+    /// but its overrun.
+    #[must_use]
+    pub const fn anchor(&self) -> EpochAnchor {
+        EpochAnchor {
+            id: self.id,
+            start: self.start,
+            first_sample: self.first_sample,
+            rate: self.rate,
+        }
+    }
+
     /// The session time `sample` plays at, if this epoch's mapping reached
     /// it. `None` if it comes before the epoch or the time overflows. It
     /// doesn't check where the epoch ends; [`TrackTimeline::time_of`] does.
@@ -67,6 +84,30 @@ impl Epoch {
     pub fn time_of(&self, sample: SampleIndex) -> Option<SessionTime> {
         let offset = sample.checked_count_since(self.first_sample)?;
         self.start.checked_add(offset.duration_at(self.rate)?)
+    }
+
+    /// Whether an epoch starting at `start` from `first_sample` may come
+    /// after this one as it stands: its sample count doesn't go back, and
+    /// it starts no earlier than this epoch's audio ends.
+    fn check_followed_by(
+        &self,
+        start: SessionTime,
+        first_sample: SampleIndex,
+    ) -> Result<(), EpochError> {
+        if first_sample < self.first_sample {
+            return Err(EpochError::SampleWentBack {
+                previous: self.first_sample,
+                first_sample,
+            });
+        }
+        let previous_end = self.time_of(first_sample).ok_or(EpochError::TimeOverflow)?;
+        if start < previous_end {
+            return Err(EpochError::ImplausibleOverrun {
+                previous_end,
+                start,
+            });
+        }
+        Ok(())
     }
 
     /// The sample playing at `time` under this epoch's mapping. `None` if
@@ -78,6 +119,22 @@ impl Epoch {
         let offset = crate::time::SampleCount::started_within(elapsed, self.rate)?;
         self.first_sample.checked_add(offset)
     }
+}
+
+/// An epoch as it's stored: from `first_sample` on, the track's samples
+/// play at `rate` from `start`. Unchecked: only
+/// [`TrackTimeline::rebuild`] turns anchors back into epochs, checking each
+/// against the one before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EpochAnchor {
+    /// The epoch's number within its track.
+    pub id: EpochId,
+    /// The session time of the epoch's first sample.
+    pub start: SessionTime,
+    /// The track's sample count when the epoch opened.
+    pub first_sample: SampleIndex,
+    /// The stream's sampling rate in the epoch.
+    pub rate: SampleRate,
 }
 
 /// The time between two epochs of a track, when there was no audio.
@@ -174,6 +231,14 @@ pub enum EpochError {
         /// The id it had.
         got: EpochId,
     },
+    /// An anchor to rebuild from ([`TrackTimeline::rebuild`]) isn't
+    /// numbered above the one before it.
+    NotAfter {
+        /// The previous anchor's id.
+        previous: EpochId,
+        /// The refused anchor's id.
+        got: EpochId,
+    },
 }
 
 impl std::fmt::Display for EpochError {
@@ -206,6 +271,12 @@ impl std::fmt::Display for EpochError {
                 got.get(),
                 expected.get()
             ),
+            Self::NotAfter { previous, got } => write!(
+                f,
+                "epoch {} came after epoch {}, not above it",
+                got.get(),
+                previous.get()
+            ),
         }
     }
 }
@@ -215,19 +286,87 @@ impl std::error::Error for EpochError {}
 /// A track's epochs, in order. Session time and the sample count both only
 /// move forward through it, so every sample has exactly one session time and
 /// every session time at most one sample.
+///
+/// Epoch numbers only go up. Each epoch opened is numbered one above the
+/// newest; a rebuilt timeline may skip numbers, where an epoch held no audio
+/// and so left no anchor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrackTimeline {
     track: TrackId,
     epochs: Vec<Epoch>,
+    /// The number the first epoch opened gets, while there's none.
+    first: EpochId,
 }
 
 impl TrackTimeline {
-    /// A track with no epochs yet.
+    /// A track with no epochs yet. Its first epoch is numbered 0.
     #[must_use]
     pub const fn new(track: TrackId) -> Self {
         Self {
             track,
             epochs: Vec::new(),
+            first: EpochId::new(0),
+        }
+    }
+
+    /// A track with no epochs here, whose earlier ones went up to `used`:
+    /// its first epoch is numbered above it. For a resumed track whose
+    /// epochs' times aren't known; [`Self::rebuild`] when they are.
+    ///
+    /// # Errors
+    ///
+    /// [`EpochError::TooManyEpochs`] if `used` is the last [`EpochId`].
+    pub fn starting_after(track: TrackId, used: EpochId) -> Result<Self, EpochError> {
+        Ok(Self {
+            track,
+            epochs: Vec::new(),
+            first: used.next().ok_or(EpochError::TooManyEpochs)?,
+        })
+    }
+
+    /// The timeline `anchors` describe, oldest first, so samples map to
+    /// session time as they did when the epochs were opened. Numbers may
+    /// skip, but only go up. The epochs report no overrun: that isn't
+    /// stored.
+    ///
+    /// # Errors
+    ///
+    /// [`EpochError::NotAfter`] for an anchor numbered no higher than the
+    /// one before it; otherwise as [`Self::follow`] refuses an epoch that
+    /// starts before the previous one's audio ends, or whose first sample
+    /// is before the previous one's.
+    pub fn rebuild(
+        track: TrackId,
+        anchors: impl IntoIterator<Item = EpochAnchor>,
+    ) -> Result<Self, EpochError> {
+        let mut timeline = Self::new(track);
+        for anchor in anchors {
+            if let Some(previous) = timeline.epochs.last() {
+                if anchor.id <= previous.id {
+                    return Err(EpochError::NotAfter {
+                        previous: previous.id,
+                        got: anchor.id,
+                    });
+                }
+                previous.check_followed_by(anchor.start, anchor.first_sample)?;
+            }
+            timeline.epochs.push(Epoch {
+                id: anchor.id,
+                start: anchor.start,
+                first_sample: anchor.first_sample,
+                rate: anchor.rate,
+                overrun: Duration::ZERO,
+            });
+        }
+        Ok(timeline)
+    }
+
+    /// The number the next epoch opened gets: one above the newest, or the
+    /// first number while there's none.
+    fn next_id(&self) -> Result<EpochId, EpochError> {
+        match self.epochs.last() {
+            Some(newest) => newest.id.next().ok_or(EpochError::TooManyEpochs),
+            None => Ok(self.first),
         }
     }
 
@@ -268,16 +407,16 @@ impl TrackTimeline {
     /// Refuses an epoch whose first sample is before the previous epoch's;
     /// one whose overrun is more than any real device's drift (1000 ppm of
     /// the previous epoch, plus 10 ms), which means a caller or clock bug;
-    /// one whose previous epoch ends beyond the session clock; and one past
-    /// the last [`EpochId`]. The timeline is unchanged when it refuses.
+    /// one whose previous epoch ends beyond the session clock; and one
+    /// numbered past the last [`EpochId`]. The timeline is unchanged when it
+    /// refuses.
     pub fn open_epoch(
         &mut self,
         start: SessionTime,
         first_sample: SampleIndex,
         rate: SampleRate,
     ) -> Result<OpenedEpoch, EpochError> {
-        let id =
-            EpochId::new(u32::try_from(self.epochs.len()).map_err(|_| EpochError::TooManyEpochs)?);
+        let id = self.next_id()?;
         let mut opened = OpenedEpoch {
             id,
             start,
@@ -319,6 +458,18 @@ impl TrackTimeline {
         Ok(opened)
     }
 
+    /// A timeline that follows another from `epoch` on: its first epoch,
+    /// whatever its number. For a thread that starts following a track
+    /// partway, such as one resumed above earlier epochs.
+    #[must_use]
+    pub fn following(track: TrackId, epoch: &Epoch) -> Self {
+        Self {
+            track,
+            epochs: vec![*epoch],
+            first: epoch.id,
+        }
+    }
+
     /// Adds `epoch`, which another timeline of this track opened, so this
     /// one maps samples to session time the same way: for a thread that
     /// follows a track the recorder is timing. Each epoch must come once,
@@ -332,8 +483,7 @@ impl TrackTimeline {
     /// always [`EpochError::ImplausibleOverrun`]: the timeline that opened
     /// it would have moved it. The timeline is unchanged when it refuses.
     pub fn follow(&mut self, epoch: &Epoch) -> Result<(), EpochError> {
-        let expected =
-            EpochId::new(u32::try_from(self.epochs.len()).map_err(|_| EpochError::TooManyEpochs)?);
+        let expected = self.next_id()?;
         if epoch.id != expected {
             return Err(EpochError::NotNext {
                 expected,
@@ -341,21 +491,7 @@ impl TrackTimeline {
             });
         }
         if let Some(previous) = self.epochs.last() {
-            if epoch.first_sample < previous.first_sample {
-                return Err(EpochError::SampleWentBack {
-                    previous: previous.first_sample,
-                    first_sample: epoch.first_sample,
-                });
-            }
-            let previous_end = previous
-                .time_of(epoch.first_sample)
-                .ok_or(EpochError::TimeOverflow)?;
-            if epoch.start < previous_end {
-                return Err(EpochError::ImplausibleOverrun {
-                    previous_end,
-                    start: epoch.start,
-                });
-            }
+            previous.check_followed_by(epoch.start, epoch.first_sample)?;
         }
         self.epochs.push(*epoch);
         Ok(())
@@ -718,6 +854,191 @@ mod tests {
         assert!(!EpochError::TooManyEpochs.to_string().is_empty());
     }
 
+    /// An epoch's anchor is its number, start, first sample and rate.
+    #[test]
+    fn an_epoch_s_anchor_is_what_times_it() {
+        let mut timeline = TrackTimeline::new(TrackId::new(0));
+        timeline.open_epoch(t(5), s(7), SPEECH).unwrap();
+        assert_eq!(
+            timeline.current().map(Epoch::anchor),
+            Some(EpochAnchor {
+                id: EpochId::new(0),
+                start: t(5),
+                first_sample: s(7),
+                rate: SPEECH,
+            })
+        );
+    }
+
+    /// A rebuilt timeline maps samples as the one its anchors came from,
+    /// and gaps in the numbering (epochs that held no audio) are kept.
+    #[test]
+    fn a_rebuilt_timeline_times_samples_as_before() {
+        let mut timeline = TrackTimeline::new(TrackId::new(3));
+        timeline.open_epoch(t(0), s(0), SPEECH).unwrap();
+        timeline
+            .open_epoch(t(1_500_000_000), s(16_000), SPEECH)
+            .unwrap();
+        timeline
+            .open_epoch(t(2_000_000_000), s(16_000), SPEECH)
+            .unwrap();
+        // Epoch 1 held no audio, so nothing stored its anchor.
+        let anchors = [timeline.epochs()[0].anchor(), timeline.epochs()[2].anchor()];
+        let rebuilt = TrackTimeline::rebuild(TrackId::new(3), anchors).unwrap();
+        assert_eq!(rebuilt.track(), TrackId::new(3));
+        let ids: Vec<EpochId> = rebuilt.epochs().iter().map(Epoch::id).collect();
+        assert_eq!(ids, [EpochId::new(0), EpochId::new(2)]);
+        for sample in [0, 15_999, 16_000, 20_000] {
+            assert_eq!(rebuilt.time_of(s(sample)), timeline.time_of(s(sample)));
+        }
+        let gaps: Vec<(SessionTime, SessionTime)> =
+            rebuilt.gaps().map(|g| (g.from(), g.to())).collect();
+        assert_eq!(gaps, [(t(1_000_000_000), t(2_000_000_000))]);
+    }
+
+    /// An epoch opened on a rebuilt timeline is numbered above its newest,
+    /// and is checked against it.
+    #[test]
+    fn a_rebuilt_timeline_opens_above_its_newest_epoch() {
+        let anchor = EpochAnchor {
+            id: EpochId::new(4),
+            start: t(0),
+            first_sample: s(0),
+            rate: SPEECH,
+        };
+        let mut rebuilt = TrackTimeline::rebuild(TrackId::new(0), [anchor]).unwrap();
+        // Its second of audio ends at 1 s: an epoch requested well before
+        // that is refused, as on the timeline that opened it.
+        assert_eq!(
+            rebuilt.clone().open_epoch(t(0), s(16_000), SPEECH),
+            Err(EpochError::ImplausibleOverrun {
+                previous_end: t(1_000_000_000),
+                start: t(0)
+            })
+        );
+        let opened = rebuilt
+            .open_epoch(t(3_000_000_000), s(16_000), SPEECH)
+            .unwrap();
+        assert_eq!(opened.id, EpochId::new(5));
+        assert_eq!(rebuilt.epochs()[0].overrun(), Duration::ZERO);
+    }
+
+    /// Anchors that couldn't have come from one timeline are refused.
+    #[test]
+    fn rebuilding_refuses_anchors_out_of_order() {
+        let anchor = |id: u32, start: u64, first: u64| EpochAnchor {
+            id: EpochId::new(id),
+            start: t(start),
+            first_sample: s(first),
+            rate: SPEECH,
+        };
+        let track = TrackId::new(0);
+        assert_eq!(
+            TrackTimeline::rebuild(track, [anchor(2, 0, 0), anchor(2, 10, 0)]),
+            Err(EpochError::NotAfter {
+                previous: EpochId::new(2),
+                got: EpochId::new(2)
+            })
+        );
+        assert_eq!(
+            TrackTimeline::rebuild(track, [anchor(0, 0, 100), anchor(1, 10, 99)]),
+            Err(EpochError::SampleWentBack {
+                previous: s(100),
+                first_sample: s(99)
+            })
+        );
+        // A second of audio ends at 1 s; the next starts a nanosecond early.
+        assert_eq!(
+            TrackTimeline::rebuild(track, [anchor(0, 0, 0), anchor(1, 999_999_999, 16_000)]),
+            Err(EpochError::ImplausibleOverrun {
+                previous_end: t(1_000_000_000),
+                start: t(999_999_999)
+            })
+        );
+        assert_eq!(
+            TrackTimeline::rebuild(
+                track,
+                [anchor(0, u64::MAX - 10, 0), anchor(1, u64::MAX, 16_000)]
+            ),
+            Err(EpochError::TimeOverflow)
+        );
+        assert_eq!(
+            TrackTimeline::rebuild(track, [anchor(0, 0, 0), anchor(1, 1_000_000_000, 16_000)])
+                .map(|t| t.epochs().len()),
+            Ok(2)
+        );
+    }
+
+    /// A timeline resumed above an epoch numbers its first one above it.
+    #[test]
+    fn a_timeline_started_after_an_epoch_numbers_above_it() {
+        let mut timeline = TrackTimeline::starting_after(TrackId::new(0), EpochId::new(6)).unwrap();
+        assert!(timeline.epochs().is_empty());
+        assert_eq!(
+            timeline.open_epoch(t(0), s(9), SPEECH).map(|o| o.id),
+            Ok(EpochId::new(7))
+        );
+        assert_eq!(
+            timeline.open_epoch(t(1), s(9), SPEECH).map(|o| o.id),
+            Ok(EpochId::new(8))
+        );
+        assert_eq!(
+            TrackTimeline::starting_after(TrackId::new(0), EpochId::new(u32::MAX)),
+            Err(EpochError::TooManyEpochs)
+        );
+    }
+
+    /// The last epoch number can't be followed by another, opened or
+    /// followed.
+    #[test]
+    fn no_epoch_comes_after_the_last_number() {
+        let anchor = EpochAnchor {
+            id: EpochId::new(u32::MAX),
+            start: t(0),
+            first_sample: s(0),
+            rate: SPEECH,
+        };
+        let mut timeline = TrackTimeline::rebuild(TrackId::new(0), [anchor]).unwrap();
+        assert_eq!(
+            timeline.open_epoch(t(1), s(0), SPEECH),
+            Err(EpochError::TooManyEpochs)
+        );
+        let mut follower = TrackTimeline::following(TrackId::new(0), &timeline.epochs()[0]);
+        let other = TrackTimeline::rebuild(TrackId::new(0), [anchor]).unwrap();
+        assert_eq!(
+            follower.follow(&other.epochs()[0]),
+            Err(EpochError::TooManyEpochs)
+        );
+    }
+
+    /// A follower that starts partway takes the epoch it starts at, whatever
+    /// its number, and then the next in turn.
+    #[test]
+    fn a_follower_can_start_at_any_epoch() {
+        let mut timeline = TrackTimeline::starting_after(TrackId::new(1), EpochId::new(2)).unwrap();
+        timeline.open_epoch(t(0), s(0), SPEECH).unwrap();
+        timeline
+            .open_epoch(t(2_000_000_000), s(16_000), SPEECH)
+            .unwrap();
+        let [first, second] = timeline.epochs() else {
+            panic!("{timeline:?}")
+        };
+        let mut follower = TrackTimeline::following(TrackId::new(1), first);
+        follower.follow(second).unwrap();
+        assert_eq!(follower, timeline);
+    }
+
+    /// The anchor error names both epochs.
+    #[test]
+    fn not_after_describes_itself() {
+        let text = EpochError::NotAfter {
+            previous: EpochId::new(8),
+            got: EpochId::new(3),
+        }
+        .to_string();
+        assert!(text.contains('8') && text.contains('3'), "{text}");
+    }
+
     /// One epoch to open: how long after the previous epoch's audio it
     /// starts, how many samples it holds, and its rate.
     #[derive(Debug, Clone)]
@@ -894,6 +1215,44 @@ mod tests {
                     previous = Some(time);
                 }
             }
+        }
+
+        /// Rebuilt from the anchors of the epochs that hold audio, a
+        /// timeline times every sample as the one that opened them.
+        #[test]
+        fn a_rebuilt_timeline_times_every_sample_the_same(
+            (first_start, first_sample, openings) in any_openings(),
+            picks in prop::collection::vec(any::<prop::sample::Index>(), 1..16),
+        ) {
+            let (timeline, spans) = build(first_start, first_sample, &openings);
+            // Only an epoch that held audio leaves an anchor; the newest is
+            // kept anyway, as a resumed session's marks keep it.
+            let last = timeline.epochs().len() - 1;
+            let anchors: Vec<EpochAnchor> = timeline
+                .epochs()
+                .iter()
+                .zip(&spans)
+                .enumerate()
+                .filter(|(i, (_, (_, first, end)))| end > first || *i == last)
+                .map(|(_, (epoch, _))| epoch.anchor())
+                .collect();
+            let rebuilt = TrackTimeline::rebuild(TrackId::new(0), anchors).unwrap();
+            for (_, first, end) in &spans {
+                let len = end.get() - first.get();
+                if len == 0 {
+                    continue;
+                }
+                for pick in &picks {
+                    let sample = s(first.get() + pick.index(usize::try_from(len).unwrap()) as u64);
+                    prop_assert_eq!(rebuilt.time_of(sample), timeline.time_of(sample));
+                    let time = rebuilt.time_of(sample).unwrap();
+                    prop_assert_eq!(rebuilt.sample_at(time), Some(sample));
+                }
+            }
+            prop_assert_eq!(
+                rebuilt.current().map(Epoch::id),
+                timeline.current().map(Epoch::id)
+            );
         }
     }
 }

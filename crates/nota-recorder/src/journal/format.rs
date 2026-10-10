@@ -6,12 +6,19 @@
 //! | Bytes | Header field |
 //! |---|---|
 //! | 0..8 | magic, `NOTAJRNL` |
-//! | 8..10 | format version, 2 |
+//! | 8..10 | format version, 3 |
 //! | 10..14 | sample rate in hertz |
 //! | 14..22 | journal id ([`JournalId`]), also in the file name |
 //! | 22..26 | track |
 //! | 26..30 | the track's epoch |
-//! | 30..34 | CRC-32 of bytes 0..30 |
+//! | 30..38 | the epoch's first sample |
+//! | 38..46 | the epoch's start, in session-time nanoseconds |
+//! | 46..50 | CRC-32 of bytes 0..46 |
+//!
+//! Bytes 26..46 are the epoch's [`EpochAnchor`]. Every journal of an epoch
+//! carries it, and the header is fsync'd before the first frame, so the
+//! epoch's timing is on disk no later than its first sample. Salvage can
+//! then time the audio of any journal it finds.
 //!
 //! | Bytes | Frame field |
 //! |---|---|
@@ -31,23 +38,36 @@
 //! sample that continues the last frame exactly. So the audio it returns is
 //! sample-continuous.
 //!
-//! Version 1 (no id, track or epoch in the header, several tracks per file)
-//! was only ever written by tests; the reader refuses it.
+//! A journal never holds a frame from before its epoch's first sample.
+//!
+//! Version 2 is version 3 without bytes 30..46: its CRC is at 30..34, and
+//! its epoch's timing wasn't kept. The reader still reads it, with no
+//! anchor, so a journal left by an older nota is salvaged. Version 1 (no
+//! id, track or epoch in the header, several tracks per file) was only ever
+//! written by tests; the reader refuses it.
 
 use std::fmt;
 
-use nota_core::{EpochId, SampleCount, SampleIndex, SampleRange, SampleRate, TrackId};
+use nota_core::{
+    EpochAnchor, EpochId, SampleCount, SampleIndex, SampleRange, SampleRate, SessionTime, TrackId,
+};
 
 use super::JournalId;
 
 /// The journal file's magic number.
 const FILE_MAGIC: [u8; 8] = *b"NOTAJRNL";
-/// The format this code writes and reads.
-const VERSION: u16 = 2;
-/// Bytes in the file header.
-pub const HEADER_LEN: usize = 34;
+/// The format this code writes.
+const VERSION: u16 = 3;
+/// The older format the reader still reads, whose header has no anchor.
+const UNTIMED_VERSION: u16 = 2;
+/// Bytes in the file header: the longest header any version has, so a
+/// file no longer than this holds no frame.
+pub const HEADER_LEN: usize = 50;
 /// Bytes of the header the CRC covers.
-const HEADER_FIELDS: usize = 30;
+const HEADER_FIELDS: usize = 46;
+/// Bytes in a version 2 header, and of it the CRC covers.
+const UNTIMED_HEADER_LEN: usize = 34;
+const UNTIMED_HEADER_FIELDS: usize = 30;
 
 /// Each frame's magic number.
 const FRAME_MAGIC: [u8; 4] = *b"NJFR";
@@ -60,25 +80,72 @@ pub const MAX_FRAME_SAMPLES: u32 = 8_192;
 /// Bytes per sample.
 const SAMPLE_BYTES: usize = 2;
 
-/// The journal's header: what the file is, and whose audio it holds.
+/// The journal's header: what the file is, whose audio it holds, and how
+/// that audio is timed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JournalHeader {
     id: JournalId,
     track: TrackId,
     epoch: EpochId,
     rate: SampleRate,
+    /// The epoch's start and first sample; `None` in a version 2 journal.
+    timing: Option<(SessionTime, SampleIndex)>,
 }
 
 impl JournalHeader {
-    /// The header of journal `id`, holding `track`'s audio from `epoch` at
-    /// `rate`.
+    /// The header of journal `id`, holding `track`'s audio from the epoch
+    /// `anchor` times, at its rate.
     #[must_use]
-    pub const fn new(id: JournalId, track: TrackId, epoch: EpochId, rate: SampleRate) -> Self {
+    pub const fn new(id: JournalId, track: TrackId, anchor: EpochAnchor) -> Self {
+        Self {
+            id,
+            track,
+            epoch: anchor.id,
+            rate: anchor.rate,
+            timing: Some((anchor.start, anchor.first_sample)),
+        }
+    }
+
+    /// The header of a version 2 journal: `track`'s audio from `epoch` at
+    /// `rate`, with no anchor. Only tests write one, as an older nota did.
+    #[cfg(test)]
+    pub(crate) const fn untimed(
+        id: JournalId,
+        track: TrackId,
+        epoch: EpochId,
+        rate: SampleRate,
+    ) -> Self {
         Self {
             id,
             track,
             epoch,
             rate,
+            timing: None,
+        }
+    }
+
+    /// How the journal's epoch is timed, or `None` for a version 2
+    /// journal, which didn't keep it.
+    #[must_use]
+    pub const fn anchor(self) -> Option<EpochAnchor> {
+        match self.timing {
+            Some((start, first_sample)) => Some(EpochAnchor {
+                id: self.epoch,
+                start,
+                first_sample,
+                rate: self.rate,
+            }),
+            None => None,
+        }
+    }
+
+    /// How many bytes the header takes on disk.
+    #[must_use]
+    pub const fn encoded_len(self) -> usize {
+        if self.timing.is_some() {
+            HEADER_LEN
+        } else {
+            UNTIMED_HEADER_LEN
         }
     }
 
@@ -192,6 +259,14 @@ pub enum Invalid {
         /// The one in the frame.
         found: u64,
     },
+    /// The frame starts before its epoch's first sample, which the header
+    /// gives.
+    BeforeEpoch {
+        /// The epoch's first sample.
+        epoch_start: SampleIndex,
+        /// The frame's first sample.
+        found: SampleIndex,
+    },
     /// The frame doesn't continue the track where the last frame ended.
     Discontinuous {
         /// The track.
@@ -219,6 +294,12 @@ impl fmt::Display for Invalid {
             Self::Sequence { expected, found } => {
                 write!(f, "frame {found} where frame {expected} was due")
             }
+            Self::BeforeEpoch { epoch_start, found } => write!(
+                f,
+                "a frame at sample {} before its epoch's first sample {}",
+                found.get(),
+                epoch_start.get()
+            ),
             Self::Discontinuous {
                 track,
                 expected,
@@ -303,23 +384,18 @@ pub fn read_journal(bytes: &[u8]) -> JournalRead {
         end,
     };
 
-    let Some(header_bytes) = bytes.get(..HEADER_LEN) else {
-        return stop(None, Vec::new(), 0, ReadEnd::Incomplete { offset: 0 });
-    };
-    let Some(header) = parse_header(header_bytes) else {
-        return stop(
-            None,
-            Vec::new(),
-            0,
-            ReadEnd::Invalid {
-                offset: 0,
-                reason: Invalid::Header,
-            },
-        );
+    let header = match parse_header(bytes) {
+        Parsed::Frame(header, _) => header,
+        Parsed::Incomplete => {
+            return stop(None, Vec::new(), 0, ReadEnd::Incomplete { offset: 0 });
+        }
+        Parsed::Invalid(reason) => {
+            return stop(None, Vec::new(), 0, ReadEnd::Invalid { offset: 0, reason });
+        }
     };
 
     let mut frames = Vec::new();
-    let mut offset = HEADER_LEN;
+    let mut offset = header.encoded_len();
     let mut next_seq = 0_u64;
     let mut next_sample = None;
     loop {
@@ -327,7 +403,7 @@ pub fn read_journal(bytes: &[u8]) -> JournalRead {
         if rest.is_empty() {
             return stop(Some(header), frames, offset, ReadEnd::Complete);
         }
-        match parse_frame(rest, next_seq, header.track, next_sample) {
+        match parse_frame(rest, next_seq, header, next_sample) {
             Parsed::Frame(frame, len) => {
                 next_sample = Some(frame.range.end());
                 frames.push(frame);
@@ -404,35 +480,73 @@ fn frame_alone(bytes: &[u8], track: TrackId) -> Option<(SampleRange, usize)> {
     Some((range, total))
 }
 
-fn parse_header(bytes: &[u8]) -> Option<JournalHeader> {
-    let fields = bytes.get(..HEADER_FIELDS)?;
-    if fields.get(..8)? != FILE_MAGIC
-        || u16::from_le_bytes(array(bytes, 8)?) != VERSION
-        || u32::from_le_bytes(array(bytes, HEADER_FIELDS)?) != crc32fast::hash(fields)
-    {
+/// The header at the start of `bytes`, of either version: incomplete if
+/// the bytes end before the header its version says, invalid if its magic,
+/// version, CRC or rate is wrong.
+fn parse_header(bytes: &[u8]) -> Parsed<JournalHeader> {
+    let (Some(magic), Some(version)) = (bytes.get(..8), array(bytes, 8).map(u16::from_le_bytes))
+    else {
+        // Too short to say which version: torn.
+        return Parsed::Incomplete;
+    };
+    let (len, fields) = match version {
+        VERSION => (HEADER_LEN, HEADER_FIELDS),
+        UNTIMED_VERSION => (UNTIMED_HEADER_LEN, UNTIMED_HEADER_FIELDS),
+        _ => return Parsed::Invalid(Invalid::Header),
+    };
+    if magic != FILE_MAGIC {
+        return Parsed::Invalid(Invalid::Header);
+    }
+    let Some(header) = bytes.get(..len) else {
+        return Parsed::Incomplete;
+    };
+    match header_fields(header, fields, version == VERSION) {
+        Some(parsed) => Parsed::Frame(parsed, len),
+        None => Parsed::Invalid(Invalid::Header),
+    }
+}
+
+/// The fields of a complete `header` whose CRC follows its first `fields`
+/// bytes, with the anchor's timing if it's `timed`; `None` if the CRC or
+/// the rate is wrong.
+fn header_fields(header: &[u8], fields: usize, timed: bool) -> Option<JournalHeader> {
+    if u32::from_le_bytes(array(header, fields)?) != crc32fast::hash(header.get(..fields)?) {
         return None;
     }
+    let timing = if timed {
+        Some((
+            SessionTime::from_nanos(u64::from_le_bytes(array(header, 38)?)),
+            SampleIndex::new(u64::from_le_bytes(array(header, 30)?)),
+        ))
+    } else {
+        None
+    };
     Some(JournalHeader {
-        rate: SampleRate::new(u32::from_le_bytes(array(bytes, 10)?))?,
-        id: JournalId::new(u64::from_le_bytes(array(bytes, 14)?)),
-        track: TrackId::new(u32::from_le_bytes(array(bytes, 22)?)),
-        epoch: EpochId::new(u32::from_le_bytes(array(bytes, 26)?)),
+        rate: SampleRate::new(u32::from_le_bytes(array(header, 10)?))?,
+        id: JournalId::new(u64::from_le_bytes(array(header, 14)?)),
+        track: TrackId::new(u32::from_le_bytes(array(header, 22)?)),
+        epoch: EpochId::new(u32::from_le_bytes(array(header, 26)?)),
+        timing,
     })
 }
 
-enum Parsed {
-    /// A valid frame, and its length in bytes.
-    Frame(Frame, usize),
+/// What parsing a header or a frame found.
+enum Parsed<T> {
+    /// A valid header or frame, and its length in bytes.
+    Frame(T, usize),
+    /// The bytes end partway through it.
     Incomplete,
+    /// It isn't valid, for this reason.
     Invalid(Invalid),
 }
 
 fn parse_frame(
     bytes: &[u8],
     next_seq: u64,
-    journal_track: TrackId,
+    header: JournalHeader,
     next_sample: Option<SampleIndex>,
-) -> Parsed {
+) -> Parsed<Frame> {
+    let journal_track = header.track;
     let Some(head) = bytes.get(..FRAME_HEADER_LEN) else {
         // Too short for a header: torn, unless what's there already shows
         // it isn't a frame.
@@ -487,6 +601,14 @@ fn parse_frame(
     let Some(range) = SampleRange::starting_at(first, SampleCount::new(u64::from(len))) else {
         return Parsed::Invalid(Invalid::Length);
     };
+    if let Some((_, epoch_start)) = header.timing
+        && first < epoch_start
+    {
+        return Parsed::Invalid(Invalid::BeforeEpoch {
+            epoch_start,
+            found: first,
+        });
+    }
     if let Some(expected) = next_sample
         && expected != first
     {
@@ -525,18 +647,28 @@ fn frame_crc(head: &[u8], payload: &[u8]) -> u32 {
     hasher.finalize()
 }
 
-/// The bytes of `header`.
+/// The bytes of `header`: version 3, or version 2 for a header with no
+/// anchor.
 #[must_use]
-pub fn encode_header(header: JournalHeader) -> [u8; HEADER_LEN] {
-    let mut out = [0; HEADER_LEN];
-    out[..8].copy_from_slice(&FILE_MAGIC);
-    out[8..10].copy_from_slice(&VERSION.to_le_bytes());
-    out[10..14].copy_from_slice(&header.rate.hz().to_le_bytes());
-    out[14..22].copy_from_slice(&header.id.get().to_le_bytes());
-    out[22..26].copy_from_slice(&header.track.get().to_le_bytes());
-    out[26..30].copy_from_slice(&header.epoch.get().to_le_bytes());
-    let crc = crc32fast::hash(&out[..HEADER_FIELDS]);
-    out[HEADER_FIELDS..].copy_from_slice(&crc.to_le_bytes());
+pub fn encode_header(header: JournalHeader) -> Vec<u8> {
+    let version = if header.timing.is_some() {
+        VERSION
+    } else {
+        UNTIMED_VERSION
+    };
+    let mut out = Vec::with_capacity(header.encoded_len());
+    out.extend_from_slice(&FILE_MAGIC);
+    out.extend_from_slice(&version.to_le_bytes());
+    out.extend_from_slice(&header.rate.hz().to_le_bytes());
+    out.extend_from_slice(&header.id.get().to_le_bytes());
+    out.extend_from_slice(&header.track.get().to_le_bytes());
+    out.extend_from_slice(&header.epoch.get().to_le_bytes());
+    if let Some((start, first_sample)) = header.timing {
+        out.extend_from_slice(&first_sample.get().to_le_bytes());
+        out.extend_from_slice(&start.as_nanos().to_le_bytes());
+    }
+    let crc = crc32fast::hash(&out);
+    out.extend_from_slice(&crc.to_le_bytes());
     out
 }
 

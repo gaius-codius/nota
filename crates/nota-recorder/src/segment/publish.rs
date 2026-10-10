@@ -9,12 +9,17 @@
 //! Every type has private fields and one way in, so a row can't be
 //! committed for a file that isn't durable, and a journal can't be deleted
 //! for a segment that isn't committed.
+//!
+//! A durable segment carries its epoch's anchor, when its journals gave
+//! one, and the store commits the anchor before the row
+//! ([`SegmentStore::insert`]): once its journals are deleted, the store is
+//! where the epoch's timing is kept.
 
 use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use nota_core::{EpochId, SampleRange, TrackId};
+use nota_core::{EpochAnchor, EpochId, SampleRange, TrackId};
 use nota_store::{AudioDigest, SegmentRow, Sha256Digest};
 use sha2::{Digest, Sha256};
 
@@ -152,6 +157,7 @@ impl RenamedSegment {
         fs.sync_dir(&self.segment.dir)?;
         Ok(DurableSegment {
             segment: self.segment,
+            anchor: None,
         })
     }
 }
@@ -161,6 +167,8 @@ impl RenamedSegment {
 #[derive(Debug)]
 pub struct DurableSegment {
     segment: Segment,
+    /// How the segment's epoch is timed, if its journals said.
+    anchor: Option<EpochAnchor>,
 }
 
 impl DurableSegment {
@@ -168,6 +176,20 @@ impl DurableSegment {
     #[must_use]
     pub const fn row(&self) -> &SegmentRow {
         &self.segment.row
+    }
+
+    /// The anchor of the segment's epoch, to commit with its row; `None`
+    /// if its journals didn't keep one (version 2 journals) or it was
+    /// rebuilt for a row already committed.
+    #[must_use]
+    pub const fn anchor(&self) -> Option<&EpochAnchor> {
+        self.anchor.as_ref()
+    }
+
+    /// The segment, with its epoch timed by `anchor`.
+    pub(super) const fn timed_by(mut self, anchor: Option<EpochAnchor>) -> Self {
+        self.anchor = anchor;
+        self
     }
 
     /// Where the file is.

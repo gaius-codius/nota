@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use nota_core::{
-    Clock, EpochId, FakeClock, SampleCount, SampleIndex, SampleRange, SampleRate, SessionId,
-    SessionTime, TrackId,
+    Clock, EpochAnchor, EpochId, FakeClock, SampleCount, SampleIndex, SampleRange, SampleRate,
+    SessionId, SessionTime, TrackId,
 };
 use nota_store::SegmentRow;
 use sha2::{Digest, Sha256};
@@ -31,6 +31,16 @@ use crate::test_dir::TestDir;
 const MIC: TrackId = TrackId::new(0);
 const SYSTEM: TrackId = TrackId::new(1);
 const SESSION: SessionId = SessionId::new(1);
+
+/// An anchor for `epoch` at `rate`, starting at session time zero and sample zero.
+fn anchor(epoch: EpochId, rate: SampleRate) -> EpochAnchor {
+    EpochAnchor {
+        id: epoch,
+        start: SessionTime::ZERO,
+        first_sample: SampleIndex::ZERO,
+        rate,
+    }
+}
 
 /// A low rate keeps the crash tests fast: a second is 1,000 samples.
 fn rate() -> SampleRate {
@@ -192,7 +202,10 @@ fn record_chunks(
     let mut writer = SessionWriter::open(&lock, rate(), length(), dyn_clock)?;
     let mut store = store_on(&lock);
     for (track, at) in [(MIC, 0_u64), (SYSTEM, 700)] {
-        writer.start_track(track, EpochId::new(0), SampleIndex::new(at))?;
+        writer.start_track(
+            track,
+            &writer.test_epoch(track, EpochId::new(0), SampleIndex::new(at)),
+        )?;
         promised.started.insert(track, SampleIndex::new(at));
         promised.durable.insert(track, SampleIndex::new(at));
         promised.captured.insert(track, SampleIndex::new(at));
@@ -619,7 +632,7 @@ fn the_written_lag_counts_frames_past_the_last_fsync() {
     let lag_of = |to: u64| {
         let fs = FakeFs::with_dirs([session(), db()]);
         let path = session().join(JournalId::new(0).file_name());
-        let header = JournalHeader::new(JournalId::new(0), MIC, EpochId::new(0), rate());
+        let header = JournalHeader::new(JournalId::new(0), MIC, anchor(EpochId::new(0), rate()));
         let mut file = fs.create(&path).unwrap();
         file.write_all(&crate::journal::format::encode_header(header))
             .unwrap();
@@ -768,7 +781,10 @@ fn record_late_into(fs: &FakeFs, promised: &mut Promised) -> Result<(), Box<dyn 
         SessionWriter::open(&lock, rate(), length(), dyn_clock)?.with_syncing(Syncing::Manual);
     let mut store = store_on(&lock);
     for (track, at) in [(MIC, 0_u64), (SYSTEM, 700)] {
-        writer.start_track(track, EpochId::new(0), SampleIndex::new(at))?;
+        writer.start_track(
+            track,
+            &writer.test_epoch(track, EpochId::new(0), SampleIndex::new(at)),
+        )?;
         promised.started.insert(track, SampleIndex::new(at));
         promised.durable.insert(track, SampleIndex::new(at));
         promised.captured.insert(track, SampleIndex::new(at));
@@ -1420,7 +1436,10 @@ fn journals_rotate_at_every_window_even_when_publishing_fails() {
     // The store's directory doesn't exist: every publish fails.
     let mut store = SessionStore::new(lock, FakeStore::new(&fs, Path::new("/missing")));
     writer
-        .start_track(MIC, EpochId::new(0), SampleIndex::new(100))
+        .start_track(
+            MIC,
+            &writer.test_epoch(MIC, EpochId::new(0), SampleIndex::new(100)),
+        )
         .unwrap();
     let mut pending = Vec::new();
     let mut failures = 0;
@@ -1520,10 +1539,18 @@ fn rows_carry_the_epoch_and_a_new_epoch_starts_a_new_segment() {
     let lock = owned(&fs);
     let mut writer = SessionWriter::open(&lock, rate(), length(), clock).unwrap();
     writer
-        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .start_track(
+            MIC,
+            &writer.test_epoch(MIC, EpochId::new(0), SampleIndex::ZERO),
+        )
         .unwrap();
     writer.append(MIC, &samples(MIC, 0, 400)).unwrap();
-    writer.new_epoch(MIC, EpochId::new(1)).unwrap();
+    writer
+        .new_epoch(
+            MIC,
+            &writer.test_epoch(MIC, EpochId::new(1), writer.next_sample(MIC).unwrap()),
+        )
+        .unwrap();
     writer.append(MIC, &samples(MIC, 400, 200)).unwrap();
     let ids = writer.finish().unwrap();
     assert_eq!(ids, finished(&[0, 1]));
@@ -1556,7 +1583,10 @@ fn journal_ids_continue_after_a_restart() {
     let lock = owned(&fs);
     let mut writer = SessionWriter::open(&lock, rate(), length(), clock).unwrap();
     writer
-        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .start_track(
+            MIC,
+            &writer.test_epoch(MIC, EpochId::new(0), SampleIndex::ZERO),
+        )
         .unwrap();
     writer.append(MIC, &[1, 2, 3]).unwrap();
     assert_eq!(writer.finish().unwrap(), finished(&[8]));
@@ -1572,7 +1602,8 @@ fn an_unreadable_journal_is_set_aside_and_the_rest_salvaged() {
     let disk = fs.crash(CrashOutcome::KeepAll);
     let bad = session().join(JournalId::new(90).file_name());
     let mut file = disk.create(&bad).unwrap();
-    file.write_all(&[0xAB; 40]).unwrap();
+    // Longer than any header, so it may have held audio.
+    file.write_all(&[0xAB; 80]).unwrap();
     // A good header naming another id than the file's name is refused too.
     let renamed = session().join(JournalId::new(91).file_name());
     let first = session().join(JournalId::new(0).file_name());
@@ -1590,7 +1621,7 @@ fn an_unreadable_journal_is_set_aside_and_the_rest_salvaged() {
             PathBuf::from("/session/journal-000091.unreadable"),
         ]
     );
-    assert_eq!(disk.read(&aside[0]).unwrap(), [0xAB; 40]);
+    assert_eq!(disk.read(&aside[0]).unwrap(), [0xAB; 80]);
     let mut seen = observe(&disk);
     seen.files
         .retain(|p, _| p.extension().is_none_or(|e| e != "unreadable"));
@@ -1624,7 +1655,10 @@ fn salvage_on_the_real_filesystem_with_sqlite() {
     let owner = ours.lock().unwrap();
     let mut writer = SessionWriter::open(&owner, rate(), length(), dyn_clock).unwrap();
     writer
-        .start_track(MIC, EpochId::new(2), SampleIndex::new(10))
+        .start_track(
+            MIC,
+            &writer.test_epoch(MIC, EpochId::new(2), SampleIndex::new(10)),
+        )
         .unwrap();
     writer.append(MIC, &samples(MIC, 10, 3_000)).unwrap();
     clock.advance(std::time::Duration::from_secs(3));
@@ -1816,7 +1850,10 @@ fn a_journal_corrupt_before_its_end_is_published_then_set_aside() {
     let lock = owned(&fs);
     let mut writer = SessionWriter::open(&lock, rate(), long, dyn_clock).unwrap();
     writer
-        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .start_track(
+            MIC,
+            &writer.test_epoch(MIC, EpochId::new(0), SampleIndex::ZERO),
+        )
         .unwrap();
     // Half a sync interval at a time, so every frame is 425 samples.
     for k in 0..120 {
@@ -1902,7 +1939,10 @@ fn journal_at_16_khz(seconds: u64) -> (Vec<u8>, Vec<(usize, u64)>) {
     let lock = owned(&fs);
     let mut writer = SessionWriter::open(&lock, hz, long, dyn_clock).unwrap();
     writer
-        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .start_track(
+            MIC,
+            &writer.test_epoch(MIC, EpochId::new(0), SampleIndex::ZERO),
+        )
         .unwrap();
     for k in 0..seconds {
         writer
@@ -2011,8 +2051,8 @@ fn frames_spanning_the_sync_interval_after_damage_keep_the_journal() {
     // damage is corruption and the journal is kept. Short of that, it could
     // all be a torn tail, and the journal is deleted.
     let corrupt_first = |count: u64| {
-        let header = JournalHeader::new(JournalId::FIRST, MIC, EpochId::new(0), rate());
-        let mut bytes = crate::journal::format::encode_header(header).to_vec();
+        let header = JournalHeader::new(JournalId::FIRST, MIC, anchor(EpochId::new(0), rate()));
+        let mut bytes = crate::journal::format::encode_header(header);
         for k in 0..count {
             encode_frame(
                 &mut bytes,
@@ -2071,7 +2111,10 @@ fn a_corrupt_journal_in_a_bad_window_keeps_its_name_until_it_publishes() {
     let lock = owned(&fs);
     let mut writer = SessionWriter::open(&lock, rate(), length(), clock).unwrap();
     writer
-        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .start_track(
+            MIC,
+            &writer.test_epoch(MIC, EpochId::new(0), SampleIndex::ZERO),
+        )
         .unwrap();
     writer.append(MIC, &samples(MIC, 0, 1_000)).unwrap();
     let finished = writer.finish().unwrap();
@@ -2427,7 +2470,10 @@ fn recording_with_the_store_down_loses_nothing_once_it_is_back() {
     let mut promised = Promised::default();
     for (track, at) in [(MIC, 100_u64), (SYSTEM, 0)] {
         writer
-            .start_track(track, EpochId::new(0), SampleIndex::new(at))
+            .start_track(
+                track,
+                &writer.test_epoch(track, EpochId::new(0), SampleIndex::new(at)),
+            )
             .unwrap();
         promised.started.insert(track, SampleIndex::new(at));
     }
@@ -2478,7 +2524,10 @@ fn another_sessions_journals_are_refused_before_anything_is_done() {
     let lock = owned(&fs);
     let mut writer = SessionWriter::open(&lock, rate(), length(), clock).unwrap();
     writer
-        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .start_track(
+            MIC,
+            &writer.test_epoch(MIC, EpochId::new(0), SampleIndex::ZERO),
+        )
         .unwrap();
     writer.append(MIC, &samples(MIC, 0, 100)).unwrap();
     let theirs = || FinishedJournal::new(SessionId::new(2), JournalId::FIRST);
@@ -2690,7 +2739,10 @@ fn recording_starts_and_rotates_with_the_store_down_and_the_findings_unwritable(
     let lock = owned(&fs);
     let mut writer = SessionWriter::open(&lock, rate(), length(), dyn_clock).unwrap();
     writer
-        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .start_track(
+            MIC,
+            &writer.test_epoch(MIC, EpochId::new(0), SampleIndex::ZERO),
+        )
         .unwrap();
     let mut store = store_on(&lock);
     let mut pending = Vec::new();
@@ -2739,10 +2791,18 @@ fn nothing_in_a_bad_rows_window_is_published_even_in_another_segment() {
     let lock = owned(&fs);
     let mut writer = SessionWriter::open(&lock, rate(), length(), clock).unwrap();
     writer
-        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .start_track(
+            MIC,
+            &writer.test_epoch(MIC, EpochId::new(0), SampleIndex::ZERO),
+        )
         .unwrap();
     writer.append(MIC, &samples(MIC, 0, 500)).unwrap();
-    writer.new_epoch(MIC, EpochId::new(1)).unwrap();
+    writer
+        .new_epoch(
+            MIC,
+            &writer.test_epoch(MIC, EpochId::new(1), writer.next_sample(MIC).unwrap()),
+        )
+        .unwrap();
     writer.append(MIC, &samples(MIC, 500, 500)).unwrap();
     // The next window, which publishes.
     writer.append(MIC, &samples(MIC, 1_000, 1_000)).unwrap();
@@ -3283,7 +3343,10 @@ fn salvage_while_a_writer_records_is_refused_and_loses_nothing() {
     let lock = owned(&fs);
     let mut writer = SessionWriter::open(&lock, rate(), length(), dyn_clock).unwrap();
     writer
-        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .start_track(
+            MIC,
+            &writer.test_epoch(MIC, EpochId::new(0), SampleIndex::ZERO),
+        )
         .unwrap();
     writer.append(MIC, &samples(MIC, 0, 1_000)).unwrap();
     clock.advance(std::time::Duration::from_secs(1));
@@ -3390,7 +3453,10 @@ fn first_recording(fs: &FakeFs) -> Vec<FinishedJournal> {
     let lock = owned(fs);
     let mut writer = SessionWriter::open(&lock, rate(), length(), clock).unwrap();
     writer
-        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .start_track(
+            MIC,
+            &writer.test_epoch(MIC, EpochId::new(0), SampleIndex::ZERO),
+        )
         .unwrap();
     writer.append(MIC, &samples(MIC, 0, 1_200)).unwrap();
     let finished = writer.finish().unwrap();
@@ -3413,7 +3479,7 @@ fn resume(fs: &FakeFs, stale: &[FinishedJournal], durable: &mut u64) -> Result<(
     let epoch = writer
         .highest_epoch(MIC)
         .map_or(EpochId::new(0), |e| EpochId::new(e.get() + 1));
-    writer.start_track(MIC, epoch, from)?;
+    writer.start_track(MIC, &writer.test_epoch(MIC, epoch, from))?;
     let mut store = store_on(&lock);
     for _ in 0..12 {
         let at = writer.next_sample(MIC).ok_or("no track")?.get();
@@ -3472,7 +3538,7 @@ fn check_resumed(disk: &FakeFs, durable: u64, used: &BTreeSet<JournalId>) -> Res
         .highest_epoch(MIC)
         .map_or(EpochId::new(0), |e| EpochId::new(e.get() + 1));
     writer
-        .start_track(MIC, epoch, from)
+        .start_track(MIC, &writer.test_epoch(MIC, epoch, from))
         .map_err(|e| e.to_string())?;
     writer.append(MIC, &[1]).map_err(|e| e.to_string())?;
     let next = writer.durable(MIC).ok_or("no journal")?.journal();
@@ -3566,7 +3632,9 @@ fn after_every_journal_is_published_and_deleted_new_ids_are_higher() {
     let mut writer = SessionWriter::open(&lock, rate(), length(), dyn_clock).unwrap();
     let from = writer.first_free_sample(MIC);
     assert_eq!(from, SampleIndex::new(1_200));
-    writer.start_track(MIC, EpochId::new(1), from).unwrap();
+    writer
+        .start_track(MIC, &writer.test_epoch(MIC, EpochId::new(1), from))
+        .unwrap();
     writer.append(MIC, &samples(MIC, from.get(), 200)).unwrap();
     clock.advance(SampleCount::new(200).duration_at(rate()).unwrap());
     writer.sync_if_due().unwrap();
@@ -3591,25 +3659,39 @@ fn a_resumed_track_cant_start_inside_what_it_holds_or_reuse_an_epoch() {
     assert_eq!(writer.first_free_sample(MIC), SampleIndex::new(1_200));
     assert_eq!(writer.highest_epoch(MIC), Some(EpochId::new(0)));
     assert!(matches!(
-        writer.start_track(MIC, EpochId::new(1), SampleIndex::new(600)),
+        writer.start_track(MIC, &writer.test_epoch(MIC, EpochId::new(1), SampleIndex::new(600))),
         Err(SessionError::Covered { track: MIC, first_free }) if first_free == SampleIndex::new(1_200)
     ));
     assert!(matches!(
-        writer.start_track(MIC, EpochId::new(0), SampleIndex::new(1_200)),
+        writer.start_track(
+            MIC,
+            &writer.test_epoch(MIC, EpochId::new(0), SampleIndex::new(1_200))
+        ),
         Err(SessionError::EpochUsed { track: MIC, .. })
     ));
     // Another track is untouched by the mic's history.
     assert_eq!(writer.first_free_sample(SYSTEM), SampleIndex::ZERO);
     assert_eq!(writer.highest_epoch(SYSTEM), None);
     writer
-        .start_track(MIC, EpochId::new(1), SampleIndex::new(1_200))
+        .start_track(
+            MIC,
+            &writer.test_epoch(MIC, EpochId::new(1), SampleIndex::new(1_200)),
+        )
         .unwrap();
     // Within a recording, epochs only go up.
     assert!(matches!(
-        writer.new_epoch(MIC, EpochId::new(1)),
+        writer.new_epoch(
+            MIC,
+            &writer.test_epoch(MIC, EpochId::new(1), writer.next_sample(MIC).unwrap())
+        ),
         Err(SessionError::EpochUsed { track: MIC, .. })
     ));
-    writer.new_epoch(MIC, EpochId::new(2)).unwrap();
+    writer
+        .new_epoch(
+            MIC,
+            &writer.test_epoch(MIC, EpochId::new(2), writer.next_sample(MIC).unwrap()),
+        )
+        .unwrap();
 }
 
 #[test]
@@ -3619,7 +3701,10 @@ fn a_track_cant_start_inside_journals_left_unsalvaged() {
     let lock = owned(&fs);
     let mut writer = SessionWriter::open(&lock, rate(), length(), dyn_clock).unwrap();
     writer
-        .start_track(SYSTEM, EpochId::new(3), SampleIndex::new(100))
+        .start_track(
+            SYSTEM,
+            &writer.test_epoch(SYSTEM, EpochId::new(3), SampleIndex::new(100)),
+        )
         .unwrap();
     writer.append(SYSTEM, &samples(SYSTEM, 100, 2_000)).unwrap();
     clock.advance(std::time::Duration::from_secs(3));
@@ -3659,7 +3744,10 @@ fn a_set_aside_journal_keeps_its_id_and_samples_from_reuse_even_unread() {
     let mut writer = SessionWriter::open(&lock, rate(), length(), clock).unwrap();
     assert_eq!(writer.first_free_sample(SYSTEM), SampleIndex::new(300));
     writer
-        .start_track(SYSTEM, EpochId::new(1), SampleIndex::new(300))
+        .start_track(
+            SYSTEM,
+            &writer.test_epoch(SYSTEM, EpochId::new(1), SampleIndex::new(300)),
+        )
         .unwrap();
     writer.append(SYSTEM, &[1]).unwrap();
     assert!(writer.durable(SYSTEM).unwrap().journal() > JournalId::new(90));
@@ -3672,7 +3760,10 @@ fn a_set_aside_journal_keeps_its_id_and_samples_from_reuse_even_unread() {
     let lock = owned(&fs);
     let mut writer = SessionWriter::open(&lock, rate(), length(), clock).unwrap();
     writer
-        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .start_track(
+            MIC,
+            &writer.test_epoch(MIC, EpochId::new(0), SampleIndex::ZERO),
+        )
         .unwrap();
     writer.append(MIC, &[1]).unwrap();
     assert!(writer.durable(MIC).unwrap().journal() > JournalId::new(90));
@@ -3691,7 +3782,7 @@ fn journal_with_damage() -> Vec<u8> {
 fn journal_damaged_before(later: u64) -> Vec<u8> {
     let fs = FakeFs::with_dirs([session()]);
     let (clock, dyn_clock) = fake_clock();
-    let header = JournalHeader::new(JournalId::new(90), SYSTEM, EpochId::new(0), rate());
+    let header = JournalHeader::new(JournalId::new(90), SYSTEM, anchor(EpochId::new(0), rate()));
     let mut journal =
         JournalWriter::create(&fs, &session(), header, SampleIndex::ZERO, dyn_clock).unwrap();
     journal.append(&samples(SYSTEM, 0, 100)).unwrap();

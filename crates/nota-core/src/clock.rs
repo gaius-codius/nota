@@ -12,7 +12,12 @@
 //! Session time keeps counting while the machine is suspended, so a sleep
 //! shows up as a gap between epochs rather than vanishing. On Linux that
 //! takes `CLOCK_BOOTTIME`: `Instant` uses `CLOCK_MONOTONIC`, which stops
-//! during suspend.
+//! during suspend. The difference between the two grows only while the
+//! machine is suspended, so the clock also says how long it has been
+//! suspended ([`Clock::suspended`]), and capture opens an epoch after one.
+//!
+//! A resumed session's clock carries on from a stored session time
+//! ([`SystemClock::resume`]), so the new recording comes after the old one.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -23,16 +28,30 @@ use crate::time::{SessionTime, WallTime};
 pub trait Clock: Send + Sync + std::fmt::Debug {
     /// The current session time.
     fn now(&self) -> SessionTime;
+
+    /// How long the machine has been suspended since the clock started, as
+    /// far as the clock can tell. It never goes backwards; it grows only
+    /// while the machine is suspended, by about the time it was.
+    fn suspended(&self) -> Duration;
 }
 
-/// The real session clock: monotonic, counting through suspend, with zero at
-/// the moment it started.
+/// The real session clock: monotonic, counting through suspend, from the
+/// session time it started at.
 #[derive(Debug)]
 pub struct SystemClock {
     origin: Duration,
+    /// The session time at `origin`: zero, or where a resumed session left
+    /// off.
+    base: SessionTime,
+    /// The awake clock's lag behind `origin`'s clock when it started: what
+    /// the machine had been suspended before.
+    asleep_before: Duration,
     /// The latest reading handed out, so `now` can't go back even if the
     /// clock underneath misbehaves.
     latest: AtomicU64,
+    /// The longest suspension reported, so `suspended` can't go back
+    /// either.
+    asleep: AtomicU64,
 }
 
 impl SystemClock {
@@ -45,10 +64,24 @@ impl SystemClock {
     /// [`ClockUnavailable`] if the system clock can't be read (on Linux,
     /// a kernel without `CLOCK_BOOTTIME`, older than 2.6.39).
     pub fn start() -> Result<Self, ClockUnavailable> {
+        Self::resume(SessionTime::ZERO)
+    }
+
+    /// Starts the clock of a resumed session: session time `from` is now,
+    /// and it counts on from there. Pass the end of everything the session
+    /// recorded before, so the new recording comes after it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::start`].
+    pub fn resume(from: SessionTime) -> Result<Self, ClockUnavailable> {
         let origin = monotonic_now().ok_or(ClockUnavailable)?;
         Ok(Self {
             origin,
-            latest: AtomicU64::new(0),
+            base: from,
+            asleep_before: asleep_now(origin),
+            latest: AtomicU64::new(from.as_nanos()),
+            asleep: AtomicU64::new(0),
         })
     }
 }
@@ -62,9 +95,20 @@ impl Clock for SystemClock {
         };
         let elapsed = reading.saturating_sub(self.origin);
         // Saturates after about 584 years.
-        let nanos = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
+        let nanos = u64::try_from(elapsed.as_nanos())
+            .unwrap_or(u64::MAX)
+            .saturating_add(self.base.as_nanos());
         let before = self.latest.fetch_max(nanos, Ordering::SeqCst);
         SessionTime::from_nanos(before.max(nanos))
+    }
+
+    fn suspended(&self) -> Duration {
+        let asleep = monotonic_now().map_or(Duration::ZERO, |reading| {
+            asleep_now(reading).saturating_sub(self.asleep_before)
+        });
+        let nanos = u64::try_from(asleep.as_nanos()).unwrap_or(u64::MAX);
+        let before = self.asleep.fetch_max(nanos, Ordering::SeqCst);
+        Duration::from_nanos(before.max(nanos))
     }
 }
 
@@ -128,6 +172,31 @@ fn monotonic_now() -> Option<Duration> {
     Some(now.saturating_duration_since(*ANCHOR.get_or_init(|| now)))
 }
 
+/// How far the clock that stops during suspend lags `boottime`, a reading
+/// of the clock that doesn't, taken just before: the time the machine has
+/// spent suspended since it booted. Zero if it can't be read. The two reads
+/// aren't simultaneous, so it can be off by the time between them.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the session clock is the one place nota reads the monotonic clock"
+)]
+fn asleep_now(boottime: Duration) -> Duration {
+    rustix::time::clock_gettime_dynamic(rustix::time::DynamicClockId::Known(
+        rustix::time::ClockId::Monotonic,
+    ))
+    .ok()
+    .and_then(|awake| Duration::try_from(awake).ok())
+    .map_or(Duration::ZERO, |awake| boottime.saturating_sub(awake))
+}
+
+/// Suspend isn't counted here yet: Windows' `Instant` counts through sleep,
+/// so session time does too, but a sleep opens no epoch until v2.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+const fn asleep_now(_boottime: Duration) -> Duration {
+    Duration::ZERO
+}
+
 #[cfg(any(test, feature = "fake-clock"))]
 pub use fake::FakeClock;
 
@@ -143,6 +212,7 @@ mod fake {
     #[derive(Debug, Default)]
     pub struct FakeClock {
         nanos: AtomicU64,
+        asleep: AtomicU64,
     }
 
     impl FakeClock {
@@ -151,7 +221,20 @@ mod fake {
         pub fn new(start: SessionTime) -> Self {
             Self {
                 nanos: AtomicU64::new(start.as_nanos()),
+                asleep: AtomicU64::new(0),
             }
+        }
+
+        /// Moves the clock forward by `by` as a suspend of that long would:
+        /// session time and [`Clock::suspended`] both move on by it.
+        pub fn suspend(&self, by: Duration) {
+            self.advance(by);
+            let by = u64::try_from(by.as_nanos()).unwrap_or(u64::MAX);
+            let _ = self
+                .asleep
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |asleep| {
+                    Some(asleep.saturating_add(by))
+                });
         }
 
         /// Moves the clock forward by `by`, stopping at the largest session
@@ -169,6 +252,10 @@ mod fake {
     impl Clock for FakeClock {
         fn now(&self) -> SessionTime {
             SessionTime::from_nanos(self.nanos.load(Ordering::SeqCst))
+        }
+
+        fn suspended(&self) -> Duration {
+            Duration::from_nanos(self.asleep.load(Ordering::SeqCst))
         }
     }
 }
@@ -201,6 +288,49 @@ mod tests {
         // long before the cap. No sleep, per the clippy ban.
         let moved = (0..100_000_000).any(|_| clock.now() > first);
         assert!(moved, "the session clock never advanced past {first:?}");
+    }
+
+    /// A resumed clock carries on from the time it's given.
+    #[test]
+    fn a_resumed_clock_carries_on_from_its_start() {
+        let from = SessionTime::from_nanos(3_600_000_000_000);
+        let clock = SystemClock::resume(from).unwrap();
+        let now = clock.now();
+        assert!(now >= from, "{now:?}");
+        // Generous: only a stalled test machine would take a minute here.
+        assert!(
+            now.checked_duration_since(from).unwrap() < Duration::from_secs(60),
+            "{now:?}"
+        );
+    }
+
+    /// A clock that started on an awake machine counts no suspend, and the
+    /// count never goes back.
+    #[test]
+    fn system_clock_counts_no_suspend_while_awake() {
+        let clock = SystemClock::start().unwrap();
+        let mut last = clock.suspended();
+        // The two clocks are read a moment apart, so allow that much.
+        assert!(last < Duration::from_millis(100), "{last:?}");
+        for _ in 0..1_000 {
+            let now = clock.suspended();
+            assert!(now >= last);
+            last = now;
+        }
+    }
+
+    /// A fake suspend moves session time and the suspend count alike;
+    /// advancing moves only session time.
+    #[test]
+    fn a_fake_suspend_counts_as_suspended() {
+        let clock = FakeClock::new(SessionTime::from_nanos(5));
+        clock.advance(Duration::from_nanos(10));
+        assert_eq!(clock.suspended(), Duration::ZERO);
+        clock.suspend(Duration::from_secs(2));
+        assert_eq!(clock.now(), SessionTime::from_nanos(2_000_000_015));
+        assert_eq!(clock.suspended(), Duration::from_secs(2));
+        clock.suspend(Duration::MAX);
+        assert_eq!(clock.suspended(), Duration::from_nanos(u64::MAX));
     }
 
     #[test]

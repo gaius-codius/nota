@@ -127,7 +127,7 @@ fn record_syncing(fs: &FakeFs, syncing: Syncing) -> Result<(), Box<dyn std::erro
         dyn_clock,
     )?
     .with_syncing(syncing);
-    w.start_track(MIC, EpochId::new(0), SampleIndex::ZERO)?;
+    w.start_track(MIC, &w.test_epoch(MIC, EpochId::new(0), SampleIndex::ZERO))?;
     let mut at = 0;
     for len in [300_u64, 300, 300, 300, 300, 300, 700] {
         w.append(MIC, &samples(at, len))?;
@@ -277,7 +277,7 @@ fn when_the_replacement_fails_too_the_samples_are_a_gap_and_recording_goes_on() 
         dyn_clock,
     )
     .unwrap();
-    w.start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+    w.start_track(MIC, &w.test_epoch(MIC, EpochId::new(0), SampleIndex::ZERO))
         .unwrap();
     w.append(MIC, &samples(0, 300)).unwrap();
     clock.advance(std::time::Duration::from_secs(1));
@@ -319,7 +319,7 @@ fn a_new_journal_whose_first_write_fails_is_replaced() {
         dyn_clock,
     )
     .unwrap();
-    w.start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+    w.start_track(MIC, &w.test_epoch(MIC, EpochId::new(0), SampleIndex::ZERO))
         .unwrap();
     // The marks' write (0-4), then the journal's create (5), header write
     // (6), sync (7), directory sync (8), then the first frame write (9)
@@ -355,7 +355,7 @@ fn a_replacement_replays_only_what_wasnt_synced() {
         dyn_clock,
     )
     .unwrap();
-    w.start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+    w.start_track(MIC, &w.test_epoch(MIC, EpochId::new(0), SampleIndex::ZERO))
         .unwrap();
     w.append(MIC, &samples(0, 300)).unwrap();
     clock.advance(std::time::Duration::from_secs(1));
@@ -397,13 +397,16 @@ fn track_errors() {
         Err(SessionError::UnknownTrack(MIC))
     ));
     assert!(matches!(
-        w.new_epoch(MIC, EpochId::new(1)),
+        w.new_epoch(MIC, &w.test_epoch(MIC, EpochId::new(1), SampleIndex::ZERO)),
         Err(SessionError::UnknownTrack(MIC))
     ));
-    w.start_track(MIC, EpochId::new(0), SampleIndex::new(u64::MAX - 1))
-        .unwrap();
+    w.start_track(
+        MIC,
+        &w.test_epoch(MIC, EpochId::new(0), SampleIndex::new(u64::MAX - 1)),
+    )
+    .unwrap();
     assert!(matches!(
-        w.start_track(MIC, EpochId::new(0), SampleIndex::ZERO),
+        w.start_track(MIC, &w.test_epoch(MIC, EpochId::new(0), SampleIndex::ZERO)),
         Err(SessionError::TrackExists(MIC))
     ));
     assert!(matches!(
@@ -510,7 +513,7 @@ fn a_second_track_on_auto_moves_every_track_to_threads() {
     )
     .unwrap()
     .with_syncing(Syncing::Auto);
-    w.start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+    w.start_track(MIC, &w.test_epoch(MIC, EpochId::new(0), SampleIndex::ZERO))
         .unwrap();
     assert_eq!(w.syncing(MIC), Some(Syncing::Inline));
     assert_eq!(w.syncing(SYSTEM), None);
@@ -518,8 +521,11 @@ fn a_second_track_on_auto_moves_every_track_to_threads() {
     clock.advance(std::time::Duration::from_secs(1));
     // Due: the sync runs inline.
     w.append(MIC, &samples(100, 100)).unwrap();
-    w.start_track(SYSTEM, EpochId::new(0), SampleIndex::ZERO)
-        .unwrap();
+    w.start_track(
+        SYSTEM,
+        &w.test_epoch(SYSTEM, EpochId::new(0), SampleIndex::ZERO),
+    )
+    .unwrap();
     assert_eq!(w.syncing(MIC), Some(Syncing::Threads));
     assert_eq!(w.syncing(SYSTEM), Some(Syncing::Threads));
     // Durable as far as the inline sync took it, in the same journal.
@@ -566,8 +572,11 @@ fn sync_if_due_reports_durable_positions_per_journal() {
         dyn_clock,
     )
     .unwrap();
-    w.start_track(MIC, EpochId::new(0), SampleIndex::new(1_900))
-        .unwrap();
+    w.start_track(
+        MIC,
+        &w.test_epoch(MIC, EpochId::new(0), SampleIndex::new(1_900)),
+    )
+    .unwrap();
     w.append(MIC, &samples(1_900, 50)).unwrap();
     assert_eq!(w.durable(MIC).map(|d| d.end().get()), Some(1_900));
     clock.advance(std::time::Duration::from_secs(1));
@@ -610,7 +619,7 @@ fn a_failed_finish_still_hands_out_its_journals() {
         dyn_clock,
     )
     .unwrap();
-    w.start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+    w.start_track(MIC, &w.test_epoch(MIC, EpochId::new(0), SampleIndex::ZERO))
         .unwrap();
     w.append(MIC, &samples(0, 100)).unwrap();
     inner.fail_after(0, io::ErrorKind::Other);
@@ -637,7 +646,7 @@ fn manual_writer(fs: &FakeFs) -> (Arc<FakeClock>, SessionWriter<FakeFs>) {
     )
     .unwrap()
     .with_syncing(Syncing::Manual);
-    w.start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+    w.start_track(MIC, &w.test_epoch(MIC, EpochId::new(0), SampleIndex::ZERO))
         .unwrap();
     (clock, w)
 }
@@ -823,9 +832,16 @@ fn a_new_epoch_writes_audio_held_back_in_the_old_epoch_without_waiting() {
     assert_eq!(w.waiting(MIC), 50);
     // The full journal ends with its fsync still held; the 50 go to
     // another journal in the old epoch, which ends too.
-    w.new_epoch(MIC, EpochId::new(1)).unwrap();
+    w.new_epoch(
+        MIC,
+        &w.test_epoch(MIC, EpochId::new(1), w.next_sample(MIC).unwrap()),
+    )
+    .unwrap();
     assert_eq!(w.waiting(MIC), 0);
-    assert_eq!(w.epoch(MIC), Some((EpochId::new(1), SampleIndex::new(900))));
+    assert_eq!(
+        w.epoch(MIC).map(|e| (e.id(), e.first_sample())),
+        Some((EpochId::new(1), SampleIndex::new(900)))
+    );
     w.append(MIC, &samples(900, 10)).unwrap();
     assert_eq!(journal_range(&fs, 0), (0, 850, 0));
     assert_eq!(journal_range(&fs, 1), (850, 900, 0));
@@ -889,7 +905,7 @@ fn syncs_on_threads_record_the_same_audio_as_inline() {
         )
         .unwrap()
         .with_syncing(syncing);
-        w.start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        w.start_track(MIC, &w.test_epoch(MIC, EpochId::new(0), SampleIndex::ZERO))
             .unwrap();
         let mut at = 0;
         for len in [300_u64, 300, 300, 300, 300, 300, 700] {
@@ -991,7 +1007,7 @@ fn when_no_data_fsync_ever_succeeds_each_failure_is_replaced_once_then_a_gap() {
         )
         .unwrap()
         .with_syncing(syncing);
-        w.start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        w.start_track(MIC, &w.test_epoch(MIC, EpochId::new(0), SampleIndex::ZERO))
             .unwrap();
         // The full budget's fsync fails, and so does its replacement's: a
         // gap, not a replacement of the replacement.

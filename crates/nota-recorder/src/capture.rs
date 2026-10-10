@@ -44,6 +44,26 @@
 //!   ([`TrackTimeline::open_epoch`]): the new epoch starts where the old
 //!   one's audio ends, with no gap.
 //!
+//! # Route changes and suspend
+//!
+//! A stream that follows the default device goes quiet while it moves to a
+//! new one, and every stream goes quiet while the machine is suspended, yet
+//! the track's sample count carries on as if nothing was missed. So the
+//! first audio after either opens a new epoch, at the time that audio was
+//! captured ([`CaptureEvent::Reopened`]): the stretch with no audio is a
+//! gap between epochs, as it is after an overrun. The stream's sender
+//! notices a suspend by the session clock's count of time spent suspended
+//! ([`Clock::suspended`]), read on each buffer, and reports it as a
+//! [`CaptureNotice::Suspended`].
+//!
+//! # Resumed sessions
+//!
+//! A track that joins a session recorded before carries on from its newest
+//! epoch ([`SessionWriter::resumed_timeline`]): its first epoch is numbered
+//! above every earlier one, and must start after the earlier audio ends,
+//! which takes the session's clock resumed from
+//! [`SessionWriter::resume_from`].
+//!
 //! [`start`] returns a [`Capture`], which keeps the stream running until it's
 //! dropped, on the thread that started it, and a
 //! [`CaptureReceiver`] for the recorder thread. Stopping ends the stream and
@@ -115,14 +135,14 @@
 
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use nota_core::messages::AudioChunk;
 use nota_core::{
-    Clock, Epoch, EpochError, EpochId, SampleCount, SampleIndex, SampleRate, SessionTime, TrackId,
+    Clock, Epoch, EpochError, SampleCount, SampleIndex, SampleRate, SessionTime, TrackId,
     TrackTimeline,
 };
 
@@ -201,8 +221,13 @@ pub enum CaptureNotice {
     /// [`record_track`] moves the track to a new epoch, so the loss is a
     /// gap, unless the timeline refuses one.
     Overrun,
-    /// The default device changed and the stream followed it.
+    /// The default device changed and the stream followed it. Its next
+    /// audio opens a new epoch ([`CaptureEvent::Reopened`]).
     RouteChanged,
+    /// The machine was suspended while the stream ran. Reported with the
+    /// first audio after it, which opens a new epoch
+    /// ([`CaptureEvent::Reopened`]).
+    Suspended,
     /// Anything else the backend reported without stopping the stream,
     /// such as real-time priority refused, or default-device changes no
     /// longer watched.
@@ -232,6 +257,13 @@ pub enum CaptureEvent {
         /// When the first sample was captured, by the session clock.
         at: SessionTime,
     },
+    /// The stream's audio resumes after a stretch it didn't capture: it
+    /// followed a new device, or the machine was suspended. The next
+    /// sample was captured at about `at`, and opens a new epoch there.
+    Reopened {
+        /// When the next sample was captured, by the session clock.
+        at: SessionTime,
+    },
     /// The stream's start returned: what it sent before, and sends from
     /// now on, is the track's.
     Started,
@@ -256,25 +288,58 @@ pub struct CaptureSender {
     stopping: Arc<AtomicBool>,
     /// Set once the first audio is sent.
     began: Arc<AtomicBool>,
+    /// Set when the stream followed a new device, until its next audio.
+    rerouted: Arc<AtomicBool>,
+    /// The clock's count of time suspended when the last audio was sent,
+    /// in nanoseconds.
+    asleep: Arc<AtomicU64>,
     /// The rate the stream captures at, to time the first audio.
     rate: SampleRate,
 }
+
+/// The least growth in the clock's count of time suspended taken for a
+/// suspend. The count is two clocks read a moment apart, so it can move by
+/// the time between the reads, which preemption can make milliseconds;
+/// a real suspend lasts seconds.
+const MIN_SUSPEND: Duration = Duration::from_millis(100);
 
 impl CaptureSender {
     /// Sends a copy of `samples`, in a buffer the recorder has finished
     /// with if there is one. Empty calls send nothing. The first call that
     /// sends anything says first when its first sample was captured
-    /// ([`CaptureEvent::Began`]).
+    /// ([`CaptureEvent::Began`]); a later one after a route change or a
+    /// suspend says so, and when ([`CaptureEvent::Reopened`]).
     pub fn audio(&self, samples: &[i16]) {
-        if !samples.is_empty() {
-            // Read once the stream has begun: only its first buffers pay
-            // for the clock.
-            let first = (!self.began.load(Ordering::SeqCst))
-                .then(|| (&*self.began, self.captured_at(samples.len())));
-            // Counted before it's queued, so it's never missed.
-            self.progress.sent(samples.len());
-            self.events.first_audio(self.track, samples, first);
+        if samples.is_empty() {
+            return;
         }
+        let began = self.began.load(Ordering::SeqCst);
+        // Checked on every buffer, the first too, so a suspend before it
+        // isn't taken for one after it.
+        let reopened = self.reopened();
+        // The clock is read only when a time is needed: a stream's first
+        // buffers, and its first after a gap.
+        let at = (!began || reopened).then(|| self.captured_at(samples.len()));
+        let first = at.filter(|_| !began).map(|at| (&*self.began, at));
+        // Counted before it's queued, so it's never missed.
+        self.progress.sent(samples.len());
+        self.events
+            .first_audio(self.track, samples, first, at.filter(|_| reopened));
+    }
+
+    /// Whether the audio about to be sent follows a stretch the stream
+    /// didn't capture: it followed a new device since its last audio, or
+    /// the machine was suspended since. A suspend is reported here, as a
+    /// [`CaptureNotice::Suspended`].
+    fn reopened(&self) -> bool {
+        let asleep = u64::try_from(self.clock.suspended().as_nanos()).unwrap_or(u64::MAX);
+        let before = self.asleep.swap(asleep, Ordering::SeqCst);
+        let slept = Duration::from_nanos(asleep.saturating_sub(before)) >= MIN_SUSPEND;
+        if slept {
+            self.notice(CaptureNotice::Suspended);
+        }
+        let rerouted = self.rerouted.swap(false, Ordering::SeqCst);
+        slept || rerouted
     }
 
     /// When the first of `len` samples just delivered was captured: now,
@@ -288,8 +353,12 @@ impl CaptureSender {
     }
 
     /// Reports something that doesn't stop the stream, stamped with the
-    /// session time now.
+    /// session time now. After a [`CaptureNotice::RouteChanged`], the
+    /// stream's next audio opens a new epoch.
     pub fn notice(&self, notice: CaptureNotice) {
+        if notice == CaptureNotice::RouteChanged {
+            self.rerouted.store(true, Ordering::SeqCst);
+        }
         let at = self.clock.now();
         self.events
             .send(self.track, CaptureEvent::Notice { notice, at });
@@ -580,6 +649,11 @@ impl TrackStarter {
             clock: Arc::clone(&self.clock),
             stopping: Arc::clone(&stopping),
             began: Arc::new(AtomicBool::new(false)),
+            rerouted: Arc::new(AtomicBool::new(false)),
+            // Suspends before the stream starts aren't its to report.
+            asleep: Arc::new(AtomicU64::new(
+                u64::try_from(self.clock.suspended().as_nanos()).unwrap_or(u64::MAX),
+            )),
             rate: self.rate,
         };
         let started_at = self.clock.now();
@@ -609,15 +683,17 @@ pub enum RecorderEvent {
     JournalFailed(SessionError),
     /// The stream noted something; recording goes on.
     Capture(CaptureNotice),
-    /// After an overrun, the track moved to this epoch, in its timeline and
-    /// its journals: its samples from [`Epoch::first_sample`] on play from
-    /// [`Epoch::start`]. Reported after the overrun's
-    /// [`Capture`](Self::Capture). From [`record_tracks`], also a joining
-    /// track's first epoch, before its first audio.
+    /// After an overrun, a route change or a suspend, the track moved to
+    /// this epoch, in its timeline and its journals: its samples from
+    /// [`Epoch::first_sample`] on play from [`Epoch::start`]. Reported
+    /// after the overrun's [`Capture`](Self::Capture), and before the
+    /// first audio after a route change or suspend. From
+    /// [`record_tracks`], also a joining track's first epoch, before its
+    /// first audio.
     Epoch(Epoch),
-    /// After an overrun, the timeline refused a new epoch, so the track
-    /// stays in its current one: the samples after the overrun are timed
-    /// early by the audio lost. Recording goes on.
+    /// After an overrun, a route change or a suspend, the timeline refused
+    /// a new epoch, so the track stays in its current one: the samples
+    /// after it are timed early by the stretch missed. Recording goes on.
     EpochRefused(EpochError),
     /// Audio the track recorded, as it was appended: for the engine, and
     /// for level meters. Its samples are numbered as the journals number
@@ -690,7 +766,9 @@ impl std::error::Error for RecordError {
 ///
 /// At each overrun the track moves to a new epoch, in `timeline` and
 /// `writer` alike, starting at the time the overrun was reported (see the
-/// module docs), and the epoch is reported.
+/// module docs), and the epoch is reported. So it does at the first audio
+/// after a route change or a suspend, starting when that audio was
+/// captured.
 ///
 /// Journals are fsync'd as audio arrives, and also when it stops arriving,
 /// so durable stays within about
@@ -743,15 +821,16 @@ pub fn record_track<S: Fs>(
 ///   stream was started. Its events are recorded as they come.
 /// - **Joining:** a track `events` was prepared for ([`prepare_tracks`])
 ///   with no timeline here joins once its stream has started and its first
-///   audio has come: it's started on `writer` in epoch 0 at
-///   [`SessionWriter::first_free_sample`], with its first epoch opened at
-///   that audio's time ([`CaptureEvent::Began`]) and reported as a
+///   audio has come: its timeline carries on from its earlier recordings
+///   ([`SessionWriter::resumed_timeline`]), and it's started on `writer`
+///   at [`SessionWriter::first_free_sample`], with its first epoch opened
+///   at that audio's time ([`CaptureEvent::Began`]) and reported as a
 ///   [`RecorderEvent::Epoch`]. Until its start returns, its events wait
 ///   in memory; if it doesn't start, they're dropped, and so is anything
-///   it sends later. A track that can't join (`writer` refuses it, as it
-///   does a track recorded in an earlier run, whose epoch 0 is used) is
-///   reported as [`RecorderEvent::CaptureFailed`], and the others record
-///   on.
+///   it sends later. A track that can't join (its first epoch would start
+///   before its earlier audio ends, as when the session's clock wasn't
+///   resumed) is reported as [`RecorderEvent::CaptureFailed`], and the
+///   others record on.
 ///
 /// After every event, from whichever track, and after a stream ends,
 /// every journal due an fsync has one started, and so do they all when
@@ -790,13 +869,12 @@ pub fn record_tracks<S: Fs>(
     }
     for timeline in timelines.iter() {
         let track = timeline.track();
-        let Some((epoch, first_sample)) = writer.epoch(track) else {
+        let Some(epoch) = writer.epoch(track) else {
             return Err(RecordError::Session(SessionError::UnknownTrack(track)));
         };
-        let current = timeline
-            .current()
-            .map(|e| (e.id(), e.first_sample(), e.rate()));
-        if current != Some((epoch, first_sample, writer.rate())) {
+        // The writer takes only epochs at its rate, so this checks the
+        // timeline's too.
+        if timeline.current().map(Epoch::anchor) != Some(epoch.anchor()) {
             return Err(RecordError::TimelineMismatch);
         }
     }
@@ -1046,6 +1124,13 @@ fn handle<S: Fs>(
                 _ => Ok(()),
             }
         }
+        CaptureEvent::Reopened { at } => match timelines.get_mut(track) {
+            Some(timeline) => {
+                open_epoch_after_loss(writer, timeline, at, &mut |e| report(Some(track), e))
+            }
+            // Before its first audio, a track has no epoch to leave.
+            None => Ok(()),
+        },
         CaptureEvent::Began { at } => {
             if timelines.get_mut(track).is_some() {
                 // Started first: its epoch is already open.
@@ -1071,23 +1156,19 @@ fn handle<S: Fs>(
     Ok(Handled::Recorded(outcome.map_err(|e| (track, e)), spent))
 }
 
-/// Starts joining `track` on `writer`, in epoch 0 at its first free
-/// sample, and returns its timeline, with that epoch opened `at`; or why
-/// it can't record.
+/// Starts joining `track` on `writer` at its first free sample, and
+/// returns its timeline, carrying on from its earlier recordings with a
+/// new epoch opened `at`; or why it can't record.
 fn join<S: Fs>(
     writer: &mut SessionWriter<S>,
     track: TrackId,
     at: SessionTime,
 ) -> Result<TrackTimeline, CaptureError> {
     let refused = |e: &dyn fmt::Display| CaptureError::Backend(format!("couldn't record it: {e}"));
-    let first = writer.first_free_sample(track);
-    let mut timeline = TrackTimeline::new(track);
-    timeline
-        .open_epoch(at, first, writer.rate())
+    let (timeline, epoch) = writer
+        .open_first_epoch(track, at)
         .map_err(|e| refused(&e))?;
-    writer
-        .start_track(track, EpochId::new(0), first)
-        .map_err(|e| refused(&e))?;
+    writer.start_track(track, &epoch).map_err(|e| refused(&e))?;
     Ok(timeline)
 }
 
@@ -1118,9 +1199,10 @@ fn settle<S: Fs>(
 }
 
 /// Moves `timeline`'s track to a new epoch starting at `at`, in `timeline`
-/// and `writer` alike, after audio was lost: the samples that follow play
-/// from `at`, and the loss is a gap. The new epoch is reported, or the
-/// timeline's refusal, with the track left in its epoch.
+/// and `writer` alike, after audio was lost or went uncaptured: the
+/// samples that follow play from `at`, and the stretch missed is a gap.
+/// The new epoch is reported, or the timeline's refusal, with the track
+/// left in its epoch.
 ///
 /// A [`SessionError::Journal`] or [`SessionError::Marks`] from ending the
 /// old epoch's journal comes back with the track moved all the same.
@@ -1134,18 +1216,16 @@ fn open_epoch_after_loss<S: Fs>(
     let next = writer
         .next_sample(track)
         .ok_or(SessionError::UnknownTrack(track))?;
-    let opened = match timeline.open_epoch(at, next, writer.rate()) {
-        Ok(opened) => opened,
-        Err(refused) => {
-            report(RecorderEvent::EpochRefused(refused));
-            return Ok(());
-        }
-    };
+    if let Err(refused) = timeline.open_epoch(at, next, writer.rate()) {
+        report(RecorderEvent::EpochRefused(refused));
+        return Ok(());
+    }
     // The writer is in the timeline's previous epoch (checked when
     // recording started, and kept in step since), so it takes the next.
-    let moved = writer.new_epoch(track, opened.id);
-    if let Some(&epoch) = timeline.current() {
-        report(RecorderEvent::Epoch(epoch));
-    }
+    let Some(&epoch) = timeline.current() else {
+        return Ok(());
+    };
+    let moved = writer.new_epoch(track, &epoch);
+    report(RecorderEvent::Epoch(epoch));
     moved
 }

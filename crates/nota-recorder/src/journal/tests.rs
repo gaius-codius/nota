@@ -1,6 +1,6 @@
 //! The journal's acceptance tests: crash after every operation, the lag
-//! bound in a timed run, torn final frames, and the v2 header with its
-//! journal id.
+//! bound in a timed run, torn final frames, and the v3 header with its
+//! journal id and epoch anchor (and the v2 header, still read).
 
 use std::collections::BTreeMap;
 use std::io;
@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nota_core::{
-    Clock, EpochId, FakeClock, SampleCount, SampleIndex, SampleRange, SampleRate, SessionTime,
-    TrackId,
+    Clock, EpochAnchor, EpochId, FakeClock, SampleCount, SampleIndex, SampleRange, SampleRate,
+    SessionTime, TrackId,
 };
 
 use super::format::{FRAME_HEADER_LEN, HEADER_LEN, MAX_FRAME_SAMPLES, encode_frame, encode_header};
@@ -31,7 +31,17 @@ fn session() -> PathBuf {
 /// The header of journal `id`, holding `track`'s audio from [`EPOCH`] at
 /// speech rate.
 fn header(id: u64, track: TrackId) -> JournalHeader {
-    JournalHeader::new(JournalId::new(id), track, EPOCH, SampleRate::SPEECH)
+    JournalHeader::new(JournalId::new(id), track, anchor(EPOCH, SampleRate::SPEECH))
+}
+
+/// An anchor for `epoch` at `rate` that starts at session time zero and sample zero.
+fn anchor(epoch: EpochId, rate: SampleRate) -> EpochAnchor {
+    EpochAnchor {
+        id: epoch,
+        start: SessionTime::ZERO,
+        first_sample: SampleIndex::ZERO,
+        rate,
+    }
 }
 
 /// Where journal `id` lives in `/session`.
@@ -364,7 +374,7 @@ fn a_journal_without_its_directory_sync_fails_the_crash_test() {
         let mut promised = Promised::default();
         let run = |promised: &mut Promised| -> io::Result<()> {
             let mut file = fs.create(&journal_path(0))?;
-            let mut bytes = encode_header(header(0, MIC)).to_vec();
+            let mut bytes = encode_header(header(0, MIC));
             encode_frame(&mut bytes, 0, MIC, SampleIndex::ZERO, &samples(MIC, 0, 100));
             file.write_all(&bytes)?;
             file.sync()?;
@@ -438,7 +448,7 @@ fn a_rate_too_low_for_one_sample_per_interval_still_records() {
     let mut journal = JournalWriter::create(
         &fs,
         &session(),
-        JournalHeader::new(JournalId::new(0), MIC, EPOCH, slow),
+        JournalHeader::new(JournalId::new(0), MIC, anchor(EPOCH, slow)),
         SampleIndex::ZERO,
         dyn_clock,
     )
@@ -729,7 +739,7 @@ fn header_problems_are_reported() {
     assert_eq!(ok.header(), Some(header(0, MIC)));
     assert_eq!((ok.end(), ok.valid_len()), (ReadEnd::Complete, HEADER_LEN));
     for at in 0..HEADER_LEN {
-        let mut bad = bytes;
+        let mut bad = bytes.clone();
         bad[at] ^= 1;
         let read = read_journal(&bad);
         assert_eq!(read.header(), None, "byte {at}");
@@ -745,18 +755,19 @@ fn header_problems_are_reported() {
 
 #[test]
 fn headers_with_a_valid_crc_but_bad_fields_are_refused() {
-    // Another version (an older or a future one) in the v2 layout, or a zero
+    // Another version (an older or a future one) in the v3 layout, or a zero
     // rate, with a correct CRC.
     let good = encode_header(header(0, MIC));
-    let mut old = good;
+    let mut old = good.clone();
     old[8..10].copy_from_slice(&1_u16.to_le_bytes());
-    let mut future = good;
-    future[8..10].copy_from_slice(&3_u16.to_le_bytes());
+    let mut future = good.clone();
+    future[8..10].copy_from_slice(&4_u16.to_le_bytes());
     let mut zero_rate = good;
     zero_rate[10..14].fill(0);
     for mut bad in [old, future, zero_rate] {
-        let crc = crc32fast::hash(&bad[..30]);
-        bad[30..].copy_from_slice(&crc.to_le_bytes());
+        let crc_at = HEADER_LEN - 4;
+        let crc = crc32fast::hash(&bad[..crc_at]);
+        bad[crc_at..].copy_from_slice(&crc.to_le_bytes());
         assert_eq!(read_journal(&bad).header(), None, "{bad:?}");
     }
 }
@@ -790,13 +801,20 @@ fn a_version_1_journal_is_refused() {
 }
 
 #[test]
-fn the_v2_header_round_trips_and_names_the_file() {
+fn the_v3_header_round_trips_and_names_the_file() {
     let fs = FakeFs::with_dirs(["/session"]);
     let (_clock, dyn_clock) = fake_clock();
     let rate = SampleRate::new(48_000).unwrap();
+    // The second's epoch began before this journal: at sample 4, 3 s in.
+    let later = EpochAnchor {
+        id: EpochId::new(7),
+        start: SessionTime::from_nanos(3_000_000_000),
+        first_sample: SampleIndex::new(4),
+        rate,
+    };
     let wanted = [
-        JournalHeader::new(JournalId::FIRST, MIC, EPOCH, SampleRate::SPEECH),
-        JournalHeader::new(JournalId::new(42), TrackId::new(3), EpochId::new(7), rate),
+        JournalHeader::new(JournalId::FIRST, MIC, anchor(EPOCH, SampleRate::SPEECH)),
+        JournalHeader::new(JournalId::new(42), TrackId::new(3), later),
     ];
     for (want, name) in wanted.into_iter().zip(["journal-000000", "journal-000042"]) {
         let mut journal = JournalWriter::create(
@@ -813,13 +831,15 @@ fn the_v2_header_round_trips_and_names_the_file() {
         journal.finish().unwrap();
         let bytes = fs.read(&session().join(name)).unwrap();
         assert_eq!(&bytes[..HEADER_LEN], encode_header(want));
-        assert_eq!(&bytes[8..10], 2_u16.to_le_bytes(), "format version 2");
+        assert_eq!(&bytes[8..10], 3_u16.to_le_bytes(), "format version 3");
         let read = read_journal(&bytes);
         let got = read.header().unwrap();
         assert_eq!(
             (got.id(), got.track(), got.epoch(), got.rate()),
             (want.id(), want.track(), want.epoch(), want.rate())
         );
+        assert_eq!(got.anchor(), want.anchor());
+        assert_eq!(got.encoded_len(), HEADER_LEN);
         assert_eq!(read.audio().unwrap().1, samples(want.track(), 9, 10));
         assert_eq!(read.end(), ReadEnd::Complete);
     }
@@ -830,6 +850,116 @@ fn the_v2_header_round_trips_and_names_the_file() {
             session().join("journal-000042")
         ]
     );
+}
+
+/// The anchor is at bytes 26..46, as the format's table says.
+#[test]
+fn the_anchor_sits_where_the_format_says() {
+    let a = EpochAnchor {
+        id: EpochId::new(5),
+        start: SessionTime::from_nanos(0x0102_0304_0506_0708),
+        first_sample: SampleIndex::new(0x1112_1314_1516_1718),
+        rate: SampleRate::SPEECH,
+    };
+    let bytes = encode_header(JournalHeader::new(JournalId::FIRST, MIC, a));
+    assert_eq!(bytes.len(), HEADER_LEN);
+    assert_eq!(bytes[26..30], 5_u32.to_le_bytes());
+    assert_eq!(bytes[30..38], 0x1112_1314_1516_1718_u64.to_le_bytes());
+    assert_eq!(bytes[38..46], 0x0102_0304_0506_0708_u64.to_le_bytes());
+    assert_eq!(bytes[46..], crc32fast::hash(&bytes[..46]).to_le_bytes());
+}
+
+/// A journal an older nota wrote, with a version 2 header, is still read,
+/// with its frames, and no anchor.
+#[test]
+fn a_version_2_journal_is_read_untimed() {
+    let old = JournalHeader::untimed(JournalId::new(4), MIC, EpochId::new(2), SampleRate::SPEECH);
+    let mut bytes = encode_header(old);
+    assert_eq!(bytes.len(), 34);
+    assert_eq!(old.encoded_len(), 34);
+    assert_eq!(bytes[8..10], 2_u16.to_le_bytes());
+    encode_frame(
+        &mut bytes,
+        0,
+        MIC,
+        SampleIndex::new(50),
+        &samples(MIC, 50, 100),
+    );
+    let read = read_journal(&bytes);
+    assert_eq!(read.header(), Some(old));
+    assert_eq!(read.header().and_then(JournalHeader::anchor), None);
+    let range = SampleRange::new(SampleIndex::new(50), SampleIndex::new(150)).unwrap();
+    assert_eq!(read.audio(), Some((range, samples(MIC, 50, 100))));
+    assert_eq!(
+        (read.end(), read.valid_len()),
+        (ReadEnd::Complete, bytes.len())
+    );
+    // Cut inside its header: torn, as a version 3 header is.
+    assert_eq!(
+        read_journal(&bytes[..33]).end(),
+        ReadEnd::Incomplete { offset: 0 }
+    );
+}
+
+/// A version 3 header cut before its end, but past its version, is torn,
+/// not invalid: salvage removes a journal that never held audio.
+#[test]
+fn a_version_3_header_cut_short_is_torn() {
+    let bytes = encode_header(header(0, MIC));
+    for cut in [0, 9, 10, 34, HEADER_LEN - 1] {
+        let read = read_journal(&bytes[..cut]);
+        assert_eq!(
+            (read.header(), read.end()),
+            (None, ReadEnd::Incomplete { offset: 0 }),
+            "cut at {cut}"
+        );
+    }
+}
+
+/// A frame from before its epoch's first sample can't be the epoch's: the
+/// reader stops there.
+#[test]
+fn a_frame_before_its_epoch_is_refused() {
+    let epoch = EpochAnchor {
+        first_sample: SampleIndex::new(100),
+        ..anchor(EPOCH, SampleRate::SPEECH)
+    };
+    let mut bytes = encode_header(JournalHeader::new(JournalId::FIRST, MIC, epoch));
+    encode_frame(
+        &mut bytes,
+        0,
+        MIC,
+        SampleIndex::new(99),
+        &samples(MIC, 99, 10),
+    );
+    let read = read_journal(&bytes);
+    assert!(read.frames().is_empty());
+    assert_eq!(
+        read.end(),
+        ReadEnd::Invalid {
+            offset: HEADER_LEN,
+            reason: Invalid::BeforeEpoch {
+                epoch_start: SampleIndex::new(100),
+                found: SampleIndex::new(99)
+            }
+        }
+    );
+    let text = Invalid::BeforeEpoch {
+        epoch_start: SampleIndex::new(100),
+        found: SampleIndex::new(99),
+    }
+    .to_string();
+    assert!(text.contains("99") && text.contains("100"), "{text}");
+    // From the epoch's first sample on, it's read.
+    let mut bytes = encode_header(JournalHeader::new(JournalId::FIRST, MIC, epoch));
+    encode_frame(
+        &mut bytes,
+        0,
+        MIC,
+        SampleIndex::new(100),
+        &samples(MIC, 100, 10),
+    );
+    assert_eq!(read_journal(&bytes).frames().len(), 1);
 }
 
 #[test]
@@ -888,7 +1018,7 @@ fn positions_in_two_journals_of_one_track_never_compare_equal() {
 /// A header for `MIC`, then the frames given as (seq, track, first,
 /// samples).
 fn build(frames: &[(u64, TrackId, u64, Vec<i16>)]) -> Vec<u8> {
-    let mut bytes = encode_header(header(0, MIC)).to_vec();
+    let mut bytes = encode_header(header(0, MIC));
     for (seq, track, first, s) in frames {
         encode_frame(&mut bytes, *seq, *track, SampleIndex::new(*first), s);
     }

@@ -503,6 +503,7 @@ fn journal_summaries<S: Fs>(fs: &S, paths: &[PathBuf]) -> Vec<JournalSummary> {
                 track: header.track(),
                 epoch: header.epoch(),
                 rate: header.rate(),
+                anchor: header.anchor(),
                 range: read.range(),
             })
         })
@@ -626,6 +627,7 @@ fn publish<S: Fs, T: SegmentStore>(
                     track: header.track(),
                     epoch: header.epoch(),
                     rate: header.rate(),
+                    anchor: header.anchor(),
                     range: read.range(),
                 });
                 if bytes.len() - read.valid_len() > max_torn_tail(header.rate())
@@ -725,7 +727,7 @@ fn write_segment<S: Fs>(
     .and_then(|temp| temp.sync().map_err(StepError::Io))
     .and_then(|synced| synced.rename(fs));
     match renamed {
-        Ok(renamed) => Ok(Ok(renamed.sync_dir(fs)?)),
+        Ok(renamed) => Ok(Ok(renamed.sync_dir(fs)?.timed_by(segment.anchor))),
         Err(StepError::Name(path, e)) => Ok(Err((path, e.kind()))),
         Err(StepError::Io(e)) => Err(e.into()),
     }

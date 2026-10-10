@@ -55,8 +55,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 
 use nota_core::{
-    Clock, EpochId, FakeClock, SampleCount, SampleIndex, SampleRate, SessionId, SessionTime,
-    TrackId,
+    Clock, FakeClock, SampleCount, SampleIndex, SampleRate, SessionId, SessionTime, TrackId,
+    TrackTimeline,
 };
 use nota_recorder::fs::{FileSyncer, Fs, FsFile, StdFile, StdFs, StdLock, StdSyncer, Synced};
 use nota_recorder::journal::{JournalId, read_journal};
@@ -492,7 +492,11 @@ fn record(
         SessionWriter::open(&session, rate, length, dyn_clock)?.with_syncing(Syncing::Threads);
     let mut store = SessionStore::new(session, store);
     for (track, at) in TRACKS {
-        writer.start_track(track, EpochId::new(0), SampleIndex::new(at))?;
+        // The track's first epoch begins at its first sample, `at`.
+        let mut timeline = TrackTimeline::new(track);
+        timeline.open_epoch(SessionTime::ZERO, SampleIndex::new(at), rate)?;
+        let epoch = timeline.current().copied().ok_or("no epoch opened")?;
+        writer.start_track(track, &epoch)?;
         log.start(track, SampleIndex::new(at))?;
     }
     for step in 0..STEPS {

@@ -116,7 +116,10 @@ fn record_both(mic: Vec<Step>, system: Vec<Step>) -> Recorded {
     let mut timelines = Vec::new();
     for track in [MIC, SYSTEM] {
         writer
-            .start_track(track, EpochId::new(0), SampleIndex::ZERO)
+            .start_track(
+                track,
+                &writer.test_epoch(track, EpochId::new(0), SampleIndex::ZERO),
+            )
             .unwrap();
         let mut timeline = TrackTimeline::new(track);
         timeline
@@ -263,11 +266,11 @@ fn an_overrun_moves_only_its_own_track_to_a_new_epoch() {
     assert_eq!(mic.epochs()[1].first_sample(), SampleIndex::new(100));
     assert_eq!(system.epochs().len(), 1);
     assert_eq!(
-        run.writer.epoch(MIC),
+        run.writer.epoch(MIC).map(|e| (e.id(), e.first_sample())),
         Some((EpochId::new(1), SampleIndex::new(100)))
     );
     assert_eq!(
-        run.writer.epoch(SYSTEM),
+        run.writer.epoch(SYSTEM).map(|e| (e.id(), e.first_sample())),
         Some((EpochId::new(0), SampleIndex::ZERO))
     );
     let epochs: Vec<_> = run
@@ -338,7 +341,10 @@ fn a_stream_without_a_timeline_waits_for_its_start() {
     let length = SegmentLength::new(SampleCount::new(1_000)).unwrap();
     let mut writer = SessionWriter::open(&session, rate(), length, clock).unwrap();
     writer
-        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .start_track(
+            MIC,
+            &writer.test_epoch(MIC, EpochId::new(0), SampleIndex::ZERO),
+        )
         .unwrap();
     let mut mic = TrackTimeline::new(MIC);
     mic.open_epoch(SessionTime::ZERO, SampleIndex::ZERO, rate())
@@ -391,7 +397,10 @@ fn a_track_that_cant_join_leaves_the_other_recording() {
     let mut writer = SessionWriter::open(&session, rate(), length, clock).unwrap();
     for track in [MIC, SYSTEM] {
         writer
-            .start_track(track, EpochId::new(0), SampleIndex::ZERO)
+            .start_track(
+                track,
+                &writer.test_epoch(track, EpochId::new(0), SampleIndex::ZERO),
+            )
             .unwrap();
     }
     let mut mic = TrackTimeline::new(MIC);
@@ -626,7 +635,10 @@ fn a_closed_channel_ends_recording() {
     let length = SegmentLength::new(SampleCount::new(1_000)).unwrap();
     let mut writer = SessionWriter::open(&session, rate(), length, clock).unwrap();
     writer
-        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .start_track(
+            MIC,
+            &writer.test_epoch(MIC, EpochId::new(0), SampleIndex::ZERO),
+        )
         .unwrap();
     let mut mic = TrackTimeline::new(MIC);
     mic.open_epoch(SessionTime::ZERO, SampleIndex::ZERO, rate())
@@ -704,7 +716,10 @@ fn a_track_that_fails_first_leaves_the_other_recording_until_it_stops() {
     let mut timelines = Vec::new();
     for track in [MIC, SYSTEM] {
         writer
-            .start_track(track, EpochId::new(0), SampleIndex::ZERO)
+            .start_track(
+                track,
+                &writer.test_epoch(track, EpochId::new(0), SampleIndex::ZERO),
+            )
             .unwrap();
         let mut timeline = TrackTimeline::new(track);
         timeline
@@ -751,7 +766,10 @@ fn events_from_a_stream_that_never_started_are_dropped() {
     let length = SegmentLength::new(SampleCount::new(1_000)).unwrap();
     let mut writer = SessionWriter::open(&session, rate(), length, clock).unwrap();
     writer
-        .start_track(SYSTEM, EpochId::new(0), SampleIndex::ZERO)
+        .start_track(
+            SYSTEM,
+            &writer.test_epoch(SYSTEM, EpochId::new(0), SampleIndex::ZERO),
+        )
         .unwrap();
     let mut timeline = TrackTimeline::new(SYSTEM);
     timeline
@@ -823,7 +841,10 @@ fn a_stalled_fsync_on_one_track_never_holds_up_the_other() {
     let mut timelines = Vec::new();
     for track in [MIC, SYSTEM] {
         writer
-            .start_track(track, EpochId::new(0), SampleIndex::ZERO)
+            .start_track(
+                track,
+                &writer.test_epoch(track, EpochId::new(0), SampleIndex::ZERO),
+            )
             .unwrap();
         let mut timeline = TrackTimeline::new(track);
         timeline
@@ -913,7 +934,10 @@ fn the_other_tracks_due_fsync_runs_as_soon_as_a_stream_ends() {
     let mut timelines = Vec::new();
     for track in [MIC, SYSTEM] {
         writer
-            .start_track(track, EpochId::new(0), SampleIndex::ZERO)
+            .start_track(
+                track,
+                &writer.test_epoch(track, EpochId::new(0), SampleIndex::ZERO),
+            )
             .unwrap();
         let mut timeline = TrackTimeline::new(track);
         timeline

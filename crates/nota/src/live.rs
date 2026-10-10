@@ -90,11 +90,10 @@ impl Live {
                     let _ = follower.follow(&epoch);
                     actions.flush = Some(track);
                 } else {
-                    // The track joined: its first epoch, and nothing yet
-                    // to flush.
-                    let mut follower = TrackTimeline::new(track);
-                    let _ = follower.follow(&epoch);
-                    self.followers.insert(track, follower);
+                    // The track joined: its first epoch, numbered above
+                    // any a resumed session used, and nothing yet to flush.
+                    self.followers
+                        .insert(track, TrackTimeline::following(track, &epoch));
                 }
             }
             // The stream stopped: what the engine holds of it won't grow.
