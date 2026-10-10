@@ -14,7 +14,7 @@ use nota_core::{
 use super::*;
 use crate::fs::Fs;
 use crate::fs::fake::FakeFs;
-use crate::journal::read_journal;
+use crate::journal::{JournalId, read_journal};
 use crate::segment::SegmentLength;
 use crate::session::{FinishedJournal, SessionDir, Syncing};
 
@@ -327,8 +327,11 @@ fn a_failed_stream_is_reported_and_the_other_records_on() {
     assert_eq!(held[&SYSTEM], samples(SYSTEM, 0, 800));
 }
 
+/// A track with no timeline joins only once its stream has started: what
+/// it sent before a start that failed is dropped, and the other track
+/// records on.
 #[test]
-fn a_stream_without_a_timeline_records_nothing() {
+fn a_stream_without_a_timeline_waits_for_its_start() {
     let fs = FakeFs::with_dirs([dir()]);
     let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
     let session = SessionDir::new(SESSION, fs, &dir()).lock().unwrap();
@@ -342,22 +345,212 @@ fn a_stream_without_a_timeline_records_nothing() {
         .unwrap();
     let (tx, rx) = test_channel();
     tx.send(MIC, CaptureEvent::Audio(samples(MIC, 0, 10)));
+    tx.send(
+        SYSTEM,
+        CaptureEvent::Began {
+            at: SessionTime::ZERO,
+        },
+    );
+    tx.send(SYSTEM, CaptureEvent::Audio(samples(SYSTEM, 0, 10)));
+    tx.send(SYSTEM, CaptureEvent::NotStarted);
+    tx.send(MIC, CaptureEvent::Stopped);
     let events = CaptureReceiver {
         events: rx,
         rate: rate(),
         tracks: test_tracks(&[MIC, SYSTEM]),
     };
-    let result = record_tracks(
+    let mut reported = Vec::new();
+    record_tracks(
         &mut writer,
         std::slice::from_mut(&mut mic),
         &events,
-        &mut |_, _| {},
+        &mut |t, _| reported.push(t),
+    )
+    .unwrap();
+    assert!(!reported.contains(&Some(SYSTEM)), "{reported:?}");
+    assert_eq!(writer.next_sample(MIC), Some(SampleIndex::new(10)));
+    assert_eq!(writer.next_sample(SYSTEM), None);
+}
+
+/// Opens "mic" at once; "system" only once `gate` says so; "late" after
+/// the clock has moved on 2 s. Each then sends its audio from a thread of
+/// its own: 300, 200 and 100 samples.
+struct Opening {
+    clock: Arc<FakeClock>,
+    gate: std::sync::Mutex<mpsc::Receiver<()>>,
+}
+
+impl CaptureBackend for Opening {
+    type Stream = Feeder;
+
+    fn start(
+        &self,
+        source: &Source,
+        _: SampleRate,
+        events: CaptureSender,
+    ) -> Result<Feeder, CaptureError> {
+        let (track, len) = match name(source).as_str() {
+            "mic" => (MIC, 300),
+            "system" => {
+                self.gate.lock().unwrap().recv().unwrap();
+                (SYSTEM, 200)
+            }
+            "late" => {
+                self.clock.advance(Duration::from_secs(2));
+                (MIC, 100)
+            }
+            _ => return Err(CaptureError::DeviceNotAvailable(source.clone())),
+        };
+        Ok(Feeder(Some(thread::spawn(move || {
+            events.audio(&samples(track, 0, len));
+        }))))
+    }
+}
+
+/// The recorder started on `sources` before their streams: the starter,
+/// what it reports, the recorder's thread (handing back its writer and
+/// how recording ended), and each track's progress.
+#[expect(clippy::type_complexity, reason = "test scaffolding")]
+fn record_joining(
+    fs: &FakeFs,
+    clock: &Arc<FakeClock>,
+    sources: &[(TrackId, Source)],
+) -> (
+    TrackStarter,
+    mpsc::Receiver<(Option<TrackId>, RecorderEvent)>,
+    thread::JoinHandle<(SessionWriter<FakeFs>, Result<(), RecordError>)>,
+    BTreeMap<TrackId, Progress>,
+) {
+    let dyn_clock: Arc<dyn Clock> = Arc::clone(clock) as Arc<dyn Clock>;
+    let session = SessionDir::new(SESSION, fs.clone(), &dir()).lock().unwrap();
+    let length = SegmentLength::new(SampleCount::new(1_000)).unwrap();
+    let mut writer = SessionWriter::open(&session, rate(), length, Arc::clone(&dyn_clock))
+        .unwrap()
+        .with_syncing(Syncing::Auto);
+    let (starter, events) = prepare_tracks(sources, rate(), &dyn_clock);
+    let progress = events
+        .tracks()
+        .into_iter()
+        .map(|t| (t, events.progress(t).unwrap()))
+        .collect();
+    let (seen_tx, seen) = mpsc::channel();
+    let recorder = thread::spawn(move || {
+        let result = record_tracks(&mut writer, &mut [], &events, &mut |t, e| {
+            let _ = seen_tx.send((t, e));
+        });
+        (writer, result)
+    });
+    (starter, seen, recorder, progress)
+}
+
+/// Acceptance (GAI-212): the first track's audio is journaled while the
+/// second stream is still opening, and the second track joins once it
+/// has; with two tracks, each fsyncs on a thread of its own.
+#[test]
+fn the_first_track_records_while_the_second_stream_is_still_opening() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let clock = Arc::new(FakeClock::new(SessionTime::from_nanos(10_000_000_000)));
+    let (open, gate) = mpsc::channel();
+    let backend = Opening {
+        clock: Arc::clone(&clock),
+        gate: std::sync::Mutex::new(gate),
+    };
+    let (starter, seen, recorder, progress) = record_joining(
+        &fs,
+        &clock,
+        &[
+            (MIC, Source::Device("mic".into())),
+            (SYSTEM, Source::Device("system".into())),
+        ],
     );
-    assert!(matches!(
-        result,
-        Err(RecordError::Session(SessionError::UnknownTrack(SYSTEM)))
-    ));
-    assert_eq!(writer.next_sample(MIC), Some(SampleIndex::ZERO));
+    let starting = thread::spawn(move || starter.start(&backend));
+    wait_for(&seen, audio_from(MIC, 0));
+    // Written to the mic's journal, with the system audio's start still
+    // waiting.
+    assert_eq!(progress[&MIC].now().captured, SampleIndex::new(300));
+    let journal = read_journal(&fs.read(&dir().join(JournalId::FIRST.file_name())).unwrap());
+    assert_eq!(
+        journal.header().map(crate::journal::JournalHeader::track),
+        Some(MIC)
+    );
+    assert_eq!(journal.audio().unwrap().1, samples(MIC, 0, 300));
+    assert!(!starting.is_finished());
+    open.send(()).unwrap();
+    let captures: Vec<_> = starting
+        .join()
+        .unwrap()
+        .into_iter()
+        .map(Result::unwrap)
+        .collect();
+    wait_for(&seen, audio_from(SYSTEM, 0));
+    drop(captures);
+    let (writer, result) = recorder.join().unwrap();
+    result.unwrap();
+    assert_eq!(writer.syncing(MIC), Some(Syncing::Threads));
+    assert_eq!(writer.syncing(SYSTEM), Some(Syncing::Threads));
+    let mut journals: Vec<FinishedJournal> = seen
+        .try_iter()
+        .filter_map(|(_, e)| match e {
+            RecorderEvent::Finished(j) => Some(j),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    journals.extend(writer.finish().unwrap());
+    let held = by_track(&fs, &journals);
+    assert_eq!(held[&MIC], samples(MIC, 0, 300));
+    assert_eq!(held[&SYSTEM], samples(SYSTEM, 0, 200));
+}
+
+/// Acceptance (GAI-212): a joining track's first epoch opens when its
+/// first audio was captured, not when its stream was asked to start; a
+/// recording of one track fsyncs inline.
+#[test]
+fn the_first_epoch_opens_at_the_first_buffer() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let clock = Arc::new(FakeClock::new(SessionTime::from_nanos(10_000_000_000)));
+    let (_open, gate) = mpsc::channel();
+    let backend = Opening {
+        clock: Arc::clone(&clock),
+        gate: std::sync::Mutex::new(gate),
+    };
+    let (starter, seen, recorder, _) =
+        record_joining(&fs, &clock, &[(MIC, Source::Device("late".into()))]);
+    let captures: Vec<_> = starter
+        .start(&backend)
+        .into_iter()
+        .map(Result::unwrap)
+        .collect();
+    // Asked to start at 10 s; the first buffer came at 12 s, holding
+    // 100 ms of audio.
+    assert_eq!(
+        captures[0].started_at(),
+        SessionTime::from_nanos(10_000_000_000)
+    );
+    let mut first_epoch = None;
+    loop {
+        let (track, event) = seen.recv_timeout(Duration::from_secs(10)).unwrap();
+        match event {
+            RecorderEvent::Epoch(epoch) => first_epoch = Some((track, epoch)),
+            RecorderEvent::Audio(_) => break,
+            _ => {}
+        }
+    }
+    let (track, epoch) = first_epoch.expect("the first epoch comes before the audio");
+    assert_eq!(track, Some(MIC));
+    assert_eq!(
+        (epoch.id(), epoch.first_sample(), epoch.start()),
+        (
+            EpochId::new(0),
+            SampleIndex::ZERO,
+            SessionTime::from_nanos(11_900_000_000)
+        )
+    );
+    drop(captures);
+    let (writer, result) = recorder.join().unwrap();
+    result.unwrap();
+    assert_eq!(writer.syncing(MIC), Some(Syncing::Inline));
+    drop(writer);
 }
 
 #[test]
@@ -429,7 +622,8 @@ fn streams_that_cant_start_leave_the_others_running() {
             Err(&CaptureError::Backend("track 1 was asked for twice".into())),
         ]
     );
-    assert_eq!(events.tracks(), [SYSTEM]);
+    // Every track asked for, once, whether its stream started or not.
+    assert_eq!(events.tracks(), [MIC, SYSTEM]);
     assert_eq!(events.rate(), rate());
 }
 
@@ -600,7 +794,7 @@ fn a_stalled_fsync_on_one_track_never_holds_up_the_other() {
     // on its fsyncs hang.
     tx.audio(MIC, &samples(MIC, 0, 100));
     wait_for(&seen, audio_from(MIC, 0));
-    let mic_journal = dir().join(crate::journal::JournalId::FIRST.file_name());
+    let mic_journal = dir().join(JournalId::FIRST.file_name());
     assert!(fs.paths().contains(&mic_journal));
     let stall = fs.stall_syncs(&mic_journal);
     // A full sync budget (850 samples) starts its fsync, which hangs, and

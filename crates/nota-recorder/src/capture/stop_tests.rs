@@ -217,7 +217,11 @@ fn record_into(fs: &FakeFs, run: Run, promised: &mut Promised) -> Result<(), Str
             RecorderEvent::JournalFailed(_) => failures += 1,
             _ => {}
         };
-        let handled = handle(&mut writer, &mut timelines, track, event, &mut report)
+        let mut given = Timelines {
+            given: &mut timelines,
+            joined: Vec::new(),
+        };
+        let handled = handle(&mut writer, &mut given, track, event, &mut report)
             .map_err(|e| e.to_string())?;
         if let Handled::Recorded(outcome, _) = handled {
             settle(&mut writer, outcome, &mut report).map_err(|e| e.to_string())?;
