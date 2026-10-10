@@ -41,8 +41,10 @@
 //!   left, in order and without gaps from the first sample, holding at least
 //!   everything fsync'd and exactly the audio captured, and every committed
 //!   row; a second salvage changes nothing; each track that joined did so
-//!   at sample 0, in an epoch opened no later than its first frame was
-//!   written, which its first row carries; the durable position was never
+//!   at sample 0, in an epoch timed from when its first buffer was
+//!   captured (its start plus the first frame's length is no later than
+//!   that frame was written), which its first row carries; no track's
+//!   stream failed or was refused; the durable position was never
 //!   more than the journal's sync interval (850 ms) behind the captured
 //!   one, nor more than 2 s behind the audio delivered or the wall clock
 //!   (all below); no audio was lost before the journal. It prints one `result` line
@@ -301,6 +303,7 @@ mod linux {
     ///   row <track> <epoch> <start> <end> <sha256 hex>
     ///   overrun <t ns>
     ///   journal-failed <t ns>
+    ///   capture-failed <track, or none> <t ns>
     ///   slow <kind> <class> <t ns> <took ns>
     ///   late <op> <kind> <class>
     ///   stop <track> <op> <kind> <class> <t ns> <captured> <durable> <delivered>
@@ -859,14 +862,7 @@ mod linux {
             let fs = fs.clone();
             thread::spawn(move || record(writer, &events, &to_publish, &fs))
         };
-        let captures = match start_streams(starter) {
-            Ok(captures) => captures,
-            Err(e) => {
-                // The recorder ends once the streams that did start stop.
-                let _ = recorder.join();
-                return Err(e.into());
-            }
-        };
+        let (captures, recorder) = start_streams(starter, recorder)?;
         let ballast = spawn_ballast(ballast_plan, &fs, &clock, &dir);
         wait(Duration::from_secs(seconds));
         drop(captures);
@@ -992,10 +988,27 @@ mod linux {
     }
 
     /// Opens each track's stream through `starter`, one after another, as
-    /// the recorder runs. If one doesn't start, the others are stopped and
-    /// its error returned.
-    fn start_streams(starter: TrackStarter) -> Result<Vec<Capture<PipeWireStream>>, CaptureError> {
-        starter.start(&PipeWireBackend).into_iter().collect()
+    /// `recorder` runs. If one doesn't start, the others are stopped, the
+    /// recorder is waited for, and the stream's error is returned with
+    /// whatever the recorder hit meanwhile.
+    fn start_streams(
+        starter: TrackStarter,
+        recorder: thread::JoinHandle<Recorded>,
+    ) -> Res<(Vec<Capture<PipeWireStream>>, thread::JoinHandle<Recorded>)> {
+        let streams: Result<Vec<_>, CaptureError> =
+            starter.start(&PipeWireBackend).into_iter().collect();
+        match streams {
+            Ok(captures) => Ok((captures, recorder)),
+            Err(e) => {
+                // The recorder ends once the streams that did start stop.
+                let also = match recorder.join() {
+                    Err(_) => "; the recorder thread panicked".to_owned(),
+                    Ok((.., Err(failed), _)) => format!("; the recorder: {failed}"),
+                    Ok(_) => String::new(),
+                };
+                Err(format!("{e}{also}").into())
+            }
+        }
     }
 
     /// A running `PipeWire` stream.
@@ -1029,35 +1042,41 @@ mod linux {
         let mut failed = None;
         let mut joined = BTreeSet::new();
         let result = record_tracks(&mut writer, &mut [], events, &mut |track, e| {
-            let logged = match e {
+            let logged = match (track, e) {
                 // A track's first epoch is the one it joined in.
-                RecorderEvent::Epoch(epoch) if track.is_some_and(|t| joined.insert(t)) => {
+                (Some(track), RecorderEvent::Epoch(epoch)) if joined.insert(track) => {
                     fs.0.log(&format!(
                         "start {} {} {} {}",
-                        track.map_or(0, TrackId::get),
+                        track.get(),
                         epoch.first_sample().get(),
                         epoch.id().get(),
                         nanos(epoch.start())
                     ))
                 }
-                RecorderEvent::Finished(j) => {
+                (_, RecorderEvent::Finished(j)) => {
                     let _ = to_publish.send(j);
                     Ok(())
                 }
-                RecorderEvent::JournalFailed(_) => {
+                (_, RecorderEvent::JournalFailed(_)) => {
                     failures += 1;
                     fs.0.note("journal-failed")
                 }
                 // Rows carry their epoch; the checks compare them as is.
                 // The audio is checked from the journals.
-                RecorderEvent::Epoch(_)
-                | RecorderEvent::EpochRefused(_)
-                | RecorderEvent::Audio(_) => Ok(()),
-                RecorderEvent::CaptureFailed(e) => {
+                (
+                    _,
+                    RecorderEvent::Epoch(_)
+                    | RecorderEvent::EpochRefused(_)
+                    | RecorderEvent::Audio(_),
+                ) => Ok(()),
+                // Logged too, so a crashed run whose track failed or
+                // couldn't join fails its check, not just an uncrashed one.
+                (track, RecorderEvent::CaptureFailed(e)) => {
                     failed.get_or_insert(e);
-                    Ok(())
+                    let id = track.map_or_else(|| "none".to_owned(), |t| t.get().to_string());
+                    fs.0.note(&format!("capture-failed {id}"))
                 }
-                RecorderEvent::Capture(n) => {
+                (_, RecorderEvent::Capture(n)) => {
                     let logged = if n == CaptureNotice::Overrun {
                         fs.0.note("overrun")
                     } else {
@@ -1157,12 +1176,14 @@ mod linux {
     #[derive(Debug, Default)]
     struct Promised {
         /// Each track asked for, from its first line: its `start` once it
-        /// joined, or its `stop` at a crash before then.
+        /// joined, or its `stop` or `end` if it never did.
         tracks: BTreeMap<u32, TrackLog>,
         /// The crash point, as `op:kind:class`.
         stop: Option<String>,
         overruns: usize,
         journal_failures: usize,
+        /// Tracks whose stream failed or that couldn't join.
+        capture_failures: usize,
         /// (kind:class, t, took ns), slowest first after reading.
         slow: Vec<(String, u64, u64)>,
         late: usize,
@@ -1191,7 +1212,13 @@ mod linux {
             let id = || -> Res<u32> { Ok(u32::try_from(n(1)?)?) };
             match w.first().copied() {
                 Some("start") => {
-                    p.tracks.entry(id()?).or_default().joined = Some((n(2)?, n(3)?, n(4)?));
+                    let track = p.tracks.entry(id()?).or_default();
+                    // A track can join in memory after another thread's
+                    // crash point, with nothing of it on disk: only a start
+                    // before the crash point counts.
+                    if p.stop.is_none() {
+                        track.joined = Some((n(2)?, n(3)?, n(4)?));
+                    }
                 }
                 Some("first") => p.tracks.entry(id()?).or_default().first = Some((n(2)?, n(3)?)),
                 Some("sync") => {
@@ -1218,6 +1245,7 @@ mod linux {
                 Some("stopped") => p.stopped = Some(n(1)?),
                 Some("ballast") => p.ballast = Some((n(1)?, n(2)?, n(3)? == 1)),
                 Some("journal-failed") => p.journal_failures += 1,
+                Some("capture-failed") => p.capture_failures += 1,
                 _ => return Err(format!("bad log line {line:?}").into()),
             }
         }
@@ -1565,6 +1593,13 @@ mod linux {
                 previous = took;
             }
         }
+        if promised.capture_failures > 0 {
+            return Err(format!(
+                "{} tracks' streams failed or couldn't join",
+                promised.capture_failures
+            )
+            .into());
+        }
         if promised.overruns > 0 || promised.journal_failures > 0 {
             return Err(format!(
                 "audio was lost before the journal: {} overruns, {} journal failures",
@@ -1749,9 +1784,15 @@ mod linux {
     }
 
     /// Each track that joined the recorder did so in the epoch its log
-    /// names: that epoch opened at the track's first sample, no later than
-    /// its first frame was written (it's timed from when that audio was
-    /// captured), and the row holding that sample carries it.
+    /// names: that epoch opened at the track's first sample, and the row
+    /// holding that sample carries it. The epoch is timed from when the
+    /// first buffer was captured, its arrival less its length, and that
+    /// buffer is the first frame: so the epoch's start plus the frame's
+    /// length is no later than the frame was written. An epoch timed at
+    /// the join or the write instead starts too late by about the frame's
+    /// length, and fails. One at session time 0 passes: a buffer that
+    /// arrives within its own length of the clock's start is timed from
+    /// 0, since session time can't go earlier.
     fn first_epochs(promised: &Promised, after: &Observed) -> Res<()> {
         for (&track, log) in &promised.tracks {
             let Some((first_sample, epoch, start)) = log.joined else {
@@ -1762,14 +1803,21 @@ mod linux {
                     format!("track {track} joined at sample {first_sample}, not at 0").into(),
                 );
             }
-            if let Some((written, _)) = log.first
-                && start > written
-            {
-                return Err(format!(
-                    "track {track}'s first epoch starts {:.1} ms after its first frame was written",
-                    ms(samples_since(written, start))
-                )
-                .into());
+            // The buffer's length and the clock readings are each rounded
+            // to the nanosecond.
+            let rounding = 1_000;
+            if let Some((written, end0)) = log.first {
+                let frame =
+                    end0.saturating_sub(first_sample) * 1_000_000_000 / u64::from(RATE.hz());
+                if start > 0 && start + frame > written + rounding {
+                    return Err(format!(
+                        "track {track}'s first epoch starts {:.1} ms too late: its first \
+                         frame ({:.1} ms) was written before that audio could have ended",
+                        ms(samples_since(written, start + frame)),
+                        ms(end0.saturating_sub(first_sample))
+                    )
+                    .into());
+                }
             }
             let first_row = after
                 .rows

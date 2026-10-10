@@ -25,7 +25,7 @@
 # Operations are numbered as they happen, and their count varies a little
 # from run to run (capture timing), so the points are numbered from one
 # uncrashed run; a point past the end of a shorter run is reported as
-# unreached, not failed. The summary counts points by the operation they
+# unreached, not failed, unless the writer exited with an error. The summary counts points by the operation they
 # stopped at.
 #
 # With --tracks T, the recorder captures T tracks, each its own stream of
@@ -420,7 +420,15 @@ run_point() {
     return 1
   fi
   if [[ ! -e $log.stopped ]]; then
-    kill_writer
+    # It finished before point N: unreached, unless it failed.
+    local status=0
+    wait "$WRITER_PID" 2> /dev/null || status=$?
+    WRITER_PID=
+    if [[ $status -ne 0 ]]; then
+      { echo "$mode $n: the writer failed (exit $status) before its crash point:"; cat "$dir/write.out"; } > "$dir/result"
+      unmount
+      return 1
+    fi
     unmount
     [[ $KEEP -eq 1 ]] || rm -rf "$dir"
     return 2
