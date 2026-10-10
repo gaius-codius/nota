@@ -114,7 +114,9 @@ mod linux {
                 RecorderEvent::Capture(n) => notices.push(n),
                 RecorderEvent::Epoch(_)
                 | RecorderEvent::Audio(_)
-                | RecorderEvent::CaptureFailed(_) => {}
+                | RecorderEvent::CaptureFailed(_)
+                | RecorderEvent::Device { .. }
+                | RecorderEvent::Detected { .. } => {}
             });
             (writer, journals, notices, failures, refused, result)
         });

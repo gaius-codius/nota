@@ -162,11 +162,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nota_core::drift::Reading;
 use nota_core::messages::AudioChunk;
+use nota_core::recorder::{DeviceChange, WarningState};
 use nota_core::{
     Clock, Drift, DriftMeter, Epoch, EpochError, OpenedEpoch, SampleCount, SampleIndex, SampleRate,
     SessionTime, TrackId, TrackTimeline,
 };
 
+use crate::detect::Condition;
 use crate::fs::Fs;
 use crate::session::{FinishedJournal, SessionError, SessionWriter};
 
@@ -284,6 +286,15 @@ pub enum CaptureEvent {
         /// When it was reported, by the session clock.
         at: SessionTime,
     },
+    /// Something happened to the stream's device, as the backend's watch
+    /// on the audio server saw it; capture goes on, unless a
+    /// [`Self::Failed`] follows.
+    Device {
+        /// What happened.
+        change: DeviceChange,
+        /// When it was noticed, by the session clock.
+        at: SessionTime,
+    },
     /// The stream failed and delivers nothing more.
     Failed(CaptureError),
     /// The stream was stopped; nothing follows.
@@ -324,6 +335,8 @@ pub struct CaptureSender {
     clock: Arc<dyn Clock>,
     /// Set once the capture is being stopped.
     stopping: Arc<AtomicBool>,
+    /// Set once the stream's failure is sent: it sends no audio after.
+    failed: Arc<AtomicBool>,
     /// Set once the first audio is sent.
     began: Arc<AtomicBool>,
     /// Set when the stream followed a new device, until its next audio.
@@ -368,7 +381,9 @@ impl CaptureSender {
     /// Sends `samples`, stamped `captured` if the stream gave a time the
     /// session clock could place.
     fn send_audio(&self, samples: &[i16], captured: Option<SessionTime>) {
-        if samples.is_empty() {
+        // After a failure the track has ended: audio the stream still
+        // delivers, from a device it was moved to say, isn't the track's.
+        if samples.is_empty() || self.failed.load(Ordering::SeqCst) {
             return;
         }
         let began = self.began.load(Ordering::SeqCst);
@@ -428,11 +443,20 @@ impl CaptureSender {
             .send(self.track, CaptureEvent::Notice { notice, at });
     }
 
+    /// Reports something that happened to the stream's device, stamped
+    /// with the session time now.
+    pub fn device(&self, change: DeviceChange) {
+        let at = self.clock.now();
+        self.events
+            .send(self.track, CaptureEvent::Device { change, at });
+    }
+
     /// Reports that the stream failed, unless the capture is being stopped:
     /// a stream torn down on purpose may report that as a failure (cpal
-    /// 0.18's `PipeWire` host says a named device disconnected).
+    /// 0.18's `PipeWire` host says a named device disconnected). Only the
+    /// first failure is sent, and no audio after it.
     pub fn failed(&self, error: CaptureError) {
-        if !self.stopping.load(Ordering::SeqCst) {
+        if !self.stopping.load(Ordering::SeqCst) && !self.failed.swap(true, Ordering::SeqCst) {
             self.events.send(self.track, CaptureEvent::Failed(error));
         }
     }
@@ -714,6 +738,7 @@ impl TrackStarter {
             progress,
             clock: Arc::clone(&self.clock),
             stopping: Arc::clone(&stopping),
+            failed: Arc::new(AtomicBool::new(false)),
             began: Arc::new(AtomicBool::new(false)),
             rerouted: Arc::new(AtomicBool::new(false)),
             // Suspends before the stream starts aren't its to report.
@@ -779,6 +804,26 @@ pub enum RecorderEvent {
     /// nothing more. What it sent before is recorded, and the other tracks
     /// record on.
     CaptureFailed(CaptureError),
+    /// Something happened to the track's device: it went away, or the
+    /// default the track follows changed ([`CaptureEvent::Device`]). A
+    /// device lost this way may be followed by
+    /// [`CaptureFailed`](Self::CaptureFailed).
+    Device {
+        /// What happened.
+        change: DeviceChange,
+        /// When it was noticed, by the session clock.
+        at: SessionTime,
+    },
+    /// One of the track's detectors ([`crate::detect`]) raised or cleared
+    /// its condition.
+    Detected {
+        /// What it's about.
+        condition: Condition,
+        /// Whether it's raised or cleared.
+        state: WarningState,
+        /// If raised, when the condition began; if cleared, when it ended.
+        at: SessionTime,
+    },
 }
 
 /// Why [`record_track`] stopped early.
@@ -1265,6 +1310,10 @@ fn handle<S: Fs>(
             }
             timelines.joined.push(timeline);
             return Ok(Handled::Joined);
+        }
+        CaptureEvent::Device { change, at } => {
+            report(Some(track), RecorderEvent::Device { change, at });
+            Ok(())
         }
         CaptureEvent::Started => Ok(()),
         CaptureEvent::Failed(error) => {

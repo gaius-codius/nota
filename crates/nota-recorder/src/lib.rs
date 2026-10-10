@@ -2,6 +2,8 @@
 //!
 //! - [`capture`]: audio capture (`PipeWire` on Linux) and the recorder loop
 //!   that journals it.
+//! - [`detect`]: the detectors that notice a track's capture going wrong:
+//!   stalled, digital zeros, quiet.
 //! - [`disk`]: the disk check, the ballast, and a full disk during a
 //!   recording.
 //! - [`fs`]: the filesystem layer every durable write goes through, with a
@@ -30,6 +32,7 @@
 //! crate's own tests turn on; it isn't part of nota.
 
 pub mod capture;
+pub mod detect;
 pub mod disk;
 pub mod engine;
 pub mod fs;
