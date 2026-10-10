@@ -396,8 +396,10 @@ mod tests {
     }
 
     /// A reading of the clock that stops during suspend, taken just now,
-    /// is placed at about the session time now.
+    /// is placed at about the session time now. Linux only: elsewhere the
+    /// clock places no such reading until v2.
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     #[expect(
         clippy::disallowed_methods,
         reason = "the test reads the clock an audio server stamps buffers with"
