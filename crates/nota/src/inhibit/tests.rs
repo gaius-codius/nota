@@ -1,6 +1,12 @@
+#[cfg(target_os = "linux")]
+use std::os::unix::net::UnixListener;
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
+#[cfg(target_os = "linux")]
+use std::thread;
 
 use nota_core::FakeClock;
 
@@ -249,4 +255,186 @@ fn merging_sleeps_keeps_the_stretch_no_track_recorded() {
     let unknown = slept(5_500, None);
     assert_eq!(mic.merged_with(&unknown), mic);
     assert_eq!(unknown.merged_with(&mic), mic);
+}
+
+/// A fresh directory under the system temp dir, removed when dropped.
+#[cfg(target_os = "linux")]
+struct TestDir(
+    /// The directory removed when the test ends.
+    PathBuf,
+);
+
+#[cfg(target_os = "linux")]
+impl TestDir {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test scaffolding outside the recorder's write path"
+    )]
+    fn new(name: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("nota-inhibit-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for TestDir {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test scaffolding outside the recorder's write path"
+    )]
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// What a lock that arrives late holds: dropping it says so on a channel.
+#[cfg(target_os = "linux")]
+struct Dropped(
+    /// Told when the lock is dropped.
+    Sender<()>,
+);
+
+#[cfg(target_os = "linux")]
+impl Drop for Dropped {
+    fn drop(&mut self) {
+        let _ = self.0.send(());
+    }
+}
+
+/// An attempt that hasn't answered when the wait ends is a refusal that
+/// says logind didn't answer, and the start isn't held up for it.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_attempt_that_hangs_is_given_up_on() {
+    let (release, released) = mpsc::channel::<()>();
+    let refused = bounded(Duration::from_millis(50), move || {
+        // Nothing sends until the test ends: the attempt hangs, for longer
+        // than any wait a start would put up with.
+        let _ = released.recv_timeout(Duration::from_secs(10));
+        Err::<(), _>(SleepNotHeld::new("the attempt ran its course"))
+    })
+    .unwrap_err();
+    assert_eq!(
+        refused.to_string(),
+        "sleep couldn't be held off: the system bus or logind didn't answer \
+         within less than a second"
+    );
+    drop(release);
+}
+
+/// A lock that arrives after the start gave up is dropped by the thread
+/// that got it, so no recording holds it without having asked.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_lock_that_arrives_late_is_dropped() {
+    let (release, released) = mpsc::channel::<()>();
+    let (dropped_tx, dropped) = mpsc::channel();
+    let result = bounded(Duration::from_millis(50), move || {
+        let _ = released.recv();
+        Ok(SleepLock::new(Dropped(dropped_tx)))
+    });
+    assert_eq!(
+        result.map(|_| ()).unwrap_err().to_string(),
+        "sleep couldn't be held off: the system bus or logind didn't answer \
+         within less than a second"
+    );
+    // The start has gone on without it; now the lock arrives.
+    release.send(()).unwrap();
+    assert_eq!(dropped.recv_timeout(Duration::from_secs(10)), Ok(()));
+}
+
+/// A lock that comes inside the wait is the one the attempt took, and
+/// isn't dropped on the way.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_lock_in_time_is_passed_on() {
+    let (dropped_tx, dropped) = mpsc::channel();
+    let lock = bounded(Duration::from_secs(10), move || {
+        Ok(SleepLock::new(Dropped(dropped_tx)))
+    })
+    .map_err(|e| e.to_string())
+    .unwrap();
+    // The lock is in hand and nothing has dropped it.
+    assert_eq!(dropped.try_recv(), Err(mpsc::TryRecvError::Empty));
+    drop(lock);
+    assert_eq!(dropped.try_recv(), Ok(()));
+}
+
+/// A refusal that comes inside the wait is passed on as it was said.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_refusal_in_time_is_passed_on() {
+    let refused = bounded(Duration::from_secs(10), || {
+        Err::<(), _>(SleepNotHeld::new("access denied"))
+    })
+    .unwrap_err();
+    assert_eq!(
+        refused.to_string(),
+        "sleep couldn't be held off: access denied"
+    );
+}
+
+/// An attempt that dies without an answer is a refusal, not a wait for
+/// the timeout.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_attempt_that_dies_is_a_refusal() {
+    let refused = bounded(Duration::from_secs(10), || -> Result<(), SleepNotHeld> {
+        panic!("the attempt died")
+    })
+    .unwrap_err();
+    assert_eq!(
+        refused.to_string(),
+        "sleep couldn't be held off: the request to logind stopped early"
+    );
+}
+
+/// A bus that accepts connections and never answers costs only the wait,
+/// not libdbus's own 25 s, and the start goes on with no lock.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_bus_that_only_accepts_is_given_up_on() {
+    let dir = TestDir::new("silent-bus");
+    let socket = dir.0.join("bus");
+    let listener = UnixListener::bind(&socket).unwrap();
+    // Accepts and keeps the connection open, and never says a word.
+    let (close_it, closed) = mpsc::channel::<()>();
+    let silent = thread::spawn(move || {
+        let _kept = listener.accept();
+        let _ = closed.recv();
+    });
+    let address = format!("unix:path={}", socket.display());
+    let refused = bounded(Duration::from_millis(300), move || {
+        take_lock(&Bus::At(address))
+    })
+    .map(|_| ())
+    .unwrap_err();
+    assert_eq!(
+        refused.to_string(),
+        "sleep couldn't be held off: the system bus or logind didn't answer \
+         within less than a second"
+    );
+    drop(close_it);
+    silent.join().unwrap();
+}
+
+/// Logind's reply holds the lock as its first item, a file descriptor;
+/// anything else is no lock, and says so.
+#[cfg(target_os = "linux")]
+#[test]
+fn only_a_file_descriptor_in_the_reply_is_a_lock() {
+    use dbus::{MessageItem, OwnedFd};
+    use std::os::fd::IntoRawFd;
+
+    let descriptor = || OwnedFd::new(std::fs::File::open("/dev/null").unwrap().into_raw_fd());
+    assert!(lock_in(vec![MessageItem::UnixFd(descriptor())]).is_ok());
+    for reply in [vec![], vec![MessageItem::Str("block".to_owned())]] {
+        let refused = lock_in(reply).map(|_| ()).unwrap_err();
+        assert_eq!(
+            refused.to_string(),
+            "sleep couldn't be held off: logind gave no lock"
+        );
+    }
 }
