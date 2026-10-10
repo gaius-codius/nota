@@ -1142,6 +1142,7 @@ fn a_row_that_doesnt_parse_is_one_sessions_problem_in_the_listing() {
     assert_eq!(listed[1].needs, Needs::Nothing);
 }
 
+/// Home reads the kept title and date when the session has no database row.
 #[test]
 fn listing_uses_kept_metadata_without_a_database_row() {
     let tmp = TestDir::new("listing-kept-no-row");
@@ -1166,7 +1167,7 @@ fn listing_uses_kept_metadata_without_a_database_row() {
     assert_eq!(listed[0].started_at, kept.started_at);
     assert_eq!(listed[0].recorded, None);
     assert!(matches!(listed[0].needs, Needs::Attention(_)));
-    // Listing does not adopt a row or modify the kept metadata.
+    // Reading the fallback must not turn the listing into adoption.
     assert_eq!(
         library.db().with(|db| db.session(session.id)).unwrap(),
         None
@@ -1177,6 +1178,7 @@ fn listing_uses_kept_metadata_without_a_database_row() {
     );
 }
 
+/// Home reads the kept title and date when the database cannot be opened.
 #[test]
 fn listing_uses_kept_metadata_when_the_database_cant_be_read() {
     let tmp = TestDir::new("listing-kept-bad-db");
@@ -1190,6 +1192,7 @@ fn listing_uses_kept_metadata_when_the_database_cant_be_read() {
     session.keep(&kept).unwrap();
     leave_journal(&session);
     drop(library);
+    // Break the database so this proves fallback after a read failure.
     break_db(&tmp.0);
     let library = Library::open(&tmp.0).unwrap();
 
@@ -1205,10 +1208,12 @@ fn listing_uses_kept_metadata_when_the_database_cant_be_read() {
     assert!(why.starts_with("audio still to save"), "{why}");
 }
 
+/// A database row takes precedence even when its title and date are unknown.
 #[test]
 fn listing_database_metadata_takes_precedence_over_kept_metadata() {
     let tmp = TestDir::new("listing-kept-precedence");
     let library = Library::open(&tmp.0).unwrap();
+    // A later row must not resurrect an older title, including when it clears one.
     for (title, started_at) in [
         (
             Some("Edited title".to_owned()),
@@ -1243,12 +1248,14 @@ fn listing_database_metadata_takes_precedence_over_kept_metadata() {
     }
 }
 
+/// A session without either source of metadata keeps its unknown title and date.
 #[test]
 fn listing_without_kept_metadata_still_has_unknown_title_and_start() {
     let tmp = TestDir::new("listing-no-kept");
     let library = Library::open(&tmp.0).unwrap();
     let session = library.create().unwrap();
     leave_journal(&session);
+    // An unreadable database must not invent metadata absent from the session.
     for library in [Some(library), None] {
         let library = library.unwrap_or_else(|| {
             break_db(&tmp.0);

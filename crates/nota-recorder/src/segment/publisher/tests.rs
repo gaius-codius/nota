@@ -396,10 +396,12 @@ fn a_set_aside_is_reported_whatever_fails_after_it() {
     assert!(failed_after_rename >= 1, "{failed_after_rename}");
 }
 
+/// The final report names the path and cause holding publication back.
 #[test]
 fn the_last_run_keeps_the_blocked_name_and_cause() {
     let (fs, lock, journals) = recorded(1);
     let path = session().join("seg-t0-000000000000.flac");
+    // Occupying the final segment name leaves its journal waiting to publish.
     fs.create_dir(&path).unwrap();
     let p = publisher(&lock, FakeStore::new(&fs, &db()));
     assert!(p.queue().send(journals));
@@ -412,11 +414,13 @@ fn the_last_run_keeps_the_blocked_name_and_cause() {
     assert!(!report.is_complete());
 }
 
+/// A fully published journal needs cleanup, rather than another publication.
 #[test]
 fn undeletable_published_audio_is_not_unpublished() {
     use crate::fs::fake::Fault;
     let (fs, lock, journals) = recorded(1);
     let id = journals[0].id();
+    // Refuse only deletion, so every sample still has a committed segment row.
     fs.fail_on(
         &session().join(id.file_name()),
         Fault::Remove,

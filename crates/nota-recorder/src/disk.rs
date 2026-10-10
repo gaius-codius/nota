@@ -549,6 +549,7 @@ impl<S: Fs + Clone + 'static> Fs for WatchedFs<S> {
         seen(&self.watch, path, self.inner.remove(path))
     }
 
+    /// Removes an empty directory and reports a full disk to the watch.
     fn remove_dir(&self, path: &Path) -> io::Result<()> {
         seen(&self.watch, path, self.inner.remove_dir(path))
     }

@@ -1019,6 +1019,7 @@ fn the_watched_filesystem_refuses_a_nonempty_directory() {
     let fs = FakeFs::with_dirs(["/data/s"]);
     fs.create(&p("/data/s/journal-000000")).unwrap();
     let watch = DiskWatch::new(fs.clone());
+    // The journal must stay where it was when directory removal is refused.
     let error = watch.fs().remove_dir(&p("/data/s")).unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::DirectoryNotEmpty);
     assert_eq!(
@@ -1048,6 +1049,7 @@ fn a_full_disk_during_watched_directory_removal_frees_ballast() {
 #[test]
 fn a_wrapper_without_directory_removal_refuses_cleanup() {
     let fs = BadLocks(FakeFs::with_dirs(["/data/s"]));
+    // An omitted operation must not silently leave an apparent success.
     let error = fs.remove_dir(&p("/data/s")).unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::Unsupported);
     assert_eq!(fs.list(&p("/data")).unwrap(), [p("/data/s")]);

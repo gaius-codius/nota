@@ -91,9 +91,10 @@ impl Fs for StdFs {
         std::fs::remove_file(path)
     }
 
+    /// Removes an empty directory through the system filesystem.
     #[expect(
         clippy::disallowed_methods,
-        reason = "the durable-write layer is the one place that removes empty directories"
+        reason = "the filesystem layer is the one place that removes empty directories"
     )]
     fn remove_dir(&self, path: &Path) -> io::Result<()> {
         valid_path(path)?;
@@ -356,32 +357,56 @@ mod tests {
     use super::*;
     use crate::test_dir::TestDir;
 
+    /// Directory removal refuses a file without removing it.
     #[test]
-    fn remove_dir_removes_only_an_empty_directory() {
-        let dir = TestDir::new("empty-dir");
-        let child = dir.0.join("child");
-        let file = child.join("file");
-        let fs = StdFs;
-        fs.create_dir(&child).unwrap();
-        drop(fs.create(&file).unwrap());
+    fn remove_dir_refuses_a_file() {
+        let dir = TestDir::new("remove-file");
+        let file = dir.0.join("file");
+        drop(StdFs.create(&file).unwrap());
+        // A file passed to directory cleanup must remain untouched.
         assert_eq!(
-            fs.remove_dir(&file).unwrap_err().kind(),
+            StdFs.remove_dir(&file).unwrap_err().kind(),
             io::ErrorKind::NotADirectory
         );
+        assert_eq!(StdFs.list(&dir.0).unwrap(), [file]);
+    }
+
+    /// Directory removal refuses a directory containing a file.
+    #[test]
+    fn remove_dir_refuses_a_nonempty_directory() {
+        let dir = TestDir::new("remove-nonempty");
+        let child = dir.0.join("child");
+        StdFs.create_dir(&child).unwrap();
+        drop(StdFs.create(&child.join("file")).unwrap());
+        // A live session's files must stop empty-directory cleanup.
         assert_eq!(
-            fs.remove_dir(&child).unwrap_err().kind(),
+            StdFs.remove_dir(&child).unwrap_err().kind(),
             io::ErrorKind::DirectoryNotEmpty
         );
-        fs.remove(&file).unwrap();
-        fs.remove_dir(&child).unwrap();
-        fs.sync_dir(&dir.0).unwrap();
-        assert!(fs.list(&dir.0).unwrap().is_empty());
+    }
+
+    /// Removing an empty directory removes its name from the parent.
+    #[test]
+    fn remove_dir_removes_an_empty_directory() {
+        let dir = TestDir::new("remove-empty");
+        let child = dir.0.join("child");
+        StdFs.create_dir(&child).unwrap();
+        // Sync the parent exactly as startup rollback does after removal.
+        StdFs.remove_dir(&child).unwrap();
+        StdFs.sync_dir(&dir.0).unwrap();
+        assert!(StdFs.list(&dir.0).unwrap().is_empty());
         assert_eq!(
-            fs.remove_dir(&child).unwrap_err().kind(),
+            StdFs.remove_dir(&child).unwrap_err().kind(),
             io::ErrorKind::NotFound
         );
+    }
+
+    /// Empty-directory cleanup refuses the filesystem root.
+    #[test]
+    fn remove_dir_refuses_the_root() {
+        // A path without a parent cannot be a session's empty scaffolding.
         assert_eq!(
-            fs.remove_dir(Path::new("/")).unwrap_err().kind(),
+            StdFs.remove_dir(Path::new("/")).unwrap_err().kind(),
             io::ErrorKind::InvalidInput
         );
     }

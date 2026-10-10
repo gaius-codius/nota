@@ -232,12 +232,14 @@ struct StartupFailure {
 }
 
 impl std::fmt::Display for StartupFailure {
+    /// Shows the startup failure followed by the earlier recovery notes.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}; {}", self.error, self.notes.join("; "))
     }
 }
 
 impl std::error::Error for StartupFailure {
+    /// Keeps the original startup error available to callers.
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(self.error.as_ref())
     }

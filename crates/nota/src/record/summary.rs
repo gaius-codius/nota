@@ -512,6 +512,7 @@ pub(super) mod tests {
             self.fs.create(&path).unwrap().write_all(&bytes).unwrap();
         }
 
+        /// Names the first recorded journal without reading an id from its path.
         fn journal_path(&self) -> PathBuf {
             PathBuf::from("/held-session").join(self.journals[0].id().file_name())
         }
