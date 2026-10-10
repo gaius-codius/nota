@@ -19,7 +19,7 @@ use std::time::Duration;
 use nota_core::recorder::{Input, Setup};
 use nota_core::{Clock, SessionTime};
 use nota_recorder::capture::{CaptureBackend, Devices, Preview, PreviewEvent, Source as Capture};
-use nota_recorder::disk::{CHECK_INTERVAL, Usage};
+use nota_recorder::disk::{BALLAST_LEN, Ballast, CHECK_INTERVAL, Usage};
 use nota_recorder::fs::{Fs, StdFs};
 use nota_tui::{Choice, InputThread, RunError, SetupAction, Theme};
 
@@ -33,9 +33,9 @@ use crate::terminal::Screen;
 /// How the Setup page ended.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Done {
-    /// `⏎`: record with this setup. The note says why the choice couldn't
-    /// be kept, if it couldn't.
-    Start(Setup, Option<String>),
+    /// `⏎`: record with this setup, which is what the choice was. The note
+    /// says why the choice couldn't be kept for next time, if it couldn't.
+    Start(Setup, Remembered, Option<String>),
     /// `esc`: back to Home.
     Back,
     /// Ctrl+C, or a signal: close nota.
@@ -103,14 +103,18 @@ fn show_with<B: CaptureBackend + Send + 'static>(
     let ran = if page.quit.asked() {
         Ok(SetupAction::Quit)
     } else {
-        let input = InputThread::spawn(ui, Arc::clone(page.clock))?;
-        let ran = screen.clear().map_err(RunError::Terminal).and_then(|()| {
-            nota_tui::run_setup(screen.terminal(), &mut setup, &events, &mut |setup| {
-                meters.refresh(setup);
+        // The spawn's failure is the page's, after the signals are let go.
+        InputThread::spawn(ui, Arc::clone(page.clock))
+            .map_err(|e| RunError::InputLost(e.kind()))
+            .and_then(|input| {
+                let ran = screen.clear().map_err(RunError::Terminal).and_then(|()| {
+                    nota_tui::run_setup(screen.terminal(), &mut setup, &events, &mut |setup| {
+                        meters.refresh(setup);
+                    })
+                });
+                let _ = input.stop();
+                ran
             })
-        });
-        let _ = input.stop();
-        ran
     };
     page.quit.show_home(None);
     // The preview's streams close before anything else opens them.
@@ -144,7 +148,7 @@ fn start(choice: &Choice, data: &std::path::Path) -> Done {
     let note = remembered::write(&StdFs, data, &kept)
         .err()
         .map(|e| format!("the choices couldn't be kept for next time: {e}"));
-    Done::Start(kept.setup(choice.title.clone()), note)
+    Done::Start(kept.setup(choice.title.clone()), kept, note)
 }
 
 /// What Setup chose last: the file Setup keeps, else the last recording's
@@ -163,17 +167,31 @@ pub(super) fn last_choice(library: &Library, data: &std::path::Path) -> Option<R
 }
 
 /// The recording's setup for `R`: the last recording's title, and what
-/// Setup last chose, or else the sources the last recording had.
-pub(super) fn last_setup_for(library: &Library, data: &std::path::Path) -> Setup {
+/// Setup last chose (`chosen`, if it chose in this run, else what it kept),
+/// or else the sources the last recording had.
+pub(super) fn last_setup_for(
+    library: &Library,
+    data: &std::path::Path,
+    chosen: Option<&Remembered>,
+) -> Setup {
     let rows = last_setup(library);
-    match (remembered::read(&StdFs, data), rows) {
-        (Ok(Some(kept)), rows) => {
-            kept.setup(rows.map_or_else(|| "Recording".to_owned(), |r| r.title))
+    let kept = chosen
+        .cloned()
+        .or_else(|| remembered::read(&StdFs, data).ok().flatten());
+    match (kept, rows) {
+        (Some(kept), rows) => {
+            kept.setup(rows.map_or_else(|| "Recording".to_owned(), |rows| rows.title))
         }
-        (_, Some(rows)) => rows,
-        (_, None) => Remembered::both().setup("Recording".to_owned()),
+        (None, Some(rows)) => rows,
+        (None, None) => Remembered::both().setup("Recording".to_owned()),
     }
 }
+
+/// How long a source may go without a level before its meter says there's
+/// no signal: levels come every 100 ms while a stream runs, so a stream
+/// that went quiet for this long has stopped (its device was unplugged,
+/// say).
+const STALE: Duration = Duration::from_secs(1);
 
 /// The preview, and what the screen takes from it.
 struct Meters {
@@ -186,6 +204,17 @@ struct Meters {
     clock: Arc<dyn Clock>,
     /// When the space was last measured, and for how many tracks.
     measured: Option<(SessionTime, usize)>,
+    /// When each source's last level came (system audio, then microphone),
+    /// if one has since the preview was last pointed at it.
+    heard_at: [Option<SessionTime>; 2],
+    /// Whether each source's stream failed or went quiet.
+    failed: [bool; 2],
+    /// Whether the preview has told the devices once: the first telling is
+    /// the list, not a change.
+    devices_known: bool,
+    /// Whether a failed source should be listened to again: the devices
+    /// changed since it failed, so what it needed may be there now.
+    retry: bool,
 }
 
 impl Meters {
@@ -204,21 +233,73 @@ impl Meters {
             data,
             clock,
             measured: None,
+            heard_at: [None; 2],
+            failed: [false; 2],
+            devices_known: false,
+            retry: false,
         }
     }
 
     /// Gives `setup` what the preview has heard, points the preview at
-    /// what `setup` now says, and measures the space if it's due.
+    /// what `setup` now says (again, if a source failed and the devices
+    /// have changed), and measures the space if it's due.
     fn refresh(&mut self, setup: &mut nota_tui::Setup) {
-        for event in self.heard.try_iter() {
-            apply(setup, event);
+        while let Ok(event) = self.heard.try_recv() {
+            self.take(setup, event);
         }
+        self.expire(setup);
         let inputs = setup.inputs();
-        if self.listening.as_ref() != Some(&inputs) {
+        if self.retry || self.listening.as_ref() != Some(&inputs) {
             self.preview.listen(&sources(&inputs));
             self.listening = Some(inputs);
+            self.heard_at = [None; 2];
+            self.failed = [false; 2];
+            self.retry = false;
         }
         self.measure(setup);
+    }
+
+    /// Takes in one event from the preview: gives it to `setup`, and notes
+    /// when each source was heard, and whether one failed.
+    fn take(&mut self, setup: &mut nota_tui::Setup, event: PreviewEvent) {
+        match &event {
+            PreviewEvent::Level { track, .. } => {
+                if let Some(at) = meter_of(*track) {
+                    self.heard_at[at] = Some(self.clock.now());
+                    self.failed[at] = false;
+                }
+            }
+            PreviewEvent::Failed { track, .. } => {
+                if let Some(at) = meter_of(*track) {
+                    self.heard_at[at] = None;
+                    self.failed[at] = true;
+                }
+            }
+            // The list changed: a device that wasn't there may be now.
+            PreviewEvent::Devices(_) => {
+                self.retry |= self.devices_known && self.failed.contains(&true);
+                self.devices_known = true;
+            }
+        }
+        apply(setup, event);
+    }
+
+    /// Marks a source whose levels stopped coming as having no signal.
+    fn expire(&mut self, setup: &mut nota_tui::Setup) {
+        let now = self.clock.now();
+        for (at, source) in [nota_tui::Source::System, nota_tui::Source::Microphone]
+            .into_iter()
+            .enumerate()
+        {
+            let silent = self.heard_at[at].is_some_and(|heard| {
+                now.checked_duration_since(heard).unwrap_or_default() >= STALE
+            });
+            if silent {
+                self.heard_at[at] = None;
+                self.failed[at] = true;
+                setup.set_failed(source);
+            }
+        }
     }
 
     /// Tells `setup` how much recording the disk has room for: when it's
@@ -237,11 +318,29 @@ impl Meters {
     }
 }
 
+/// Where a track's meter is in [`Meters`]: system audio, then microphone.
+fn meter_of(track: nota_core::TrackId) -> Option<usize> {
+    match track {
+        SYSTEM => Some(0),
+        MIC => Some(1),
+        _ => None,
+    }
+}
+
 /// How much recording `tracks` tracks would fit in what the disk has left,
-/// or nothing if it can't say.
+/// or nothing if it can't say. A recording lays its ballast first when
+/// there is none and the disk has room for it twice over, and that room
+/// isn't the recording's.
 fn room(data: &std::path::Path, tracks: usize) -> Option<Duration> {
     let free = StdFs.free_space(data).ok()?;
-    Some(Usage::new(tracks, RATE, segment_length()).time_left(free))
+    let ballast = match Ballast::find(&StdFs, data, BALLAST_LEN) {
+        Ok(Some(_)) => 0,
+        // Without one, or if the directory can't be listed, a recording
+        // makes it when there's room.
+        _ if free >= BALLAST_LEN.saturating_mul(2) => BALLAST_LEN,
+        _ => 0,
+    };
+    Some(Usage::new(tracks, RATE, segment_length()).time_left(free.saturating_sub(ballast)))
 }
 
 /// Gives `setup` what the preview reported.

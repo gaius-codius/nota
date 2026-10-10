@@ -99,3 +99,35 @@ fn setup_too_small() {
     let terminal = draw(&mut mockup_setup(), 50, 12);
     insta::assert_snapshot!(terminal.backend());
 }
+
+/// At the minimum size, with both sources chosen, long device names from
+/// the audio server and little space left: the words are cut to two rows
+/// each, so Engines and the space line stay on the screen.
+#[test]
+fn setup_long_descriptions_at_the_minimum_size() {
+    let device = |name: &str, description: &str| Device {
+        name: name.to_owned(),
+        description: description.to_owned(),
+    };
+    let mut setup = Setup::new(
+        "A long title for the minimum size",
+        "parakeet",
+        Theme::default(),
+    )
+    .remembering(Listen::Both, Input::Default, Input::Default);
+    setup.set_devices(Devices {
+        outputs: vec![device(
+            "alsa.usb",
+            "USB Audio Interface with Surround Sound Speakers and Digital Stereo Output",
+        )],
+        inputs: vec![device(
+            "alsa.array",
+            "USB Conference Microphone Array with Acoustic Echo Cancellation and Noise Suppression",
+        )],
+        default_output: Some("alsa.usb".to_owned()),
+        default_input: Some("alsa.array".to_owned()),
+    });
+    setup.set_space(Some(Duration::from_hours(2)));
+    let terminal = draw(&mut setup, 60, 20);
+    insta::assert_snapshot!(terminal.backend());
+}

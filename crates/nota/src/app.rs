@@ -113,6 +113,7 @@ fn run_app(args: &RecordArgs, said: &mut Vec<String>) -> Result<(), BoxError> {
         theme,
         quit: &quit,
         notice: None,
+        chosen: None,
     }
     .run(args, said, &jobs)
 }
@@ -144,6 +145,9 @@ struct Pages<'a> {
     quit: &'a QuitSignals,
     /// A recording failure to show on the next visit to Home.
     notice: Option<String>,
+    /// What Setup chose for the last recording started from it in this run,
+    /// which `R` repeats even if it couldn't be kept in the data directory.
+    chosen: Option<remembered::Remembered>,
 }
 
 impl Pages<'_> {
@@ -169,8 +173,9 @@ impl Pages<'_> {
                 }
                 Next::Record => self.last_setup(args),
                 Next::Setup => match self.setup(args, &mut current)? {
-                    setup::Done::Start(setup, note) => {
+                    setup::Done::Start(setup, chosen, note) => {
                         said.extend(note.map(|note| format!("nota: {note}")));
+                        self.chosen = Some(chosen);
                         setup
                     }
                     setup::Done::Back => {
@@ -195,7 +200,7 @@ impl Pages<'_> {
     /// What `R` records with: the last settings, or a first recording's
     /// default sources.
     fn last_setup(&self, args: &RecordArgs) -> Setup {
-        setup::last_setup_for(self.listing.library, &args.data)
+        setup::last_setup_for(self.listing.library, &args.data, self.chosen.as_ref())
     }
 
     /// Shows Setup, with the date and time as the title it starts with.

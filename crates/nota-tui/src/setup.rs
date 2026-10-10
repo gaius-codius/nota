@@ -45,7 +45,7 @@ use ratatui::text::{Line, Span};
 use crate::home::duration;
 use crate::level::bar;
 use crate::render::{Keep, MIN_HEIGHT, MIN_WIDTH, frame_row, too_small, truncate};
-use crate::text::{display_width, is_drawn, wrap};
+use crate::text::{display_width, graphemes, is_drawn, wrap};
 use crate::theme::Theme;
 
 /// The longest title, in characters. A title is one line; this only keeps a
@@ -61,6 +61,11 @@ const SPACE_SHOWN_BELOW: Duration = Duration::from_hours(4);
 /// Below this much time left the space line is in the accent colour
 /// rather than gold.
 const SPACE_URGENT_BELOW: Duration = Duration::from_hours(1);
+
+/// The most rows the plain words about one source take. A device's
+/// description comes from the audio server and can be long; the words
+/// stop there so the engines and the space line stay on the screen.
+const MAX_WORD_ROWS: usize = 2;
 
 /// The column inside the frame where each field's content starts.
 const CONTENT_COL: u16 = 14;
@@ -375,7 +380,12 @@ impl Setup {
     fn type_key(&mut self, code: KeyCode) {
         match code {
             KeyCode::Backspace => {
-                self.title.pop();
+                // A whole grapheme: an accent or a joined emoji goes with
+                // its base.
+                let last = graphemes(&self.title).next_back().map(|(g, _)| g.len());
+                if let Some(last) = last {
+                    self.title.truncate(self.title.len() - last);
+                }
             }
             KeyCode::Char(c) if is_drawn(c) => self.push_title(c),
             _ => {}
@@ -432,6 +442,8 @@ impl Setup {
             Step::Forward => at + 1,
         };
         *self.input_mut(source) = choices[to].clone();
+        // What the old device sounded like isn't the new one's.
+        self.meters[meter_index(source)] = Meter::default();
     }
 
     /// What `←→` chooses between for `source`: the default, then each
@@ -608,7 +620,7 @@ impl Setup {
         y += 1;
         let room = width.saturating_sub(usize::from(CONTENT_COL) + 2);
         for words in self.plain_words() {
-            for text in wrap(&words, room) {
+            for text in capped(wrap(&words, room), room) {
                 row(&mut y, Self::indented(text, self.theme.text_secondary));
             }
         }
@@ -656,7 +668,13 @@ impl Setup {
             ""
         };
         let room = width.saturating_sub(usize::from(CONTENT_COL) + 2);
-        let shown = truncate(vec![Span::raw(format!("{}{cursor}", self.title))], room);
+        // While it takes typing, the end of the title is what shows, with
+        // the cursor: the new letters are never cut off.
+        let shown = if self.field == Field::Title {
+            vec![Span::raw(tail_of(&format!("{}{cursor}", self.title), room))]
+        } else {
+            truncate(vec![Span::raw(self.title.clone())], room)
+        };
         let mut spans = vec![
             self.marker(Field::Title),
             Span::styled("Title", self.theme.text_secondary),
@@ -803,6 +821,41 @@ impl Field {
             Self::Listen => Self::Title,
         }
     }
+}
+
+/// The end of `text` that fits in `room` columns, with `…` before it if the
+/// start was cut. Cuts fall between grapheme clusters.
+fn tail_of(text: &str, room: usize) -> String {
+    if display_width(text) <= room {
+        return text.to_owned();
+    }
+    // One column for the `…`.
+    let mut left = room.saturating_sub(1);
+    let mut start = text.len();
+    for (grapheme, width) in graphemes(text).rev() {
+        if width > left {
+            break;
+        }
+        left -= width;
+        start -= grapheme.len();
+    }
+    format!("…{}", &text[start..])
+}
+
+/// The first two of `lines`, the second cut short with `…` if there were
+/// more, so one source's words never take more than two rows.
+fn capped(mut lines: Vec<String>, room: usize) -> Vec<String> {
+    if lines.len() > MAX_WORD_ROWS {
+        lines.truncate(MAX_WORD_ROWS);
+        if let Some(last) = lines.last_mut() {
+            let cut = truncate(vec![Span::raw(format!("{last} …"))], room);
+            *last = cut
+                .into_iter()
+                .map(|span| span.content.into_owned())
+                .collect();
+        }
+    }
+    lines
 }
 
 /// Where `source`'s meter is.

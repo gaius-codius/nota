@@ -154,6 +154,12 @@ fn start_with_notes<B: CaptureBackend>(
     if let Some(why) = stop_asked(&ui, &ui_events) {
         return Err(why.into());
     }
+    // Before a session is made for it: a setup with no track has nothing
+    // to record.
+    let sources = sources(setup);
+    if sources.is_empty() {
+        return Err("nothing to record".into());
+    }
     let session = create_session(&library, &watch)?;
     // From here, a start that fails removes the session again, unless
     // audio reached it.
@@ -162,7 +168,6 @@ fn start_with_notes<B: CaptureBackend>(
         session: session.clone(),
         discard: true,
     };
-    let sources = sources(setup);
     // Kept before any stream opens, naming every track asked for; narrowed
     // to those that start. With no room, startup leaves no session behind.
     let asked = session_row(setup, session.id, &sources);
@@ -990,6 +995,27 @@ mod tests {
         assert_eq!(why, STOPPED_BY_FULL_DISK);
         assert!(why.contains("disk is full"));
         assert_eq!(waiting.try_iter().collect::<Vec<_>>(), [full]);
+    }
+
+    /// A track the setup leaves out isn't asked for, and a setup that
+    /// leaves out both asks for none, which `start` refuses before it makes
+    /// a session.
+    #[test]
+    fn a_track_left_out_of_the_setup_is_not_recorded() {
+        let mut setup = Setup {
+            title: "Workshop".to_owned(),
+            mic: Some(Input::Default),
+            system: None,
+        };
+        assert_eq!(sources(&setup), [(MIC, Source::Microphone)]);
+        setup.mic = None;
+        setup.system = Some(Input::Device("speakers.monitor".to_owned()));
+        assert_eq!(
+            sources(&setup),
+            [(SYSTEM, Source::Device("speakers.monitor".to_owned()))]
+        );
+        setup.system = None;
+        assert_eq!(sources(&setup), []);
     }
 
     /// The setup a start command carries decides what each track records.

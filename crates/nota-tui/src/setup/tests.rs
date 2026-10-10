@@ -232,3 +232,48 @@ fn the_space_line_shows_only_under_four_hours() {
     setup.set_space(None);
     assert!(setup.space_line().is_none());
 }
+
+/// `←→` pinning a device clears its meter: the bars heard from the old
+/// device aren't the new one's.
+#[test]
+fn pinning_a_device_clears_its_meter() {
+    let mut setup = screen();
+    for _ in 0..8 {
+        setup.set_level(Source::System, Level::FULL_SCALE);
+        setup.set_level(Source::Microphone, Level::FULL_SCALE);
+    }
+    press(&mut setup, KeyCode::Right);
+    assert!(setup.meters[0].bars.iter().all(Option::is_none));
+    assert!(setup.meters[1].bars.iter().all(Option::is_some));
+}
+
+/// Backspace takes a whole grapheme: a letter with its accent, or a
+/// joined emoji, goes at once rather than leaving its parts.
+#[test]
+fn backspace_removes_a_whole_grapheme() {
+    let mut setup = screen();
+    press(&mut setup, KeyCode::Tab);
+    setup.paste(" e\u{301}");
+    assert_eq!(setup.chosen().title, "9 Oct, 14:05 e\u{301}");
+    // The title is trimmed, so the space left behind doesn't show: only an
+    // `e` left without its accent would.
+    press(&mut setup, KeyCode::Backspace);
+    assert_eq!(setup.chosen().title, "9 Oct, 14:05");
+}
+
+/// The end of a long text is what shows while typing, behind `…`.
+#[test]
+fn the_end_of_a_long_title_shows_with_the_cursor() {
+    assert_eq!(tail_of("short", 10), "short");
+    assert_eq!(tail_of("a title that is long▏", 8), "…s long▏");
+    assert_eq!(tail_of("日本語のタイトル▏", 7), "…トル▏");
+}
+
+/// A source's words take at most two rows, the second cut short.
+#[test]
+fn a_sources_words_take_at_most_two_rows() {
+    let lines = ["one", "two", "three four"].map(str::to_owned).to_vec();
+    assert_eq!(capped(lines, 20), ["one", "two …"]);
+    let lines = ["one", "two"].map(str::to_owned).to_vec();
+    assert_eq!(capped(lines.clone(), 20), lines);
+}

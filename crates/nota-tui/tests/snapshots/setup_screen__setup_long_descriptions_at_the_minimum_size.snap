@@ -1,0 +1,24 @@
+---
+source: crates/nota-tui/tests/setup_screen.rs
+expression: terminal.backend()
+---
+"╭─ ≈ nota · new recording ───────────────── last settings ─╮"
+"│                                                          │"
+"│   Title      A long title for the minimum size           │"
+"│                                                          │"
+"│ ▸ Listen to  pick the one that moves                     │"
+"│              ○ System audio  USB Audio Inter…  ▁▁▁▁▁▁▁▁  │"
+"│              ○ Microphone    USB Conference …  ▁▁▁▁▁▁▁▁  │"
+"│              ● Both                                      │"
+"│                                                          │"
+"│              Records everything playing on USB Audio     │"
+"│              Interface with Surround Sound Speakers an…  │"
+"│              Records the room through USB Conference     │"
+"│              Microphone Array with Acoustic Echo …       │"
+"│                                                          │"
+"│   Engines    parakeet                                    │"
+"│              ✓ everything stays on this machine          │"
+"│                                                          │"
+"│              ⚠ space for about 2h 00m of recording       │"
+"│                                                          │"
+"╰─ ⏎ start  tab next  ↑↓ source  esc back ── R skips this ─╯"

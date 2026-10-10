@@ -628,14 +628,18 @@ pub trait CaptureBackend {
         events: CaptureSender,
     ) -> Result<Self::Stream, CaptureError>;
 
-    /// The devices the audio server has now, for Setup to offer. A backend
-    /// with no server to ask has none.
+    /// The devices the audio server has now, for Setup to offer.
+    ///
+    /// A backend with no server to ask can't list any, which is what this
+    /// says unless it's overridden.
     ///
     /// # Errors
     ///
     /// A [`CaptureError`] if the server can't be asked.
     fn devices(&self) -> Result<Devices, CaptureError> {
-        Ok(Devices::default())
+        Err(CaptureError::Backend(
+            "this backend can't list devices".to_owned(),
+        ))
     }
 }
 

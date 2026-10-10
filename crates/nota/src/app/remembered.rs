@@ -28,10 +28,8 @@ use nota_tui::Listen;
 
 use crate::library::kept::{escape, unescape};
 
-/// The file's name in the data directory, and the name it's written under
-/// first.
+/// The file's name in the data directory.
 const FILE: &str = "setup.txt";
-const PARTIAL: &str = "setup.txt.partial";
 
 /// The first line.
 const HEADER: &str = "nota setup 1";
@@ -76,15 +74,22 @@ impl Remembered {
     }
 }
 
+/// The name the file is written under first: this process's own, so two
+/// notas saving at once never rename each other's half-written file.
+fn partial_name() -> String {
+    format!("{FILE}.{}.partial", std::process::id())
+}
+
 /// Writes `remembered` into `dir`, the data directory, on `fs`: written
 /// under another name, synced, renamed into place and the directory
-/// synced, so a crash leaves the whole file or the one before.
+/// synced, so a crash leaves the whole file or the one before. A crash
+/// leaves its partial file behind, a few lines long.
 ///
 /// # Errors
 ///
 /// If any step of the write fails.
 pub(super) fn write<F: Fs>(fs: &F, dir: &Path, remembered: &Remembered) -> io::Result<()> {
-    let partial = dir.join(PARTIAL);
+    let partial = dir.join(partial_name());
     // A write that failed may have left this name.
     match fs.remove(&partial) {
         Ok(()) => fs.sync_dir(dir)?,

@@ -7,7 +7,8 @@
 //! - **Main:** starts everything, runs the screen, and stops everything in
 //!   order. The capture streams live here: they stop on the thread that
 //!   started them.
-//! - **Recorder:** records both tracks into one session writer
+//! - **Recorder:** records the session's tracks (both, unless Setup chose
+//!   one) into one session writer
 //!   ([`record_tracks`](nota_recorder::capture::record_tracks)); hands
 //!   finished journals to the publisher and everything else to the live
 //!   thread. It never waits on either.

@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::time::Duration;
 
@@ -20,6 +21,45 @@ const WAIT: Duration = Duration::from_secs(10);
 /// has the same devices as [`screen`], so the preview's first report
 /// doesn't change the list a test pressed keys against.
 struct Opened(Sender<Capture>);
+
+/// A backend for the tests of recovery: its streams fail to open while
+/// `broken` is set, and its devices change when `plugged` is.
+struct Flaky {
+    opened: Sender<Capture>,
+    broken: Arc<AtomicBool>,
+    plugged: Arc<AtomicBool>,
+}
+
+impl CaptureBackend for Flaky {
+    type Stream = ();
+
+    fn start(
+        &self,
+        source: &Capture,
+        _rate: nota_core::SampleRate,
+        _events: CaptureSender,
+    ) -> Result<(), CaptureError> {
+        let _ = self.opened.send(source.clone());
+        if self.broken.load(Ordering::SeqCst) {
+            return Err(CaptureError::DeviceNotAvailable(source.clone()));
+        }
+        Ok(())
+    }
+
+    fn devices(&self) -> Result<Devices, CaptureError> {
+        let mut inputs = Vec::new();
+        if self.plugged.load(Ordering::SeqCst) {
+            inputs.push(Device {
+                name: "usb.seiren".to_owned(),
+                description: "Seiren Mini".to_owned(),
+            });
+        }
+        Ok(Devices {
+            inputs,
+            ..Devices::default()
+        })
+    }
+}
 
 impl CaptureBackend for Opened {
     type Stream = ();
@@ -255,7 +295,7 @@ fn r_records_with_what_setup_kept_or_else_the_last_recording() {
     let tmp = TestDir::new("r-settings");
     let library = Library::open(&tmp.0).unwrap();
     assert_eq!(
-        last_setup_for(&library, &tmp.0),
+        last_setup_for(&library, &tmp.0, None),
         Setup {
             title: "Recording".to_owned(),
             mic: Some(Input::Default),
@@ -265,7 +305,7 @@ fn r_records_with_what_setup_kept_or_else_the_last_recording() {
     let library = crate::app::tests::library_of_three(&tmp.0);
     // No file yet: the last recording's tracks, as before Setup existed.
     assert_eq!(
-        last_setup_for(&library, &tmp.0),
+        last_setup_for(&library, &tmp.0, None),
         Setup {
             title: "Finishing".to_owned(),
             mic: Some(Input::Default),
@@ -281,7 +321,7 @@ fn r_records_with_what_setup_kept_or_else_the_last_recording() {
     // The kept choice: only the microphone, pinned to a device named `mic`,
     // which the tracks' display names couldn't tell from the default.
     assert_eq!(
-        last_setup_for(&library, &tmp.0),
+        last_setup_for(&library, &tmp.0, None),
         Setup {
             title: "Finishing".to_owned(),
             mic: Some(Input::Device("mic".to_owned())),
@@ -298,7 +338,7 @@ fn starting_keeps_the_choice_and_says_when_it_could_not() {
     let mut setup = screen();
     setup.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     let choice = setup.chosen();
-    let Done::Start(started, note) = start(&choice, &tmp.0) else {
+    let Done::Start(started, _, note) = start(&choice, &tmp.0) else {
         panic!("Setup didn't start");
     };
     assert_eq!(note, None);
@@ -315,9 +355,129 @@ fn starting_keeps_the_choice_and_says_when_it_could_not() {
         nota_tui::Listen::Microphone
     );
     // A data directory that isn't there can't keep anything.
-    let Done::Start(started, note) = start(&choice, &tmp.0.join("gone")) else {
+    let Done::Start(started, _, note) = start(&choice, &tmp.0.join("gone")) else {
         panic!("Setup didn't start");
     };
     assert_eq!(started.mic, Some(Input::Default));
     assert!(note.unwrap().starts_with("the choices couldn't be kept"));
+}
+
+/// A source whose stream failed to open is listened to again once the
+/// devices change, as when the microphone it needed is plugged in.
+#[test]
+fn a_failed_source_is_listened_to_again_when_the_devices_change() {
+    let tmp = TestDir::new("preview-retries");
+    let (opened, sources) = channel();
+    let broken = Arc::new(AtomicBool::new(true));
+    let plugged = Arc::new(AtomicBool::new(false));
+    let backend = Flaky {
+        opened,
+        broken: Arc::clone(&broken),
+        plugged: Arc::clone(&plugged),
+    };
+    let fake = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let clock: Arc<dyn Clock> = fake.clone();
+    let (preview, heard) = Preview::start(backend, RATE, Arc::clone(&clock)).unwrap();
+    let mut meters = Meters::new(preview, heard, tmp.0.clone(), clock);
+    let mut setup = screen();
+    meters.refresh(&mut setup);
+    // Both streams were tried and both failed.
+    for _ in 0..2 {
+        sources.recv_timeout(WAIT).unwrap();
+    }
+    // The failures and the first list of devices, in whichever order.
+    while meters.failed != [true, true] || !meters.devices_known {
+        let event = meters.heard.recv_timeout(WAIT).unwrap();
+        meters.take(&mut setup, event);
+    }
+    assert!(!meters.retry, "the first list isn't a change");
+    // The microphone is plugged in, and the preview's next look at the
+    // devices sees it.
+    broken.store(false, Ordering::SeqCst);
+    plugged.store(true, Ordering::SeqCst);
+    fake.advance(Duration::from_secs(10));
+    loop {
+        let event = meters.heard.recv_timeout(WAIT).unwrap();
+        let devices = matches!(event, PreviewEvent::Devices(_));
+        meters.take(&mut setup, event);
+        if devices && meters.retry {
+            break;
+        }
+    }
+    meters.refresh(&mut setup);
+    let again = [
+        sources.recv_timeout(WAIT).unwrap(),
+        sources.recv_timeout(WAIT).unwrap(),
+    ];
+    assert_eq!(again, [Capture::SystemAudio, Capture::Microphone]);
+    assert!(!meters.retry && meters.failed == [false, false]);
+}
+
+/// A source whose levels stop coming (its device was unplugged) says it has
+/// no signal, rather than keeping the last bars up.
+#[test]
+fn a_source_that_goes_quiet_says_there_is_no_signal() {
+    let tmp = TestDir::new("preview-expires");
+    let (opened, _sources) = channel();
+    let fake = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let clock: Arc<dyn Clock> = fake.clone();
+    let (preview, heard) = Preview::start(Opened(opened), RATE, Arc::clone(&clock)).unwrap();
+    let mut meters = Meters::new(preview, heard, tmp.0.clone(), clock);
+    let mut setup = screen();
+    let level = PreviewEvent::Level {
+        track: MIC,
+        level: Level::FULL_SCALE,
+    };
+    meters.take(&mut setup, level);
+    // Just under the limit, still a working meter.
+    fake.advance(STALE - Duration::from_millis(1));
+    meters.expire(&mut setup);
+    assert!(!row_of(&rows(&mut setup), "Microphone").contains("⚠"));
+    fake.advance(Duration::from_millis(1));
+    meters.expire(&mut setup);
+    assert!(row_of(&rows(&mut setup), "Microphone").contains("⚠ no signal"));
+    // A source never heard isn't marked: it may still be opening.
+    assert!(!row_of(&rows(&mut setup), "System audio").contains("⚠"));
+}
+
+/// Setup's own choice is what `R` repeats in this run, even when what it
+/// kept in the data directory is older.
+#[test]
+fn r_repeats_the_choice_made_in_this_run_over_a_stale_file() {
+    let tmp = TestDir::new("r-in-memory");
+    let library = Library::open(&tmp.0).unwrap();
+    let stale = Remembered {
+        listen: nota_tui::Listen::Microphone,
+        system: Input::Default,
+        microphone: Input::Default,
+    };
+    remembered::write(&StdFs, &tmp.0, &stale).unwrap();
+    let chosen = Remembered::both();
+    assert_eq!(
+        last_setup_for(&library, &tmp.0, Some(&chosen)),
+        Setup {
+            title: "Recording".to_owned(),
+            mic: Some(Input::Default),
+            system: Some(Input::Default),
+        }
+    );
+}
+
+/// The space shown leaves out the ballast a recording lays first, unless
+/// it's laid already: with one there, the same disk has room for more.
+#[test]
+fn the_space_leaves_out_the_ballast_not_yet_laid() {
+    let tmp = TestDir::new("space-ballast");
+    let free = StdFs.free_space(&tmp.0).unwrap();
+    // The ballast is laid only where there's room for it twice over.
+    if free < BALLAST_LEN.saturating_mul(2) {
+        return;
+    }
+    let without = room(&tmp.0, 2).unwrap();
+    let ballast = tmp
+        .0
+        .join(nota_recorder::disk::ballast_file_name(BALLAST_LEN));
+    StdFs.create(&ballast).unwrap();
+    let with = room(&tmp.0, 2).unwrap();
+    assert!(with > without, "{with:?} should be more than {without:?}");
 }

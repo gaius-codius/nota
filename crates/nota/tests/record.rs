@@ -241,6 +241,16 @@ impl Running {
         })
     }
 
+    /// Whether a level meter showed a bar above the lowest since `from`: a
+    /// stream was open and its audio was heard.
+    fn shows_a_level_after(&self, from: usize) -> bool {
+        wait_until(Duration::from_secs(10), || {
+            let out = self.output.lock().unwrap();
+            visible(out.get(from..).unwrap_or_default())
+                .contains(['▂', '▃', '▄', '▅', '▆', '▇', '█'])
+        })
+    }
+
     fn len(&self) -> usize {
         self.output.lock().unwrap().len()
     }
@@ -759,9 +769,9 @@ fn setup_creates_no_session_and_esc_goes_back_home() {
     nota.press("r");
     assert!(nota.shows_after(at, "new recording"), "{}", nota.output());
     assert!(nota.shows_after(at, "pick the one that moves"));
-    // Long enough for the preview to have opened its streams and sent
-    // levels.
-    pause(Duration::from_millis(1_000));
+    // The preview's streams are open and heard the tone, and still no
+    // session was made.
+    assert!(nota.shows_a_level_after(at), "{}", nota.output());
     assert!(
         tmp.0.join("sessions").read_dir().unwrap().next().is_none(),
         "{}",
@@ -790,9 +800,12 @@ fn setup_records_the_chosen_source_and_r_records_it_again() {
     let at = nota.len();
     nota.press("r");
     assert!(nota.shows_after(at, "new recording"), "{}", nota.output());
-    // `↓` chooses the microphone.
+    // The meters move with the tone; `↓` then chooses the microphone.
+    assert!(nota.shows_a_level_after(at), "{}", nota.output());
+    let at = nota.len();
     nota.press("\u{1b}[B");
-    pause(Duration::from_millis(300));
+    // One word: a draw skips cells that are blank already.
+    assert!(nota.shows_after(at, "room"), "{}", nota.output());
     record_from_setup_and_stop(&mut nota, "\r");
     // Home again, then `R`: the last settings, the microphone alone.
     let at = nota.len();
