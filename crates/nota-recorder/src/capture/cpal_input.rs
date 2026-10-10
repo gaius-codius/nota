@@ -5,8 +5,15 @@
 //! The buffers are sent unstamped ([`CaptureSender::audio`]): cpal's
 //! timestamps on these hosts count from the stream's own start, not from
 //! `CLOCK_MONOTONIC`, so the recorder can't set them against the session
-//! clock. Losses are therefore timed at the overrun, and no drift is
-//! measured (see the capture module's docs).
+//! clock. No drift is measured, and a loss is timed at the overrun the
+//! host reports, if it reports one (see the capture module's docs).
+//!
+//! A stream that's dropped can still deliver the buffer that was in
+//! flight: on `PulseAudio` the server's acknowledgement of the deletion
+//! comes after the drop. The recorder discards what arrives after the
+//! stop, but [`Progress`](super::Progress) has counted it as delivered.
+
+use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{BufferSize, StreamConfig};
@@ -15,9 +22,13 @@ use nota_core::SampleRate;
 use super::pipewire::{start_error, stream_error};
 use super::{CaptureError, CaptureSender, Devices, Source, devices::Device};
 
+/// How long opening a stream may wait for the audio server to answer.
+const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// A running stream on one of the plain hosts. Capture stops when it's
 /// dropped.
 pub struct PlainStream {
+    /// Held so the stream runs until this is dropped.
     _stream: cpal::Stream,
 }
 
@@ -28,24 +39,26 @@ impl std::fmt::Debug for PlainStream {
 }
 
 /// Opens and starts a mono 16-bit stream at `rate` on `device`, sending
-/// what it captures to `events`.
+/// what it captures to `events`, with buffers of `buffer`.
 ///
-/// `pinned` names the device as the stream stays on it: these hosts
-/// don't follow a default, so a device that goes away ends the stream.
+/// `source` is what was asked for, which start errors name. `pinned`
+/// names the device as the stream stays on it: these hosts don't follow
+/// a default, so a device that goes away ends the stream.
 ///
 /// # Errors
 ///
 /// A [`CaptureError`] if the stream can't be built or started.
 pub(super) fn open(
     device: &cpal::Device,
-    pinned: &Source,
+    (source, pinned): (&Source, &Source),
     rate: SampleRate,
+    buffer: BufferSize,
     events: CaptureSender,
 ) -> Result<PlainStream, CaptureError> {
     let config = StreamConfig {
         channels: 1,
         sample_rate: rate.hz(),
-        buffer_size: BufferSize::Default,
+        buffer_size: buffer,
     };
     let errors = events.clone();
     let failed_source = pinned.clone();
@@ -62,10 +75,10 @@ pub(super) fn open(
                 Some(Err(failure)) => errors.failed(failure),
                 None => {}
             },
-            None,
+            Some(OPEN_TIMEOUT),
         )
-        .map_err(|e| start_error(pinned, &e))?;
-    stream.play().map_err(|e| start_error(pinned, &e))?;
+        .map_err(|e| start_error(source, &e))?;
+    stream.play().map_err(|e| start_error(source, &e))?;
     Ok(PlainStream { _stream: stream })
 }
 
@@ -78,6 +91,20 @@ pub(super) struct Listed {
     pub(super) description: String,
     /// Whether it plays (a sink) rather than records.
     pub(super) plays: bool,
+}
+
+/// One device a host lists, kept unless it's a monitor source, which Setup
+/// shows as the sink it records.
+pub(super) fn listed_unless_monitor(
+    name: String,
+    description: String,
+    plays: bool,
+) -> Option<Listed> {
+    (plays || !name.ends_with(".monitor")).then_some(Listed {
+        name,
+        description,
+        plays,
+    })
 }
 
 /// The [`Devices`] a host's `listed` devices make, with its defaults.
@@ -119,6 +146,19 @@ mod tests {
             description: description.into(),
             plays,
         }
+    }
+
+    /// A monitor source isn't an input of its own, but a sink is an output
+    /// whatever its name.
+    #[test]
+    fn monitor_sources_are_not_listed_as_inputs() {
+        let keep = |name: &str, plays| listed_unless_monitor(name.into(), "d".into(), plays);
+        assert_eq!(keep("pci.monitor", false), None);
+        assert_eq!(keep("usb", false), Some(listed("usb", "d", false)));
+        assert_eq!(
+            keep("pci.monitor", true),
+            Some(listed("pci.monitor", "d", true))
+        );
     }
 
     /// Sinks and sources are told apart and each list is by description,

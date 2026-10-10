@@ -108,8 +108,9 @@
 //! journal's fsync is checked after every event, whichever track it came
 //! from, after a stream ends, and while no audio arrives.
 //!
-//! Opening a stream can take seconds (cpal waits about 4 s for an audio
-//! server that accepts the connection and doesn't answer), so `nota
+//! Opening a stream can take seconds (on `PipeWire`, cpal waits about 4 s
+//! for an audio server that accepts the connection and doesn't answer; on
+//! `PulseAudio`, [`PulseBackend`] allows 5 s), so `nota
 //! record` starts the recorder first: [`prepare_tracks`] gives the
 //! receiver before any stream opens, [`record_tracks`] runs on it, and
 //! the [`TrackStarter`] then opens the streams one after another. Each
@@ -179,18 +180,23 @@
 //! | | `PipeWire` | `PulseAudio` | ALSA |
 //! |---|---|---|---|
 //! | Tracks | system audio, microphone | system audio, microphone | microphone |
-//! | Buffer stamps (drift, exact loss times) | yes | no | no |
+//! | Buffer stamps (drift) | yes | no | no |
 //! | Follows a changed default | yes | no | no |
 //! | Route-change epochs and device events | yes | no | no |
-//! | Device lost | yes | the stream's failure | the stream's failure |
+//! | Overruns (an epoch for the loss) | yes | no | yes |
+//! | Device lost | yes | not reported if the server moves the stream | the stream's failure |
 //!
 //! On `PulseAudio` and ALSA a stream stays on the device it started on
-//! ([`PulseBackend`], [`AlsaBackend`]), and a start on a followed source
-//! says so as a [`CaptureNotice::Warning`]. A loss is timed at the
-//! overrun, as for any stream that doesn't stamp its buffers. The zeros,
-//! quiet and stalled detectors read the samples and the delivered count,
-//! so they work on all three. On ALSA the system audio fails to start,
-//! with [`CaptureError::NoSystemAudio`], and the microphone records on.
+//! ([`PulseBackend`], [`AlsaBackend`]), unless the server moves it;
+//! `PulseAudio`'s says so at a start on a followed source, as a
+//! [`CaptureNotice::Warning`]. Where overruns
+//! are reported, a loss is timed at the overrun, as for any stream that
+//! doesn't stamp its buffers; on `PulseAudio` a loss isn't noticed. The
+//! zeros, quiet and stalled detectors read the samples and the delivered
+//! count, so they work on all three. On ALSA the system audio fails to
+//! start, with [`CaptureError::NoSystemAudio`], and the microphone records
+//! on. What a plain `PulseAudio` or ALSA-only system really does is
+//! measured on the other-distro machines (GAI-207).
 //!
 //! # Platform
 //!

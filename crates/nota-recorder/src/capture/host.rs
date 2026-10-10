@@ -62,8 +62,9 @@ pub struct SystemProbe;
 const DEFAULT_PIPEWIRE_REMOTE: &str = "pipewire-0";
 
 /// The socket of the `PipeWire` daemon, given the `PIPEWIRE_REMOTE`
-/// variable and the runtime directory: the variable names a socket in the
-/// runtime directory, or is a path of its own.
+/// variable and the runtime directory (`PIPEWIRE_RUNTIME_DIR`, else
+/// `XDG_RUNTIME_DIR`, as libpipewire reads them): the variable names a
+/// socket in the runtime directory, or is a path of its own.
 fn pipewire_socket(remote: Option<&str>, runtime_dir: Option<&Path>) -> Option<PathBuf> {
     let remote = remote
         .filter(|name| !name.is_empty())
@@ -79,7 +80,10 @@ impl HostProbe for SystemProbe {
     /// that has gone refuses, which is how it's told from one running.
     fn pipewire_running(&self) -> bool {
         let remote = std::env::var("PIPEWIRE_REMOTE").ok();
-        let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+        let runtime_dir = std::env::var_os("PIPEWIRE_RUNTIME_DIR")
+            .filter(|dir| !dir.is_empty())
+            .or_else(|| std::env::var_os("XDG_RUNTIME_DIR"))
+            .map(PathBuf::from);
         pipewire_socket(remote.as_deref(), runtime_dir.as_deref())
             .is_some_and(|socket| UnixStream::connect(socket).is_ok())
     }
@@ -94,6 +98,7 @@ impl HostProbe for SystemProbe {
 /// microphone records ([`CaptureError::NoSystemAudio`]).
 #[derive(Debug, Clone, Copy)]
 pub struct AudioBackend {
+    /// The host chosen.
     host: Host,
 }
 
@@ -156,7 +161,11 @@ impl CaptureBackend for AudioBackend {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::sync::Arc;
 
+    use nota_core::{Clock, FakeClock, SessionTime, TrackId};
+
+    use super::super::start;
     use super::*;
 
     /// A probe with fixed answers that counts how often it was asked.
@@ -211,7 +220,7 @@ mod tests {
 
     /// The backend keeps the host its probe chose.
     #[test]
-    fn the_backend_captures_through_the_chosen_host() {
+    fn the_backend_keeps_the_host_its_probe_chose() {
         for (pipewire, pulse, host) in [
             (true, false, Host::PipeWire),
             (false, true, Host::PulseAudio),
@@ -222,11 +231,26 @@ mod tests {
         }
     }
 
-    /// ALSA can't record the system audio, and says what would let it.
+    /// On ALSA only, the system audio fails to start through the
+    /// backend, with the message that says what would let it record. (It
+    /// is refused before any device is opened, so this needs no sound
+    /// card.)
     #[test]
-    fn alsa_says_the_system_audio_needs_a_server() {
+    fn alsa_only_says_the_system_audio_needs_a_server() {
+        let backend = AudioBackend::with_probe(&Fake::new(false, false));
+        let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
+        let rate = SampleRate::new(16_000).unwrap();
+        let refused = start(
+            &backend,
+            TrackId::new(0),
+            &Source::SystemAudio,
+            rate,
+            &clock,
+        );
+        let error = refused.expect_err("the system audio can't start on ALSA");
+        assert_eq!(error, CaptureError::NoSystemAudio);
         assert_eq!(
-            CaptureError::NoSystemAudio.to_string(),
+            error.to_string(),
             "system audio needs PipeWire or PulseAudio; only the microphone records on ALSA"
         );
     }
@@ -255,5 +279,10 @@ mod tests {
             Some(PathBuf::from("/tmp/pw"))
         );
         assert_eq!(socket(None, None), None);
+        // A system-wide daemon's directory, as `PIPEWIRE_RUNTIME_DIR` gives it.
+        assert_eq!(
+            socket(None, Some(Path::new("/run/pipewire"))),
+            Some(PathBuf::from("/run/pipewire/pipewire-0"))
+        );
     }
 }

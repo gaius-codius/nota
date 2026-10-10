@@ -7,30 +7,45 @@
 //! - **No default-device events.** The stream stays on the device that was
 //!   the default when it started; if the default changes, it goes on
 //!   recording the old one, and says so at the start as a
-//!   [`CaptureNotice::Warning`]. Only the device going away is reported,
-//!   as the stream's failure
-//!   ([`CaptureSender::failed`]), which also marks it lost.
+//!   [`CaptureNotice::Warning`].
+//! - **No device loss reported.** The host gives a failure only when it
+//!   can't read the stream's timing. A server that moves the stream to
+//!   another source when its device is unplugged (as `PulseAudio` and
+//!   `pipewire-pulse` do) isn't told of, so the track records on from the
+//!   new source with no loss, epoch or warning.
+//! - **No overruns.** The host doesn't report them, so a loss isn't
+//!   noticed: the audio after it is timed early by what was lost, and no
+//!   epoch shows the gap.
 //! - **No stamps.** Buffers aren't stamped with the server's capture time,
-//!   so losses are timed at the overrun and drift isn't measured (the
-//!   capture module's docs, "Lost audio and drift").
-//! - **No watch on the server**, so no route-change epochs: the detectors
-//!   and the device events see what the stream itself reports.
+//!   so drift isn't measured (the capture module's docs, "Lost audio and
+//!   drift").
+//! - **No watch on the server**, so no route-change epochs.
+//!
+//! The stream asks for [`BUFFER_FRAMES`] frames a buffer: left to the
+//! server, a buffer is about two seconds, which would hold up the first
+//! audio and trip the stalled detector.
+//!
+//! Once connected, the host waits for the server without a bound, except
+//! while a stream is built (5 s): starting it (`play`, which waits for the
+//! first audio), listing devices and looking up the defaults wait as long
+//! as the server takes. A server that answers the handshake and then
+//! stops answering can hold up a start, and Setup's preview.
 
 use cpal::traits::{DeviceTrait, HostTrait};
-use cpal::{DeviceDirection, DeviceId, HostId};
+use cpal::{BufferSize, DeviceDirection, DeviceId, HostId};
 use nota_core::SampleRate;
 
-use super::cpal_input::{self, Listed, PlainStream};
+use super::cpal_input::{self, PlainStream};
 use super::{CaptureBackend, CaptureError, CaptureNotice, CaptureSender, Devices, Source};
+
+/// The frames in each buffer the stream asks for: 800, which is 50 ms at
+/// nota's 16 kHz. Measured against `pipewire-pulse`, the server's own
+/// default delivers every 2 s and holds `play` back for as long.
+const BUFFER_FRAMES: u32 = 800;
 
 /// What `PulseAudio` calls the source that records what plays on `sink`.
 fn monitor_of(sink: &str) -> String {
     format!("{sink}.monitor")
-}
-
-/// Whether `name` is a monitor source, which Setup lists as its sink.
-fn is_monitor(name: &str) -> bool {
-    name.ends_with(".monitor")
 }
 
 /// The host's name for the device that records `source`, and whether the
@@ -58,6 +73,7 @@ fn source_name(
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PulseBackend;
 
+/// The connection to the `PulseAudio` server.
 fn host() -> Result<cpal::Host, CaptureError> {
     cpal::host_from_id(HostId::PulseAudio).map_err(|e| CaptureError::HostUnavailable(e.to_string()))
 }
@@ -79,11 +95,7 @@ impl CaptureBackend for PulseBackend {
                 let name = id_of(&device)?;
                 let description = device.description().ok()?;
                 let plays = description.direction() == DeviceDirection::Output;
-                (plays || !is_monitor(&name)).then(|| Listed {
-                    name,
-                    description: description.name().to_owned(),
-                    plays,
-                })
+                cpal_input::listed_unless_monitor(name, description.name().to_owned(), plays)
             });
         Ok(cpal_input::devices_from(
             listed,
@@ -126,10 +138,12 @@ impl CaptureBackend for PulseBackend {
             .ok_or_else(|| CaptureError::DeviceNotAvailable(source.clone()))?;
         if follows {
             events.notice(CaptureNotice::Warning(format!(
-                "PulseAudio: {source} stays on {name} if the default changes"
+                "PulseAudio: {source} records {name}, and doesn't follow the default if it changes"
             )));
         }
-        cpal_input::open(&device, &Source::Device(name), rate, events)
+        let pinned = Source::Device(name);
+        let buffer = BufferSize::Fixed(BUFFER_FRAMES);
+        cpal_input::open(&device, (source, &pinned), rate, buffer, events)
     }
 }
 
@@ -190,10 +204,10 @@ mod tests {
         assert_eq!(source_name(&Source::Microphone, Some("s"), None, &[]), None);
     }
 
-    /// A server that answers lists its devices, with no monitor among the
-    /// inputs, and one that can't be reached says so: never an empty list
-    /// for either. (CI has no server; `pipewire-pulse` answers as
-    /// `PulseAudio` does.)
+    /// A smoke check against whatever server the machine has: one that
+    /// answers lists its devices, with no monitor among the inputs, and one
+    /// that can't be reached says so. (CI has no server, where this only
+    /// proves the error is `HostUnavailable`.)
     #[test]
     fn the_server_lists_its_devices_or_is_unavailable() {
         match PulseBackend.devices() {
@@ -203,19 +217,12 @@ mod tests {
                     "{devices:?}"
                 );
                 assert!(
-                    devices.inputs.iter().all(|d| !is_monitor(&d.name)),
+                    devices.inputs.iter().all(|d| !d.name.ends_with(".monitor")),
                     "{devices:?}"
                 );
             }
             Err(CaptureError::HostUnavailable(_)) => {}
             Err(other) => panic!("{other}"),
         }
-    }
-
-    /// Monitor sources are listed through their sinks, not as inputs.
-    #[test]
-    fn monitors_are_told_by_their_name() {
-        assert!(is_monitor("alsa_output.pci.monitor"));
-        assert!(!is_monitor("alsa_input.usb"));
     }
 }
