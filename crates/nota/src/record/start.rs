@@ -156,12 +156,8 @@ fn start_with_notes<B: CaptureBackend>(
     if let Some(why) = stop_asked(&ui, &ui_events) {
         return Err(why.into());
     }
-    // Before a session is made for it: a setup with no track has nothing
-    // to record.
-    let sources = sources(setup);
-    if sources.is_empty() {
-        return Err("nothing to record".into());
-    }
+    // Before a session is made for it.
+    let sources = asked_sources(setup)?;
     let session = create_session(&library, &watch)?;
     // From here, a start that fails removes the session again, unless
     // audio reached it.
@@ -993,6 +989,16 @@ pub(crate) fn source_of(input: &Input, default: Source) -> Source {
         Input::Default => default,
         Input::Device(name) => Source::Device(name.clone()),
     }
+}
+
+/// Each track `setup` asks for, as [`sources`] gives them, or an error if
+/// it asks for none: then there's nothing to record.
+fn asked_sources(setup: &Setup) -> Result<Vec<(TrackId, Source)>, BoxError> {
+    let sources = sources(setup);
+    if sources.is_empty() {
+        return Err("nothing to record".into());
+    }
+    Ok(sources)
 }
 
 /// Each track `setup` asks for, with its source as `setup` chose it: the

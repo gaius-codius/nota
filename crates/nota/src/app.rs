@@ -2,13 +2,16 @@
 //!
 //! ```text
 //! Home ──r──▶ Setup ──⏎──▶ Recording ──s, y──▶ Processing ──esc──▶ Home
-//!  └──────────R (last settings)──▶ Recording
+//!  └──────────R (last settings)──▶ Recording ──disk full, ⏎──▶ Home
 //! ```
 //!
 //! The terminal is set up once, for Home, and lent to each recording: the
 //! Recording screen runs on it, and Home shows "finishing the recording"
 //! while the recording stops, then Processing shows its jobs and transcript.
-//! Home opens a session in Processing too. Setup (see `setup`) listens to
+//! Home opens a session in Processing too. A recording a full disk stops
+//! shows again once it has stopped, saying what was saved, and `⏎` goes
+//! Home, where the session needs you until there's space to process it.
+//! Setup (see `setup`) listens to
 //! both sources so their meters move before a session exists; `R` skips it
 //! and records with the last settings, which Setup keeps (see `remembered`).
 //!
@@ -25,22 +28,26 @@
 
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use jiff::Timestamp;
 use jiff::civil::Date;
 use jiff::tz::TimeZone;
-use nota_core::recorder::{Command, Setup};
+use nota_core::recorder::{Cause, Command, Setup};
 use nota_core::{Clock, SessionId, SessionTime, SystemClock, WallTime, wall_now};
-use nota_tui::{Action, Home, InputThread, RunError, Session, Status, Theme};
+use nota_store::{Happened, JobState, Wait};
+use nota_tui::{Action, Event, Home, InputThread, Recording, RunError, Session, Status, Theme};
+use ratatui::Terminal;
+use ratatui::backend::Backend;
 
 use crate::final_pass::Jobs;
 use crate::jobs::{Capture, FreeSpace, Runner};
 use crate::library::{Library, Listed, Needs, Salvaged};
 use crate::record::{
-    BoxError, Lent, QuitSignals, RATE, RecordArgs, final_engine, record_in, segment_length,
+    BoxError, Lent, QuitSignals, RATE, RecordArgs, Returned, final_engine, record_in,
+    segment_length,
 };
 use crate::terminal::Screen;
 
@@ -189,6 +196,13 @@ impl Pages<'_> {
                 Recorded::Back(back, id) => {
                     screen = Some(back);
                     processing_session = Some(id);
+                }
+                // Home next, not Processing: there's no space to process it.
+                Recorded::Stopped(back, mut stopped) => {
+                    screen = show_stopped(back, &mut stopped, &self.listing.clock, self.quit);
+                    if screen.is_none() {
+                        return Ok(());
+                    }
                 }
                 Recorded::Failed(e) => self.notice = Some(format!("the recording failed: {e}")),
                 Recorded::TerminalGone => return Ok(()),
@@ -373,8 +387,11 @@ impl Capture for Recordings {
 
 /// How a recording from Home went, for what comes next.
 enum Recorded {
-    /// It was recorded, and the terminal is back for Home.
+    /// It was recorded, and the terminal is back for Processing.
     Back(Screen, SessionId),
+    /// A full disk stopped it, and the terminal is back with its Recording
+    /// screen, to show stopped before Home.
+    Stopped(Screen, Box<Recording>),
     /// It failed: the terminal was restored, and Home says why.
     Failed(String),
     /// It was recorded, but the terminal failed (as after a hangup):
@@ -423,7 +440,7 @@ fn record_from(
 
 /// Keeps the recording's result for the next page and the closing report.
 fn recorded_result(
-    recorded: Result<(crate::record::Outcome, Option<Screen>), BoxError>,
+    recorded: Result<(crate::record::Outcome, Option<Returned>), BoxError>,
     said: &mut Vec<String>,
 ) -> Recorded {
     match recorded {
@@ -434,9 +451,17 @@ fn recorded_result(
                 outcome.segments
             ));
             said.extend(outcome.notes.iter().map(|note| format!("  {note}")));
-            back.map_or(Recorded::TerminalGone, |screen| {
-                Recorded::Back(screen, outcome.id)
-            })
+            match back {
+                None => Recorded::TerminalGone,
+                Some(Returned {
+                    screen,
+                    stopped: None,
+                }) => Recorded::Back(screen, outcome.id),
+                Some(Returned {
+                    screen,
+                    stopped: Some(stopped),
+                }) => Recorded::Stopped(screen, Box::new(stopped)),
+            }
         }
         Err(e) => {
             said.push(format!("nota: the recording failed: {e}"));
@@ -478,6 +503,66 @@ fn show_home(
     });
     quit.show_home(None);
     ran
+}
+
+/// How the stopped Recording screen was left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Left {
+    /// `⏎`, or the keyboard was lost: Home next.
+    Home,
+    /// A signal asked nota to close.
+    Quit,
+    /// The terminal failed: there's nothing to show Home on.
+    TerminalGone,
+}
+
+/// Shows `recording`, which a full disk stopped, on `screen` until `⏎` or
+/// a signal (see [`wait_stopped`]), with keys read afresh: the recording's
+/// own input thread has stopped. The terminal comes back for Home, or
+/// `None` if it failed.
+fn show_stopped(
+    mut screen: Screen,
+    recording: &mut Recording,
+    clock: &Arc<dyn Clock>,
+    quit: &QuitSignals,
+) -> Option<Screen> {
+    let (ui, events) = mpsc::channel();
+    // Without keys there's no way to leave the screen: Home at once.
+    let Ok(input) = InputThread::spawn(ui.clone(), Arc::clone(clock)) else {
+        return Some(screen);
+    };
+    // Drawn whole: Home's stopping line was drawn over it.
+    let left = match screen.clear() {
+        Ok(()) => wait_stopped(screen.terminal(), recording, (ui, &events), quit),
+        Err(_) => Left::TerminalGone,
+    };
+    let _ = input.stop();
+    (left != Left::TerminalGone).then_some(screen)
+}
+
+/// Shows the stopped `recording` on `terminal` until `⏎` is pressed, the
+/// keyboard is lost, or a signal asks nota to close: while it waits,
+/// signals reach its events (`ui`, read from `events`), as they reach
+/// Home's.
+fn wait_stopped<B: Backend>(
+    terminal: &mut Terminal<B>,
+    recording: &mut Recording,
+    (ui, events): (Sender<Event>, &Receiver<Event>),
+    quit: &QuitSignals,
+) -> Left {
+    quit.show_home(Some(ui));
+    // A signal before the wait was there to take it.
+    let waited = if quit.asked() {
+        Ok(())
+    } else {
+        recording.wait_stopped(terminal, events)
+    };
+    quit.show_home(None);
+    match waited {
+        Err(RunError::Terminal(_)) => Left::TerminalGone,
+        _ if quit.asked() => Left::Quit,
+        Ok(()) | Err(RunError::InputLost(_) | RunError::CommandsClosed(_)) => Left::Home,
+    }
 }
 
 /// The engines named on Setup, which says when they hear: live and again
@@ -549,13 +634,26 @@ impl Listing<'_> {
         let jobs = self.library.db().with(|db| db.jobs());
         for shown in sessions.iter_mut().filter(|s| s.status == Status::Ready) {
             match &jobs {
-                Ok(jobs) => job_status(shown, jobs),
+                Ok(jobs) => job_status(shown, jobs, |id| self.stopped_by_full_disk(id)),
                 Err(error) => {
                     shown.status = Status::NeedsYou;
                     shown.detail = Some(format!("processing status couldn't be read: {error}"));
                 }
             }
         }
+    }
+
+    /// Whether a full disk stopped `id`'s recording, as its timeline says.
+    /// A timeline that can't be read says nothing.
+    fn stopped_by_full_disk(&self, id: SessionId) -> bool {
+        self.library
+            .db()
+            .with(|db| db.timeline(id))
+            .is_ok_and(|events| {
+                events
+                    .iter()
+                    .any(|event| event.happened == Happened::Raised(Cause::DiskFull))
+            })
     }
 
     /// Gives `home` the sessions again if a listing is due: [`RELIST`] has
@@ -624,19 +722,33 @@ fn stopping_home(home: &mut Home) {
     home.set_busy(Some(STOPPING.to_owned()));
 }
 
-/// Gives one ready session the status of its jobs.
-fn job_status(shown: &mut Session, jobs: &[nota_store::Job]) {
-    let own = || {
-        jobs.iter()
-            .filter(|job| job.session == SessionId::new(shown.id))
-    };
+/// Gives one ready session the status of its jobs. Jobs waiting for
+/// space need you to free some: after a full disk stopped the recording
+/// (`stopped_by_full_disk` says whether one did), or ran a job out of it.
+fn job_status(
+    shown: &mut Session,
+    jobs: &[nota_store::Job],
+    stopped_by_full_disk: impl FnOnce(SessionId) -> bool,
+) {
+    let id = SessionId::new(shown.id);
+    let own = || jobs.iter().filter(|job| job.session == id);
     if let Some(why) = own().find_map(|job| match &job.state {
-        nota_store::JobState::Failed(why) => Some(why),
+        JobState::Failed(why) => Some(why),
         _ => None,
     }) {
         shown.status = Status::NeedsYou;
         shown.detail = Some(format!("processing failed: {why}"));
-    } else if own().any(|job| job.state != nota_store::JobState::Done) {
+    } else if own().any(|job| job.state == JobState::Waiting(Some(Wait::Space))) {
+        shown.status = Status::NeedsYou;
+        shown.detail = Some(
+            if stopped_by_full_disk(id) {
+                "stopped early: disk full · free space to finish"
+            } else {
+                "the disk is full · free space to finish"
+            }
+            .to_owned(),
+        );
+    } else if own().any(|job| job.state != JobState::Done) {
         shown.status = Status::Processing;
         shown.detail = Some("final transcript queued or running".into());
     }
