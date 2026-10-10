@@ -12,7 +12,7 @@ use nota_core::recorder::{self, Command};
 use nota_core::{Clock, SessionTime};
 use ratatui::Terminal;
 use ratatui::backend::Backend;
-use ratatui::crossterm::event::{self, KeyEvent};
+use ratatui::crossterm::event::{self, KeyCode, KeyEvent, KeyEventKind};
 
 use crate::home::{Action, Home};
 use crate::screen::Recording;
@@ -207,6 +207,56 @@ pub fn run<B: Backend>(
             }
         }
     }
+}
+
+impl Recording {
+    /// Keeps the screen up after the recording has stopped, so its listener
+    /// can read what happened (a full disk, say) before going Home. Draws
+    /// it, redrawing at least every 250 ms and on a resize, and applies the
+    /// recorder's events. It returns when `⏎` is pressed, when the recorder
+    /// says it's stopping or has stopped (a signal asking nota to quit), or
+    /// once every sender of `events` is gone. Other keys and pastes do
+    /// nothing: nothing is being recorded, so there's no mark or note to
+    /// take.
+    ///
+    /// # Errors
+    ///
+    /// - [`RunError::Terminal`] if drawing fails.
+    /// - [`RunError::InputLost`] if the input thread reports that reading
+    ///   the terminal failed.
+    pub fn wait_stopped<B: Backend>(
+        &mut self,
+        terminal: &mut Terminal<B>,
+        events: &Receiver<Event>,
+    ) -> Result<(), RunError<B::Error>> {
+        loop {
+            terminal
+                .draw(|frame| self.draw(frame))
+                .map_err(RunError::Terminal)?;
+            let first = match events.recv_timeout(REDRAW) {
+                Ok(event) => event,
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => return Ok(()),
+            };
+            for event in std::iter::once(first).chain(events.try_iter().take(MAX_BATCH - 1)) {
+                match event {
+                    Event::Key { key, .. } if is_plain_enter(&key) => return Ok(()),
+                    Event::Recorder(recorder::Event::Stopping | recorder::Event::Stopped(_)) => {
+                        return Ok(());
+                    }
+                    Event::Recorder(event) => self.update(event),
+                    Event::InputLost(kind) => return Err(RunError::InputLost(kind)),
+                    Event::Key { .. } | Event::Paste(_) | Event::Resize => {}
+                }
+            }
+        }
+    }
+}
+
+/// Whether `key` is `⏎` pressed on its own: a release, a repeat or a
+/// chord with a modifier isn't an answer.
+fn is_plain_enter(key: &KeyEvent) -> bool {
+    key.kind == KeyEventKind::Press && key.code == KeyCode::Enter && key.modifiers.is_empty()
 }
 
 /// Runs `home` on `terminal` until it asks for something: draws it and
@@ -864,6 +914,121 @@ mod tests {
         assert_eq!(ended, Ended::Stopped);
         assert_eq!(note_rx.try_iter().collect::<Vec<_>>(), [Command::Stop]);
         drop(event_tx);
+    }
+
+    /// A recording stopped by a full disk at 1:12:48, on a mic and the
+    /// system audio.
+    fn stopped_screen(clock: &Arc<FakeClock>) -> Recording {
+        let mut screen = screen(clock);
+        screen.update(recorder::Event::Warning(recorder::Warning {
+            cause: recorder::Cause::DiskFull,
+            track: None,
+            at: SessionTime::from_nanos(4_368_000_000_000),
+            state: recorder::WarningState::Raised,
+        }));
+        screen
+    }
+
+    /// Waits on a stopped screen over `events`, then nothing more; the
+    /// last thing drawn comes back with the result.
+    fn wait_over(events: Vec<Event>) -> (Result<(), RunError<std::convert::Infallible>>, String) {
+        let clock = Arc::new(FakeClock::new(SessionTime::from_nanos(4_368_000_000_000)));
+        let mut screen = stopped_screen(&clock);
+        let mut terminal = Terminal::new(TestBackend::new(62, 20)).unwrap();
+        let (event_tx, event_rx) = mpsc::channel();
+        for event in events {
+            event_tx.send(event).unwrap();
+        }
+        drop(event_tx);
+        let result = screen.wait_stopped(&mut terminal, &event_rx);
+        (result, format!("{}", terminal.backend()))
+    }
+
+    /// `⏎` on the stopped screen ends the wait, and nothing after it is
+    /// read.
+    #[test]
+    fn enter_ends_the_wait_on_the_stopped_screen() {
+        let lost = Event::InputLost(io::ErrorKind::BrokenPipe);
+        let (result, shown) = wait_over(vec![key_at(KeyCode::Enter, 7), lost]);
+        assert!(result.is_ok(), "{result:?}");
+        assert!(shown.contains("■ stopped · disk full"), "{shown}");
+    }
+
+    /// Any key but a plain `⏎` is left alone, so the wait goes on to the
+    /// event after them: here, a lost keyboard.
+    #[test]
+    fn other_keys_and_pastes_leave_the_stopped_screen_waiting() {
+        let held_enter = Event::Key {
+            key: KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+            at: SessionTime::from_nanos(7),
+        };
+        let released_enter = Event::Key {
+            key: KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Release),
+            at: SessionTime::from_nanos(7),
+        };
+        let events = vec![
+            key('m'),
+            key('s'),
+            key('q'),
+            key_at(KeyCode::Esc, 7),
+            held_enter,
+            released_enter,
+            Event::Paste("note".into()),
+            Event::Resize,
+            Event::InputLost(io::ErrorKind::BrokenPipe),
+        ];
+        let (result, _) = wait_over(events);
+        assert!(
+            matches!(result, Err(RunError::InputLost(io::ErrorKind::BrokenPipe))),
+            "{result:?}"
+        );
+    }
+
+    /// A signal asking nota to quit ends the wait, whether it arrives as
+    /// the recorder stopping or as stopped.
+    #[test]
+    fn the_recorder_stopping_ends_the_wait_on_the_stopped_screen() {
+        for stopping in [
+            recorder::Event::Stopping,
+            recorder::Event::Stopped(recorder::Outcome::new(
+                nota_core::SessionId::new(1),
+                std::path::PathBuf::new(),
+            )),
+        ] {
+            let lost = Event::InputLost(io::ErrorKind::BrokenPipe);
+            let (result, _) = wait_over(vec![Event::Recorder(stopping), lost]);
+            assert!(result.is_ok(), "{result:?}");
+        }
+    }
+
+    /// With every sender gone nothing can answer, so the wait ends.
+    #[test]
+    fn the_wait_on_the_stopped_screen_ends_when_the_events_end() {
+        let (result, shown) = wait_over(Vec::new());
+        assert!(result.is_ok(), "{result:?}");
+        assert!(shown.contains("⏎ home"), "{shown}");
+    }
+
+    /// A lost keyboard is reported, since `⏎` can't come any more.
+    #[test]
+    fn the_wait_on_the_stopped_screen_reports_a_lost_keyboard() {
+        let lost = Event::InputLost(io::ErrorKind::BrokenPipe);
+        let (result, _) = wait_over(vec![lost, key_at(KeyCode::Enter, 7)]);
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, RunError::InputLost(io::ErrorKind::BrokenPipe)),
+            "{err}"
+        );
+    }
+
+    /// What the recorder reports during the wait reaches the screen: text
+    /// the engine finishes after the stop still shows.
+    #[test]
+    fn the_stopped_screen_applies_what_the_recorder_reports() {
+        let text = Event::Recorder(recorder::Event::Text(heard(0, 1, "late words")));
+        let (result, shown) = wait_over(vec![text]);
+        assert!(result.is_ok(), "{result:?}");
+        assert!(shown.contains("│   late words"), "{shown}");
     }
 
     #[test]

@@ -13,6 +13,26 @@
 //! ╰─ m mark  n note  s stop ─────────────────── <source · size> ─╯  keys, status
 //! ```
 //!
+//! - A warning takes `● REC`'s place in the top border and keeps the clock:
+//!   `⚠ mic lost · 01:12:48`.
+//! - On the band, `·` marks a stretch where nothing was recorded, and `┊` a
+//!   change (a route change, a device lost or back, a fault starting).
+//!
+//! **Stopped by a full disk:** the top border reads `■ stopped · disk full`
+//! with no clock, the transcript moves up for what happened and what was
+//! saved, `░░░` isn't drawn, and the footer is `⏎ home` and
+//! `<time> saved`:
+//!
+//! ```text
+//! │   …the end of the transcript                               │
+//! │                                                            │
+//! │   The disk is full, so nota stopped the recording.         │
+//! │   Everything up to 01:12:48 is saved.                      │
+//! │   Free some space, then open the session from Home to…     │
+//! │                                                            │
+//! ╰─ ⏎ home ──────────────────────────────────── 1h 12m saved ─╯
+//! ```
+//!
 //! From 100 columns (`MainWide`), the marks-and-notes panel takes the
 //! right 32, after a gap of 2; the main panel keeps its layout in the rest:
 //!
@@ -24,7 +44,7 @@
 //! ╰─ j/k move ─────── 3 ◆ · 2 ◇ ─╯
 //! ```
 
-use nota_core::Utterance;
+use nota_core::{SessionTime, Utterance};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
@@ -112,12 +132,15 @@ impl Recording {
         // Inside the frame, with a column of padding on each side.
         let inner = Rect::new(area.x + 2, area.y + 1, area.width - 4, area.height - 2);
         self.draw_band(inner, buf);
-        let transcript = Rect::new(
+        let mut transcript = Rect::new(
             area.x + 1,
             inner.y + BAND_ROWS,
             area.width - 2,
             inner.height - BAND_ROWS,
         );
+        if let Some(at) = self.stopped_by_full_disk() {
+            transcript = self.draw_stopped_notice(transcript, at, buf);
+        }
         self.draw_transcript(transcript, buf);
         for y in inner.y..inner.bottom() {
             buf.set_string(area.x, y, "│", self.theme.border);
@@ -163,8 +186,15 @@ impl Recording {
         ];
         let clock = format!("{h:02}:{m:02}:{s:02}");
         // A warning takes `● REC`'s place and keeps the clock: the clock
-        // still counting is what shows the recording goes on.
+        // still counting is what shows the recording goes on. A recording
+        // that has stopped has no clock to keep.
+        let stopped = self.stopped_by_full_disk().is_some();
         let right = match self.warnings.top(self.clock.now()) {
+            _ if stopped => vec![
+                Span::styled("■ stopped", self.theme.accent),
+                Span::styled(" · ", self.theme.text_hint),
+                Span::styled("disk full", self.theme.text),
+            ],
             Some(shown) => self.warning_spans(shown, clock),
             None => vec![
                 Span::styled("●", dot),
@@ -210,6 +240,21 @@ impl Recording {
             self.theme.text_secondary,
         )];
         let row = Rect::new(area.x, area.bottom() - 1, area.width, 1);
+        if let Some(at) = self.stopped_by_full_disk() {
+            // The only key that works is the one that leaves; the source
+            // and size give way to how much is saved.
+            let left = vec![
+                Span::styled("⏎", self.theme.text),
+                Span::styled(" home", self.theme.text_hint),
+            ];
+            let saved = vec![Span::styled(
+                format!("{} saved", saved_words(at)),
+                self.theme.text_secondary,
+            )];
+            let border = self.theme.border;
+            frame_row(row, ('╰', '╯'), left, saved, Keep::Left, border, buf);
+            return None;
+        }
         let key = |key: &'static str, what: &'static str| {
             [
                 Span::styled(key, self.theme.text),
@@ -322,6 +367,38 @@ impl Recording {
         }
     }
 
+    /// The words of a recording stopped by a full disk, drawn at the bottom
+    /// of `area` with a blank row above and below. Returns what's left of
+    /// `area` for the transcript.
+    fn draw_stopped_notice(&self, area: Rect, at: SessionTime, buf: &mut Buffer) -> Rect {
+        let text_width = usize::from(area.width.saturating_sub(MARGIN + 1));
+        let sentences = [
+            "The disk is full, so nota stopped the recording.".to_owned(),
+            format!("Everything up to {} is saved.", clock_hms(at)),
+            "Free some space, then open the session from Home to finish it.".to_owned(),
+        ];
+        let lines: Vec<String> = sentences
+            .iter()
+            .flat_map(|sentence| wrap(sentence, text_width))
+            .collect();
+        let rows = u16::try_from(lines.len() + 2)
+            .unwrap_or(u16::MAX)
+            .min(area.height);
+        let top = area.bottom() - rows;
+        // The blank rows are the first and the last of the notice.
+        for (y, text) in (top + 1..area.bottom() - 1).zip(lines) {
+            let line = Line::from(vec![
+                Span::raw(" ".repeat(usize::from(MARGIN))),
+                Span::styled(text, self.theme.text),
+            ]);
+            buf.set_line(area.x, y, &line, area.width);
+        }
+        Rect {
+            height: area.height - rows,
+            ..area
+        }
+    }
+
     /// The transcript, newest at the bottom of what fits. `area` spans the
     /// frame's inside, margins included.
     fn draw_transcript(&self, area: Rect, buf: &mut Buffer) {
@@ -349,7 +426,8 @@ impl Recording {
     ) -> Vec<Line<'static>> {
         // Built bottom up, then turned over.
         let mut lines: Vec<Line<'static>> = Vec::new();
-        if self.transcribing {
+        // A stopped recording has nothing left to transcribe live.
+        if self.transcribing && self.stopped_by_full_disk().is_none() {
             lines.push(Line::from(vec![
                 Span::raw(" ".repeat(usize::from(MARGIN))),
                 Span::styled(TRANSCRIBING, self.theme.text_secondary),
@@ -390,8 +468,8 @@ impl Recording {
     /// A mark wins over a note.
     fn margin_of(
         &self,
-        start: nota_core::SessionTime,
-        next_start: Option<nota_core::SessionTime>,
+        start: SessionTime,
+        next_start: Option<SessionTime>,
     ) -> Option<Span<'static>> {
         // The annotations are in time order: find this utterance's by
         // halving, not by checking them all.
@@ -507,7 +585,7 @@ impl Recording {
 
     /// What was being heard at `at`, as one line: the text of the latest
     /// utterance that started at or before it, or nothing if none had.
-    fn heard_at(&self, at: nota_core::SessionTime) -> String {
+    fn heard_at(&self, at: SessionTime) -> String {
         let index = self.utterances.partition_point(|u| u.start() <= at);
         index
             .checked_sub(1)
@@ -650,8 +728,25 @@ fn one_line(text: &str) -> String {
     wrap(text, usize::MAX).concat()
 }
 
+/// A session time as the top border shows it, `HH:MM:SS`.
+fn clock_hms(at: SessionTime) -> String {
+    let secs = at.elapsed().as_secs();
+    format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
+}
+
+/// How much a stopped recording saved, for its footer: `1h 12m` from an
+/// hour, `12m` from a minute, else `45s`.
+fn saved_words(at: SessionTime) -> String {
+    let secs = at.elapsed().as_secs();
+    match (secs / 3600, secs / 60 % 60) {
+        (0, 0) => format!("{secs}s"),
+        (0, m) => format!("{m}m"),
+        (h, m) => format!("{h}h {m}m"),
+    }
+}
+
 /// A session time as the panel shows it, `H:MM:SS`.
-fn clock_time(at: nota_core::SessionTime) -> String {
+fn clock_time(at: SessionTime) -> String {
     let secs = at.elapsed().as_secs();
     format!("{}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
 }
@@ -1110,5 +1205,27 @@ mod tests {
         screen.selected = Some(6);
         let (times, _) = shown(&mut screen);
         assert_eq!(times.first().map(String::as_str), Some("0:00:02"));
+    }
+
+    /// The footer's saved time is in hours and minutes from an hour, in
+    /// minutes from a minute, and in seconds below that.
+    #[test]
+    fn saved_time_is_worded_by_its_size() {
+        let words = |s| saved_words(secs(s));
+        assert_eq!(words(4_368), "1h 12m");
+        assert_eq!(words(3_600), "1h 0m");
+        assert_eq!(words(3_599), "59m");
+        assert_eq!(words(720), "12m");
+        assert_eq!(words(60), "1m");
+        assert_eq!(words(59), "59s");
+        assert_eq!(words(0), "0s");
+    }
+
+    /// The stopped screen's words give the time as the top border does, with
+    /// two digits for each part.
+    #[test]
+    fn the_stopped_clock_has_two_digits_for_each_part() {
+        assert_eq!(clock_hms(secs(4_368)), "01:12:48");
+        assert_eq!(clock_hms(secs(5)), "00:00:05");
     }
 }
