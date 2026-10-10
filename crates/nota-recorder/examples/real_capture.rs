@@ -1067,7 +1067,9 @@ mod linux {
                     _,
                     RecorderEvent::Epoch(_)
                     | RecorderEvent::EpochRefused(_)
-                    | RecorderEvent::Audio(_),
+                    | RecorderEvent::Audio(_)
+                    | RecorderEvent::Device { .. }
+                    | RecorderEvent::Detected { .. },
                 ) => Ok(()),
                 // Logged too, so a crashed run whose track failed or
                 // couldn't join fails its check, not just an uncrashed one.

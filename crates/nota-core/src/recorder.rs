@@ -243,7 +243,10 @@ pub struct Warning {
     pub cause: Cause,
     /// The track it's about, if it's about one.
     pub track: Option<TrackId>,
-    /// When it was raised or cleared.
+    /// When it was raised or cleared. For the detectors' causes
+    /// ([`Cause::Stalled`], [`Cause::DigitalZeros`], [`Cause::Quiet`]) a
+    /// raise is at when the condition began, and is sent once it has
+    /// lasted its threshold.
     pub at: SessionTime,
     /// Whether it's raised or cleared.
     pub state: WarningState,

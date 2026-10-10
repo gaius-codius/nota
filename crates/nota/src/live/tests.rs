@@ -1,6 +1,7 @@
-use nota_core::recorder::{Cause, Warning, WarningState};
+use nota_core::recorder::{Cause, DeviceChange, Warning, WarningState};
 use nota_core::{SampleIndex, SampleRange, SampleRate};
 use nota_recorder::capture::CaptureNotice;
+use nota_recorder::detect::Condition;
 
 use super::*;
 
@@ -192,6 +193,66 @@ fn a_retimed_epoch_flushes_nothing() {
             SessionTime::from_nanos(11_001_000_101),
             "after".to_owned()
         )]
+    );
+}
+
+/// Each detector's condition reaches the screen as the warning of its own
+/// cause, for its own track and at the time the recorder gave.
+#[test]
+fn a_detected_condition_is_a_warning_for_its_track() {
+    let mut live = Live::new(&[opened(MIC, 0), opened(SYSTEM, 0)]);
+    let mut warnings = Vec::new();
+    for (track, condition, state, at) in [
+        (MIC, Condition::Stalled, WarningState::Raised, ms(10)),
+        (
+            SYSTEM,
+            Condition::DigitalZeros,
+            WarningState::Raised,
+            ms(20),
+        ),
+        (MIC, Condition::Quiet, WarningState::Cleared, ms(30)),
+    ] {
+        let detected = RecorderEvent::Detected {
+            condition,
+            state,
+            at,
+        };
+        warnings.extend(live.recorder(Some(track), detected).updates);
+    }
+    let warning = |cause, track, at, state| {
+        Event::Warning(Warning {
+            cause,
+            track: Some(track),
+            at,
+            state,
+        })
+    };
+    assert_eq!(
+        warnings,
+        [
+            warning(Cause::Stalled, MIC, ms(10), WarningState::Raised),
+            warning(Cause::DigitalZeros, SYSTEM, ms(20), WarningState::Raised),
+            warning(Cause::Quiet, MIC, ms(30), WarningState::Cleared),
+        ]
+    );
+}
+
+/// A device change reaches the screen with the track it's about and the
+/// time it was noticed.
+#[test]
+fn a_device_change_is_a_device_event_for_its_track() {
+    let mut live = Live::new(&[opened(SYSTEM, 0)]);
+    let lost = RecorderEvent::Device {
+        change: DeviceChange::Lost,
+        at: ms(40),
+    };
+    assert_eq!(
+        live.recorder(Some(SYSTEM), lost).updates,
+        [Event::Device {
+            track: SYSTEM,
+            change: DeviceChange::Lost,
+            at: ms(40)
+        }]
     );
 }
 

@@ -13,7 +13,14 @@
 # monotonic clocks, and only a real suspend moves it: on an awake machine,
 # a CI runner's included, a reading of zero can't be told from the real
 # one. The capture tests drive suspends through the fake clock instead.
+#
+# The watch on PipeWire's graph (capture/pipewire/watch.rs) runs only against
+# a live PipeWire, which CI's runners don't have: its loop, its subscriptions
+# and its Drop are run by scripts/pipewire-devices.sh, on a private instance.
+# What it decides is in capture/route.rs, and what it reads (audio_node,
+# default_event, Pending) has unit tests; those stay mutated.
 exclude_re = [
+  "pipewire/watch\\.rs:.*(impl std::fmt::Debug for Watch>|impl Drop for Watch>|replace watch -> | run -> | in run$|Watcher::|Subscription::)",
   "impl .*Debug for PipeWireStream",
   "replace promote_current_thread -> bool with false",
   "replace <impl Clock for SystemClock>::suspended -> Duration with Default::default\\(\\)",

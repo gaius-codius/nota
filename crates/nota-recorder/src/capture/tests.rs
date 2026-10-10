@@ -571,6 +571,8 @@ fn recording_an_unstarted_track_is_an_error() {
         events: rx,
         rate: rate(),
         tracks: test_tracks(&[MIC]),
+        clock: Arc::new(FakeClock::new(SessionTime::ZERO)),
+        thresholds: BTreeMap::new(),
     };
     let mut timeline = epoch_zero();
     let result = record_track(&mut writer, &mut timeline, &events, &mut |_| {});
@@ -587,6 +589,8 @@ fn a_channel_with_no_senders_reads_as_stopped() {
         events: rx,
         rate: rate(),
         tracks: test_tracks(&[MIC]),
+        clock: Arc::new(FakeClock::new(SessionTime::ZERO)),
+        thresholds: BTreeMap::new(),
     };
     assert!(matches!(rx.next(Duration::from_millis(1)), Received::Idle));
     let sender = CaptureSender {
@@ -595,6 +599,8 @@ fn a_channel_with_no_senders_reads_as_stopped() {
         progress: Progress::new(SampleIndex::ZERO, SampleIndex::ZERO),
         clock: Arc::new(FakeClock::new(SessionTime::ZERO)),
         stopping: Arc::new(AtomicBool::new(false)),
+        failed: Arc::new(AtomicBool::new(false)),
+        lost: Arc::new(AtomicBool::new(false)),
         began: Arc::new(AtomicBool::new(false)),
         rerouted: Arc::new(AtomicBool::new(false)),
         asleep: Arc::new(AtomicU64::new(0)),
@@ -693,6 +699,8 @@ fn a_stream_at_another_rate_than_the_journals_records_nothing() {
         events: rx,
         rate: other,
         tracks: test_tracks(&[MIC]),
+        clock: Arc::new(FakeClock::new(SessionTime::ZERO)),
+        thresholds: BTreeMap::new(),
     };
     let mut timeline = epoch_zero();
     let result = record_track(&mut writer, &mut timeline, &events, &mut |_| {});
@@ -1103,6 +1111,8 @@ fn started_in(epoch: EpochId, at: u64) -> (FakeFs, SessionWriter<FakeFs>, Captur
         events: rx,
         rate: rate(),
         tracks: test_tracks(&[MIC]),
+        clock: Arc::new(FakeClock::new(SessionTime::ZERO)),
+        thresholds: BTreeMap::new(),
     };
     (fs, writer, events)
 }
@@ -1169,6 +1179,8 @@ fn notices_carry_the_time_they_were_reported() {
         progress: Progress::new(SampleIndex::ZERO, SampleIndex::ZERO),
         clock: Arc::clone(&clock) as Arc<dyn Clock>,
         stopping: Arc::new(AtomicBool::new(false)),
+        failed: Arc::new(AtomicBool::new(false)),
+        lost: Arc::new(AtomicBool::new(false)),
         began: Arc::new(AtomicBool::new(false)),
         rerouted: Arc::new(AtomicBool::new(false)),
         asleep: Arc::new(AtomicU64::new(0)),
@@ -1181,6 +1193,8 @@ fn notices_carry_the_time_they_were_reported() {
         events: rx,
         rate: rate(),
         tracks: test_tracks(&[MIC]),
+        clock: Arc::new(FakeClock::new(SessionTime::ZERO)),
+        thresholds: BTreeMap::new(),
     };
     assert!(matches!(
         rx.next(Duration::from_millis(1)),
@@ -1540,6 +1554,8 @@ fn audio_the_writer_refuses_outright_stays_delivered() {
         events: rx,
         rate: rate(),
         tracks: vec![(MIC, progress.clone())],
+        clock: Arc::new(FakeClock::new(SessionTime::ZERO)),
+        thresholds: BTreeMap::new(),
     };
     // Two samples where only one sample number is left: nothing is
     // recorded, so they stay counted as delivered and not captured.
@@ -1887,6 +1903,8 @@ fn a_stamp_the_clock_cant_place_is_sent_unstamped() {
         progress: Progress::new(SampleIndex::ZERO, SampleIndex::ZERO),
         clock: Arc::new(FakeClock::new(SessionTime::ZERO)),
         stopping: Arc::new(AtomicBool::new(false)),
+        failed: Arc::new(AtomicBool::new(false)),
+        lost: Arc::new(AtomicBool::new(false)),
         // Begun already, so each call queues only its audio.
         began: Arc::new(AtomicBool::new(true)),
         rerouted: Arc::new(AtomicBool::new(false)),
@@ -1897,6 +1915,8 @@ fn a_stamp_the_clock_cant_place_is_sent_unstamped() {
         events: rx,
         rate: rate(),
         tracks: test_tracks(&[MIC]),
+        clock: Arc::new(FakeClock::new(SessionTime::ZERO)),
+        thresholds: BTreeMap::new(),
     };
     sender.audio_captured(&[1, 2], Duration::MAX);
     sender.audio_captured(&[3, 4], Duration::from_millis(7));
