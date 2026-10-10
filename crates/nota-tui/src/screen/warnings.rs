@@ -162,12 +162,14 @@ pub(crate) struct Warnings {
 }
 
 impl Warnings {
-    /// Notes `tracks`: what each records and its source's name.
+    /// Notes `tracks`: what each records, and the source's name of those
+    /// recording. A track that isn't keeps its role, for the warnings, but
+    /// no source, so the footer doesn't name it.
     pub(crate) fn set_tracks(&mut self, tracks: Vec<Track>) {
         for track in tracks {
             let state = self.tracks.entry(track.id).or_default();
             state.role = Some(track.role);
-            state.source = Some(track.source);
+            state.source = track.recording.then_some(track.source);
         }
     }
 

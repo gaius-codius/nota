@@ -115,6 +115,10 @@ pub struct Track {
     /// The footer's name for where it records from, until a route change
     /// names another.
     pub source: String,
+    /// Whether its stream started. A track asked for that didn't start is
+    /// still given, so a warning can name its role; the footer names only
+    /// the sources of those that did.
+    pub recording: bool,
 }
 
 /// A mark (◆): "this matters", at the moment `m` was pressed.

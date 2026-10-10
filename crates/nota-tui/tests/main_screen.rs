@@ -307,11 +307,13 @@ fn two_tracks(screen: Recording) -> Recording {
             id: MIC,
             role: TrackRole::Microphone,
             source: "mic".to_owned(),
+            recording: true,
         },
         Track {
             id: SYSTEM,
             role: TrackRole::System,
             source: "system".to_owned(),
+            recording: true,
         },
     ])
 }

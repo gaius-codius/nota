@@ -18,11 +18,13 @@ fn two_tracks() -> Warnings {
             id: MIC,
             role: TrackRole::Microphone,
             source: "mic".to_owned(),
+            recording: true,
         },
         Track {
             id: SYSTEM,
             role: TrackRole::System,
             source: "system audio".to_owned(),
+            recording: true,
         },
     ]);
     warnings
@@ -468,4 +470,37 @@ fn a_journal_broken_without_a_track_is_only_a_change() {
     );
     assert_eq!(warnings.top(secs(41)), None);
     assert_eq!(warnings.changes(), [secs(40)]);
+}
+
+/// A track given as not recording keeps its role, so its failure to start
+/// reads `⚠ mic not recording`, but the footer names only the source still
+/// recording.
+#[test]
+fn a_track_that_didn_t_start_is_named_by_its_warning_but_not_the_footer() {
+    let mut warnings = Warnings::default();
+    warnings.set_tracks(vec![
+        Track {
+            id: MIC,
+            role: TrackRole::Microphone,
+            source: "mic".to_owned(),
+            recording: false,
+        },
+        Track {
+            id: SYSTEM,
+            role: TrackRole::System,
+            source: "system audio".to_owned(),
+            recording: true,
+        },
+    ]);
+    raise(
+        &mut warnings,
+        Cause::StreamFailed("permission refused".into()),
+        Some(MIC),
+        2,
+    );
+    assert_eq!(
+        warnings.top(secs(2)),
+        Some(shown("⚠ mic not recording", Tone::Accent, 0))
+    );
+    assert_eq!(warnings.sources(), Some("system audio".to_owned()));
 }

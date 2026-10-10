@@ -7,7 +7,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
 use nota_core::recorder::{self, Cause, Input, Setup, TrackRole, Warning, WarningState};
-use nota_core::{Clock, SessionId, TrackId, wall_now};
+use nota_core::{Clock, SessionId, SessionTime, TrackId, wall_now};
 use nota_recorder::capture::{
     Capture, CaptureBackend, CaptureReceiver, RecordError, RecorderEvent, Source, TrackStarter,
     prepare_tracks, record_tracks,
@@ -45,7 +45,8 @@ pub(super) struct Screening {
     /// Closes the screen, among other things.
     pub(super) ui: Sender<Event>,
     pub(super) ui_events: Receiver<Event>,
-    /// The tracks recording, with the sources the footer names.
+    /// Every track asked for; the footer names the sources of those
+    /// recording.
     pub(super) tracks: Vec<recorder::Track>,
     /// Where the screen's marks and notes go to be stored.
     pub(super) save: Sender<ToSave>,
@@ -211,13 +212,13 @@ fn start_with_notes<B: CaptureBackend>(
     };
     // Before the first audio, so no stretch of the recording is unguarded.
     let sleep = inhibit::hold(logind);
-    let (captures, tracks, ready) =
+    let (streams, ready) =
         open_streams(ready, starter, backend, &sources, (&ui, &ui_events), notes)?;
-    if let Some(warning) = sleep.report(clock.as_ref(), notes) {
-        to_screen(&ui, &ready.saver.sender(), warning, clock.now());
-    }
+    let save = ready.saver.sender();
+    let asleep = sleep.report(clock.as_ref(), notes);
+    warn_of_start(&streams.failed, asleep, (&ui, &save), clock.as_ref());
     unmade.keep();
-    keep_started(&rows, &watch, &session, &asked, &captures, notes);
+    keep_started(&rows, &watch, &session, &asked, &streams.captures, notes);
     let Ready {
         recorder,
         publisher,
@@ -238,7 +239,7 @@ fn start_with_notes<B: CaptureBackend>(
         library,
         session: session.id,
         lock,
-        captures,
+        captures: streams.captures,
         sleep,
         disk,
         publisher,
@@ -251,7 +252,7 @@ fn start_with_notes<B: CaptureBackend>(
         screen,
         ui,
         ui_events,
-        tracks,
+        tracks: streams.tracks,
         save: started_save,
     };
     Ok((running, screening))
@@ -375,39 +376,86 @@ fn open_streams<B: CaptureBackend>(
         ready.abandon();
         return Err(why.into());
     }
-    let (captures, tracks) = start_streams(starter, backend, sources, notes);
-    if captures.is_empty() {
+    let streams = start_streams(starter, backend, sources, notes);
+    if streams.captures.is_empty() {
         ready.abandon();
         return Err("nothing to record".into());
     }
-    Ok((captures, tracks, ready))
+    Ok((streams, ready))
+}
+
+/// What opening the streams came to.
+struct Streams<S> {
+    /// The streams that started, running.
+    captures: Vec<Capture<S>>,
+    /// Every track asked for, as the screen shows it: `recording` is false
+    /// for those that didn't start.
+    tracks: Vec<recorder::Track>,
+    /// The tracks that didn't start, with the start error's text.
+    failed: Vec<(TrackId, String)>,
 }
 
 /// Opens each source's stream through `starter`, one after another,
-/// noting those that don't start. Returns the running captures and the
-/// tracks they record, as the screen shows them.
+/// noting those that don't start. Returns the running captures, every
+/// track asked for as the screen shows it, and those that failed to start.
 fn start_streams<B: CaptureBackend>(
     starter: TrackStarter,
     backend: &B,
     sources: &[(TrackId, Source)],
     notes: &mut Vec<String>,
-) -> (Vec<Capture<B::Stream>>, Vec<recorder::Track>) {
-    let mut captures = Vec::new();
-    let mut tracks = Vec::new();
+) -> Streams<B::Stream> {
+    let mut streams = Streams {
+        captures: Vec::new(),
+        tracks: Vec::new(),
+        failed: Vec::new(),
+    };
     for (result, (track, source)) in starter.start(backend).into_iter().zip(sources) {
+        streams
+            .tracks
+            .push(screen_track(*track, source, result.is_ok()));
         match result {
-            Ok(capture) => {
-                captures.push(capture);
-                tracks.push(screen_track(*track, source));
+            Ok(capture) => streams.captures.push(capture),
+            Err(e) => {
+                notes.push(format!("not recording {source}: {e}"));
+                streams.failed.push((*track, e.to_string()));
             }
-            Err(e) => notes.push(format!("not recording {source}: {e}")),
         }
     }
-    (captures, tracks)
+    streams
 }
 
-/// `track`, recording `source`, as the screen shows it.
-fn screen_track(track: TrackId, source: &Source) -> recorder::Track {
+/// Warns of what the start found once the streams were tried: a warning
+/// for each of the `failed` tracks, then the `sleep` one, if there is one.
+/// All go to the screen and the saver (`ui`, `save`) as a stream's failure
+/// mid-recording does, so they reach the timeline too.
+fn warn_of_start(
+    failed: &[(TrackId, String)],
+    sleep: Option<recorder::Event>,
+    (ui, save): (&Sender<Event>, &Sender<ToSave>),
+    clock: &dyn Clock,
+) {
+    let unstarted = failed
+        .iter()
+        .map(|(track, why)| not_started(*track, why.clone(), clock.now()));
+    for warning in unstarted.chain(sleep) {
+        to_screen(ui, save, warning, clock.now());
+    }
+}
+
+/// The warning that `track`'s stream didn't start, for `why`, raised at
+/// `at`: the same one a stream that fails mid-recording raises.
+fn not_started(track: TrackId, why: String, at: SessionTime) -> recorder::Event {
+    recorder::Event::Warning(Warning {
+        cause: Cause::StreamFailed(why),
+        track: Some(track),
+        at,
+        state: WarningState::Raised,
+    })
+}
+
+/// `track`, asked to record `source`, as the screen shows it: `recording`
+/// says whether its stream started.
+fn screen_track(track: TrackId, source: &Source, recording: bool) -> recorder::Track {
     let role = match track_kind(track) {
         TrackKind::Microphone => TrackRole::Microphone,
         TrackKind::System => TrackRole::System,
@@ -416,6 +464,7 @@ fn screen_track(track: TrackId, source: &Source) -> recorder::Track {
         id: track,
         role,
         source: source_name(source),
+        recording,
     }
 }
 
@@ -447,9 +496,8 @@ fn start_live(
     Ok((live_inputs, live))
 }
 
-/// The streams that started, the tracks they record as the screen shows
-/// them, and what started before them.
-type Opened<S> = (Vec<Capture<S>>, Vec<recorder::Track>, Ready);
+/// What opening the streams came to, and what started before them.
+type Opened<S> = (Streams<S>, Ready);
 
 /// What a start that fails before any stream opens says.
 const STOPPED_BEFORE: &str = "stopped before recording started; no session was made";
@@ -1004,7 +1052,7 @@ mod tests {
         Event::Recorder(recorder::Event::Warning(Warning {
             cause: Cause::DiskLow,
             track: None,
-            at: nota_core::SessionTime::ZERO,
+            at: SessionTime::ZERO,
             state: WarningState::Raised,
         }))
     }
@@ -1047,7 +1095,7 @@ mod tests {
         let full = Event::Recorder(recorder::Event::Warning(Warning {
             cause: Cause::DiskFull,
             track: None,
-            at: nota_core::SessionTime::ZERO,
+            at: SessionTime::ZERO,
             state: WarningState::Raised,
         }));
         ui.send(full.clone()).unwrap();
@@ -1087,8 +1135,8 @@ mod tests {
     #[test]
     #[expect(clippy::disallowed_methods, reason = "test scaffolding")]
     fn the_saver_stores_text_and_annotations_in_the_session() {
+        use nota_core::Utterance;
         use nota_core::recorder::Mark;
-        use nota_core::{SessionTime, Utterance};
         use nota_store::{Annotation, RevisionNumber};
 
         let root = std::env::temp_dir().join(format!("nota-saving-{}", std::process::id()));
@@ -1145,7 +1193,7 @@ mod tests {
     #[expect(clippy::disallowed_methods, reason = "test scaffolding")]
     fn a_live_utterance_is_stored_with_its_words_in_session_time() {
         use nota_core::messages::{HeardWord, Transcript};
-        use nota_core::{SampleIndex, SampleRange, SessionTime};
+        use nota_core::{SampleIndex, SampleRange};
         use nota_recorder::engine::EngineEvent;
 
         let root = std::env::temp_dir().join(format!("nota-saving-words-{}", std::process::id()));
@@ -1213,7 +1261,7 @@ mod tests {
 
     /// What the crash child stores.
     fn crash_heard() -> Option<nota_core::Utterance> {
-        let at = nota_core::SessionTime::from_nanos(3_000_000_000);
+        let at = SessionTime::from_nanos(3_000_000_000);
         nota_core::Utterance::new(MIC, at, at, "said before the kill".to_owned())
     }
 
@@ -1324,7 +1372,7 @@ mod tests {
         happened: nota_store::Happened,
     ) -> nota_store::TimelineEvent {
         nota_store::TimelineEvent {
-            at: nota_core::SessionTime::from_nanos(at * 1_000_000),
+            at: SessionTime::from_nanos(at * 1_000_000),
             track,
             happened,
         }
@@ -1342,7 +1390,7 @@ mod tests {
         pub(super) fn through_live(saver: &Saver, ui: &Sender<Event>, clock: &Arc<dyn Clock>) {
             use nota_core::messages::AudioChunk;
             use nota_core::recorder::DeviceChange;
-            use nota_core::{SampleIndex, SessionTime, TrackTimeline};
+            use nota_core::{SampleIndex, TrackTimeline};
             use nota_recorder::capture::CaptureNotice;
             use nota_recorder::detect::Condition;
 
@@ -1411,8 +1459,8 @@ mod tests {
     #[test]
     #[expect(clippy::disallowed_methods, reason = "test scaffolding")]
     fn changes_from_every_source_reach_the_sessions_timeline() {
+        use nota_core::FakeClock;
         use nota_core::recorder::{DeviceChange, Disk};
-        use nota_core::{FakeClock, SessionTime};
         use nota_store::Happened;
 
         let root = std::env::temp_dir().join(format!("nota-timeline-{}", std::process::id()));
@@ -1484,22 +1532,139 @@ mod tests {
         use nota_core::recorder::Track;
         assert_eq!(
             [
-                screen_track(MIC, &Source::Microphone),
-                screen_track(SYSTEM, &Source::Device("speakers.monitor".to_owned())),
+                screen_track(MIC, &Source::Microphone, true),
+                screen_track(SYSTEM, &Source::Device("speakers.monitor".to_owned()), true),
             ],
             [
                 Track {
                     id: MIC,
                     role: TrackRole::Microphone,
-                    source: "mic".to_owned()
+                    source: "mic".to_owned(),
+                    recording: true,
                 },
                 Track {
                     id: SYSTEM,
                     role: TrackRole::System,
-                    source: "speakers.monitor".to_owned()
+                    source: "speakers.monitor".to_owned(),
+                    recording: true,
                 },
             ]
         );
+    }
+
+    /// A backend that opens the microphone and refuses everything else, as
+    /// a system whose permission for one device is refused.
+    struct MicOnly;
+
+    impl CaptureBackend for MicOnly {
+        type Stream = ();
+
+        fn start(
+            &self,
+            source: &Source,
+            _: nota_core::SampleRate,
+            _: nota_recorder::capture::CaptureSender,
+        ) -> Result<(), nota_recorder::capture::CaptureError> {
+            match source {
+                Source::Microphone => Ok(()),
+                other => Err(nota_recorder::capture::CaptureError::DeviceNotAvailable(
+                    other.clone(),
+                )),
+            }
+        }
+    }
+
+    /// Opens the microphone and the system audio through [`MicOnly`], so
+    /// the system's stream fails to start.
+    fn start_with_a_failing_system() -> Streams<()> {
+        let clock: Arc<dyn Clock> = Arc::new(nota_core::FakeClock::new(SessionTime::ZERO));
+        let sources = [(MIC, Source::Microphone), (SYSTEM, Source::SystemAudio)];
+        let (starter, events) = prepare_tracks(&sources, RATE, &clock);
+        let streams = start_streams(starter, &MicOnly, &sources, &mut Vec::new());
+        drop(events);
+        streams
+    }
+
+    /// When one source doesn't start, the screen is still given both
+    /// tracks, the failed one marked as not recording, and the failure is
+    /// kept with its text.
+    #[test]
+    fn a_track_that_didn_t_start_is_still_told_to_the_screen() {
+        let streams = start_with_a_failing_system();
+        let roles: Vec<_> = streams
+            .tracks
+            .iter()
+            .map(|track| (track.id, track.role, track.recording))
+            .collect();
+        assert_eq!(
+            roles,
+            [
+                (MIC, TrackRole::Microphone, true),
+                (SYSTEM, TrackRole::System, false)
+            ]
+        );
+        let why = nota_recorder::capture::CaptureError::DeviceNotAvailable(Source::SystemAudio);
+        assert_eq!(streams.failed, [(SYSTEM, why.to_string())]);
+        assert_eq!(streams.captures.len(), 1);
+    }
+
+    /// Acceptance (GAI-427): a stream that never started is the same
+    /// warning as one that failed mid-recording, and through the real saver
+    /// it reaches the session's timeline with its track and the time it
+    /// was told.
+    #[test]
+    #[expect(clippy::disallowed_methods, reason = "test scaffolding")]
+    fn a_stream_that_didn_t_start_reaches_the_timeline() {
+        use nota_core::FakeClock;
+        use nota_store::Happened;
+
+        let root = std::env::temp_dir().join(format!("nota-unstarted-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let library = Library::open(&root).unwrap();
+        let id = SessionId::new(6);
+        let rows = NewSessionRows::new(library.db().clone(), NewSession::bare(id));
+        let fake = Arc::new(FakeClock::new(SessionTime::from_nanos(2_000_000_000)));
+        let clock: Arc<dyn Clock> = Arc::clone(&fake) as Arc<dyn Clock>;
+        let (ui, screen) = mpsc::channel::<Event>();
+        let saver = Saver::spawn(
+            saving(rows, id, None),
+            ui.clone(),
+            Arc::clone(&clock),
+            LibraryHealth::default(),
+        )
+        .unwrap();
+
+        let (track, why) = start_with_a_failing_system().failed.remove(0);
+        let warning = not_started(track, why.clone(), clock.now());
+        assert_eq!(
+            warning,
+            recorder::Event::Warning(Warning {
+                cause: Cause::StreamFailed(why.clone()),
+                track: Some(SYSTEM),
+                at: SessionTime::from_nanos(2_000_000_000),
+                state: WarningState::Raised,
+            })
+        );
+        // Sent as the start sends them, with no sleep warning beside it.
+        let failed = [(track, why.clone())];
+        warn_of_start(&failed, None, (&ui, &saver.sender()), clock.as_ref());
+
+        drop(ui);
+        let report = saver.finish();
+        assert_eq!((report.events, report.lost_events), (1, 0));
+        let stored = library.db().with(|db| db.timeline(id)).unwrap();
+        assert_eq!(
+            stored,
+            [nota_store::TimelineEvent {
+                at: SessionTime::from_nanos(2_000_000_000),
+                track: Some(SYSTEM),
+                happened: Happened::Raised(Cause::StreamFailed(why)),
+            }]
+        );
+        // The screen was told too.
+        let told: Vec<_> = screen.try_iter().collect();
+        assert_eq!(told, [Event::Recorder(warning)]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1563,7 +1728,7 @@ mod salvage_note_tests {
     /// Startup names the real directory that prevents a segment being published.
     #[test]
     fn startup_names_a_directory_blocking_salvage() {
-        use nota_core::{FakeClock, SessionTime};
+        use nota_core::FakeClock;
         let root = std::env::temp_dir().join(format!("nota-start-held-{}", std::process::id()));
         remove_fixture(&root);
         let library = Library::open(&root).unwrap();

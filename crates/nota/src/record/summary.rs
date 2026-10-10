@@ -56,9 +56,14 @@ pub(super) fn show(
     }
 }
 
-/// The footer's text until a route changes: the tracks' sources, joined.
+/// The footer's text until a route changes: the sources of the tracks
+/// recording, joined.
 fn footer(tracks: &[Track]) -> String {
-    let sources: Vec<_> = tracks.iter().map(|track| track.source.as_str()).collect();
+    let sources: Vec<_> = tracks
+        .iter()
+        .filter(|track| track.recording)
+        .map(|track| track.source.as_str())
+        .collect();
     sources.join(" + ")
 }
 
@@ -413,11 +418,28 @@ pub(super) mod tests {
             id: TrackId::new(id),
             role,
             source: source.to_owned(),
+            recording: true,
         };
         let mic = track(0, TrackRole::Microphone, "mic");
         let system = track(1, TrackRole::System, "system audio");
         assert_eq!(footer(&[mic.clone(), system]), "mic + system audio");
         assert_eq!(footer(&[mic]), "mic");
+    }
+
+    /// A track asked for that didn't start is left out of the footer.
+    #[test]
+    fn the_footer_leaves_out_a_track_that_isn_t_recording() {
+        let track = |id, role, source: &str, recording| Track {
+            id: TrackId::new(id),
+            role,
+            source: source.to_owned(),
+            recording,
+        };
+        let tracks = [
+            track(0, TrackRole::Microphone, "mic", false),
+            track(1, TrackRole::System, "system audio", true),
+        ];
+        assert_eq!(footer(&tracks), "system audio");
     }
 
     #[test]
