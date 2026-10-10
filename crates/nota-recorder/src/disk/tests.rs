@@ -1136,3 +1136,44 @@ fn a_shared_watch_says_so_when_debugged() {
     let shown = format!("{watch:?}");
     assert!(shown.contains("claimed: Some(Claimed(..))"), "{shown}");
 }
+
+/// A watch over `fs` holding a ballast of `len` bytes in `/data`, shared
+/// as startup shares it: `/data/live` claims it while locked by anyone
+/// but the watch itself.
+fn shared_past_own(fs: &FakeFs, len: u64) -> Arc<DiskWatch<FakeFs>> {
+    let watch = watched(fs, len);
+    let under = fs.clone();
+    watch.share(move |own| {
+        let live = p("/data/live");
+        !own.contains(&live)
+            && under
+                .lock_dir(&live)
+                .is_err_and(|e| e.kind() == io::ErrorKind::WouldBlock)
+    });
+    watch
+}
+
+/// A directory locked through the watch is its own while held: the full
+/// disk frees the ballast.
+#[test]
+fn a_lock_the_watch_holds_doesnt_claim_its_ballast() {
+    let fs = FakeFs::with_dirs(["/data/live"]);
+    let watch = shared_past_own(&fs, 100);
+    let _own = watch.fs().lock_dir(&p("/data/live")).unwrap();
+    watch.note_full(None);
+    assert_eq!(watch.full().map(|f| f.ballast), Some(Freed::Freed));
+}
+
+/// Once the watch lets a directory go, whoever locks it next is a
+/// recording, and keeps the ballast.
+#[test]
+fn a_lock_the_watch_let_go_is_no_longer_its_own() {
+    let fs = FakeFs::with_dirs(["/data/live"]);
+    let watch = shared_past_own(&fs, 100);
+    drop(watch.fs().lock_dir(&p("/data/live")).unwrap());
+    // A recording takes the directory the watch just unlocked.
+    let _recording = fs.lock_dir(&p("/data/live")).unwrap();
+    watch.note_full(None);
+    assert_eq!(watch.full().map(|f| f.ballast), Some(Freed::None));
+    assert!(Ballast::find(&fs, &p("/data"), 100).unwrap().is_some());
+}
