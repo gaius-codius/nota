@@ -925,6 +925,37 @@ fn a_suspend_opens_an_epoch_at_the_audio_after_it() {
     assert_eq!(journal_epochs(&fs, &journals), [(0, 0, 100), (1, 100, 200)]);
 }
 
+/// An overrun reported for the same stretch as a route change, just before
+/// its audio, opens the one epoch: the reopening isn't refused, and the
+/// audio is timed from the overrun.
+#[test]
+fn an_overrun_and_a_route_change_open_one_epoch_for_one_gap() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let script = vec![
+        Step::Audio(samples(0, 100)),
+        Step::Notice(CaptureNotice::RouteChanged),
+        Step::Advance(secs(2)),
+        Step::Notice(CaptureNotice::Overrun),
+        Step::Audio(samples(100, 100)),
+    ];
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    assert!(
+        !run.reported
+            .iter()
+            .any(|e| matches!(e, RecorderEvent::EpochRefused(_))),
+        "{:?}",
+        run.reported
+    );
+    let starts: Vec<_> = run
+        .timeline
+        .epochs()
+        .iter()
+        .map(|e| (e.id().get(), e.start(), e.first_sample().get()))
+        .collect();
+    assert_eq!(starts, [(0, SessionTime::ZERO, 0), (1, at(2), 100)]);
+}
+
 /// A blip in the suspend count shorter than a real suspend, and a suspend
 /// before the stream's first audio, open no epoch.
 #[test]

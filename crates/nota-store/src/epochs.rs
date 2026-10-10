@@ -2,10 +2,11 @@
 //! session time once its journals are gone.
 //!
 //! The recorder keeps an epoch's anchor in its journals' headers, and
-//! copies it here as the epoch's first segment is published, before the
-//! segment's row, so every committed segment's epoch is timed here. An
-//! epoch's anchor never changes: a different one for an epoch already
-//! stored is refused.
+//! copies it here with each segment it publishes, before the segment's
+//! row, so a committed segment's epoch is timed here. Segments from
+//! journals that didn't keep it (an older nota's), and rows committed
+//! before it was kept, have no epoch row. An epoch's anchor never changes:
+//! a different one for an epoch already stored is refused.
 
 use nota_core::{EpochAnchor, EpochId, SampleIndex, SampleRate, SessionId, SessionTime, TrackId};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};

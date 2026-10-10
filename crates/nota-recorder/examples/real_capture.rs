@@ -766,11 +766,14 @@ mod linux {
             self.fs
                 .counted("commit", segment.path(), || {
                     // As the library's store commits: the epoch's anchor
-                    // first, then the row.
+                    // first, then the row, which an epoch already timed
+                    // otherwise doesn't stop.
                     if let Some(anchor) = segment.anchor() {
-                        store
-                            .insert_epoch(session, segment.row().track(), anchor)
-                            .map_err(io::Error::other)?;
+                        match store.insert_epoch(session, segment.row().track(), anchor) {
+                            Ok(_)
+                            | Err(StoreError::EpochConflict { .. } | StoreError::Corrupt(_)) => {}
+                            Err(e) => return Err(io::Error::other(e)),
+                        }
                     }
                     store
                         .insert_segment(session, segment.row())

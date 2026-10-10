@@ -570,8 +570,16 @@ impl<S: Fs> SessionWriter<S> {
     /// A timeline for `track` to open its first epoch on: one that carries
     /// on from its newest earlier epoch, so the first is numbered above it
     /// and starts no earlier than its audio ends. If that epoch's anchor
-    /// wasn't kept, one numbered above it with no earlier epochs; for a
-    /// track with none, a new one.
+    /// wasn't kept, or its first sample is past what the track holds, one
+    /// numbered above it with no earlier epochs; for a track with none, a
+    /// new one.
+    ///
+    /// An anchor can be past what the track holds: it's durable before its
+    /// epoch's first sample, so a crash, or a full disk, can keep it and
+    /// lose the end of the epoch before. The new epoch then starts at
+    /// [`Self::first_free_sample`], below that anchor's first sample, and
+    /// the writer still refuses one starting before
+    /// [`Self::earlier_end`], the anchor's start.
     ///
     /// # Errors
     ///
@@ -579,8 +587,12 @@ impl<S: Fs> SessionWriter<S> {
     /// last [`EpochId`].
     pub fn resumed_timeline(&self, track: TrackId) -> Result<TrackTimeline, EpochError> {
         match self.earlier.get(&track).and_then(|e| e.epoch) {
-            Some(MarkedEpoch::Timed(anchor)) => TrackTimeline::rebuild(track, [anchor]),
-            Some(MarkedEpoch::Untimed(id)) => TrackTimeline::starting_after(track, id),
+            Some(MarkedEpoch::Timed(anchor))
+                if anchor.first_sample <= self.first_free_sample(track) =>
+            {
+                TrackTimeline::rebuild(track, [anchor])
+            }
+            Some(epoch) => TrackTimeline::starting_after(track, epoch.id()),
             None => Ok(TrackTimeline::new(track)),
         }
     }

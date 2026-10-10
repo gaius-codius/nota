@@ -27,17 +27,19 @@ pub trait SegmentStore {
     /// Commits `segment`'s row for `session`, durably, before returning,
     /// and first the anchor of its epoch, if it has one
     /// ([`DurableSegment::anchor`]), so a committed row's epoch is timed in
-    /// the store. Committing the same row or anchor again is fine. Takes a
-    /// [`DurableSegment`], so a row can only be committed for a file that's
-    /// durable under its final name.
+    /// the store. Committing the same row or anchor again is fine. An epoch
+    /// stored with another anchor, or whose stored row doesn't parse, keeps
+    /// what it has and the row is committed all the same: its audio
+    /// matters more than its timing. Takes a [`DurableSegment`], so a row
+    /// can only be committed for a file that's durable under its final
+    /// name.
     ///
     /// # Errors
     ///
     /// The store's error, including a different row of the session for the
     /// same track and first sample, a row of the same session and track
-    /// whose samples overlap this one's, another anchor stored for the
-    /// epoch, and a session the store doesn't hold. A row isn't committed
-    /// if its anchor wasn't.
+    /// whose samples overlap this one's, and a session the store doesn't
+    /// hold. A row isn't committed if its anchor failed for another reason.
     fn insert(&mut self, session: SessionId, segment: &DurableSegment) -> Result<(), Self::Error>;
 
     /// Whether `error` says the disk is full (see
@@ -96,7 +98,15 @@ impl SegmentStore for nota_store::Store {
 
     fn insert(&mut self, session: SessionId, segment: &DurableSegment) -> Result<(), Self::Error> {
         if let Some(anchor) = segment.anchor() {
-            self.insert_epoch(session, segment.row().track(), anchor)?;
+            match self.insert_epoch(session, segment.row().track(), anchor) {
+                // The epoch keeps the anchor it has; the row still commits.
+                Ok(_)
+                | Err(
+                    nota_store::StoreError::EpochConflict { .. }
+                    | nota_store::StoreError::Corrupt(_),
+                ) => {}
+                Err(e) => return Err(e),
+            }
         }
         self.insert_segment(session, segment.row()).map(|_| ())
     }
@@ -410,7 +420,12 @@ mod fake {
 
         fn insert(&mut self, session: SessionId, segment: &DurableSegment) -> io::Result<()> {
             if let Some(anchor) = segment.anchor() {
-                self.insert_epoch(session, segment.row().track(), anchor)?;
+                match self.insert_epoch(session, segment.row().track(), anchor) {
+                    // As SQLite's store: the epoch keeps the anchor it has,
+                    // and the row still commits.
+                    Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                    other => other?,
+                }
             }
             let row = segment.row();
             let path = self.row_path(session, row);
@@ -734,7 +749,8 @@ mod tests {
 
     /// Commits a timed segment through `store`: its epoch's anchor is
     /// committed with it, which `epochs` reads back; a segment whose epoch
-    /// the store times otherwise isn't committed.
+    /// the store times otherwise is committed, and the epoch keeps its
+    /// anchor.
     fn timed_round_trip<S: SegmentStore>(
         store: &mut S,
         epochs: impl Fn(&mut S) -> Vec<(TrackId, EpochAnchor)>,
@@ -748,12 +764,13 @@ mod tests {
         store.insert(one, &segment).unwrap();
         assert_eq!(epochs(store), [(TrackId::new(1), anchor(7))]);
         let other = durable(&fs, 20).timed_by(Some(anchor(8)));
-        assert!(store.insert(one, &other).is_err());
-        assert_eq!(store.rows(one).unwrap(), [*segment.row()]);
+        store.insert(one, &other).unwrap();
+        assert_eq!(store.rows(one).unwrap(), [*segment.row(), *other.row()]);
+        assert_eq!(epochs(store), [(TrackId::new(1), anchor(7))]);
         // An untimed segment leaves the epochs as they are.
         store.insert(one, &durable(&fs, 30)).unwrap();
         assert_eq!(epochs(store), [(TrackId::new(1), anchor(7))]);
-        assert_eq!(store.rows(one).unwrap().len(), 2);
+        assert_eq!(store.rows(one).unwrap().len(), 3);
     }
 
     #[test]

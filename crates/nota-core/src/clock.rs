@@ -302,6 +302,9 @@ mod tests {
             now.checked_duration_since(from).unwrap() < Duration::from_secs(60),
             "{now:?}"
         );
+        // And it counts on from there, not stands still at it.
+        let moved = (0..100_000_000).any(|_| clock.now() > now);
+        assert!(moved, "the resumed clock never advanced past {now:?}");
     }
 
     /// A clock that started on an awake machine counts no suspend, and the

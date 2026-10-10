@@ -227,6 +227,57 @@ fn an_epoch_with_no_audio_kept_ends_the_track_at_its_start() {
     assert_eq!(writer.earlier_end(MIC), Some(ms(9_000)));
 }
 
+/// A crash can keep a new epoch's anchor and lose the end of the epoch
+/// before it: the track still resumes, numbered above the anchor's epoch,
+/// from the sample it holds up to, and no earlier than that anchor's start.
+#[test]
+fn a_track_resumes_when_its_newest_anchor_is_past_its_audio() {
+    let fs = FakeFs::with_dirs([dir()]);
+    // Epoch 0 kept samples up to 1,000; epoch 1, opened at 5 s from sample
+    // 1,200, was marked, but its journal and the 200 samples before it
+    // were lost.
+    let mut marks = fs.create(&dir().join(MARKS_FILE_NAME)).unwrap();
+    marks
+        .write_all(b"nota session marks 2\njournals-below 64\nepoch 0 1 1200 1000 5000000000\n")
+        .unwrap();
+    let mut journal = fs
+        .create(&dir().join(JournalId::new(3).file_name()))
+        .unwrap();
+    let header = JournalHeader::new(
+        JournalId::new(3),
+        MIC,
+        EpochAnchor {
+            id: EpochId::new(0),
+            start: ms(0),
+            first_sample: s(0),
+            rate: rate(),
+        },
+    );
+    let mut bytes = crate::journal::format::encode_header(header);
+    crate::journal::format::encode_frame(&mut bytes, 0, MIC, s(0), &[1; 1_000]);
+    journal.write_all(&bytes).unwrap();
+    let (lock, _) = writer_at(&fs, SessionTime::ZERO);
+    let mut writer =
+        SessionWriter::open(&lock, rate(), length(), Arc::new(FakeClock::default())).unwrap();
+    assert_eq!(writer.first_free_sample(MIC), s(1_000));
+    assert_eq!(writer.earlier_end(MIC), Some(ms(5_000)));
+    assert_eq!(writer.resume_from(), ms(5_000));
+    // Too early is refused by the writer, as for any resumed track.
+    let (_, early) = writer.open_first_epoch(MIC, ms(4_000)).unwrap();
+    assert!(matches!(
+        writer.start_track(MIC, &early),
+        Err(SessionError::TimeWentBack { track: MIC, .. })
+    ));
+    let (_, epoch) = writer.open_first_epoch(MIC, ms(6_000)).unwrap();
+    assert_eq!(
+        (epoch.id(), epoch.start(), epoch.first_sample()),
+        (EpochId::new(2), ms(6_000), s(1_000))
+    );
+    writer.start_track(MIC, &epoch).unwrap();
+    writer.append(MIC, &[2; 10]).unwrap();
+    writer.finish().unwrap();
+}
+
 /// Marks from an older nota name the epoch but not its time: the track
 /// carries on above it, untimed, and nothing holds the clock back.
 #[test]
@@ -266,16 +317,14 @@ fn the_newest_timed_epoch_is_carried_on_from() {
         first_sample: s(40),
         rate: rate(),
     };
+    // Its journal holds 10 samples from the epoch's first, to 2.01 s.
     let mut journal = fs
         .create(&dir().join(JournalId::new(9).file_name()))
         .unwrap();
-    journal
-        .write_all(&crate::journal::format::encode_header(JournalHeader::new(
-            JournalId::new(9),
-            MIC,
-            anchor,
-        )))
-        .unwrap();
+    let mut bytes =
+        crate::journal::format::encode_header(JournalHeader::new(JournalId::new(9), MIC, anchor));
+    crate::journal::format::encode_frame(&mut bytes, 0, MIC, s(40), &[1; 10]);
+    journal.write_all(&bytes).unwrap();
     let (lock, _) = writer_at(&fs, SessionTime::ZERO);
     let writer =
         SessionWriter::open(&lock, rate(), length(), Arc::new(FakeClock::default())).unwrap();
@@ -289,7 +338,7 @@ fn the_newest_timed_epoch_is_carried_on_from() {
             .collect::<Vec<_>>(),
         [anchor]
     );
-    assert_eq!(writer.earlier_end(MIC), Some(ms(2_000)));
+    assert_eq!(writer.earlier_end(MIC), Some(ms(2_010)));
     drop(writer);
 
     // Marks naming epoch 4 timed outrank the journal's epoch 3.

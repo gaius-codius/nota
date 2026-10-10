@@ -130,5 +130,38 @@ fn main() -> Result<()> {
             Ok(())
         },
     )?;
+    untimed_copy(dir, "one_track.journal", "untimed.journal")?;
+    Ok(())
+}
+
+/// Bytes in a version 3 header, and in a version 2 one, which has no
+/// anchor (bytes 30..46 of version 3).
+const TIMED_HEADER: usize = 50;
+const UNTIMED_HEADER: usize = 34;
+
+/// Writes the seed `name` in `dir` as the version 2 journal an older nota
+/// wrote: the seed `from` with its header's anchor taken out, version 2,
+/// and the CRC over the fields left. The frames are as they were.
+fn untimed_copy(dir: &Path, from: &str, name: &str) -> Result<()> {
+    let target = dir.join(name);
+    if target.exists() {
+        return Ok(());
+    }
+    let timed = StdFs.read(&dir.join(from))?;
+    let (Some(fields), Some(frames)) = (timed.get(..30), timed.get(TIMED_HEADER..)) else {
+        return Err(format!("{from} is shorter than a header").into());
+    };
+    let mut bytes = fields.to_vec();
+    bytes[8..10].copy_from_slice(&2_u16.to_le_bytes());
+    let crc = crc32fast::hash(&bytes);
+    bytes.extend_from_slice(&crc.to_le_bytes());
+    if bytes.len() != UNTIMED_HEADER {
+        return Err("the untimed header came out the wrong length".into());
+    }
+    bytes.extend_from_slice(frames);
+    let mut out = StdFs.create(&target)?;
+    out.write_all(&bytes)?;
+    out.sync()?;
+    StdFs.sync_dir(dir)?;
     Ok(())
 }

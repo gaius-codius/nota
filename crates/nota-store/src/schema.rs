@@ -274,8 +274,8 @@ BEGIN SELECT RAISE(ABORT, 'a revision is never added to'); END;
 /// The final pass's text is kept apart from the heard text: its own rows,
 /// located by track and sample as the engine gives them, not in
 /// `utterance`, so a revision never shows the two passes mixed. (Placing
-/// it in session time needs each epoch's anchor, which nothing stores
-/// yet.) A row with no text is audio the engine couldn't transcribe.
+/// it in session time needs each epoch's anchor, which the `epoch` table
+/// holds for every segment published since journals kept it.) A row with no text is audio the engine couldn't transcribe.
 /// `final_progress` says how far each track has got: every published
 /// sample before `up_to` is covered, so a pass stopped partway resumes
 /// there.
