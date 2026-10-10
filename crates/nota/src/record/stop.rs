@@ -36,6 +36,7 @@ pub(super) fn stop<B: CaptureBackend>(started: Started<B>, shown: Shown) -> Outc
     // Stop, in order.
     drop(captures);
     let writer = recorded(recorder.join(), &mut outcome);
+    let writer_lost = writer.is_none();
     // The writer's last journals are published while the live thread
     // shuts the engine down.
     let mut log = None;
@@ -66,11 +67,14 @@ pub(super) fn stop<B: CaptureBackend>(started: Started<B>, shown: Shown) -> Outc
     let full = full_while_recording || disk.as_ref().is_ok_and(|d| d.full.is_some());
     note_disk(&mut outcome, disk, full_while_recording);
     // Everything the live thread and the screen gave is stored, or given
-    // up on, before the session is marked stopped and its jobs queued (and
-    // before a failed publisher returns early).
+    // up on, before the session is marked stopped and its jobs queued.
     let saved = saver.finish();
     match &stopped.published {
-        Ok(report) => note_published(&mut outcome, report),
+        // Without the writer, its last journals are left for salvage.
+        Ok(report) => {
+            note_published(&mut outcome, report);
+            outcome.complete &= !writer_lost;
+        }
         Err(e) => outcome
             .notes
             .push(format!("{e}; the next start publishes what's left")),

@@ -20,11 +20,11 @@
 //! delivered, not only from what the recorder wrote.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use nota_core::{SampleCount, SampleIndex, TrackId};
+use nota_core::{SampleCount, SampleIndex, SessionTime, TrackId};
 
 use super::CaptureEvent;
 
@@ -179,10 +179,30 @@ impl QueueSender {
 
     /// Queues a copy of `samples` from `track`, in a spare buffer if there
     /// is one.
+    #[cfg(test)]
     pub(super) fn audio(&self, track: TrackId, samples: &[i16]) {
+        self.first_audio(track, samples, None);
+    }
+
+    /// Queues a copy of `samples` from `track`, in a spare buffer if there
+    /// is one; first [`CaptureEvent::Began`], at the time `first` gives,
+    /// if its flag isn't set yet. The flag is set and `Began` queued under
+    /// the queue's lock, so no audio from `track` can come before it,
+    /// however many senders the stream sends through.
+    pub(super) fn first_audio(
+        &self,
+        track: TrackId,
+        samples: &[i16],
+        first: Option<(&AtomicBool, SessionTime)>,
+    ) {
         let mut state = self.0.lock();
         if state.closed {
             return;
+        }
+        if let Some((began, at)) = first
+            && !began.swap(true, Ordering::SeqCst)
+        {
+            state.events.push_back((track, CaptureEvent::Began { at }));
         }
         let mut buffer = if let Some(buffer) = state.spare.pop() {
             buffer
@@ -479,5 +499,34 @@ mod tests {
         // More taken off than was counted can't wrap.
         progress.appended(1_000, SampleIndex::new(150));
         assert_eq!(progress.now(), at(150, 150, 130));
+    }
+
+    /// However many senders a stream's first audio comes through at
+    /// once, `Began` is queued once, ahead of all of it.
+    #[test]
+    fn began_comes_once_and_before_any_audio() {
+        for _ in 0..200 {
+            let (queue, sender) = Queue::new();
+            let began = Arc::new(AtomicBool::new(false));
+            let senders: Vec<_> = (0..4).map(|_| sender.clone()).collect();
+            drop(sender);
+            let threads: Vec<_> = senders
+                .into_iter()
+                .map(|sender| {
+                    let began = Arc::clone(&began);
+                    std::thread::spawn(move || {
+                        sender.first_audio(MIC, &[1], Some((&began, SessionTime::ZERO)));
+                    })
+                })
+                .collect();
+            for thread in threads {
+                thread.join().unwrap();
+            }
+            let mut seen = Vec::new();
+            while let Received::Event(_, event) = queue.next(Duration::ZERO) {
+                seen.push(matches!(event, CaptureEvent::Began { .. }));
+            }
+            assert_eq!(seen, [true, false, false, false, false]);
+        }
     }
 }

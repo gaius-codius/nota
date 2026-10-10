@@ -1093,13 +1093,26 @@ fn one_track_fsyncs_inline_and_two_on_a_thread_each() {
     let tmp = TestDir::new("syncing");
     let mut one = Running::start_with(&tmp.0, &["--mic", "missing"]);
     assert!(one.shows_after(0, "s stop"), "{}", one.output());
-    pause(Duration::from_millis(1_500));
+    // The track has joined the recorder once its first journal is there.
+    let audio = tmp.0.join("sessions/1/audio");
+    assert!(wait_until(Duration::from_secs(10), || {
+        StdFs.list(&audio).unwrap_or_default().iter().any(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("journal-"))
+        })
+    }));
     assert_eq!(sync_threads(one.pid()), Vec::<String>::new());
     one.signal(Signal::TERM);
     assert!(one.exits().expect("nota didn't stop").success());
 
     let mut two = recording(&tmp.0);
-    assert_eq!(sync_threads(two.pid()), ["nota-sync-0", "nota-sync-1"]);
+    assert!(
+        wait_until(Duration::from_secs(10), || sync_threads(two.pid())
+            == ["nota-sync-0", "nota-sync-1"]),
+        "{:?}",
+        sync_threads(two.pid())
+    );
     two.signal(Signal::TERM);
     assert!(two.exits().expect("nota didn't stop").success());
     assert_everything_sent_saved(&two, &tmp.0, 2, &[0, 1], 1_450);

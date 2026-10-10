@@ -267,13 +267,13 @@ impl CaptureSender {
     /// ([`CaptureEvent::Began`]).
     pub fn audio(&self, samples: &[i16]) {
         if !samples.is_empty() {
-            if !self.began.swap(true, Ordering::SeqCst) {
-                let at = self.captured_at(samples.len());
-                self.events.send(self.track, CaptureEvent::Began { at });
-            }
+            // Read once the stream has begun: only its first buffers pay
+            // for the clock.
+            let first = (!self.began.load(Ordering::SeqCst))
+                .then(|| (&*self.began, self.captured_at(samples.len())));
             // Counted before it's queued, so it's never missed.
             self.progress.sent(samples.len());
-            self.events.audio(self.track, samples);
+            self.events.first_audio(self.track, samples, first);
         }
     }
 
@@ -413,8 +413,10 @@ impl<T> Capture<T> {
     }
 
     /// When the stream was started, by the session clock: read just before
-    /// it was opened, so no audio it delivers can come from earlier. Open
-    /// the track's first epoch here.
+    /// it was opened, so no audio it delivers can come from earlier. A
+    /// track started first opens its first epoch here, early by the
+    /// stream's start-up latency; a track that joins the recorder opens it
+    /// at its first audio instead ([`CaptureEvent::Began`]).
     #[must_use]
     pub const fn started_at(&self) -> SessionTime {
         self.started_at
@@ -649,8 +651,6 @@ pub enum RecordError {
     /// starting at the same sample and at the writer's rate, so its samples
     /// would be timed wrongly. Nothing is recorded.
     TimelineMismatch,
-    /// A track joining the recorder couldn't open its first epoch.
-    FirstEpoch(EpochError),
 }
 
 impl fmt::Display for RecordError {
@@ -667,7 +667,6 @@ impl fmt::Display for RecordError {
             Self::TimelineMismatch => f.write_str(
                 "the track's timeline doesn't match the epoch or rate its journals are written in",
             ),
-            Self::FirstEpoch(e) => write!(f, "the track's first epoch couldn't open: {e}"),
         }
     }
 }
@@ -677,7 +676,6 @@ impl std::error::Error for RecordError {
         match self {
             Self::Capture(e) => Some(e),
             Self::Session(e) => Some(e),
-            Self::FirstEpoch(e) => Some(e),
             Self::RateMismatch { .. } | Self::TimelineMismatch => None,
         }
     }
@@ -749,8 +747,11 @@ pub fn record_track<S: Fs>(
 ///   [`SessionWriter::first_free_sample`], with its first epoch opened at
 ///   that audio's time ([`CaptureEvent::Began`]) and reported as a
 ///   [`RecorderEvent::Epoch`]. Until its start returns, its events wait
-///   in memory; if it doesn't start, they're dropped. A track `writer`
-///   recorded in an earlier run can't join: its epoch 0 is used.
+///   in memory; if it doesn't start, they're dropped, and so is anything
+///   it sends later. A track that can't join (`writer` refuses it, as it
+///   does a track recorded in an earlier run, whose epoch 0 is used) is
+///   reported as [`RecorderEvent::CaptureFailed`], and the others record
+///   on.
 ///
 /// After every event, from whichever track, and after a stream ends,
 /// every journal due an fsync has one started, and so do they all when
@@ -773,10 +774,8 @@ pub fn record_track<S: Fs>(
 /// [`RecordError::TimelineMismatch`] unless each timeline's current epoch
 /// is the one `writer` records its track in, from the same first sample,
 /// at `writer`'s rate. While recording, [`RecordError::Session`] if a
-/// track can't be recorded or can't join, and
-/// [`RecordError::FirstEpoch`] if a joining track's first epoch can't
-/// open. A journal that breaks isn't an error here: it's reported, and
-/// recording goes on.
+/// track can't be recorded. A journal that breaks, or a track that can't
+/// join, isn't an error here: it's reported, and recording goes on.
 pub fn record_tracks<S: Fs>(
     writer: &mut SessionWriter<S>,
     timelines: &mut [TrackTimeline],
@@ -857,6 +856,12 @@ pub fn record_tracks<S: Fs>(
                     note_started(writer, events, track);
                     Ok(())
                 }
+                Handled::Refused(error) => {
+                    // Its later events are dropped; its `Stopped` ends it.
+                    joining.insert(track, Joining::Refused);
+                    report(Some(track), RecorderEvent::CaptureFailed(error));
+                    Ok(())
+                }
                 Handled::Ended => {
                     live.remove(&track);
                     Ok(())
@@ -892,20 +897,35 @@ enum Joining {
     Unconfirmed(Vec<CaptureEvent>),
     /// Its stream started; it joins at its first audio.
     Confirmed,
+    /// Its stream didn't start, or it couldn't join: nothing more of it is
+    /// recorded, and it ends with its stream.
+    Refused,
 }
 
 /// What of `track`'s `event` to handle now: the event itself, unless the
 /// track's stream hasn't started yet, when it waits. Once the start
 /// returns, everything that waited, in order; if it fails, only the
-/// failure (the rest is dropped).
+/// failure (the rest is dropped). Of a refused track, only the end of its
+/// stream.
 fn admit(
     joining: &mut BTreeMap<TrackId, Joining>,
     track: TrackId,
     event: CaptureEvent,
     events: &CaptureReceiver,
 ) -> Vec<CaptureEvent> {
-    let Some(Joining::Unconfirmed(held)) = joining.get_mut(&track) else {
-        return vec![event];
+    let held = match joining.get_mut(&track) {
+        Some(Joining::Unconfirmed(held)) => held,
+        Some(Joining::Refused) => {
+            return match event {
+                CaptureEvent::Audio(buffer) => {
+                    events.events.recycle(buffer);
+                    Vec::new()
+                }
+                CaptureEvent::Stopped | CaptureEvent::Failed(_) => vec![CaptureEvent::Stopped],
+                _ => Vec::new(),
+            };
+        }
+        Some(Joining::Confirmed) | None => return vec![event],
     };
     match event {
         CaptureEvent::Started => {
@@ -919,7 +939,7 @@ fn admit(
                     events.events.recycle(buffer);
                 }
             }
-            joining.remove(&track);
+            joining.insert(track, Joining::Refused);
             vec![CaptureEvent::NotStarted]
         }
         event => {
@@ -978,6 +998,8 @@ enum Handled {
     Recorded(Result<(), (TrackId, SessionError)>, Option<Vec<i16>>),
     /// The track joined: it's started on the writer, its first epoch open.
     Joined,
+    /// The track couldn't join, for this reason: it isn't recorded.
+    Refused(CaptureError),
     /// The track's stream stopped, failed or never started: nothing more
     /// comes from it.
     Ended,
@@ -1029,7 +1051,10 @@ fn handle<S: Fs>(
                 // Started first: its epoch is already open.
                 return Ok(Handled::Recorded(Ok(()), None));
             }
-            let timeline = join(writer, track, at)?;
+            let timeline = match join(writer, track, at) {
+                Ok(timeline) => timeline,
+                Err(error) => return Ok(Handled::Refused(error)),
+            };
             if let Some(&epoch) = timeline.current() {
                 report(Some(track), RecorderEvent::Epoch(epoch));
             }
@@ -1047,20 +1072,22 @@ fn handle<S: Fs>(
 }
 
 /// Starts joining `track` on `writer`, in epoch 0 at its first free
-/// sample, and returns its timeline, with that epoch opened `at`.
+/// sample, and returns its timeline, with that epoch opened `at`; or why
+/// it can't record.
 fn join<S: Fs>(
     writer: &mut SessionWriter<S>,
     track: TrackId,
     at: SessionTime,
-) -> Result<TrackTimeline, RecordError> {
+) -> Result<TrackTimeline, CaptureError> {
+    let refused = |e: &dyn fmt::Display| CaptureError::Backend(format!("couldn't record it: {e}"));
     let first = writer.first_free_sample(track);
     let mut timeline = TrackTimeline::new(track);
     timeline
         .open_epoch(at, first, writer.rate())
-        .map_err(RecordError::FirstEpoch)?;
+        .map_err(|e| refused(&e))?;
     writer
         .start_track(track, EpochId::new(0), first)
-        .map_err(RecordError::Session)?;
+        .map_err(|e| refused(&e))?;
     Ok(timeline)
 }
 

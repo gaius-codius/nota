@@ -353,6 +353,14 @@ fn a_stream_without_a_timeline_waits_for_its_start() {
     );
     tx.send(SYSTEM, CaptureEvent::Audio(samples(SYSTEM, 0, 10)));
     tx.send(SYSTEM, CaptureEvent::NotStarted);
+    // Anything its stream still sends is dropped.
+    tx.send(
+        SYSTEM,
+        CaptureEvent::Began {
+            at: SessionTime::ZERO,
+        },
+    );
+    tx.send(SYSTEM, CaptureEvent::Audio(samples(SYSTEM, 10, 10)));
     tx.send(MIC, CaptureEvent::Stopped);
     let events = CaptureReceiver {
         events: rx,
@@ -370,6 +378,61 @@ fn a_stream_without_a_timeline_waits_for_its_start() {
     assert!(!reported.contains(&Some(SYSTEM)), "{reported:?}");
     assert_eq!(writer.next_sample(MIC), Some(SampleIndex::new(10)));
     assert_eq!(writer.next_sample(SYSTEM), None);
+}
+
+/// A track that can't start on the writer when it joins is reported as
+/// failed, and the track already recording records on.
+#[test]
+fn a_track_that_cant_join_leaves_the_other_recording() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let session = SessionDir::new(SESSION, fs, &dir()).lock().unwrap();
+    let length = SegmentLength::new(SampleCount::new(1_000)).unwrap();
+    let mut writer = SessionWriter::open(&session, rate(), length, clock).unwrap();
+    for track in [MIC, SYSTEM] {
+        writer
+            .start_track(track, EpochId::new(0), SampleIndex::ZERO)
+            .unwrap();
+    }
+    let mut mic = TrackTimeline::new(MIC);
+    mic.open_epoch(SessionTime::ZERO, SampleIndex::ZERO, rate())
+        .unwrap();
+    let (tx, rx) = test_channel();
+    tx.send(MIC, CaptureEvent::Audio(samples(MIC, 0, 10)));
+    tx.send(SYSTEM, CaptureEvent::Started);
+    // The writer already has the system track: it can't join.
+    tx.send(
+        SYSTEM,
+        CaptureEvent::Began {
+            at: SessionTime::ZERO,
+        },
+    );
+    tx.send(SYSTEM, CaptureEvent::Audio(samples(SYSTEM, 0, 10)));
+    tx.send(MIC, CaptureEvent::Audio(samples(MIC, 10, 10)));
+    tx.send(SYSTEM, CaptureEvent::Stopped);
+    tx.send(MIC, CaptureEvent::Stopped);
+    let events = CaptureReceiver {
+        events: rx,
+        rate: rate(),
+        tracks: test_tracks(&[MIC, SYSTEM]),
+    };
+    let mut failed = Vec::new();
+    record_tracks(
+        &mut writer,
+        std::slice::from_mut(&mut mic),
+        &events,
+        &mut |t, e| {
+            if let RecorderEvent::CaptureFailed(e) = e {
+                failed.push((t, e.to_string()));
+            }
+        },
+    )
+    .unwrap();
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0].0, Some(SYSTEM));
+    assert!(failed[0].1.contains("couldn't record it"), "{failed:?}");
+    assert_eq!(writer.next_sample(MIC), Some(SampleIndex::new(20)));
+    assert_eq!(writer.next_sample(SYSTEM), Some(SampleIndex::ZERO));
 }
 
 /// Opens "mic" at once; "system" only once `gate` says so; "late" after

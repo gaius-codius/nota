@@ -493,8 +493,10 @@ fn one_track_on_auto_runs_exactly_as_inline() {
     );
 }
 
-/// A second track moves the first one's fsyncs to a thread, with the
-/// sync it ran inline and hadn't taken yet still counted.
+/// A second track moves the first one's fsyncs to a thread: the
+/// durable position its inline syncs reached stands, and both tracks
+/// record whole. (Results run inline and not yet taken are forwarded by
+/// `TrackSyncs::move_to_thread`, tested in `syncs`.)
 #[test]
 fn a_second_track_on_auto_moves_every_track_to_threads() {
     const SYSTEM: TrackId = TrackId::new(1);
