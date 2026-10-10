@@ -157,6 +157,7 @@ pub(super) fn note_published(outcome: &mut Outcome, report: &PublishReport) {
         }
         outcome.notes.push(note);
     }
+    outcome.notes.extend(held_notes(report.held()));
     if !report.set_aside().is_empty() {
         let names = file_names(report.set_aside());
         let (damaged, are) = if report.set_aside().len() == 1 {
@@ -168,6 +169,105 @@ pub(super) fn note_published(outcome: &mut Outcome, report: &PublishReport) {
             "{damaged} damaged, so part of the recording wasn't published: \
              {names} {are} kept, and what read before the damage was published"
         ));
+    }
+}
+
+/// Names the files a publish or salvage run couldn't use or clean up.
+pub(crate) fn held_notes(held: &nota_recorder::segment::Published) -> Vec<String> {
+    let mut notes = Vec::new();
+    for (path, kind) in held.blocked() {
+        notes.push(format!(
+            "{}: {}; its audio is still to publish",
+            file_name(path),
+            file_cause(*kind)
+        ));
+    }
+    notes.extend(cleanup_notes(held));
+    notes.extend(finding_notes(held));
+    for (path, kind) in held.temps_kept() {
+        notes.push(format!(
+            "{}: couldn't remove the temporary file ({})",
+            file_name(path),
+            file_cause(*kind)
+        ));
+    }
+    for (journal, kind) in held.unread() {
+        notes.push(format!(
+            "{}: couldn't read it ({})",
+            journal.id().file_name(),
+            file_cause(*kind)
+        ));
+    }
+    notes
+}
+
+/// Names rows that still hold a journal's audio back.
+fn finding_notes(held: &nota_recorder::segment::Published) -> Vec<String> {
+    use nota_recorder::segment::{Problem, segment_file_name};
+    held.findings()
+        .iter()
+        .map(|finding| {
+            let row = finding.row();
+            let name = segment_file_name(row.track(), row.range());
+            let cause = match finding.problem() {
+                Problem::Missing => "the segment file is missing".to_owned(),
+                Problem::HashMismatch | Problem::LengthMismatch => {
+                    "the segment file doesn't match its stored audio".to_owned()
+                }
+                Problem::Unreadable(_) => "the segment file couldn't be read".to_owned(),
+            };
+            let repair = held
+                .not_repaired()
+                .iter()
+                .find(|(r, _)| r == row)
+                .map(|(_, kind)| format!("; couldn't repair it ({})", file_cause(*kind)))
+                .unwrap_or_default();
+            format!("{name}: {cause}{repair}; its journals are still to publish")
+        })
+        .collect()
+}
+
+/// Names journals kept only because deleting or setting them aside failed.
+fn cleanup_notes(held: &nota_recorder::segment::Published) -> Vec<String> {
+    let mut notes = Vec::new();
+    for (id, kind) in held.not_deleted() {
+        notes.push(format!(
+            "{}: couldn't delete it ({}); all its audio is published",
+            id.file_name(),
+            file_cause(*kind)
+        ));
+    }
+    for (path, kind) in held.not_set_aside() {
+        let why = if *kind == io::ErrorKind::AlreadyExists {
+            "aside name taken".to_owned()
+        } else {
+            format!("couldn't set it aside ({})", file_cause(*kind))
+        };
+        notes.push(format!(
+            "{}: {why}; the damaged journal is kept",
+            file_name(path)
+        ));
+    }
+    notes
+}
+
+/// The file's own name, so startup and the summary use the same spelling.
+fn file_name(path: &std::path::Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
+}
+
+/// The cause of a name that can't be used.
+fn file_cause(kind: io::ErrorKind) -> String {
+    match kind {
+        io::ErrorKind::IsADirectory | io::ErrorKind::DirectoryNotEmpty => {
+            "a directory is in the way".to_owned()
+        }
+        io::ErrorKind::AlreadyExists => "the name is taken".to_owned(),
+        io::ErrorKind::PermissionDenied => "permission denied".to_owned(),
+        _ => kind.to_string(),
     }
 }
 
@@ -195,7 +295,7 @@ pub(super) fn track_name(track: Option<TrackId>) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use nota_core::recorder::{Input, Mark, Note, Setup};
     use nota_core::{
         EpochId, FakeClock, SampleCount, SampleIndex, SampleRate, SessionId, SessionTime,
@@ -349,6 +449,241 @@ mod tests {
                  journal-000000.unreadable is kept, and what read before the damage \
                  was published"
             ]
+        );
+    }
+
+    /// Whether the fixture keeps all its audio or has damage between frames.
+    #[derive(Clone, Copy)]
+    enum JournalAudio {
+        Intact,
+        Damaged,
+    }
+
+    /// A finished journal ready for the real publisher to inspect.
+    pub(in crate::record) struct PublishFixture {
+        /// The filesystem holding the recorded journals.
+        pub(in crate::record) fs: FakeFs,
+        /// The session lock used by the writer and publisher.
+        pub(in crate::record) lock: nota_recorder::session::SessionLock<FakeFs>,
+        /// The journals the writer finished for publication.
+        journals: Vec<nota_recorder::session::FinishedJournal>,
+        /// The recording's segment window.
+        pub(in crate::record) length: SegmentLength,
+    }
+
+    impl PublishFixture {
+        /// Records synced frames, retaining the journal until publication.
+        fn recorded(audio: JournalAudio) -> Self {
+            let session = PathBuf::from("/held-session");
+            let fs = FakeFs::with_dirs([session.clone(), PathBuf::from("/held-db")]);
+            let lock = SessionDir::new(SessionId::new(1), fs.clone(), &session)
+                .lock()
+                .unwrap();
+            let length = SegmentLength::new(SampleCount::new(1_000)).unwrap();
+            let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
+            let mut writer =
+                SessionWriter::open(&lock, SampleRate::new(1_000).unwrap(), length, clock).unwrap();
+            writer
+                .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+                .unwrap();
+            for _ in 0..20 {
+                writer.append(MIC, &[7; 50]).unwrap();
+            }
+            let journals = writer.finish().unwrap();
+            let fixture = Self {
+                fs,
+                lock,
+                journals,
+                length,
+            };
+            if matches!(audio, JournalAudio::Damaged) {
+                fixture.damage_middle_frame();
+            }
+            fixture
+        }
+
+        /// Damage after two frames leaves readable audio on both sides.
+        fn damage_middle_frame(&self) {
+            use nota_recorder::journal::format::{FRAME_HEADER_LEN, HEADER_LEN};
+            let path = self.journal_path();
+            let mut bytes = self.fs.read(&path).unwrap();
+            bytes[HEADER_LEN + 2 * (FRAME_HEADER_LEN + 100) + FRAME_HEADER_LEN + 7] ^= 0x40;
+            self.fs.remove(&path).unwrap();
+            self.fs.create(&path).unwrap().write_all(&bytes).unwrap();
+        }
+
+        /// Names the first recorded journal without reading an id from its path.
+        fn journal_path(&self) -> PathBuf {
+            PathBuf::from("/held-session").join(self.journals[0].id().file_name())
+        }
+
+        /// Finishing retries pending work and produces the summary's report.
+        fn publish(self) -> (PublishReport, Outcome) {
+            let publisher = Publisher::spawn(
+                SessionStore::new(
+                    self.lock,
+                    FakeStore::new(&self.fs, &PathBuf::from("/held-db")),
+                ),
+                self.length,
+            )
+            .unwrap();
+            assert!(publisher.queue().send(self.journals));
+            let report = publisher.finish().unwrap();
+            let mut outcome = Outcome::default();
+            note_published(&mut outcome, &report);
+            (report, outcome)
+        }
+    }
+
+    /// A directory occupying the final segment name explains unpublished audio.
+    #[test]
+    fn the_summary_names_a_directory_blocking_publication() {
+        let fixture = PublishFixture::recorded(JournalAudio::Intact);
+        // The writer has finished; only publication meets the obstructing directory.
+        fixture
+            .fs
+            .create_dir(&PathBuf::from("/held-session/seg-t0-000000000000.flac"))
+            .unwrap();
+        let (report, outcome) = fixture.publish();
+        assert_eq!(report.left().len(), 1);
+        assert!(!outcome.complete);
+        assert!(outcome.notes.iter().any(|note| note ==
+            "seg-t0-000000000000.flac: a directory is in the way; its audio is still to publish"));
+    }
+
+    /// An undeletable journal explains cleanup without claiming audio is unsaved.
+    #[test]
+    fn the_summary_says_an_undeletable_journals_audio_is_published() {
+        use nota_recorder::fs::fake::Fault;
+        let fixture = PublishFixture::recorded(JournalAudio::Intact);
+        // Refuse only cleanup, after the segment and its row are saved.
+        fixture.fs.fail_on(
+            &fixture.journal_path(),
+            Fault::Remove,
+            io::ErrorKind::PermissionDenied,
+        );
+        let (report, outcome) = fixture.publish();
+        assert!(report.left().is_empty());
+        assert!(outcome.complete);
+        assert_eq!(outcome.segments, 1);
+        assert_eq!(
+            outcome.notes,
+            ["journal-000000: couldn't delete it (permission denied); all its audio is published"]
+        );
+    }
+
+    /// Publishes one journal while refusing its final deletion.
+    pub(crate) fn cleanup_report() -> nota_recorder::segment::Published {
+        use nota_recorder::fs::fake::Fault;
+        let fixture = PublishFixture::recorded(JournalAudio::Intact);
+        // Only deletion fails; the report proves the segment's audio is saved.
+        fixture.fs.fail_on(
+            &fixture.journal_path(),
+            Fault::Remove,
+            io::ErrorKind::PermissionDenied,
+        );
+        let mut bound = SessionStore::new(
+            fixture.lock,
+            FakeStore::new(&fixture.fs, &PathBuf::from("/held-db")),
+        );
+        nota_recorder::segment::publish_journals(&mut bound, fixture.length, &fixture.journals)
+            .unwrap()
+    }
+
+    /// A taken aside name explains why a damaged journal remains under its name.
+    #[test]
+    fn the_summary_names_a_taken_aside_name() {
+        let fixture = PublishFixture::recorded(JournalAudio::Damaged);
+        // Preserve an earlier aside file, forcing the collision path to keep both.
+        fixture
+            .fs
+            .create(&PathBuf::from("/held-session/journal-000000.unreadable"))
+            .unwrap()
+            .write_all(b"previous damaged journal")
+            .unwrap();
+        let (report, outcome) = fixture.publish();
+        assert_eq!(report.left().len(), 1);
+        assert!(!outcome.complete);
+        assert!(report.set_aside().is_empty());
+        assert!(outcome.notes.iter().any(|note| note
+            == "journal-000000: aside name taken; the damaged journal is kept"));
+    }
+    /// Two journals: one needs cleanup, the other's changed segment cannot be repaired.
+    pub(in crate::record) fn mixed_fixture() -> PublishFixture {
+        use nota_recorder::fs::fake::Fault;
+        use nota_recorder::segment::publish_journals;
+        let mut fixture = PublishFixture::recorded(JournalAudio::Intact);
+        let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
+        let mut writer = SessionWriter::open(
+            &fixture.lock,
+            SampleRate::new(1_000).unwrap(),
+            fixture.length,
+            clock,
+        )
+        .unwrap();
+        writer
+            .start_track(SYSTEM, EpochId::new(0), SampleIndex::ZERO)
+            .unwrap();
+        writer.append(SYSTEM, &[9; 50]).unwrap();
+        fixture.journals.extend(writer.finish().unwrap());
+        // Retain both published journals so the later repair has its original audio.
+        for journal in &fixture.journals {
+            fixture.fs.fail_on(
+                &PathBuf::from("/held-session").join(journal.id().file_name()),
+                Fault::Remove,
+                io::ErrorKind::PermissionDenied,
+            );
+        }
+        let mut bound = SessionStore::new(
+            fixture.lock.clone(),
+            FakeStore::new(&fixture.fs, &PathBuf::from("/held-db")),
+        );
+        let first = publish_journals(&mut bound, fixture.length, &fixture.journals).unwrap();
+        assert_eq!(first.not_deleted().len(), 2);
+        block_system_repair(&fixture.fs, &first);
+
+        fixture
+    }
+
+    /// Leaves the system segment changed and refuses to move it aside.
+    fn block_system_repair(fs: &FakeFs, first: &nota_recorder::segment::Published) {
+        use nota_recorder::fs::fake::Fault;
+        use nota_recorder::segment::segment_file_name;
+        let row = first
+            .segments()
+            .iter()
+            .find(|row| row.track() == SYSTEM)
+            .unwrap();
+        let path = PathBuf::from("/held-session").join(segment_file_name(row.track(), row.range()));
+        // A changed file that cannot be moved aside makes repair fail before replacing it.
+        fs.remove(&path).unwrap();
+        fs.create(&path)
+            .unwrap()
+            .write_all(b"changed segment")
+            .unwrap();
+        fs.fail_on(&path, Fault::Rename, io::ErrorKind::PermissionDenied);
+    }
+
+    /// Cleanup of one journal must not hide another journal's pending repair.
+    #[test]
+    fn the_summary_reports_cleanup_and_unfinished_repair_together() {
+        let (report, outcome) = mixed_fixture().publish();
+        assert_eq!(report.held().not_deleted().len(), 1);
+        assert_eq!(report.held().not_repaired().len(), 1);
+        assert!(!outcome.complete);
+        assert!(
+            outcome
+                .notes
+                .iter()
+                .any(|note| note.contains("all its audio is published"))
+        );
+        assert!(
+            outcome
+                .notes
+                .iter()
+                .any(|note| note.contains("seg-t1-000000000000.flac")
+                    && note.contains("couldn't repair it (permission denied)")
+                    && note.contains("its journals are still to publish"))
         );
     }
 }

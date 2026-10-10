@@ -103,8 +103,10 @@ mod summary;
 
 pub(crate) use signals::QuitSignals;
 pub(crate) use start::last_setup;
-pub(crate) use summary::Outcome;
 use summary::show;
+#[cfg(test)]
+pub(crate) use summary::tests::cleanup_report;
+pub(crate) use summary::{Outcome, held_notes};
 
 use crate::final_pass::Engine;
 use crate::library::Library;

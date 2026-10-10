@@ -625,6 +625,15 @@ fn session(listed: Listed, salvaged: &[Salvaged], dates: &Dates) -> Session {
         (Needs::Attention(_), Some(Salvaged::Failed(_, e))) => {
             (Status::NeedsYou, Some(format!("salvage failed: {e}")))
         }
+        (Needs::Attention(why), Some(Salvaged::Left(_, _, held))) => {
+            let notes = crate::record::held_notes(held);
+            let detail = if notes.is_empty() {
+                why
+            } else {
+                notes.join("; ")
+            };
+            (Status::NeedsYou, Some(detail))
+        }
         (Needs::Attention(why), _) => (Status::NeedsYou, Some(why)),
         (Needs::InUse, _) => (Status::Processing, Some("being recorded".to_owned())),
         // Salvage at start failed, but a later one (each recording's start
@@ -635,7 +644,7 @@ fn session(listed: Listed, salvaged: &[Salvaged], dates: &Dates) -> Session {
         // Journals salvage left, or set aside as damaged, show as attention
         // above while they're there; once none are left, it's recovered.
         // "Nothing lost" only if salvage set nothing aside.
-        (Needs::Nothing, Some(Salvaged::Done(_, aside) | Salvaged::Left(_, aside))) => {
+        (Needs::Nothing, Some(Salvaged::Done(_, aside) | Salvaged::Left(_, aside, _))) => {
             let recovered = if aside.is_empty() {
                 "recovered after a crash · nothing lost"
             } else {
@@ -659,7 +668,7 @@ fn session(listed: Listed, salvaged: &[Salvaged], dates: &Dates) -> Session {
 const fn salvaged_id(salvaged: &Salvaged) -> SessionId {
     match salvaged {
         Salvaged::Done(id, _)
-        | Salvaged::Left(id, _)
+        | Salvaged::Left(id, _, _)
         | Salvaged::InUse(id)
         | Salvaged::Failed(id, _) => *id,
     }

@@ -9,7 +9,7 @@ use std::thread::{self, JoinHandle};
 
 use nota_store::SegmentRow;
 
-use super::{PublishError, SegmentLength, SegmentStore, publish_journals};
+use super::{PublishError, Published, SegmentLength, SegmentStore, publish_journals};
 use crate::fs::Fs;
 use crate::session::{FinishedJournal, SessionError, SessionStore, SessionWriter};
 
@@ -50,10 +50,16 @@ impl PublishQueue {
 /// What a [`Publisher`] did, once it finished.
 #[derive(Debug, Default)]
 pub struct PublishReport {
+    /// All rows known when the publisher stopped.
     rows: Vec<SegmentRow>,
+    /// Errors from every attempt, including ones a later try got past.
     errors: Vec<PublishError>,
+    /// Journals still needing publication.
     left: Vec<FinishedJournal>,
+    /// Damaged journals kept under their aside names.
     set_aside: Vec<PathBuf>,
+    /// Names and causes from the last attempt.
+    held: Published,
 }
 
 impl PublishReport {
@@ -72,17 +78,19 @@ impl PublishReport {
         &self.errors
     }
 
-    /// The journals still on disk after the last try: its run failed,
-    /// they couldn't be read (see
-    /// [`Published::unread`](super::Published::unread)), deleted or set
-    /// aside, a name their segment needs couldn't be used (see
-    /// [`Published::blocked`](super::Published::blocked)), or a finding
-    /// holds their audio back (see
-    /// [`Published::findings`](super::Published::findings)). They're left
-    /// for salvage at the next start.
+    /// Journals still needing publication after the last try. A journal
+    /// whose audio is all in saved segments but couldn't be deleted is
+    /// reported by [`Self::held`] instead.
     #[must_use]
     pub fn left(&self) -> &[FinishedJournal] {
         &self.left
+    }
+
+    /// The last run's held names and their error kinds. Earlier failures
+    /// that a later run got past aren't reported here.
+    #[must_use]
+    pub const fn held(&self) -> &Published {
+        &self.held
     }
 
     /// The journal files set aside as damaged, under their new names (see
@@ -232,6 +240,13 @@ fn publish_all<S: Fs, T: SegmentStore>(
     if !pending.is_empty() {
         publish_pending(&mut session, length, &mut pending, &mut report);
     }
+    pending.retain(|journal| {
+        !report
+            .held
+            .not_deleted()
+            .iter()
+            .any(|(id, _)| *id == journal.id())
+    });
     report.left = pending;
     if let Ok(rows) = session.parts().1.rows() {
         report.rows = rows;
@@ -257,8 +272,13 @@ fn publish_pending<S: Fs, T: SegmentStore>(
                     "syncing the directory after setting journals aside failed",
                 )));
             }
+            report.held = published;
         }
-        Err(error) => report.errors.push(error),
+        Err(error) => {
+            // A failed run gives no proof of which journals are settled.
+            report.held = Published::default();
+            report.errors.push(error);
+        }
     }
     let dir = session.session();
     if let Ok(there) = dir.fs().list(dir.dir()) {

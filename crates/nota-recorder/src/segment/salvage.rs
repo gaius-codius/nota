@@ -250,6 +250,40 @@ fn store_error<E: Error + Send + Sync + 'static>(e: E) -> PublishError {
     PublishError::Store(Box::new(e))
 }
 
+/// Salvages at startup through the disk watch. If a full disk freed the
+/// ballast, retry once: the first attempt may have left part of a segment.
+///
+/// # Errors
+///
+/// As [`salvage`], after the retry if one was needed.
+pub fn salvage_start<S: Fs + Clone + 'static, T: SegmentStore>(
+    session: &mut SessionStore<crate::disk::WatchedFs<S>, T>,
+    length: SegmentLength,
+    watch: &crate::disk::DiskWatch<S>,
+) -> Result<Published, PublishError> {
+    let first = salvage(session, length);
+    if first.as_ref().is_err_and(startup_space_error::<T>)
+        && watch
+            .full()
+            .is_some_and(|f| f.ballast == crate::disk::Freed::Freed)
+    {
+        salvage(session, length)
+    } else {
+        first
+    }
+}
+
+/// Retries only the space failure that spending the ballast can resolve.
+fn startup_space_error<T: SegmentStore>(error: &PublishError) -> bool {
+    match error {
+        PublishError::Io(error) => crate::fs::is_disk_full(error),
+        PublishError::Store(error) => error
+            .downcast_ref::<T::Error>()
+            .is_some_and(T::is_disk_full),
+        _ => false,
+    }
+}
+
 /// Recovers a session after a crash: publishes every journal left in its
 /// directory as segments, adds the rows missing from its store, and deletes
 /// the journals once their rows are committed. Leftover segment and findings
@@ -1170,5 +1204,51 @@ mod tests {
             ),
             Err(Problem::HashMismatch)
         );
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+    use crate::segment::FakeStore;
+
+    /// A reserve freed earlier does not make a permission error worth retrying.
+    #[test]
+    fn startup_doesnt_retry_a_permission_error() {
+        let error = PublishError::Io(io::ErrorKind::PermissionDenied.into());
+        // The current error, rather than an earlier full disk, decides the retry.
+        assert!(!startup_space_error::<FakeStore>(&error));
+    }
+
+    /// A filesystem space failure can be retried after the reserve is freed.
+    #[test]
+    fn startup_retries_a_filesystem_space_error() {
+        let error = PublishError::Io(io::ErrorKind::StorageFull.into());
+        // This is the error freeing the reserve can resolve.
+        assert!(startup_space_error::<FakeStore>(&error));
+    }
+
+    /// A store permission failure remains final even after earlier recovery.
+    #[test]
+    fn startup_doesnt_retry_a_store_permission_error() {
+        let error = PublishError::Store(Box::new(io::Error::from(io::ErrorKind::PermissionDenied)));
+        // Free space cannot repair a permission failure.
+        assert!(!startup_space_error::<FakeStore>(&error));
+    }
+
+    /// A live session cannot be recovered by spending the reserve.
+    #[test]
+    fn startup_doesnt_retry_a_recording_in_use() {
+        let error = PublishError::InUse(Use::Recording);
+        // The recording lock stays held regardless of free space.
+        assert!(!startup_space_error::<FakeStore>(&error));
+    }
+
+    /// The store's own space classification decides its retry.
+    #[test]
+    fn startup_retries_a_store_space_error() {
+        let error = PublishError::Store(Box::new(io::Error::from(io::ErrorKind::StorageFull)));
+        // FakeStore reports I/O errors, as the watched store reports SQLite errors.
+        assert!(startup_space_error::<FakeStore>(&error));
     }
 }

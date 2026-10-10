@@ -197,7 +197,7 @@ fn salvage_that_leaves_journals_says_so() {
     StdFs.create_dir(&session.audio().join(journal)).unwrap();
     let done = library.salvage_all(length()).unwrap();
     assert!(
-        matches!(done[..], [Salvaged::Left(id, _)] if id == session.id),
+        matches!(done[..], [Salvaged::Left(id, _, _)] if id == session.id),
         "{done:?}"
     );
 }
@@ -1140,4 +1140,172 @@ fn a_row_that_doesnt_parse_is_one_sessions_problem_in_the_listing() {
     assert_eq!(listed[0].recorded, None);
     assert_eq!(listed[1].recorded, Some(Duration::from_secs(60)));
     assert_eq!(listed[1].needs, Needs::Nothing);
+}
+
+/// Home reads the kept title and date when the session has no database row.
+#[test]
+fn listing_uses_kept_metadata_without_a_database_row() {
+    let tmp = TestDir::new("listing-kept-no-row");
+    let library = Library::open(&tmp.0).unwrap();
+    let session = library.create().unwrap();
+    let kept = NewSession {
+        title: Some("Woodland ecology".into()),
+        started_at: WallTime::from_unix_seconds(1_760_004_000),
+        ..NewSession::bare(session.id)
+    };
+    session.keep(&kept).unwrap();
+    leave_journal(&session);
+    assert_eq!(
+        library.db().with(|db| db.session(session.id)).unwrap(),
+        None
+    );
+
+    let listed = library.listing(SampleRate::SPEECH).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, session.id);
+    assert_eq!(listed[0].title, kept.title);
+    assert_eq!(listed[0].started_at, kept.started_at);
+    assert_eq!(listed[0].recorded, None);
+    assert!(matches!(listed[0].needs, Needs::Attention(_)));
+    // Reading the fallback must not turn the listing into adoption.
+    assert_eq!(
+        library.db().with(|db| db.session(session.id)).unwrap(),
+        None
+    );
+    assert_eq!(
+        kept::read(&StdFs, &session.dir, session.id).unwrap(),
+        Some(kept)
+    );
+}
+
+/// Home reads the kept title and date when the database cannot be opened.
+#[test]
+fn listing_uses_kept_metadata_when_the_database_cant_be_read() {
+    let tmp = TestDir::new("listing-kept-bad-db");
+    let library = Library::open(&tmp.0).unwrap();
+    let session = library.create().unwrap();
+    let kept = NewSession {
+        title: Some("River habitats".into()),
+        started_at: WallTime::from_unix_seconds(1_760_004_001),
+        ..NewSession::bare(session.id)
+    };
+    session.keep(&kept).unwrap();
+    leave_journal(&session);
+    drop(library);
+    // Break the database so this proves fallback after a read failure.
+    break_db(&tmp.0);
+    let library = Library::open(&tmp.0).unwrap();
+
+    let listed = library.listing(SampleRate::SPEECH).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, session.id);
+    assert_eq!(listed[0].title, kept.title);
+    assert_eq!(listed[0].started_at, kept.started_at);
+    assert_eq!(listed[0].recorded, None);
+    let Needs::Attention(why) = &listed[0].needs else {
+        panic!("{listed:?}");
+    };
+    assert!(why.starts_with("audio still to save"), "{why}");
+}
+
+/// A database row takes precedence even when its title and date are unknown.
+#[test]
+fn listing_database_metadata_takes_precedence_over_kept_metadata() {
+    let tmp = TestDir::new("listing-kept-precedence");
+    let library = Library::open(&tmp.0).unwrap();
+    // A later row must not resurrect an older title, including when it clears one.
+    for (title, started_at) in [
+        (
+            Some("Edited title".to_owned()),
+            WallTime::from_unix_seconds(1_760_008_000),
+        ),
+        (None, None),
+    ] {
+        let session = library.create().unwrap();
+        session
+            .keep(&NewSession {
+                title: Some("Original title".into()),
+                started_at: WallTime::from_unix_seconds(1_760_004_000),
+                ..NewSession::bare(session.id)
+            })
+            .unwrap();
+        library
+            .db()
+            .with(|db| {
+                db.create_session(&NewSession {
+                    title: title.clone(),
+                    started_at,
+                    ..NewSession::bare(session.id)
+                })
+            })
+            .unwrap();
+        let listed = library.listing(SampleRate::SPEECH).unwrap();
+        let row = listed.iter().find(|row| row.id == session.id).unwrap();
+        assert_eq!(row.title, title);
+        assert_eq!(row.started_at, started_at);
+        assert_eq!(row.recorded, None);
+        assert_eq!(row.needs, Needs::Nothing);
+    }
+}
+
+/// A session without either source of metadata keeps its unknown title and date.
+#[test]
+fn listing_without_kept_metadata_still_has_unknown_title_and_start() {
+    let tmp = TestDir::new("listing-no-kept");
+    let library = Library::open(&tmp.0).unwrap();
+    let session = library.create().unwrap();
+    leave_journal(&session);
+    // An unreadable database must not invent metadata absent from the session.
+    for library in [Some(library), None] {
+        let library = library.unwrap_or_else(|| {
+            break_db(&tmp.0);
+            Library::open(&tmp.0).unwrap()
+        });
+        let listed = library.listing(SampleRate::SPEECH).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, session.id);
+        assert_eq!(listed[0].title, None);
+        assert_eq!(listed[0].started_at, None);
+        assert_eq!(listed[0].recorded, None);
+        assert!(matches!(listed[0].needs, Needs::Attention(_)));
+    }
+}
+
+/// A second start mustn't spend the ballast of a live recording, even
+/// before that recording has made its first journal.
+#[test]
+fn startup_keeps_a_live_recordings_ballast() {
+    use nota_recorder::disk::{Ballast, Freed};
+    use nota_recorder::fs::fake::FakeFs;
+    let root = PathBuf::from("/data");
+    let audio = root.join("sessions/1/audio");
+    let fs = FakeFs::with_dirs([audio.clone()]);
+    Ballast::keep(&fs, &root, 1_024, || false).unwrap();
+    let _recording = fs.lock_dir(&audio).unwrap();
+    // Home recovery takes no reserve from a session still being started.
+    let watch = startup_watch(&fs, &root, 1_024).unwrap();
+    fs.set_capacity(Some(1_024));
+    let mut output = watch.fs().create(&root.join("old-segment.tmp")).unwrap();
+    assert_eq!(
+        output.write_all(&[7; 20]).unwrap_err().kind(),
+        io::ErrorKind::StorageFull
+    );
+    assert_eq!(watch.full().map(|f| f.ballast), Some(Freed::None));
+    assert!(Ballast::find(&fs, &root, 1_024).unwrap().is_some());
+}
+
+/// Once another recording releases its lock, recovery can use the ballast.
+#[test]
+fn startup_can_use_ballast_after_the_live_recording_stops() {
+    use nota_recorder::disk::Ballast;
+    use nota_recorder::fs::fake::FakeFs;
+    let root = PathBuf::from("/data");
+    let audio = root.join("sessions/1/audio");
+    let fs = FakeFs::with_dirs([audio.clone()]);
+    Ballast::keep(&fs, &root, 1_024, || false).unwrap();
+    let recording = fs.lock_dir(&audio).unwrap();
+    assert!(!startup_watch(&fs, &root, 1_024).unwrap().holds_ballast());
+    // Releasing the session gives recovery its finishing room back.
+    drop(recording);
+    assert!(startup_watch(&fs, &root, 1_024).unwrap().holds_ballast());
 }

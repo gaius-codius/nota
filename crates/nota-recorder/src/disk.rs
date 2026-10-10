@@ -418,6 +418,12 @@ impl<S: Fs + Clone> DiskWatch<S> {
         self.changed.notify_all();
     }
 
+    /// Starts recording after startup succeeded. A full disk startup got
+    /// past belongs to recovery, before the monitor or any writer runs.
+    pub fn start_recording(&self) {
+        self.lock().full = None;
+    }
+
     /// Whether the disk has filled, and how.
     #[must_use]
     pub fn full(&self) -> Option<Full> {
@@ -541,6 +547,11 @@ impl<S: Fs + Clone + 'static> Fs for WatchedFs<S> {
 
     fn remove(&self, path: &Path) -> io::Result<()> {
         seen(&self.watch, path, self.inner.remove(path))
+    }
+
+    /// Removes an empty directory and reports a full disk to the watch.
+    fn remove_dir(&self, path: &Path) -> io::Result<()> {
+        seen(&self.watch, path, self.inner.remove_dir(path))
     }
 
     fn sync_file(&self, path: &Path) -> io::Result<()> {

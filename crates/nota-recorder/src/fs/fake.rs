@@ -121,6 +121,8 @@ pub enum Op {
     SyncDir(PathBuf),
     /// [`Fs::remove`].
     Remove(PathBuf),
+    /// [`Fs::remove_dir`].
+    RemoveDir(PathBuf),
     /// [`Fs::read`].
     Read(PathBuf),
     /// [`Fs::list`].
@@ -136,6 +138,8 @@ pub enum Fault {
     Rename,
     /// [`Fs::remove`] of the path.
     Remove,
+    /// [`Fs::remove_dir`] of the path.
+    RemoveDir,
     /// [`Fs::read`] of the path.
     Read,
 }
@@ -350,6 +354,7 @@ enum NameOp {
     MakeDir(PathBuf),
     Rename(PathBuf, PathBuf),
     Unlink(PathBuf),
+    RemoveDir(PathBuf),
 }
 
 impl NameOp {
@@ -360,7 +365,8 @@ impl NameOp {
             Self::Link(path, _)
             | Self::MakeDir(path)
             | Self::Rename(path, _)
-            | Self::Unlink(path) => path.parent(),
+            | Self::Unlink(path)
+            | Self::RemoveDir(path) => path.parent(),
         }
     }
 
@@ -379,6 +385,9 @@ impl NameOp {
             }
             Self::Unlink(path) => {
                 names.files.remove(path);
+            }
+            Self::RemoveDir(path) => {
+                names.dirs.remove(path);
             }
         }
     }
@@ -873,6 +882,31 @@ impl Fs for FakeFs {
         Ok(())
     }
 
+    /// Removes an empty directory and records its name change.
+    fn remove_dir(&self, path: &Path) -> io::Result<()> {
+        valid_path(path)?;
+        let mut state = self.lock();
+        state.admit()?;
+        state.fault(Fault::RemoveDir, path)?;
+        state.dir_exists(path)?;
+        if state
+            .names
+            .files
+            .keys()
+            .chain(state.names.dirs.iter())
+            .any(|entry| entry.parent() == Some(path))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::DirectoryNotEmpty,
+                "directory is not empty",
+            ));
+        }
+        state.names.dirs.remove(path);
+        state.pending.push(NameOp::RemoveDir(path.to_path_buf()));
+        state.log.push(Op::RemoveDir(path.to_path_buf()));
+        Ok(())
+    }
+
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         valid_path(path)?;
         let mut state = self.lock();
@@ -1243,6 +1277,144 @@ mod tests {
         let _f = fs.create(&p("/a/x")).unwrap();
         fs.sync_dir(&p("/b")).unwrap();
         assert_eq!(after_crash(&fs, CrashOutcome::LoseUnsynced, "/a/x"), None);
+    }
+
+    /// Directory removal never treats a file as an empty directory.
+    #[test]
+    fn remove_dir_rejects_a_file() {
+        let fs = FakeFs::with_dirs(["/s"]);
+        let _file = fs.create(&p("/s/file")).unwrap();
+        // A wrong kind of path must leave the file in place.
+        assert_eq!(
+            fs.remove_dir(&p("/s/file")).unwrap_err().kind(),
+            io::ErrorKind::NotADirectory
+        );
+        assert_eq!(fs.list(&p("/s")).unwrap(), [p("/s/file")]);
+    }
+
+    /// Directory removal reports a missing name rather than success.
+    #[test]
+    fn remove_dir_rejects_a_missing_name() {
+        let fs = FakeFs::with_dirs(["/s"]);
+        // Rollback needs to distinguish an absent directory from one removed now.
+        assert_eq!(
+            fs.remove_dir(&p("/missing")).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+    }
+
+    /// A child directory still makes its parent nonempty.
+    #[test]
+    fn remove_dir_rejects_a_parent_with_children() {
+        let fs = FakeFs::with_dirs(["/s", "/s/nested"]);
+        let _file = fs.create(&p("/s/file")).unwrap();
+        // Both file and directory children must block parent removal.
+        assert_eq!(
+            fs.remove_dir(&p("/s")).unwrap_err().kind(),
+            io::ErrorKind::DirectoryNotEmpty
+        );
+        fs.remove(&p("/s/file")).unwrap();
+        assert_eq!(
+            fs.remove_dir(&p("/s")).unwrap_err().kind(),
+            io::ErrorKind::DirectoryNotEmpty
+        );
+    }
+
+    /// Removing the last child lets an empty parent be removed.
+    #[test]
+    fn remove_dir_removes_an_empty_parent() {
+        let fs = FakeFs::with_dirs(["/s", "/s/nested"]);
+        // Startup rollback removes its audio directory before the session directory.
+        fs.remove_dir(&p("/s/nested")).unwrap();
+        fs.remove_dir(&p("/s")).unwrap();
+        assert_eq!(fs.ops().last(), Some(&Op::RemoveDir(p("/s"))));
+        assert_eq!(
+            fs.list(&p("/s")).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+    }
+
+    /// Syncing the parent keeps a removed directory absent after any crash.
+    #[test]
+    fn remove_dir_stays_removed_after_parent_sync() {
+        for outcome in CrashOutcome::standard() {
+            let fs = FakeFs::with_dirs(["/s", "/s/empty"]);
+            fs.remove_dir(&p("/s/empty")).unwrap();
+            // The parent owns the removed name, so its sync completes the removal.
+            fs.sync_dir(&p("/s")).unwrap();
+            assert!(
+                fs.crash(outcome).list(&p("/s")).unwrap().is_empty(),
+                "{outcome:?}"
+            );
+        }
+    }
+
+    /// Syncing another directory leaves a removal open to a crash.
+    #[test]
+    fn remove_dir_can_return_without_parent_sync() {
+        let fs = FakeFs::with_dirs(["/s", "/s/empty"]);
+        fs.remove_dir(&p("/s/empty")).unwrap();
+        // The root's sync must not stand in for the removed name's parent.
+        fs.sync_dir(&p("/")).unwrap();
+        assert_eq!(
+            fs.crash(CrashOutcome::LoseUnsynced).list(&p("/s")).unwrap(),
+            vec![p("/s/empty")]
+        );
+        assert!(
+            fs.crash(CrashOutcome::KeepAll)
+                .list(&p("/s"))
+                .unwrap()
+                .is_empty()
+        );
+        let mut seen = BTreeSet::new();
+        for seed in 0..100 {
+            seen.insert(
+                fs.crash(CrashOutcome::Partial { seed })
+                    .list(&p("/s"))
+                    .unwrap(),
+            );
+        }
+        assert_eq!(seen.len(), 2, "partial crashes preserve or lose the unlink");
+    }
+
+    /// A scheduled directory removal failure leaves the name unchanged.
+    #[test]
+    fn remove_dir_scheduled_failure_preserves_the_name() {
+        let fs = FakeFs::with_dirs(["/s"]);
+        // Fail the first operation so cleanup cannot claim it removed the directory.
+        fs.fail_after(0, io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            fs.remove_dir(&p("/s")).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(fs.list(&p("/")).unwrap(), vec![p("/s")]);
+    }
+
+    /// A path-specific removal failure leaves that directory unchanged.
+    #[test]
+    fn remove_dir_named_failure_preserves_the_name() {
+        let fs = FakeFs::with_dirs(["/s"]);
+        // Refuse this name independently of how many operations preceded cleanup.
+        fs.fail_on(&p("/s"), Fault::RemoveDir, io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            fs.remove_dir(&p("/s")).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(fs.list(&p("/")).unwrap(), vec![p("/s")]);
+    }
+
+    /// A directory removal counts as an operation at which the fake can crash.
+    #[test]
+    fn remove_dir_triggers_a_scheduled_crash() {
+        let fs = FakeFs::with_dirs(["/s"]);
+        // A crash before removal preserves the directory even when all prior writes survive.
+        fs.crash_after(0);
+        assert!(fs.remove_dir(&p("/s")).is_err());
+        assert!(fs.has_crashed());
+        assert_eq!(
+            fs.crash(CrashOutcome::KeepAll).list(&p("/")).unwrap(),
+            vec![p("/s")]
+        );
     }
 
     #[test]
