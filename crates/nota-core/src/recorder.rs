@@ -393,6 +393,13 @@ mod tests {
         assert_eq!(Note::new(at, ""), None);
     }
 
+    /// The screens call the tracks `mic` and `system`.
+    #[test]
+    fn tracks_are_named_for_what_they_record() {
+        assert_eq!(TrackRole::Microphone.name(), "mic");
+        assert_eq!(TrackRole::System.name(), "system");
+    }
+
     #[test]
     fn peak_of_samples_is_the_largest_magnitude() {
         assert_eq!(Level::of_samples(&[]), Level::SILENT);
