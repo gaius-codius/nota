@@ -536,8 +536,9 @@ impl CaptureSender {
     /// Reports something that doesn't stop the stream, stamped with the
     /// session time now. After a [`CaptureNotice::RouteChanged`], the
     /// stream's next audio opens a new epoch, unless a
-    /// [`DeviceChange::Changed`] already did for the same change (see
-    /// [`Reroutes`]).
+    /// [`DeviceChange::Changed`] already did for the same change: each
+    /// source's reports are counted apart, and the audio reopens whenever
+    /// either has reported more changes than it has reopened for.
     pub fn notice(&self, notice: CaptureNotice) {
         if notice == CaptureNotice::RouteChanged {
             self.reroutes.stream_moved();
@@ -552,8 +553,8 @@ impl CaptureSender {
     /// failed (its track has ended), and a loss only once until another
     /// device follows. After a [`DeviceChange::Changed`], the stream's
     /// next audio opens a new epoch, unless a
-    /// [`CaptureNotice::RouteChanged`] already did for the same change (see
-    /// [`Reroutes`]).
+    /// [`CaptureNotice::RouteChanged`] already did for the same change, as
+    /// [`Self::notice`] says.
     pub fn device(&self, change: DeviceChange) {
         self.device_at(change, self.clock.now());
     }
