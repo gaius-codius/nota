@@ -956,6 +956,39 @@ fn an_overrun_and_a_route_change_open_one_epoch_for_one_gap() {
     assert_eq!(starts, [(0, SessionTime::ZERO, 0), (1, at(2), 100)]);
 }
 
+/// An overrun reported as the stream moves, before a stall, leaves the
+/// stall to the reopening's own epoch: the audio after it is timed when it
+/// was captured, not from the overrun.
+#[test]
+fn a_stall_after_an_overrun_gets_its_own_epoch() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let script = vec![
+        Step::Audio(samples(0, 100)),
+        Step::Notice(CaptureNotice::RouteChanged),
+        Step::Advance(secs(1)),
+        Step::Notice(CaptureNotice::Overrun),
+        // The new device's first audio comes 2 s later.
+        Step::Advance(secs(2)),
+        Step::Audio(samples(100, 100)),
+    ];
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    let starts: Vec<_> = run
+        .timeline
+        .epochs()
+        .iter()
+        .map(|e| (e.id().get(), e.start(), e.first_sample().get()))
+        .collect();
+    assert_eq!(
+        starts,
+        [
+            (0, SessionTime::ZERO, 0),
+            (1, at(1), 100),
+            (2, SessionTime::from_nanos(2_900_000_000), 100)
+        ]
+    );
+}
+
 /// A blip in the suspend count shorter than a real suspend, and a suspend
 /// before the stream's first audio, open no epoch.
 #[test]

@@ -57,10 +57,11 @@
 //! [`CaptureNotice::Suspended`].
 //!
 //! The audio server may also report an overrun for the same stretch, just
-//! before that audio. Its epoch, opened when it was reported, already
-//! makes the stretch a gap, so the reopening opens no second one: the
-//! audio is timed from the overrun, late by up to a buffer, as after any
-//! overrun.
+//! before that audio. Its epoch, opened when it was reported and holding
+//! no audio yet, already makes the stretch a gap, so a reopening timed
+//! before it opens no second one: the audio is timed from the overrun,
+//! late by up to a buffer, as after any overrun. A reopening timed after
+//! it (the stream stalled on after the overrun) opens its own.
 //!
 //! # Resumed sessions
 //!
@@ -1133,9 +1134,10 @@ fn handle<S: Fs>(
             }
         }
         CaptureEvent::Reopened { at } => match timelines.get_mut(track) {
-            // An epoch with no audio yet (an overrun's, just before) already
-            // makes the stretch a gap; see the module docs.
-            Some(timeline) if !holds_audio(writer, timeline) => Ok(()),
+            // An epoch with no audio yet, opened no earlier (an overrun's,
+            // just before), already makes the stretch a gap; see the
+            // module docs.
+            Some(timeline) if opened_since(writer, timeline, at) => Ok(()),
             Some(timeline) => {
                 open_epoch_after_loss(writer, timeline, at, &mut |e| report(Some(track), e))
             }
@@ -1209,11 +1211,16 @@ fn settle<S: Fs>(
     Ok(())
 }
 
-/// Whether `timeline`'s current epoch holds any of its track's audio:
-/// `writer` has recorded past its first sample.
-fn holds_audio<S: Fs>(writer: &SessionWriter<S>, timeline: &TrackTimeline) -> bool {
+/// Whether `timeline`'s current epoch holds none of its track's audio yet
+/// (`writer` hasn't recorded past its first sample) and starts at `at` or
+/// later: it already marks the stretch before audio captured at `at`.
+fn opened_since<S: Fs>(
+    writer: &SessionWriter<S>,
+    timeline: &TrackTimeline,
+    at: SessionTime,
+) -> bool {
     match (timeline.current(), writer.next_sample(timeline.track())) {
-        (Some(epoch), Some(next)) => next > epoch.first_sample(),
+        (Some(epoch), Some(next)) => next == epoch.first_sample() && epoch.start() >= at,
         _ => false,
     }
 }
