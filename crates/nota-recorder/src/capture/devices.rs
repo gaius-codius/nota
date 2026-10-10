@@ -37,7 +37,6 @@ mod tests {
     use nota_core::SampleRate;
 
     use super::super::{CaptureBackend, CaptureError, CaptureSender, Source};
-    use super::*;
 
     /// A backend that says nothing about devices, as a test's fake does.
     struct Silent;

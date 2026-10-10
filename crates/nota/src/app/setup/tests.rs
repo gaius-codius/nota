@@ -376,7 +376,7 @@ fn a_failed_source_is_listened_to_again_when_the_devices_change() {
         plugged: Arc::clone(&plugged),
     };
     let fake = Arc::new(FakeClock::new(SessionTime::ZERO));
-    let clock: Arc<dyn Clock> = fake.clone();
+    let clock: Arc<dyn Clock> = Arc::<FakeClock>::clone(&fake);
     let (preview, heard) = Preview::start(backend, RATE, Arc::clone(&clock)).unwrap();
     let mut meters = Meters::new(preview, heard, tmp.0.clone(), clock);
     let mut setup = screen();
@@ -420,7 +420,7 @@ fn a_source_that_goes_quiet_says_there_is_no_signal() {
     let tmp = TestDir::new("preview-expires");
     let (opened, _sources) = channel();
     let fake = Arc::new(FakeClock::new(SessionTime::ZERO));
-    let clock: Arc<dyn Clock> = fake.clone();
+    let clock: Arc<dyn Clock> = Arc::<FakeClock>::clone(&fake);
     let (preview, heard) = Preview::start(Opened(opened), RATE, Arc::clone(&clock)).unwrap();
     let mut meters = Meters::new(preview, heard, tmp.0.clone(), clock);
     let mut setup = screen();
@@ -430,7 +430,7 @@ fn a_source_that_goes_quiet_says_there_is_no_signal() {
     };
     meters.take(&mut setup, level);
     // Just under the limit, still a working meter.
-    fake.advance(STALE - Duration::from_millis(1));
+    fake.advance(STALE.checked_sub(Duration::from_millis(1)).unwrap());
     meters.expire(&mut setup);
     assert!(!row_of(&rows(&mut setup), "Microphone").contains("⚠"));
     fake.advance(Duration::from_millis(1));
