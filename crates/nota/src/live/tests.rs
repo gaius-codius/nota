@@ -210,3 +210,18 @@ fn text_for_a_track_nobody_follows_is_dropped() {
         .is_empty()
     );
 }
+
+/// A track that joins the recorder is followed from its first epoch,
+/// which flushes nothing: its text is placed from when its audio began.
+#[test]
+fn a_joining_track_is_followed_from_its_first_epoch() {
+    let mut live = Live::new(&[]);
+    assert!(live.engine(heard(SYSTEM, 0, 10, "x")).updates.is_empty());
+    let first = opened(SYSTEM, 2_000).epochs()[0];
+    let actions = live.recorder(Some(SYSTEM), RecorderEvent::Epoch(first));
+    assert_eq!(actions.flush, None);
+    assert_eq!(
+        texts(&live.engine(heard(SYSTEM, 500, 900, "welcome")).updates),
+        [(ms(2_500), ms(2_900), "welcome".to_owned())]
+    );
+}

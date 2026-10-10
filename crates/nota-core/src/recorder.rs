@@ -47,7 +47,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::epoch;
-use crate::ids::TrackId;
+use crate::ids::{SessionId, TrackId};
 use crate::time::SessionTime;
 use crate::utterance::Utterance;
 
@@ -314,8 +314,10 @@ pub struct Disk {
 }
 
 /// How a recording went: what `nota record` says after it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
+    /// The session recorded.
+    pub id: SessionId,
     /// The session's directory.
     pub session: PathBuf,
     /// Things worth saying: sessions salvaged, streams that didn't start,
@@ -326,6 +328,21 @@ pub struct Outcome {
     /// Whether everything recorded was published, with nothing left for
     /// the next start's salvage.
     pub complete: bool,
+}
+
+impl Outcome {
+    /// The outcome of recording session `id` into `session`, before
+    /// anything is noted or published.
+    #[must_use]
+    pub const fn new(id: SessionId, session: PathBuf) -> Self {
+        Self {
+            id,
+            session,
+            notes: Vec::new(),
+            segments: 0,
+            complete: false,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -7,10 +7,10 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
 use nota_core::recorder::{self, Cause, Input, Setup, Warning, WarningState};
-use nota_core::{Clock, EpochId, SessionId, TrackId, TrackTimeline, wall_now};
+use nota_core::{Clock, SessionId, TrackId, wall_now};
 use nota_recorder::capture::{
-    Capture, CaptureBackend, CaptureReceiver, RecordError, RecorderEvent, Source, record_tracks,
-    start_tracks,
+    Capture, CaptureBackend, CaptureReceiver, RecordError, RecorderEvent, Source, TrackStarter,
+    prepare_tracks, record_tracks,
 };
 use nota_recorder::disk::{
     BALLAST_LEN, CHECK_INTERVAL, DiskMonitor, DiskReport, DiskWatch, MonitorConfig, Usage,
@@ -86,16 +86,21 @@ pub(super) type Recorded = (
 );
 
 /// Starts everything a recording needs, in order: the signals and the
-/// terminal first (without one there's nothing to record into), then the
-/// session, the tracks, the publisher, the live thread and the recorder.
-/// The terminal is `screen` and the library `library` if given (the
-/// app's, already set up and open), else they're set up here. A lent
-/// terminal was set up after the app's own signal listener, so the order
-/// holds for it too.
+/// terminal first (without one there's nothing to record into), then,
+/// with a line on screen, the salvage of earlier sessions. Unless a stop
+/// was asked for meanwhile, the session, the publisher and the recorder
+/// follow, and only then the streams, one after another, each track
+/// recorded as soon as its own has started; then the disk monitor, the
+/// saver, the engine and the live thread. The terminal is `screen` and
+/// the library `library` if given (the app's, already set up and open),
+/// else they're set up here. A lent terminal was set up after the app's
+/// own signal listener, so the order holds for it too.
 ///
 /// # Errors
 ///
-/// If any of it can't be started, or no stream at all can.
+/// If any of it can't be started, a stop was asked for before the
+/// session was made, or no stream at all starts. A start that fails
+/// before any audio is recorded leaves no session behind.
 pub(super) fn start<B: CaptureBackend>(
     args: &RecordArgs,
     setup: &Setup,
@@ -104,63 +109,59 @@ pub(super) fn start<B: CaptureBackend>(
     screen: Option<Screen>,
     library: Option<Library>,
 ) -> Result<(Started<B>, Screening), BoxError> {
-    let mut outcome = Outcome::default();
-    start_with_outcome(args, setup, backend, clock, screen, library, &mut outcome)
-        .map_err(|error| startup_failure(error, outcome.notes))
+    let mut notes = Vec::new();
+    start_with_notes(args, setup, backend, clock, screen, library, &mut notes)
+        .map_err(|error| startup_failure(error, notes))
 }
 
-/// Prepares capture while keeping recovery notes for a failed start.
-fn start_with_outcome<B: CaptureBackend>(
+/// Starts as [`start`] says, keeping recovery notes for a failed start.
+fn start_with_notes<B: CaptureBackend>(
     args: &RecordArgs,
     setup: &Setup,
     backend: &B,
     clock: &Arc<dyn Clock>,
     screen: Option<Screen>,
     library: Option<Library>,
-    outcome: &mut Outcome,
+    notes: &mut Vec<String>,
 ) -> Result<(Started<B>, Screening), BoxError> {
     let (ui, ui_events) = mpsc::channel::<Event>();
     let signals = listen_for_signals(ui.clone())?;
     // The terminal first: without one there's nothing to record into.
     let draws = args.latency_log.as_ref().map(|_| DrawEnds::default());
-    let screen = match screen {
+    let mut screen = match screen {
         Some(screen) => screen,
         None => Screen::enter(draws.clone().map(|d| (d, Arc::clone(clock))))?,
     };
 
     let library = library.map_or_else(|| Library::open(&args.data), Ok)?;
-    let (watch, session) = recover_for_start(&library, args, outcome)?;
-    outcome.session.clone_from(&session.dir);
-    let (lock, mut writer) = open_session(&session, &watch, clock)?;
-
+    show_recovering(&mut screen);
+    let watch = recover(&library, args, notes)?;
+    if stop_asked(&ui_events) {
+        return Err(STOPPED_BEFORE.into());
+    }
+    let session = create_session(&library, &watch)?;
+    // From here, a start that fails removes the session again, unless
+    // audio reached it.
+    let unmade = Unmade {
+        fs: watch.fs(),
+        session: session.clone(),
+        discard: true,
+    };
     let sources = sources(setup);
-    let (started, events) = start_tracks(backend, &sources, RATE, clock);
-    let mut captures: Vec<Capture<B::Stream>> = Vec::new();
-    let mut listening = Vec::new();
-    for (result, (_, source)) in started.into_iter().zip(&sources) {
-        match result {
-            Ok(capture) => {
-                captures.push(capture);
-                listening.push(source_name(source));
-            }
-            Err(e) => outcome.notes.push(format!("not recording {source}: {e}")),
-        }
-    }
-    if captures.is_empty() {
-        return Err("nothing to record".into());
-    }
-    // Each track's first epoch starts when its own stream did: a stream
-    // opened later doesn't push the first one's audio later.
-    let timelines = open_timelines(&mut writer, &captures)?;
-
-    // Keep the title before recording starts, through the same watch as
-    // the journals. With no room, startup leaves no empty session behind.
-    let row = session_row(setup, session.id, &sources, &captures);
-    keep_before_recording(&watch, &session, &row, outcome)?;
+    // Kept before any stream opens, naming every track asked for; narrowed
+    // to those that start. With no room, startup leaves no session behind.
+    let asked = session_row(setup, session.id, &sources);
+    keep_before_recording(&watch, &session, &asked, notes)?;
+    let (lock, writer) = open_session(&session, &watch, clock)?;
     watch.start_recording();
-    let disk = watch_disk(args, &session.audio(), captures.len(), &watch, &ui, clock)?;
 
-    let rows = NewSessionRows::new(library.db().clone(), row);
+    // Everything that can fail to start does so before any stream opens,
+    // while there's no audio to lose.
+    let rows = NewSessionRows::new(library.db().clone(), asked.clone());
+    // SQLite writes the database itself, so the segment rows' commits are
+    // watched for a full disk too.
+    let store = WatchedStore::new(rows.clone(), Arc::clone(&watch), &library.db_path());
+    let publisher = Publisher::spawn(SessionStore::new(lock.clone(), store), segment_length())?;
     // The live text, marks and notes are stored as they come, on a thread
     // of their own; whichever of it and the publisher writes first adds the
     // session's row.
@@ -169,36 +170,48 @@ fn start_with_outcome<B: CaptureBackend>(
         ui.clone(),
         Arc::clone(clock),
     )?;
-    // SQLite writes the database itself, so the segment rows' commits are
-    // watched for a full disk too.
-    let rows = WatchedStore::new(rows, watch, &library.db_path());
-    let publisher = Publisher::spawn(SessionStore::new(lock.clone(), rows), segment_length())?;
-    let (live_inputs, live_received) = mpsc::channel::<LiveInput>();
-    let engine = match &args.models {
-        Some((parakeet, vad)) => Some(start_engine(parakeet, vad, clock, &live_inputs)?),
-        None => None,
-    };
-    let log = args.latency_log.clone().map(LatencyLog::new);
-    let live = spawn_live(
-        Live::new(&timelines),
-        engine,
-        live_received,
-        ui.clone(),
-        saver.sender(),
-        log.map(|log| (log, Arc::clone(clock))),
-    )?;
+    let (live_inputs, live) = start_live(args, clock, &ui, &saver)?;
+    // Usage is reckoned for every track asked for: a little early with a
+    // low disk if one doesn't start.
+    let disk = watch_disk(args, &session.audio(), sources.len(), &watch, &ui, clock)?;
+    // The recorder runs before any stream opens: each track joins it as
+    // its stream starts, while the next one opens.
+    let (starter, events) = prepare_tracks(&sources, RATE, clock);
     let recorder = spawn_recorder(
         writer,
-        timelines,
         events,
         publisher.queue(),
         live_inputs.clone(),
         ui.clone(),
     )?;
+    let ready = Ready {
+        recorder,
+        publisher,
+        saver,
+        live_inputs,
+        live,
+        disk,
+        lock,
+    };
+    let (captures, listening, ready) =
+        open_streams(ready, starter, backend, &sources, &ui_events, notes)?;
+    unmade.keep();
+    keep_started(&rows, &watch, &session, &asked, &captures, notes);
+    let Ready {
+        recorder,
+        publisher,
+        saver,
+        live_inputs,
+        live,
+        disk,
+        lock,
+    } = ready;
 
+    let mut outcome = Outcome::new(session.id, session.dir.clone());
+    outcome.notes = std::mem::take(notes);
     let started_save = saver.sender();
-    let started = Started {
-        outcome: std::mem::take(outcome),
+    let running = Started {
+        outcome,
         signals,
         draws,
         library,
@@ -216,10 +229,209 @@ fn start_with_outcome<B: CaptureBackend>(
         screen,
         ui,
         ui_events,
-        listening: listening.join(" + "),
+        listening,
         save: started_save,
     };
-    Ok((started, screening))
+    Ok((running, screening))
+}
+
+/// Says on screen that earlier sessions are being checked, so a long
+/// salvage doesn't look like a blank, stuck screen. Only a courtesy: if
+/// drawing fails, the next screen says so.
+fn show_recovering(screen: &mut Screen) {
+    let _ = screen.clear();
+    let _ = screen.terminal().draw(|frame| {
+        let area = frame.area();
+        let line = ratatui::widgets::Paragraph::new(RECOVERING)
+            .alignment(ratatui::layout::Alignment::Center);
+        let middle = ratatui::layout::Rect {
+            y: area.y + area.height / 2,
+            height: 1.min(area.height),
+            ..area
+        };
+        frame.render_widget(line, middle);
+    });
+}
+
+/// The line shown while earlier sessions are checked.
+pub(super) const RECOVERING: &str = "Checking earlier recordings…";
+
+/// Whether a signal asked for a stop since the signals were first
+/// listened for. Before the screen, they're all that can be waiting.
+fn stop_asked(ui_events: &Receiver<Event>) -> bool {
+    ui_events
+        .try_iter()
+        .any(|event| matches!(event, Event::Recorder(recorder::Event::Stopping)))
+}
+
+/// Opens the streams once everything else has started, unless a stop was
+/// asked for meanwhile; with none started, or stopped first, stops what
+/// did start ([`Ready::abandon`]) and fails.
+fn open_streams<B: CaptureBackend>(
+    ready: Ready,
+    starter: TrackStarter,
+    backend: &B,
+    sources: &[(TrackId, Source)],
+    ui_events: &Receiver<Event>,
+    notes: &mut Vec<String>,
+) -> Result<Opened<B::Stream>, BoxError> {
+    // A stop asked for while all that started: still no audio.
+    if stop_asked(ui_events) {
+        drop(starter);
+        ready.abandon();
+        return Err(STOPPED_BEFORE.into());
+    }
+    let (captures, listening) = start_streams(starter, backend, sources, notes);
+    if captures.is_empty() {
+        ready.abandon();
+        return Err("nothing to record".into());
+    }
+    Ok((captures, listening, ready))
+}
+
+/// Opens each source's stream through `starter`, one after another,
+/// noting those that don't start. Returns the running captures and the
+/// footer's names for their sources.
+fn start_streams<B: CaptureBackend>(
+    starter: TrackStarter,
+    backend: &B,
+    sources: &[(TrackId, Source)],
+    notes: &mut Vec<String>,
+) -> (Vec<Capture<B::Stream>>, String) {
+    let mut captures = Vec::new();
+    let mut listening = Vec::new();
+    for (result, (_, source)) in starter.start(backend).into_iter().zip(sources) {
+        match result {
+            Ok(capture) => {
+                captures.push(capture);
+                listening.push(source_name(source));
+            }
+            Err(e) => notes.push(format!("not recording {source}: {e}")),
+        }
+    }
+    (captures, listening.join(" + "))
+}
+
+/// Starts the engine, if there are models, and the live thread that
+/// feeds it: the live thread's inputs, and the thread.
+fn start_live(
+    args: &RecordArgs,
+    clock: &Arc<dyn Clock>,
+    ui: &Sender<Event>,
+    saver: &Saver,
+) -> Result<(Sender<LiveInput>, JoinHandle<Option<LatencyLog>>), BoxError> {
+    let (live_inputs, live_received) = mpsc::channel::<LiveInput>();
+    let engine = match &args.models {
+        Some((parakeet, vad)) => Some(start_engine(parakeet, vad, clock, &live_inputs)?),
+        None => None,
+    };
+    let log = args.latency_log.clone().map(LatencyLog::new);
+    // Each track's epochs reach the live thread from the recorder, the
+    // first ones too.
+    let live = spawn_live(
+        Live::new(&[]),
+        engine,
+        live_received,
+        ui.clone(),
+        saver.sender(),
+        log.map(|log| (log, Arc::clone(clock))),
+    )?;
+    Ok((live_inputs, live))
+}
+
+/// The streams that started, the footer's names for their sources, and
+/// what started before them.
+type Opened<S> = (Vec<Capture<S>>, String, Ready);
+
+/// What a start that fails before any stream opens says.
+const STOPPED_BEFORE: &str = "stopped before recording started; no session was made";
+
+/// The session a start made, removed again ([`discard_empty`]) when this
+/// is dropped, unless it's kept: a start that fails before any audio
+/// leaves no session behind.
+struct Unmade {
+    fs: RecordFs,
+    session: SessionPaths,
+    /// Cleared once the start has succeeded.
+    discard: bool,
+}
+
+impl Unmade {
+    /// The start succeeded: the session stays.
+    fn keep(mut self) {
+        self.discard = false;
+    }
+}
+
+impl Drop for Unmade {
+    fn drop(&mut self) {
+        if self.discard {
+            discard_empty(&self.fs, &self.session);
+        }
+    }
+}
+
+/// Everything started before the streams.
+struct Ready {
+    recorder: JoinHandle<Recorded>,
+    publisher: Publisher,
+    saver: Saver,
+    live_inputs: Sender<LiveInput>,
+    live: JoinHandle<Option<LatencyLog>>,
+    disk: DiskMonitor<StdFs>,
+    lock: SessionLock<RecordFs>,
+}
+
+impl Ready {
+    /// Stops it all, in order, when no stream started: the recorder, which
+    /// has heard that none did (or that none will), returns with nothing
+    /// recorded, the publisher has nothing to publish, and the saver,
+    /// the live thread (with the engine) and the disk monitor stop. The
+    /// session is then removed, as [`Unmade`] does.
+    fn abandon(self) {
+        // A recorder that panicked leaves its journals, if any, for
+        // salvage; `discard_empty` keeps a session with audio in it.
+        drop(self.recorder.join());
+        let _ = self.publisher.finish();
+        let _ = self.live_inputs.send(LiveInput::Done);
+        drop(self.live_inputs);
+        drop(self.live.join());
+        drop(self.saver.finish());
+        drop(self.disk.stop());
+        drop(self.lock);
+    }
+}
+
+/// Narrows the session's row, `asked`, to the tracks of `captures`, those
+/// that started, if some didn't: in the database's row, and in the row
+/// kept with the audio. A failure is a note: the row names a track with
+/// no audio.
+fn keep_started<S>(
+    rows: &NewSessionRows,
+    watch: &Arc<DiskWatch<StdFs>>,
+    session: &SessionPaths,
+    asked: &NewSession,
+    captures: &[Capture<S>],
+    notes: &mut Vec<String>,
+) {
+    let mut row = asked.clone();
+    row.tracks
+        .retain(|t| captures.iter().any(|c| c.track() == t.track));
+    if row.tracks.len() == asked.tracks.len() {
+        return;
+    }
+    if !rows.set_tracks(&row.tracks) {
+        notes.push(
+            "the library database already lists every track asked for, \
+             though not all of them recorded"
+                .to_owned(),
+        );
+    }
+    if let Err(error) = session.keep_on(&watch.fs(), &row) {
+        notes.push(format!(
+            "the session's tracks weren't kept with its audio: {error}"
+        ));
+    }
 }
 
 /// A failed start, with the recovery notes it collected first.
@@ -254,22 +466,20 @@ fn startup_failure(error: BoxError, notes: Vec<String>) -> BoxError {
     }
 }
 
-/// Recovers earlier sessions, then makes this start's empty directories.
-fn recover_for_start(
+/// Recovers earlier sessions, then watches the disk for this start.
+fn recover(
     library: &Library,
     args: &RecordArgs,
-    outcome: &mut Outcome,
-) -> Result<(Arc<DiskWatch<StdFs>>, SessionPaths), BoxError> {
+    notes: &mut Vec<String>,
+) -> Result<Arc<DiskWatch<StdFs>>, BoxError> {
     let ballast_len = ballast_length(args);
     let recovery = startup_watch(&StdFs, &args.data, ballast_len)?;
     for salvaged in library.salvage_watched(segment_length(), &recovery)? {
-        outcome.notes.push(salvage_note(&salvaged));
+        notes.push(salvage_note(&salvaged));
     }
     // Recovery has its own watch: a full disk it got past mustn't stop
     // the new recording. Hold whatever ballast is still there.
-    let watch = startup_watch(&StdFs, &args.data, ballast_len)?;
-    let session = create_session(library, &watch)?;
-    Ok((watch, session))
+    Ok(startup_watch(&StdFs, &args.data, ballast_len)?)
 }
 
 /// A space failure rejects this start; other title failures remain notes.
@@ -277,13 +487,13 @@ fn keep_before_recording(
     watch: &Arc<DiskWatch<StdFs>>,
     session: &SessionPaths,
     row: &NewSession,
-    outcome: &mut Outcome,
+    notes: &mut Vec<String>,
 ) -> Result<(), BoxError> {
     if let Err(error) = keep_session(watch, session, row) {
         if is_disk_full(&error) {
             return Err(start_error(error));
         }
-        outcome.notes.push(format!(
+        notes.push(format!(
             "the session's title and tracks weren't kept with its audio: {error}"
         ));
     }
@@ -352,7 +562,9 @@ fn open_session(
         .lock()
         .map_err(start_error)?;
     let writer = SessionWriter::open(&lock, RATE, segment_length(), Arc::clone(clock))?;
-    Ok((lock, writer.with_syncing(Syncing::Threads)))
+    // Inline for one track, the path the crash tests sweep; a thread per
+    // track once a second starts (see `nota_recorder::capture`).
+    Ok((lock, writer.with_syncing(Syncing::Auto)))
 }
 
 /// Tests keep a smaller ballast for their short recordings.
@@ -421,7 +633,6 @@ fn disk_reports(ui: Sender<Event>, clock: Arc<dyn Clock>) -> impl FnMut(DiskRepo
 /// waiting on either. Then it closes the screen.
 fn spawn_recorder(
     mut writer: SessionWriter<RecordFs>,
-    mut timelines: Vec<TrackTimeline>,
     events: CaptureReceiver,
     queue: PublishQueue,
     live_inputs: Sender<LiveInput>,
@@ -432,7 +643,8 @@ fn spawn_recorder(
         .spawn(move || -> Recorded {
             let mut failures = 0;
             let mut lost = Vec::new();
-            let result = record_tracks(&mut writer, &mut timelines, &events, &mut |track, e| {
+            // Every track joins as its stream starts.
+            let result = record_tracks(&mut writer, &mut [], &events, &mut |track, e| {
                 match e {
                     RecorderEvent::Finished(journals) => {
                         // A refused batch stays on disk for salvage.
@@ -455,23 +667,6 @@ fn spawn_recorder(
             let _ = ui.send(Event::Recorder(recorder::Event::Stopping));
             (writer, result, failures, lost)
         })
-}
-
-/// Starts each track in the writer and opens its timeline's first epoch.
-fn open_timelines<S>(
-    writer: &mut SessionWriter<RecordFs>,
-    captures: &[Capture<S>],
-) -> Result<Vec<TrackTimeline>, BoxError> {
-    let mut timelines = Vec::new();
-    for capture in captures {
-        let track = capture.track();
-        let first = writer.first_free_sample(track);
-        writer.start_track(track, EpochId::new(0), first)?;
-        let mut timeline = TrackTimeline::new(track);
-        timeline.open_epoch(capture.started_at(), first, RATE)?;
-        timelines.push(timeline);
-    }
-    Ok(timelines)
 }
 
 /// What the summary says of one salvaged session.
@@ -514,13 +709,8 @@ fn set_aside_part(aside: &[PathBuf]) -> String {
     }
 }
 
-/// This session's row: its title and the tracks that started.
-fn session_row<S>(
-    setup: &Setup,
-    id: SessionId,
-    sources: &[(TrackId, Source); 2],
-    captures: &[Capture<S>],
-) -> NewSession {
+/// This session's row: its title and every track asked for.
+fn session_row(setup: &Setup, id: SessionId, sources: &[(TrackId, Source); 2]) -> NewSession {
     NewSession {
         id,
         title: Some(setup.title.clone()),
@@ -529,7 +719,6 @@ fn session_row<S>(
         started_at: wall_now(),
         tracks: sources
             .iter()
-            .filter(|(track, _)| captures.iter().any(|c| c.track() == *track))
             .map(|(track, source)| Track {
                 track: *track,
                 kind: track_kind(*track),
@@ -786,7 +975,7 @@ mod tests {
 
         // The system audio opened 2 s into the session, at 16 kHz.
         let s = SessionTime::from_nanos;
-        let mut timeline = TrackTimeline::new(SYSTEM);
+        let mut timeline = nota_core::TrackTimeline::new(SYSTEM);
         timeline
             .open_epoch(s(2_000_000_000), SampleIndex::ZERO, RATE)
             .unwrap();
@@ -999,7 +1188,7 @@ mod salvage_note_tests {
         let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
         let mut writer = SessionWriter::open(&lock, RATE, segment_length(), clock).unwrap();
         writer
-            .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+            .start_track(MIC, nota_core::EpochId::new(0), SampleIndex::ZERO)
             .unwrap();
         writer.append(MIC, &[7; 50]).unwrap();
         writer.finish().unwrap();

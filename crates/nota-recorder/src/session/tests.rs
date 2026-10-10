@@ -114,13 +114,19 @@ fn nth_op(run: impl Fn(&FakeFs), n: usize, wanted: impl Fn(&Op) -> bool) -> usiz
 /// 2,500 samples in uneven chunks with time passing: rotations at 1,000 and
 /// 2,000, and timed syncs between.
 fn record(fs: &FakeFs) -> Result<(), Box<dyn std::error::Error>> {
+    record_syncing(fs, Syncing::Inline)
+}
+
+/// [`record`], with the writer's fsyncs run as `syncing` says.
+fn record_syncing(fs: &FakeFs, syncing: Syncing) -> Result<(), Box<dyn std::error::Error>> {
     let (clock, dyn_clock) = clock();
     let mut w = SessionWriter::open(
         &session_dir(fs).lock().unwrap(),
         rate(),
         length(),
         dyn_clock,
-    )?;
+    )?
+    .with_syncing(syncing);
     w.start_track(MIC, EpochId::new(0), SampleIndex::ZERO)?;
     let mut at = 0;
     for len in [300_u64, 300, 300, 300, 300, 300, 700] {
@@ -470,6 +476,83 @@ fn the_last_journal_id_is_refused_naming_the_file() {
             "{name}"
         );
     }
+}
+
+/// With one track, recording's mode is the inline one, operation for
+/// operation: the path the crash sweeps take.
+#[test]
+fn one_track_on_auto_runs_exactly_as_inline() {
+    let inline = FakeFs::with_dirs([dir(), PathBuf::from("/db")]);
+    record_syncing(&inline, Syncing::Inline).unwrap();
+    let auto = FakeFs::with_dirs([dir(), PathBuf::from("/db")]);
+    record_syncing(&auto, Syncing::Auto).unwrap();
+    assert_eq!(auto.ops(), inline.ops());
+    assert_eq!(
+        salvaged(&auto),
+        [(0, 1_000), (1_000, 2_000), (2_000, 2_500)]
+    );
+}
+
+/// A second track moves the first one's fsyncs to a thread: the
+/// durable position its inline syncs reached stands, and both tracks
+/// record whole. (Results run inline and not yet taken are forwarded by
+/// `TrackSyncs::move_to_thread`, tested in `syncs`.)
+#[test]
+fn a_second_track_on_auto_moves_every_track_to_threads() {
+    const SYSTEM: TrackId = TrackId::new(1);
+    let fs = FakeFs::with_dirs([dir(), PathBuf::from("/db")]);
+    let (clock, dyn_clock) = clock();
+    let mut w = SessionWriter::open(
+        &session_dir(&fs).lock().unwrap(),
+        rate(),
+        length(),
+        dyn_clock,
+    )
+    .unwrap()
+    .with_syncing(Syncing::Auto);
+    w.start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .unwrap();
+    assert_eq!(w.syncing(MIC), Some(Syncing::Inline));
+    assert_eq!(w.syncing(SYSTEM), None);
+    w.append(MIC, &samples(0, 100)).unwrap();
+    clock.advance(std::time::Duration::from_secs(1));
+    // Due: the sync runs inline.
+    w.append(MIC, &samples(100, 100)).unwrap();
+    w.start_track(SYSTEM, EpochId::new(0), SampleIndex::ZERO)
+        .unwrap();
+    assert_eq!(w.syncing(MIC), Some(Syncing::Threads));
+    assert_eq!(w.syncing(SYSTEM), Some(Syncing::Threads));
+    // Durable as far as the inline sync took it, in the same journal.
+    w.sync_if_due().unwrap();
+    let durable = w.durable(MIC).unwrap();
+    assert_eq!(
+        (durable.journal(), durable.end().get()),
+        (JournalId::new(0), 200)
+    );
+    w.append(SYSTEM, &samples(0, 300)).unwrap();
+    w.append(MIC, &samples(200, 100)).unwrap();
+    w.finish().unwrap();
+    // Both tracks' audio, every sample, as salvage finds it.
+    let mut store = FakeStore::new(&fs, Path::new("/db"));
+    salvage(
+        &mut SessionStore::new(session_dir(&fs).lock().unwrap(), &mut store),
+        length(),
+    )
+    .unwrap();
+    let mut rows: Vec<_> = store
+        .rows(SESSION)
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r.track().get(),
+                r.range().start().get(),
+                r.range().end().get(),
+            )
+        })
+        .collect();
+    rows.sort_unstable();
+    assert_eq!(rows, [(0, 0, 300), (1, 0, 300)]);
 }
 
 #[test]

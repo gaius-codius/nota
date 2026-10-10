@@ -1058,6 +1058,99 @@ fn a_start_with_no_inputs_reports_each_failure_once() {
         2,
         "{said}"
     );
+    // Acceptance (GAI-212): a failed start leaves no empty session.
+    assert_eq!(sessions(&tmp.0), Vec::<String>::new());
+}
+
+/// The sessions in the data directory `data`, by name.
+fn sessions(data: &Path) -> Vec<String> {
+    let mut names: Vec<String> = StdFs
+        .list(&data.join("sessions"))
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|p| p.file_name()?.to_str().map(str::to_owned))
+        .collect();
+    names.sort();
+    names
+}
+
+/// The names of the threads of process `pid` that run a track's fsyncs.
+fn sync_threads(pid: u32) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(format!("/proc/{pid}/task"))
+        .unwrap()
+        .filter_map(|task| std::fs::read_to_string(task.ok()?.path().join("comm")).ok())
+        .map(|name| name.trim().to_owned())
+        .filter(|name| name.starts_with("nota-sync"))
+        .collect();
+    names.sort();
+    names
+}
+
+/// Acceptance (GAI-220): a recording of one track fsyncs inline, on the
+/// recorder thread; one of two tracks runs a sync thread for each.
+#[test]
+fn one_track_fsyncs_inline_and_two_on_a_thread_each() {
+    let tmp = TestDir::new("syncing");
+    let mut one = Running::start_with(&tmp.0, &["--mic", "missing"]);
+    assert!(one.shows_after(0, "s stop"), "{}", one.output());
+    // The track has joined the recorder once its first journal is there.
+    let audio = tmp.0.join("sessions/1/audio");
+    assert!(wait_until(Duration::from_secs(10), || {
+        StdFs.list(&audio).unwrap_or_default().iter().any(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("journal-"))
+        })
+    }));
+    assert_eq!(sync_threads(one.pid()), Vec::<String>::new());
+    one.signal(Signal::TERM);
+    assert!(one.exits().expect("nota didn't stop").success());
+
+    let mut two = recording(&tmp.0);
+    assert!(
+        wait_until(Duration::from_secs(10), || sync_threads(two.pid())
+            == ["nota-sync-0", "nota-sync-1"]),
+        "{:?}",
+        sync_threads(two.pid())
+    );
+    two.signal(Signal::TERM);
+    assert!(two.exits().expect("nota didn't stop").success());
+    assert_everything_sent_saved(&two, &tmp.0, 2, &[0, 1], 1_450);
+}
+
+/// Acceptance (GAI-212): salvage shows a line on screen, and a stop asked
+/// for meanwhile ends nota before any session is made. The library is
+/// held locked, so salvaging the killed session waits on it.
+#[test]
+fn a_stop_during_salvage_makes_no_session() {
+    let tmp = TestDir::new("stop-in-salvage");
+    let mut killed = recording(&tmp.0);
+    killed.signal(Signal::KILL);
+    assert!(killed.exits().is_some());
+    let lock = open_library(&tmp.0.join("library.db"));
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+    let mut nota = Running::start_with(&tmp.0, &[]);
+    // Drawn word by word, so the spaces between are cursor moves.
+    assert!(nota.shows_after(0, "Checking"), "{}", nota.output());
+    assert!(
+        visible(&nota.output.lock().unwrap()).contains("recordings…"),
+        "{}",
+        nota.output()
+    );
+    nota.signal(Signal::TERM);
+    lock.execute_batch("COMMIT").unwrap();
+    drop(lock);
+    let status = nota.exits().expect("nota didn't stop");
+    assert!(!status.success(), "{status:?}");
+    assert!(nota.terminal_restored());
+    let said = visible(&nota.output.lock().unwrap());
+    assert!(said.contains("stopped before recording started"), "{said}");
+    assert!(
+        !said.contains("s stop"),
+        "the Recording screen started: {said}"
+    );
+    assert_eq!(sessions(&tmp.0), ["1"]);
 }
 
 #[test]

@@ -21,9 +21,13 @@ pub enum Syncing {
     #[default]
     Inline,
     /// On a thread for each track, while the writer goes on appending: a
-    /// track's fsync holds up only its own durable position. For
-    /// recording.
+    /// track's fsync holds up only its own durable position.
     Threads,
+    /// Inline while the writer records one track; once a second track
+    /// starts, on a thread for each track, the first one's too. For
+    /// recording: a recording of one track takes the path the crash tests
+    /// sweep, and one track's fsync never holds up another's audio.
+    Auto,
     /// Held until the test runs them, so a test can complete them at any
     /// point.
     #[cfg(test)]
@@ -52,6 +56,26 @@ enum Runner<Y> {
     },
 }
 
+impl<Y: FileSyncer> Runner<Y> {
+    /// A runner on a new thread for `track`'s syncs, and a sender into
+    /// the results it hands back, ahead of the thread's own.
+    fn thread(track: TrackId) -> io::Result<(Self, mpsc::Sender<SyncDone>)> {
+        let (jobs, queued) = mpsc::channel::<PendingSync<Y>>();
+        let (finished, done) = mpsc::channel();
+        let ahead = finished.clone();
+        thread::Builder::new()
+            .name(format!("nota-sync-{}", track.get()))
+            .spawn(move || {
+                for job in queued {
+                    if finished.send(job.run()).is_err() {
+                        break;
+                    }
+                }
+            })?;
+        Ok((Self::Thread { jobs, done }, ahead))
+    }
+}
+
 impl<Y> fmt::Debug for TrackSyncs<Y> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let kind = match &self.runner {
@@ -71,26 +95,18 @@ impl<Y: FileSyncer> TrackSyncs<Y> {
     /// `track`'s fsyncs, run as `syncing` says. With
     /// [`Syncing::Threads`], it starts the track's sync thread, which ends
     /// once this is dropped and the syncs already handed to it have run.
+    /// [`Syncing::Auto`] starts inline: the writer moves the track to a
+    /// thread ([`Self::move_to_thread`]) when a second one starts.
     ///
     /// # Errors
     ///
     /// If the thread can't be started.
     pub(super) fn new(syncing: Syncing, track: TrackId) -> io::Result<Self> {
         let runner = match syncing {
-            Syncing::Inline => Runner::Inline(VecDeque::new()),
+            Syncing::Inline | Syncing::Auto => Runner::Inline(VecDeque::new()),
             Syncing::Threads => {
-                let (jobs, queued) = mpsc::channel::<PendingSync<Y>>();
-                let (finished, done) = mpsc::channel();
-                thread::Builder::new()
-                    .name(format!("nota-sync-{}", track.get()))
-                    .spawn(move || {
-                        for job in queued {
-                            if finished.send(job.run()).is_err() {
-                                break;
-                            }
-                        }
-                    })?;
-                Runner::Thread { jobs, done }
+                let (runner, _) = Runner::thread(track)?;
+                runner
             }
             #[cfg(test)]
             Syncing::Manual => Runner::Manual {
@@ -102,6 +118,41 @@ impl<Y: FileSyncer> TrackSyncs<Y> {
             runner,
             outstanding: VecDeque::new(),
         })
+    }
+
+    /// From now on, runs the fsyncs on a thread of the track's own, as
+    /// [`Syncing::Threads`] does. Syncs already run inline and not yet
+    /// taken come back first, in order. Nothing changes unless they ran
+    /// inline.
+    ///
+    /// # Errors
+    ///
+    /// If the thread can't be started; the syncs then go on running
+    /// inline, with nothing lost.
+    pub(super) fn move_to_thread(&mut self, track: TrackId) -> io::Result<()> {
+        let Runner::Inline(ran) = &mut self.runner else {
+            return Ok(());
+        };
+        let (runner, finished) = Runner::thread(track)?;
+        // Ahead of anything the thread runs: it has been handed nothing yet.
+        for done in ran.drain(..) {
+            // The receiver is in `runner`, here, so this can't fail.
+            let _ = finished.send(done);
+        }
+        self.runner = runner;
+        Ok(())
+    }
+
+    /// Which way the fsyncs run now: [`Syncing::Inline`] or
+    /// [`Syncing::Threads`] (or, in tests, held for the test), never
+    /// [`Syncing::Auto`].
+    pub(super) const fn syncing(&self) -> Syncing {
+        match self.runner {
+            Runner::Inline(_) => Syncing::Inline,
+            Runner::Thread { .. } => Syncing::Threads,
+            #[cfg(test)]
+            Runner::Manual { .. } => Syncing::Manual,
+        }
     }
 
     /// Hands `job` over to run: at once, inline.
@@ -243,6 +294,30 @@ mod tests {
         j.complete_sync(syncs.next().unwrap()).unwrap();
         assert_eq!(j.durable().end().get(), 20);
         assert!(!syncs.is_pending());
+        assert!(syncs.next().is_none());
+    }
+
+    /// Syncs run inline before the move come back first, in order, then
+    /// the thread's.
+    #[test]
+    fn syncs_moved_to_a_thread_come_back_after_those_run_inline() {
+        let fs = FakeFs::with_dirs(["/s"]);
+        let mut j = journal(&fs);
+        let mut syncs = TrackSyncs::new(Syncing::Auto, TRACK).unwrap();
+        assert_eq!(syncs.syncing(), Syncing::Inline);
+        two_syncs(&mut syncs, &mut j);
+        syncs.move_to_thread(TRACK).unwrap();
+        assert_eq!(syncs.syncing(), Syncing::Threads);
+        j.append_within(&[3; 10]).unwrap();
+        syncs.start(j.begin_sync().unwrap());
+        for end in [10, 20, 30] {
+            j.complete_sync(syncs.next().unwrap()).unwrap();
+            assert_eq!(j.durable().end().get(), end);
+        }
+        assert!(!syncs.is_pending());
+        // Moving again changes nothing.
+        syncs.move_to_thread(TRACK).unwrap();
+        assert_eq!(syncs.syncing(), Syncing::Threads);
         assert!(syncs.next().is_none());
     }
 

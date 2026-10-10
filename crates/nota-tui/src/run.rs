@@ -870,7 +870,10 @@ mod tests {
     fn the_recorder_stopping_ends_the_loop_and_keeps_the_draft() {
         for stopping in [
             recorder::Event::Stopping,
-            recorder::Event::Stopped(recorder::Outcome::default()),
+            recorder::Event::Stopped(recorder::Outcome::new(
+                nota_core::SessionId::new(1),
+                std::path::PathBuf::new(),
+            )),
         ] {
             let clock = Arc::new(FakeClock::new(SessionTime::from_nanos(20)));
             let mut screen = screen(&clock);

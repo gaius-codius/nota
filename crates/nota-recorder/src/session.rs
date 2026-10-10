@@ -63,6 +63,11 @@
 //!
 //! Inline (the default), each fsync runs as it starts, as before.
 //!
+//! [`Syncing::Auto`], as recording runs, is inline while one track
+//! records. When a second track starts, every track's fsyncs move to
+//! threads; syncs the first track ran inline and the writer hasn't taken
+//! yet come back first, so nothing about its durable position changes.
+//!
 //! # Resuming a session
 //!
 //! A writer may open on a session that has recorded before (after salvage,
@@ -486,14 +491,17 @@ impl<S: Fs> SessionWriter<S> {
         self.earlier.get(&track).and_then(|e| e.epoch)
     }
 
-    /// Starts `track` in `epoch`; its first sample will be `at`.
+    /// Starts `track` in `epoch`; its first sample will be `at`. With
+    /// [`Syncing::Auto`], a second track moves every track's fsyncs to
+    /// threads.
     ///
     /// # Errors
     ///
     /// [`SessionError::TrackExists`]; [`SessionError::EpochUsed`] unless
     /// `epoch` is above [`Self::highest_epoch`]; [`SessionError::Covered`]
     /// if `at` is before [`Self::first_free_sample`]; [`SessionError::Io`]
-    /// if the track's sync thread can't start.
+    /// if a sync thread can't start (the track isn't started, and tracks
+    /// already moved to threads stay there).
     pub fn start_track(
         &mut self,
         track: TrackId,
@@ -510,7 +518,20 @@ impl<S: Fs> SessionWriter<S> {
         if at < first_free {
             return Err(SessionError::Covered { track, first_free });
         }
-        let syncs = TrackSyncs::new(self.syncing, track).map_err(SessionError::Io)?;
+        let syncing = match self.syncing {
+            Syncing::Auto if !self.tracks.is_empty() => {
+                // A second track: every track's fsyncs move to threads.
+                for (&started, state) in &mut self.tracks {
+                    state
+                        .syncs
+                        .move_to_thread(started)
+                        .map_err(SessionError::Io)?;
+                }
+                Syncing::Threads
+            }
+            syncing => syncing,
+        };
+        let syncs = TrackSyncs::new(syncing, track).map_err(SessionError::Io)?;
         self.tracks.insert(
             track,
             Track {
@@ -524,6 +545,14 @@ impl<S: Fs> SessionWriter<S> {
             },
         );
         Ok(())
+    }
+
+    /// Where `track`'s fsyncs run now: [`Syncing::Inline`] or
+    /// [`Syncing::Threads`], never [`Syncing::Auto`]. `None` if it isn't
+    /// started.
+    #[must_use]
+    pub fn syncing(&self, track: TrackId) -> Option<Syncing> {
+        self.tracks.get(&track).map(|state| state.syncs.syncing())
     }
 
     /// Moves `track` to `epoch` (its stream reopened): its journal ends, and

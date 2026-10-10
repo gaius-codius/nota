@@ -588,6 +588,8 @@ fn a_channel_with_no_senders_reads_as_stopped() {
         progress: Progress::new(SampleIndex::ZERO, SampleIndex::ZERO),
         clock: Arc::new(FakeClock::new(SessionTime::ZERO)),
         stopping: Arc::new(AtomicBool::new(false)),
+        began: Arc::new(AtomicBool::new(false)),
+        rate: rate(),
     };
     sender.audio(&[]);
     assert!(matches!(rx.next(Duration::from_millis(1)), Received::Idle));
@@ -990,6 +992,8 @@ fn notices_carry_the_time_they_were_reported() {
         progress: Progress::new(SampleIndex::ZERO, SampleIndex::ZERO),
         clock: Arc::clone(&clock) as Arc<dyn Clock>,
         stopping: Arc::new(AtomicBool::new(false)),
+        began: Arc::new(AtomicBool::new(false)),
+        rate: rate(),
     };
     sender.notice(CaptureNotice::Overrun);
     // The recorder gets to it later.
