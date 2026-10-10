@@ -1228,6 +1228,22 @@ mod startup_tests {
         assert!(startup_space_error::<FakeStore>(&error));
     }
 
+    /// A store permission failure remains final even after earlier recovery.
+    #[test]
+    fn startup_doesnt_retry_a_store_permission_error() {
+        let error = PublishError::Store(Box::new(io::Error::from(io::ErrorKind::PermissionDenied)));
+        // Free space cannot repair a permission failure.
+        assert!(!startup_space_error::<FakeStore>(&error));
+    }
+
+    /// A live session cannot be recovered by spending the reserve.
+    #[test]
+    fn startup_doesnt_retry_a_recording_in_use() {
+        let error = PublishError::InUse(Use::Recording);
+        // The recording lock stays held regardless of free space.
+        assert!(!startup_space_error::<FakeStore>(&error));
+    }
+
     /// The store's own space classification decides its retry.
     #[test]
     fn startup_retries_a_store_space_error() {
