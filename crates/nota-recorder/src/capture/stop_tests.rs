@@ -453,7 +453,7 @@ fn clean_ops() -> usize {
     // Not vacuous: both tracks moved to a second epoch, and audio was
     // published live.
     for timeline in &promised.timelines {
-        assert_eq!(timeline.epochs().len(), 2, "{timeline:?}");
+        assert_eq!(timeline.epochs().len(), 2, "{timeline:?}"); // check-bound
     }
     fs.attempted()
 }

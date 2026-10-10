@@ -920,7 +920,7 @@ fn recording_and_salvage_crashed_anywhere_end_as_an_uninterrupted_salvage() {
         .iter()
         .rposition(|op| matches!(op, Op::Write { path, .. } if is_journal(path)))
         .unwrap();
-    assert!(first_row < last_journal, "nothing published live");
+    assert!(first_row < last_journal, "nothing published live"); // check-bound
 
     // Every crash point and outcome of the recording. Salvage is crashed at
     // a sample of its points per case, the sample moving along from case to
@@ -1153,7 +1153,7 @@ fn overlapping_journals_resolve_to_the_newer_one() {
             .iter()
             .any(|b| a.0 < b.0 && a.1 == b.1 && a.2.start() < b.2.end() && b.2.start() < a.2.end())
     });
-    assert!(overlaps, "{ranges:?}");
+    assert!(overlaps, "{ranges:?}"); // check-bound
     let after = salvage_fake(&disk).unwrap();
     check_after(&promised, &after).unwrap();
 
@@ -1416,7 +1416,7 @@ fn a_failed_journal_fsync_then_a_crash_anywhere_publishes_the_newer_copy_once() 
         assert!(summary.scenario_ops > 60, "{summary:?}"); // check-bound
         assert_eq!(
             summary.cases,
-            (summary.scenario_ops + 1) * CrashOutcome::standard().len()
+            (summary.scenario_ops + 1) * CrashOutcome::standard().len() // check-bound
         );
         // Not vacuous: many cases left an older copy for salvage to refuse.
         assert!(
@@ -2686,7 +2686,7 @@ fn findings_survive_any_later_failure_and_their_own_never_stops_publishing() {
     assert!(unsaved >= 4, "{unsaved}"); // check-bound
     // Each journal's unlink.
     assert!(carried_on >= 4, "{carried_on}"); // check-bound
-    assert_eq!(row_reads, 1);
+    assert_eq!(row_reads, 1); // check-bound
     let journals = fs.paths().into_iter().filter(|p| is_journal(p)).count();
     assert!(journals >= 4, "{journals}"); // check-bound
     assert_eq!(journal_reads, journals);
@@ -4189,7 +4189,7 @@ fn a_set_aside_is_reported_whatever_fails_after_it() {
             unsynced += 1;
         }
     }
-    assert_eq!(unsynced, 1);
+    assert_eq!(unsynced, 1); // check-bound
 }
 
 mod disk_full;

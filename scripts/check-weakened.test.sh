@@ -108,20 +108,22 @@ grep -qx '  - bound set: floor.rs: assert!(ops > 15, "{ops}"); // check-bound' <
 # A crash script's bound: a `#` comment that ends the line. One quoted in a
 # string isn't a tag.
 git checkout -q main
-printf 'min_rows=2 # check-bound\necho "x # check-bound" y\n' >bound.sh
+printf 'min_rows=2 # check-bound\necho "x # check-bound" y\nmin_ops=3 # check-bound\r\n' >bound.sh
 git add bound.sh
 git commit -qm shell
 git checkout -q -b shell
-printf 'min_rows=1 # check-bound\necho "x # check-bound" z\n' >bound.sh
+printf 'min_rows=1 # check-bound\necho "x # check-bound" z\nmin_ops=2 # check-bound\r\n' >bound.sh
 git commit -qam shell
 out=$("$script" main shell 2>&1) || true
 grep -qx '  - bound set: bound.sh: min_rows=1 # check-bound' <<<"$out" ||
   fail "missed a shell bound's new value: $out"
 grep -qx '  - bound was: bound.sh: min_rows=2 # check-bound' <<<"$out" ||
   fail "missed a shell bound's old value: $out"
+grep -q '  - bound set: bound.sh: min_ops=2 # check-bound' <<<"$out" ||
+  fail "missed a shell bound on a CRLF line: $out"
 grep -q 'echo' <<<"$out" && fail "took a quoted tag for a bound: $out"
 git checkout -q -b shell-prose main
-printf 'min_rows=2 # check-bound\necho "x # check-bound" y\n# A bound carries # check-bound\n' >bound.sh
+printf 'min_rows=2 # check-bound\necho "x # check-bound" y\nmin_ops=3 # check-bound\r\n# A bound carries # check-bound\n' >bound.sh
 git commit -qam shell-prose
 out=$("$script" main shell-prose 2>&1) || true
 [[ $out == "check-weakened: nothing found" ]] ||
@@ -143,8 +145,11 @@ grep -q '^usage: check-weakened.sh BASE \[HEAD\]' <<<"$out" || fail "no usage wi
 
 # The bounds the crash harnesses check carry the tag, so changing one is
 # reported: the loss and lag limits, the real-capture harness's floor for
-# audio playing, its script's baseline floors, and the crash sweeps' floors
-# on the operations and crash points they reached.
+# audio playing, and its script's baseline floors. The crash sweeps' floors
+# are too many to name one by one, so the guard checks each file still has
+# at least as many tags as this change gave it, and that the floors of the
+# common shapes (the crash summary's counts, the worst lag reached) have
+# theirs.
 repo=$scripts/..
 recorder=$repo/crates/nota-recorder
 tagged() { # what was searched for, the lines found
@@ -161,6 +166,11 @@ tagged "the crash harnesses' limits" "$bounds"
 tagged "the crash sweeps' floors" "$(grep -E \
   'summary\.(scenario_ops|recovery_crashed|rerun_crashed) >|worst\.get\(\) >=' \
   "$recorder/src/segment/tests.rs" "$recorder/src/capture/stop_tests.rs" || true)"
+for want in segment/tests.rs:35 capture/stop_tests.rs:6; do
+  file=$recorder/src/${want%:*}
+  got=$(grep -cE '//[[:space:]]*check-bound([^A-Za-z0-9_-]|$)' "$file" || true)
+  (( got >= ${want#*:} )) || fail "${want%:*} has $got tagged bounds, expected at least ${want#*:}"
+done
 floors=$(grep -E '^min_[a-z_]+=' "$scripts/real-capture-crash.sh" || true)
 [[ $(grep -c . <<<"$floors") -eq 2 ]] || fail "expected the script's 2 baseline floors: $floors"
 while IFS= read -r line; do
