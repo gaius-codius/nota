@@ -482,10 +482,85 @@ fn stops_on(signal: Signal, name: &str) {
     assert_everything_sent_saved(&nota, &tmp.0, 1, &[0, 1], 1_450);
 }
 
+/// Starts a recording from the current page, then stops it and opens Processing.
+fn record_from_page_and_stop(nota: &mut Running, key: &str) -> usize {
+    // Wait for Recording before sending its stop key.
+    let at = nota.len();
+    nota.press(key);
+    assert!(nota.shows_after(at, "s stop"), "{}", nota.output());
+    let at = nota.len();
+    nota.press("s");
+    assert!(nota.shows_after(at, "stop recording?"), "{}", nota.output());
+    // A quick answer is typing until the question's guard has passed.
+    pause(Duration::from_millis(700));
+    let at = nota.len();
+    nota.press("y");
+    assert!(nota.shows_after(at, "finishing"), "{}", nota.output());
+    assert!(nota.shows_after(at, "tab view"), "{}", nota.output());
+    at
+}
+
+/// Processing's next recording shows the first session even in a new library.
+#[test]
+fn home_lists_the_first_session_during_the_next_stop() {
+    let tmp = TestDir::new("processing-first-session-home");
+    let mut nota = Running::start_home(&tmp.0);
+    // Starting from an empty Home catches a list kept from before the first stop.
+    assert!(
+        nota.shows_after(0, "nothing recorded yet"),
+        "{}",
+        nota.output()
+    );
+    record_from_page_and_stop(&mut nota, "R");
+    // Request the second recording directly from Processing, without visiting Home.
+    let at = record_from_page_and_stop(&mut nota, "r");
+    let stopped = visible(&nota.output.lock().unwrap()[at..]);
+    assert!(stopped.contains("recent"), "{stopped}");
+    assert!(stopped.contains("Recording"), "{stopped}");
+    assert!(!stopped.contains("nothing recorded yet"), "{stopped}");
+    nota.press("q");
+    assert!(nota.exits().unwrap().success());
+}
+
+/// A recording started from Processing keeps Home's sessions during its stop.
+#[test]
+fn home_lists_sessions_during_a_stop_started_from_processing() {
+    let tmp = TestDir::new("processing-keeps-home");
+    // An earlier recording gives Home a session to keep while Processing is open.
+    let mut first = recording(&tmp.0);
+    first.signal(Signal::TERM);
+    assert!(first.exits().unwrap().success());
+    let mut nota = Running::start_home(&tmp.0);
+    assert!(nota.shows_after(0, "Workshop"), "{}", nota.output());
+    // Open that session, then start the next recording from its page.
+    let at = nota.len();
+    nota.press("\r");
+    assert!(nota.shows_after(at, "tab view"), "{}", nota.output());
+    let at = nota.len();
+    nota.press("r");
+    assert!(nota.shows_after(at, "s stop"), "{}", nota.output());
+    // Wait for the question's guard before answering the stop.
+    let at = nota.len();
+    nota.press("s");
+    assert!(nota.shows_after(at, "stop recording?"), "{}", nota.output());
+    pause(Duration::from_millis(700));
+    let at = nota.len();
+    nota.press("y");
+    assert!(nota.shows_after(at, "finishing"), "{}", nota.output());
+    assert!(nota.shows_after(at, "tab view"), "{}", nota.output());
+    // The stop draws Home's list before opening Processing again.
+    let stopped = visible(&nota.output.lock().unwrap()[at..]);
+    assert!(stopped.contains("recent"), "{stopped}");
+    assert!(stopped.contains("Workshop"), "{stopped}");
+    assert!(!stopped.contains("nothing recorded yet"), "{stopped}");
+    nota.press("q");
+    assert!(nota.exits().unwrap().success());
+}
+
 /// `nota` with no command opens Home. `R` records with the last settings
 /// (a first recording: the default devices, titled "Recording"), stopping
-/// opens Processing, then esc returns to Home with the session listed; `q` closes nota
-/// with the terminal restored and the recording's summary said.
+/// opens Processing, then esc returns to Home with the session listed.
+/// `q` closes nota with the terminal restored and its summary said.
 #[test]
 fn home_records_opens_processing_and_returns_home() {
     let tmp = TestDir::new("home");

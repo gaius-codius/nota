@@ -12,16 +12,16 @@
 //! directory (`jobs/`) for as long as it runs, so a second nota open on
 //! the same library runs no jobs of its own: its runner waits for the
 //! lock, and takes the queue over once the first nota closes or dies.
-//! Holding it, the runner first
-//! takes back the jobs a runner that died left running: they wait to run
-//! again, and run on from what they committed. A job that nota has died
-//! running [`MAX_ATTEMPTS`] times fails rather than taking nota down again.
+//! Holding it, the runner first takes back the jobs a runner that died
+//! left running: they wait to run again, and run on from what they
+//! committed. A job that nota has died running [`MAX_ATTEMPTS`] times
+//! fails rather than taking nota down again.
 //!
 //! **Nothing holds the queue up.** A job runs only once what it waits for
 //! is there ([`Wait`]): space, after a full disk; a speech engine; its
-//! session's audio, all published. The
-//! queue moves on past one that's waiting, and past one that fails (it
-//! keeps its reason), to the next session's.
+//! session's audio, all published. The queue moves on past one that's
+//! waiting, and past one that fails (it keeps its reason), to the next
+//! session's.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -31,9 +31,9 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use nota_core::{Clock, SessionTime, SystemClock};
+use nota_core::{Clock, SessionTime};
 use nota_recorder::fs::{Fs, StdFs};
-use nota_store::{Job, JobEnd, JobState, Progress, StoreError, Wait, Writer};
+use nota_store::{Job, JobEnd, JobId, JobState, Progress, StoreError, Wait, Writer};
 
 /// A job that nota has died while running this many times fails.
 pub(crate) const MAX_ATTEMPTS: u32 = 3;
@@ -82,7 +82,10 @@ pub(crate) trait Room: Send + Sync + 'static {
 
 /// Free space under the data directory: at least [`JOB_ROOM`].
 #[derive(Debug, Clone)]
-pub(crate) struct FreeSpace(pub(crate) std::path::PathBuf);
+pub(crate) struct FreeSpace(
+    /// The data directory whose free space is checked.
+    pub(crate) std::path::PathBuf,
+);
 
 /// The space a job waiting for it needs: as much as the ballast a
 /// recording keeps (256 MB), so jobs don't fill the room a recording needs
@@ -101,9 +104,11 @@ impl Room for FreeSpace {
 /// What the runner thread shares with its handle.
 #[derive(Debug, Default)]
 struct Shared {
+    /// Set when nota is closing.
     stopping: AtomicBool,
     /// Set when the runner should look at the queue now.
     woken: Mutex<bool>,
+    /// Wakes the thread when the queue or recording changes.
     wake: Condvar,
 }
 
@@ -133,14 +138,17 @@ impl Shared {
 /// The running runner. Dropping it stops it, pausing the job it runs.
 #[derive(Debug)]
 pub(crate) struct Runner {
+    /// Lets this handle wake and stop the thread.
     shared: Arc<Shared>,
+    /// The thread to join when the runner stops.
     thread: Option<JoinHandle<()>>,
 }
 
 impl Runner {
     /// Starts the runner for the library whose data directory is `data`
     /// and database `db`. While another nota runs the library's jobs, it
-    /// waits, and takes over when that one stops.
+    /// waits, and takes over when that one stops. Engine retries use the
+    /// supplied clock.
     ///
     /// # Errors
     ///
@@ -152,10 +160,8 @@ impl Runner {
         worker: impl Worker,
         capture: impl Capture,
         room: impl Room,
+        clock: Arc<dyn Clock>,
     ) -> io::Result<Self> {
-        let clock: Arc<dyn Clock> = Arc::new(
-            SystemClock::start().map_err(|_| io::Error::other("the system clock can't be read"))?,
-        );
         let dir = data.join("jobs");
         match StdFs.create_dir(&dir) {
             Ok(()) => StdFs.sync_dir(data)?,
@@ -167,16 +173,8 @@ impl Runner {
         let thread = thread::Builder::new()
             .name("nota-jobs".into())
             .spawn(move || {
-                // Another nota's runner, or a lock that can't be taken now
-                // (the directory replaced, say): try again in a moment.
-                let _lock = loop {
-                    if looping.stopping() {
-                        return;
-                    }
-                    match StdFs.lock_dir(&dir) {
-                        Ok(lock) => break lock,
-                        Err(_) => looping.sleep(HELD),
-                    }
+                let Some(_lock) = wait_for_lock(&dir, &looping) else {
+                    return;
                 };
                 Loop {
                     db,
@@ -218,15 +216,34 @@ impl Drop for Runner {
     }
 }
 
+/// Waits for the library's lock, unless nota is closing.
+fn wait_for_lock(dir: &Path, shared: &Shared) -> Option<<StdFs as Fs>::Lock> {
+    while !shared.stopping() {
+        match StdFs.lock_dir(dir) {
+            Ok(lock) => return Some(lock),
+            // Another nota's runner, or a directory replaced meanwhile.
+            Err(_) => shared.sleep(HELD),
+        }
+    }
+    None
+}
+
 /// The runner thread's state.
 struct Loop<W, C, R> {
+    /// The library whose queue it runs.
     db: Writer,
+    /// Runs each job once it is ready.
     worker: W,
+    /// Tells it whether a recording is going.
     capture: C,
+    /// Checks whether jobs have room to write.
     room: R,
+    /// Lets its handle wake and stop it.
     shared: Arc<Shared>,
+    /// The app's clock, used to space engine retries.
     clock: Arc<dyn Clock>,
-    retry_after: BTreeMap<nota_store::JobId, SessionTime>,
+    /// When each job last stopped because its engine could not start.
+    retry_after: BTreeMap<JobId, SessionTime>,
 }
 
 impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
@@ -293,6 +310,24 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
             self.shared.sleep(IDLE);
             return;
         }
+        let end = self.work(job);
+        if !self.note_end(job.id, &end) {
+            return;
+        }
+        if end == JobEnd::Waiting(Some(Wait::Engine)) {
+            self.retry_after.insert(job.id, self.clock.now());
+        } else {
+            self.retry_after.remove(&job.id);
+        }
+        // Out of space by SQLite's count though the disk check finds room
+        // (a quota, a full temp store): don't start it again at once.
+        if end == JobEnd::Waiting(Some(Wait::Space)) {
+            self.shared.sleep(IDLE);
+        }
+    }
+
+    /// Runs the job with this recording check and progress callback.
+    fn work(&mut self, job: &Job) -> JobEnd {
         let shared = Arc::clone(&self.shared);
         let capture = &self.capture;
         let stop = move || shared.stopping() || capture.recording();
@@ -302,33 +337,27 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
             // Only shown; a progress that can't be noted is shown late.
             let _ = db.with(|db| db.job_progress(id, progress));
         };
-        let end = self.worker.run(
+        self.worker.run(
             job,
             &Running {
                 stop: &stop,
                 progress: &progress,
             },
-        );
+        )
+    }
+
+    /// Notes the result before another job can run.
+    fn note_end(&self, id: JobId, end: &JobEnd) -> bool {
         // Until it's noted, the job stays running in the database, and
         // nothing else runs: a job that ended must not be run again.
-        while self.db.with(|db| db.end_job(id, &end)).is_err() {
+        while self.db.with(|db| db.end_job(id, end)).is_err() {
             if self.shared.stopping() {
-                // Taken back at the next start, and run again from what
-                // it committed.
-                return;
+                // Taken back at the next start, from what it committed.
+                return false;
             }
             self.shared.sleep(IDLE);
         }
-        if end == JobEnd::Waiting(Some(Wait::Engine)) {
-            self.retry_after.insert(id, self.clock.now());
-        } else {
-            self.retry_after.remove(&id);
-        }
-        // Out of space by SQLite's count though the disk check finds room
-        // (a quota, a full temp store): don't start it again at once.
-        if end == JobEnd::Waiting(Some(Wait::Space)) {
-            self.shared.sleep(IDLE);
-        }
+        true
     }
 }
 

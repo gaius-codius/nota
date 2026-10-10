@@ -43,6 +43,8 @@ use crate::record::{
 };
 use crate::terminal::Screen;
 
+mod processing;
+
 /// What Home shows while a recording stops.
 const STOPPING: &str = "finishing the recording";
 
@@ -84,10 +86,7 @@ fn run_app(args: &RecordArgs, said: &mut Vec<String>) -> Result<(), BoxError> {
         Arc::new(SystemClock::start().map_err(|_| "the system clock can't be read")?);
     let theme = Theme::load();
     let engines = engines(args);
-    let processing_engine = final_engine(args).ok().flatten().map_or_else(
-        || "speech engine unavailable".into(),
-        |engine| format!("{} · {}", engine.heard_by.engine, engine.heard_by.model),
-    );
+    let processing_engine = processing_engine(args);
     // Set while this nota records: no job runs then.
     let here = Arc::new(AtomicBool::new(false));
     let (runner, mut notice) = start_jobs(args, &library, &clock, &here);
@@ -101,65 +100,142 @@ fn run_app(args: &RecordArgs, said: &mut Vec<String>) -> Result<(), BoxError> {
         listed_at: None,
         said: None,
     };
-    let mut screen: Option<Screen> = None;
-    let mut processing_session = None;
-    while !quit.asked() {
-        let mut current = match screen.take() {
-            Some(screen) => screen,
-            None => Screen::enter(None)?,
-        };
-        let sessions = if processing_session.is_some() {
-            Vec::new()
-        } else {
-            listing.sessions()?
-        };
-        let mut home = Home::new(sessions, engines, theme);
-        home.set_notice(notice.take());
-        let action = if let Some(id) = processing_session.take() {
-            processing::show(
-                &mut current,
-                &library,
-                id,
-                &processing_engine,
-                theme,
-                &clock,
-                &quit,
-            )?
-        } else {
-            match show_home(&mut current, &mut home, &mut listing, &quit)? {
-                Action::Quit => nota_tui::ProcessingAction::Quit,
-                Action::Record => nota_tui::ProcessingAction::Record,
-                Action::Open(id) => {
-                    processing_session = Some(SessionId::new(id));
+    let mut home = Home::new(listing.sessions()?, engines, theme);
+    home.set_notice(notice.take());
+    Pages {
+        listing,
+        home,
+        engine: processing_engine,
+        theme,
+        quit: &quit,
+        notice: None,
+    }
+    .run(args, said, &jobs)
+}
+
+/// The final pass engine, kept as a state until the page draws its label.
+fn processing_engine(args: &RecordArgs) -> processing::EngineLine {
+    final_engine(args).ok().flatten().map_or_else(
+        || processing::EngineLine::Unavailable,
+        |engine| {
+            processing::EngineLine::Configured(format!(
+                "{} · {}",
+                engine.heard_by.engine, engine.heard_by.model
+            ))
+        },
+    )
+}
+
+/// Home kept between visits to Processing and Recording.
+struct Pages<'a> {
+    /// The library's list, refreshed while Home is open.
+    listing: Listing<'a>,
+    /// The page also shown while a recording stops.
+    home: Home,
+    /// The engine named on Processing.
+    engine: processing::EngineLine,
+    /// The screen colours.
+    theme: Theme,
+    /// Signals that close the app.
+    quit: &'a QuitSignals,
+    /// A recording failure to show on the next visit to Home.
+    notice: Option<String>,
+}
+
+impl Pages<'_> {
+    /// Visits each page until nota closes.
+    fn run(
+        &mut self,
+        args: &RecordArgs,
+        said: &mut Vec<String>,
+        jobs: &Background,
+    ) -> Result<(), BoxError> {
+        let mut screen = None;
+        let mut processing_session = None;
+        while !self.quit.asked() {
+            let mut current = match screen.take() {
+                Some(screen) => screen,
+                None => Screen::enter(None)?,
+            };
+            match self.action(&mut current, &mut processing_session)? {
+                nota_tui::ProcessingAction::Quit => return Ok(()),
+                nota_tui::ProcessingAction::Home => {
                     screen = Some(current);
                     continue;
                 }
+                nota_tui::ProcessingAction::Record => {}
             }
-        };
-        match action {
-            nota_tui::ProcessingAction::Quit => return Ok(()),
-            nota_tui::ProcessingAction::Home => {
-                screen = Some(current);
-                continue;
+            match self.record(args, current, said, jobs) {
+                Recorded::Back(back, id) => {
+                    screen = Some(back);
+                    processing_session = id;
+                }
+                Recorded::Failed(e) => self.notice = Some(format!("the recording failed: {e}")),
+                Recorded::TerminalGone => return Ok(()),
             }
-            nota_tui::ProcessingAction::Record => {}
         }
-        match record_from(args, &library, current, &mut home, said, &jobs) {
-            Recorded::Back(back, id) => {
-                screen = Some(back);
-                processing_session = id;
-            }
-            Recorded::Failed(e) => notice = Some(format!("the recording failed: {e}")),
-            Recorded::TerminalGone => return Ok(()),
-        }
+        Ok(())
     }
-    Ok(())
+
+    /// Starts a recording with the kept Home page for its stop.
+    fn record(
+        &mut self,
+        args: &RecordArgs,
+        screen: Screen,
+        said: &mut Vec<String>,
+        jobs: &Background,
+    ) -> Recorded {
+        self.listing.relist(&mut self.home);
+        record_from(
+            args,
+            self.listing.library,
+            screen,
+            &mut self.home,
+            said,
+            jobs,
+        )
+    }
+
+    /// Shows Processing or Home and keeps Home's list for a later stop.
+    fn action(
+        &mut self,
+        screen: &mut Screen,
+        processing_session: &mut Option<SessionId>,
+    ) -> Result<nota_tui::ProcessingAction, BoxError> {
+        if let Some(id) = processing_session.take() {
+            return processing::show(
+                screen,
+                self.listing.library,
+                id,
+                &self.engine,
+                self.theme,
+                &self.listing.clock,
+                self.quit,
+            );
+        }
+        self.home.set_busy(None);
+        if let Some(notice) = self.notice.take() {
+            self.home.set_notice(Some(notice));
+        }
+        self.listing.relist(&mut self.home);
+        Ok(
+            match show_home(screen, &mut self.home, &mut self.listing, self.quit)? {
+                Action::Quit => nota_tui::ProcessingAction::Quit,
+                Action::Record => nota_tui::ProcessingAction::Record,
+                Action::Open(id) => {
+                    *processing_session = Some(SessionId::new(id));
+                    nota_tui::ProcessingAction::Home
+                }
+            },
+        )
+    }
 }
 
 /// The jobs that run after each stop, and whether this nota is recording.
 struct Background {
     /// `None` if they can't run.
     runner: Option<Runner>,
+    /// Whether this nota is recording.
     here: Arc<AtomicBool>,
 }
 
@@ -187,6 +263,7 @@ fn start_jobs(
         Jobs::new(library.clone(), engine, Arc::clone(clock)),
         capture,
         FreeSpace(args.data.clone()),
+        Arc::clone(clock),
     ) {
         Ok(runner) => (Some(runner), None),
         Err(e) => (None, Some(cant(e))),
@@ -197,8 +274,11 @@ fn start_jobs(
 /// nota's, found by its locked session ([`Library::recording`]) at most
 /// every [`ELSEWHERE`].
 struct Recordings {
+    /// The library checked for another recording.
     library: Library,
+    /// Whether this nota is recording.
     here: Arc<AtomicBool>,
+    /// Times the interval between checks.
     clock: Arc<dyn Clock>,
     /// When another nota was last looked for, and whether one was
     /// recording.
@@ -252,7 +332,7 @@ fn record_from(
     let mut record = args.clone();
     record.start = Command::Start(last_setup(library).unwrap_or_else(first_setup));
     let mut stopping = |screen: &mut Screen| {
-        home.set_busy(Some(STOPPING.to_owned()));
+        stopping_home(home);
         // Only a courtesy: if drawing fails, the next draw says so.
         let _ = screen.clear();
         let _ = screen.terminal().draw(|frame| home.draw(frame));
@@ -273,6 +353,14 @@ fn record_from(
     if let Some(runner) = &jobs.runner {
         runner.wake();
     }
+    recorded_result(recorded, said)
+}
+
+/// Keeps the recording's result for the next page and the closing report.
+fn recorded_result(
+    recorded: Result<(crate::record::Outcome, Option<Screen>), BoxError>,
+    said: &mut Vec<String>,
+) -> Recorded {
     match recorded {
         Ok((outcome, back)) => {
             said.push(format!(
@@ -354,6 +442,7 @@ const fn engines(args: &RecordArgs) -> &'static str {
 /// read again while Home stays open: every [`RELIST`], and as soon as the
 /// local date changes, so `today` moves on at midnight.
 struct Listing<'a> {
+    /// The library whose sessions are shown.
     library: &'a Library,
     /// What salvage did at start.
     salvaged: &'a [Salvaged],
@@ -389,41 +478,23 @@ impl Listing<'_> {
             .into_iter()
             .map(|listed| session(listed, self.salvaged, &dates))
             .collect();
+        self.job_statuses(&mut sessions);
+        self.listed_at = Some((at, dates.today()));
+        Ok(sessions)
+    }
+
+    /// Gives ready sessions their post-stop job status.
+    fn job_statuses(&self, sessions: &mut [Session]) {
         let jobs = self.library.db().with(|db| db.jobs());
-        if let Ok(jobs) = &jobs {
-            for shown in &mut sessions {
-                if shown.status != Status::Ready {
-                    continue;
-                }
-                let own: Vec<_> = jobs
-                    .iter()
-                    .filter(|job| job.session.get() == shown.id)
-                    .collect();
-                if let Some(why) = own.iter().find_map(|job| match &job.state {
-                    nota_store::JobState::Failed(why) => Some(why),
-                    _ => None,
-                }) {
-                    shown.status = Status::NeedsYou;
-                    shown.detail = Some(format!("processing failed: {why}"));
-                } else if own
-                    .iter()
-                    .any(|job| job.state != nota_store::JobState::Done)
-                {
-                    shown.status = Status::Processing;
-                    shown.detail = Some("final transcript queued or running".into());
-                }
-            }
-        }
-        if let Err(error) = jobs {
-            for shown in &mut sessions {
-                if shown.status == Status::Ready {
+        for shown in sessions.iter_mut().filter(|s| s.status == Status::Ready) {
+            match &jobs {
+                Ok(jobs) => job_status(shown, jobs),
+                Err(error) => {
                     shown.status = Status::NeedsYou;
                     shown.detail = Some(format!("processing status couldn't be read: {error}"));
                 }
             }
         }
-        self.listed_at = Some((at, dates.today()));
-        Ok(sessions)
     }
 
     /// Gives `home` the sessions again if a listing is due: [`RELIST`] has
@@ -431,9 +502,13 @@ impl Listing<'_> {
     /// fails, Home keeps the list it has and says why, once until a
     /// listing works again, without replacing another problem it shows.
     fn refresh(&mut self, home: &mut Home) {
-        if !self.due() {
-            return;
+        if self.due() {
+            self.relist(home);
         }
+    }
+
+    /// Lists now after a page change, keeping the old list if reading fails.
+    fn relist(&mut self, home: &mut Home) {
         match self.sessions() {
             Ok(sessions) => {
                 if self
@@ -483,12 +558,36 @@ impl Listing<'_> {
     }
 }
 
+/// Shows the recording's stop without replacing Home's list.
+fn stopping_home(home: &mut Home) {
+    home.set_busy(Some(STOPPING.to_owned()));
+}
+
+/// Gives one ready session the status of its jobs.
+fn job_status(shown: &mut Session, jobs: &[nota_store::Job]) {
+    let own = || {
+        jobs.iter()
+            .filter(|job| job.session == SessionId::new(shown.id))
+    };
+    if let Some(why) = own().find_map(|job| match &job.state {
+        nota_store::JobState::Failed(why) => Some(why),
+        _ => None,
+    }) {
+        shown.status = Status::NeedsYou;
+        shown.detail = Some(format!("processing failed: {why}"));
+    } else if own().any(|job| job.state != nota_store::JobState::Done) {
+        shown.status = Status::Processing;
+        shown.detail = Some("final transcript queued or running".into());
+    }
+}
+
 /// How Home words a session's date: `today`, `2 Oct` this year, `Oct 2025`
 /// before it, in the local time zone.
 struct Dates {
     /// Now, if the calendar's time can be read; without it, no day is
     /// `today`.
     now: Option<WallTime>,
+    /// The local time zone for date labels.
     zone: TimeZone,
 }
 
@@ -568,5 +667,3 @@ const fn salvaged_id(salvaged: &Salvaged) -> SessionId {
 
 #[cfg(test)]
 mod tests;
-
-mod processing;

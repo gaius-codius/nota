@@ -43,7 +43,9 @@ mod text;
 mod theme;
 
 pub use home::{Action, Home, Session, Status};
-pub use processing::{Processing, ProcessingAction, ProcessingJob, ProcessingState};
+pub use processing::{
+    Processing, ProcessingAction, ProcessingFailure, ProcessingJob, ProcessingState, ProcessingWait,
+};
 pub use run::{Ended, Event, InputThread, RunError, run, run_home, run_processing};
 pub use screen::Recording;
 pub use theme::{Theme, ThemeError};
