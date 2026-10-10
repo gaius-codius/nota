@@ -28,7 +28,7 @@ use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 use nota_core::recorder::{self, Cause, Warning, WarningState};
-use nota_core::{Clock, Gap, SessionTime};
+use nota_core::{Clock, SessionTime};
 use nota_tui::Event;
 
 /// Where a sleep lock comes from: logind, or a stand-in in tests.
@@ -191,19 +191,93 @@ impl Logind for SystemLogind {
     }
 }
 
+/// How far apart two tracks' first audio after a sleep can be and still be
+/// the same sleep when the timelines can't say otherwise: each stream wakes
+/// on its own, and a slow one (Bluetooth, say) a few seconds after the rest.
+const SAME_SLEEP: Duration = Duration::from_secs(2);
+
+/// A stretch of the recording in which no track captured anything, as a
+/// sleep leaves it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Unrecorded {
+    /// When the audio before it ended.
+    pub(crate) from: SessionTime,
+    /// When the audio after it began.
+    pub(crate) to: SessionTime,
+}
+
+impl Unrecorded {
+    /// How long it lasted.
+    fn duration(self) -> Duration {
+        self.to
+            .checked_duration_since(self.from)
+            .unwrap_or_default()
+    }
+
+    /// Whether `at` is in it, or within [`SAME_SLEEP`] after it.
+    fn reaches(self, at: SessionTime) -> bool {
+        at >= self.from
+            && self
+                .to
+                .checked_add(SAME_SLEEP)
+                .is_none_or(|latest| at <= latest)
+    }
+
+    /// What this and `other` have in common, if they overlap.
+    fn overlap(self, other: Self) -> Option<Self> {
+        let from = self.from.max(other.from);
+        let to = self.to.min(other.to);
+        (from < to).then_some(Self { from, to })
+    }
+}
+
 /// A sleep the machine took during the recording, as the live view saw it:
-/// the first audio after it, and the gap before that audio if the
-/// timeline kept one.
+/// when the audio first came back, and the stretch with no audio before it
+/// if the timelines kept one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Slept {
-    /// When the audio came back.
+    /// When the audio first came back, on any track.
     pub(crate) resumed: SessionTime,
-    /// The time with no audio. Missing if the timeline took the stretch as
-    /// drift, or refused a new epoch for it.
-    pub(crate) gap: Option<Gap>,
+    /// The time in which no track recorded. Missing if the timeline took
+    /// the stretch as drift, refused a new epoch for it, or none of the
+    /// gaps it kept began where the track's audio ended.
+    pub(crate) unrecorded: Option<Unrecorded>,
 }
 
 impl Slept {
+    /// Whether `other`, from another track, is the same sleep as this:
+    /// their stretches overlap, or one has none and its track woke in or
+    /// just after the other's, or neither has one and the tracks woke
+    /// within [`SAME_SLEEP`] of each other.
+    pub(crate) fn same_sleep_as(&self, other: &Self) -> bool {
+        match (self.unrecorded, other.unrecorded) {
+            (Some(ours), Some(theirs)) => ours.overlap(theirs).is_some(),
+            (Some(only), None) => only.reaches(other.resumed),
+            (None, Some(only)) => only.reaches(self.resumed),
+            (None, None) => {
+                let apart = self
+                    .resumed
+                    .checked_duration_since(other.resumed)
+                    .or_else(|| other.resumed.checked_duration_since(self.resumed));
+                apart.is_some_and(|apart| apart <= SAME_SLEEP)
+            }
+        }
+    }
+
+    /// This sleep and `other`, which is the same one seen from another
+    /// track, as one: the machine was asleep only while no track recorded,
+    /// so the stretch is what both have in common.
+    pub(crate) fn merged_with(&self, other: &Self) -> Self {
+        let unrecorded = match (self.unrecorded, other.unrecorded) {
+            (Some(ours), Some(theirs)) => ours.overlap(theirs),
+            (ours, theirs) => ours.or(theirs),
+        };
+        Self {
+            resumed: self.resumed.min(other.resumed),
+            unrecorded,
+        }
+    }
+
     /// The warning for the screen, raised at the resume.
     pub(crate) fn warning(&self) -> recorder::Event {
         recorder::Event::Warning(Warning {
@@ -216,11 +290,11 @@ impl Slept {
 
     /// What the summary says of it.
     pub(crate) fn note(&self) -> String {
-        match self.gap {
-            Some(gap) => format!(
+        match self.unrecorded {
+            Some(unrecorded) => format!(
                 "the machine slept at {} for {}; nothing was recorded then",
-                clock_time(gap.from()),
-                lasted(gap.duration())
+                clock_time(unrecorded.from),
+                lasted(unrecorded.duration())
             ),
             None => format!(
                 "the machine slept before {}; the recording may have a gap there",
@@ -240,6 +314,7 @@ fn clock_time(at: SessionTime) -> String {
 fn lasted(span: Duration) -> String {
     let secs = span.as_secs();
     match (secs / 3600, secs / 60 % 60, secs % 60) {
+        (0, 0, 0) => "less than a second".to_owned(),
         (0, 0, s) => format!("{s}s"),
         (0, m, s) => format!("{m}m {s}s"),
         (h, m, _) => format!("{h}h {m}m"),

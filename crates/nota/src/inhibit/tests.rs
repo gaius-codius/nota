@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 
-use nota_core::{EpochId, FakeClock, SampleIndex, SampleRate, TrackId, TrackTimeline};
+use nota_core::FakeClock;
 
 use super::*;
 
@@ -56,17 +56,20 @@ fn ms(ms: u64) -> SessionTime {
     SessionTime::from_nanos(ms * 1_000_000)
 }
 
-/// A gap of `from` to `to` milliseconds, from a timeline that reopened.
-fn gap(from: u64, to: u64) -> Gap {
-    let rate = SampleRate::new(1_000).unwrap();
-    let mut timeline = TrackTimeline::new(TrackId::new(0));
-    timeline.open_epoch(ms(0), SampleIndex::ZERO, rate).unwrap();
-    timeline
-        .open_epoch(ms(to), SampleIndex::new(from), rate)
-        .unwrap();
-    let gap = timeline.gaps().next().unwrap();
-    assert_eq!(gap.after(), EpochId::new(0));
-    gap
+/// A stretch with no audio from `from` to `to` milliseconds.
+fn quiet(from: u64, to: u64) -> Unrecorded {
+    Unrecorded {
+        from: ms(from),
+        to: ms(to),
+    }
+}
+
+/// A sleep that ended with audio at `resumed` ms, after `unrecorded`.
+fn slept(resumed: u64, unrecorded: Option<Unrecorded>) -> Slept {
+    Slept {
+        resumed: ms(resumed),
+        unrecorded,
+    }
 }
 
 /// The lock is held from the moment it's taken until it's dropped, and
@@ -154,10 +157,7 @@ fn a_dbus_error_keeps_its_name_and_message() {
 /// particular.
 #[test]
 fn a_sleep_warns_at_the_resume() {
-    let slept = Slept {
-        resumed: ms(5_000),
-        gap: Some(gap(1_000, 5_000)),
-    };
+    let slept = slept(5_000, Some(quiet(1_000, 5_000)));
     assert_eq!(
         slept.warning(),
         recorder::Event::Warning(Warning {
@@ -173,10 +173,7 @@ fn a_sleep_warns_at_the_resume() {
 /// before it, and for how long.
 #[test]
 fn the_note_for_a_sleep_with_a_gap_says_when_and_how_long() {
-    let slept = Slept {
-        resumed: ms(4_452_000),
-        gap: Some(gap(4_360_000, 4_452_000)),
-    };
+    let slept = slept(4_452_000, Some(quiet(4_360_000, 4_452_000)));
     assert_eq!(
         slept.note(),
         "the machine slept at 1:12:40 for 1m 32s; nothing was recorded then"
@@ -187,10 +184,7 @@ fn the_note_for_a_sleep_with_a_gap_says_when_and_how_long() {
 /// note can only say the machine slept before the resume.
 #[test]
 fn the_note_for_a_sleep_without_a_gap_says_where_audio_resumed() {
-    let slept = Slept {
-        resumed: ms(61_000),
-        gap: None,
-    };
+    let slept = slept(61_000, None);
     assert_eq!(
         slept.note(),
         "the machine slept before 0:01:01; the recording may have a gap there"
@@ -201,11 +195,58 @@ fn the_note_for_a_sleep_without_a_gap_says_where_audio_resumed() {
 #[test]
 fn lengths_show_their_two_largest_units() {
     let secs = Duration::from_secs;
-    assert_eq!(lasted(secs(0)), "0s");
+    assert_eq!(lasted(Duration::from_millis(999)), "less than a second");
+    assert_eq!(lasted(secs(1)), "1s");
     assert_eq!(lasted(secs(59)), "59s");
     assert_eq!(lasted(secs(60)), "1m 0s");
     assert_eq!(lasted(secs(92)), "1m 32s");
     assert_eq!(lasted(secs(3_599)), "59m 59s");
     assert_eq!(lasted(secs(3_600)), "1h 0m");
     assert_eq!(lasted(secs(7_500 + 59)), "2h 5m");
+}
+
+/// Tracks whose stretches overlap woke from one sleep; ones that only touch
+/// or are apart didn't.
+#[test]
+fn sleeps_with_overlapping_stretches_are_the_same_sleep() {
+    let first = slept(5_000, Some(quiet(1_000, 5_000)));
+    assert!(first.same_sleep_as(&slept(9_000, Some(quiet(1_000, 9_000)))));
+    assert!(first.same_sleep_as(&slept(5_040, Some(quiet(1_040, 5_040)))));
+    // Touching isn't overlapping: the second began as the first ended.
+    assert!(!first.same_sleep_as(&slept(9_000, Some(quiet(5_000, 9_000)))));
+    assert!(!first.same_sleep_as(&slept(9_000, Some(quiet(6_000, 9_000)))));
+}
+
+/// A track with no stretch to compare is the same sleep if it woke in the
+/// other's stretch or within two seconds after it, whichever came first.
+#[test]
+fn a_sleep_with_no_stretch_is_judged_by_when_it_woke() {
+    let known = slept(5_000, Some(quiet(1_000, 5_000)));
+    assert!(known.same_sleep_as(&slept(5_500, None)));
+    assert!(known.same_sleep_as(&slept(7_000, None)));
+    assert!(!known.same_sleep_as(&slept(7_001, None)));
+    assert!(!known.same_sleep_as(&slept(999, None)));
+    // The same from the other side.
+    assert!(slept(7_000, None).same_sleep_as(&known));
+    assert!(!slept(7_001, None).same_sleep_as(&known));
+    // Neither has one: two seconds apart, in either order.
+    assert!(slept(1_000, None).same_sleep_as(&slept(3_000, None)));
+    assert!(slept(3_000, None).same_sleep_as(&slept(1_000, None)));
+    assert!(!slept(1_000, None).same_sleep_as(&slept(3_001, None)));
+    assert!(!slept(3_001, None).same_sleep_as(&slept(1_000, None)));
+}
+
+/// Merging the sleep one track saw with another's keeps what no track
+/// recorded: the stretch they have in common, from the first to wake.
+#[test]
+fn merging_sleeps_keeps_the_stretch_no_track_recorded() {
+    let mic = slept(5_000, Some(quiet(1_000, 5_000)));
+    let system = slept(9_000, Some(quiet(1_000, 9_000)));
+    let both = slept(5_000, Some(quiet(1_000, 5_000)));
+    assert_eq!(mic.merged_with(&system), both);
+    assert_eq!(system.merged_with(&mic), both);
+    // With a stretch on one side only, that's the one kept.
+    let unknown = slept(5_500, None);
+    assert_eq!(mic.merged_with(&unknown), mic);
+    assert_eq!(unknown.merged_with(&mic), mic);
 }

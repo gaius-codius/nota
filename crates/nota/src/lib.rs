@@ -11,6 +11,10 @@
 //!
 //! The binary's `main` only calls [`main`]; the code is here so its tests
 //! can turn on the `fake-capture` feature.
+//!
+//! The one native library here is libdbus-1, through the `dbus` crate
+//! (Linux only, already linked by cpal for rtkit): `nota record` asks
+//! logind for a sleep lock over it (see `inhibit`).
 
 use std::ffi::OsString;
 use std::io::{self, Write};
