@@ -1,6 +1,7 @@
 //! The watch on `PipeWire`'s graph for one track's stream: which device
-//! its [`Source`] is on, reported as [`DeviceChange`]s ([`super::super::route`]
-//! decides what counts as one).
+//! its [`Source`] is on, reported as
+//! [`DeviceChange`](nota_core::recorder::DeviceChange)s
+//! ([`super::super::route`] decides what counts as one).
 //!
 //! The watch runs a `PipeWire` main loop on a thread of its own, with its
 //! own connection. It reads the graph from the registry (the sinks,
