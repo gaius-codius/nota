@@ -538,29 +538,50 @@ pub(crate) fn startup_watch<S: Fs + Clone>(
     len: u64,
 ) -> io::Result<Arc<DiskWatch<S>>> {
     let watch = DiskWatch::new(fs.clone());
+    // Recovery mustn't spend a live recording's finishing room.
+    if startup_in_use(fs, root)? {
+        return Ok(watch);
+    }
     if let Some(ballast) = Ballast::find(fs, root, len)? {
         watch.hold(ballast);
     }
     Ok(watch)
 }
 
+/// Checks locks even before a recording has made its first journal.
+fn startup_in_use<S: Fs>(fs: &S, root: &Path) -> io::Result<bool> {
+    for session in fs.list(&root.join(SESSIONS))? {
+        if fs
+            .lock_dir(&session.join(AUDIO))
+            .is_err_and(|e| e.kind() == io::ErrorKind::WouldBlock)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Removes only empty scaffolding that this start just created. Never
 /// removes audio, journals or a session made by another start.
 pub(crate) fn discard_empty<S: Fs>(fs: &S, paths: &SessionPaths) {
     let audio = paths.audio();
-    // Opening the writer may have left only its unpublished marks temp.
-    if let Ok(files) = fs.list(&audio) {
-        for path in files {
-            if path
-                .file_name()
-                .is_some_and(|n| n == "session-marks.tmp" || n == "session.txt.partial")
-            {
+    // No row is discarded once audio or anything unknown is there.
+    match fs.list(&audio) {
+        Ok(files)
+            if files
+                .iter()
+                .all(|p| p.file_name().is_some_and(|n| n == "session-marks.tmp")) =>
+        {
+            for path in files {
                 let _removed = fs.remove(&path);
             }
         }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        _ => return,
     }
-    let partial = paths.dir.join(kept::KEPT_PARTIAL);
-    let _partial = fs.remove(&partial);
+    for name in [kept::KEPT_PARTIAL, kept::KEPT] {
+        let _row = fs.remove(&paths.dir.join(name));
+    }
     let _audio = fs.remove_dir(&audio);
     let _contents = fs.sync_dir(&paths.dir);
     let _session = fs.remove_dir(&paths.dir);

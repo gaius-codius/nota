@@ -984,3 +984,71 @@ fn a_watched_store_names_a_row_that_doesnt_parse() {
         None
     );
 }
+
+/// Recovery's full-disk notice mustn't stop a recording that can now start.
+#[test]
+fn a_recovered_start_doesnt_report_full_to_the_recording_monitor() {
+    let fs = FakeFs::with_dirs(["/data/s"]);
+    let watch = DiskWatch::new(fs);
+    watch.note_full(Some(&p("/data/session.txt.partial")));
+    // Startup has made room and kept its row before the monitor begins.
+    watch.start_recording();
+    let (monitor, reports) = spawn_monitor(&watch, config(small(1), 100, WAIT));
+    let summary = monitor.stop().unwrap();
+    assert_eq!(summary.full, None);
+    assert!(
+        reports
+            .try_iter()
+            .all(|r| !matches!(r, DiskReport::Full(_)))
+    );
+}
+
+/// Empty session scaffolding is removed through the watched filesystem.
+#[test]
+fn the_watched_filesystem_removes_an_empty_directory() {
+    let fs = FakeFs::with_dirs(["/data/s"]);
+    let watch = DiskWatch::new(fs.clone());
+    watch.fs().remove_dir(&p("/data/s")).unwrap();
+    // Success must reflect a real removal, not a swallowed operation.
+    assert!(!fs.list(&p("/data")).unwrap().contains(&p("/data/s")));
+}
+
+/// A rollback must never swallow refusal to remove nonempty audio.
+#[test]
+fn the_watched_filesystem_refuses_a_nonempty_directory() {
+    let fs = FakeFs::with_dirs(["/data/s"]);
+    fs.create(&p("/data/s/journal-000000")).unwrap();
+    let watch = DiskWatch::new(fs.clone());
+    let error = watch.fs().remove_dir(&p("/data/s")).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::DirectoryNotEmpty);
+    assert_eq!(
+        fs.list(&p("/data/s")).unwrap(),
+        [p("/data/s/journal-000000")]
+    );
+}
+
+/// A full-disk directory removal still frees the held ballast.
+#[test]
+fn a_full_disk_during_watched_directory_removal_frees_ballast() {
+    use crate::fs::fake::Fault;
+    let fs = FakeFs::with_dirs(["/data/s"]);
+    let watch = watched(&fs, 100);
+    fs.fail_on(&p("/data/s"), Fault::RemoveDir, io::ErrorKind::StorageFull);
+    // Metadata can be full too; startup still needs the ballast freed.
+    assert_eq!(
+        watch.fs().remove_dir(&p("/data/s")).unwrap_err().kind(),
+        io::ErrorKind::StorageFull
+    );
+    assert_eq!(watch.full().map(|f| f.ballast), Some(Freed::Freed));
+    assert!(Ballast::find(&fs, &p("/data"), 100).unwrap().is_none());
+}
+
+/// A wrapper that omits directory removal must refuse rather than claim
+/// cleanup succeeded while leaving the directory in place.
+#[test]
+fn a_wrapper_without_directory_removal_refuses_cleanup() {
+    let fs = BadLocks(FakeFs::with_dirs(["/data/s"]));
+    let error = fs.remove_dir(&p("/data/s")).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+    assert_eq!(fs.list(&p("/data")).unwrap(), [p("/data/s")]);
+}

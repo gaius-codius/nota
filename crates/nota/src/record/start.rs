@@ -105,6 +105,20 @@ pub(super) fn start<B: CaptureBackend>(
     library: Option<Library>,
 ) -> Result<(Started<B>, Screening), BoxError> {
     let mut outcome = Outcome::default();
+    start_with_outcome(args, setup, backend, clock, screen, library, &mut outcome)
+        .map_err(|error| startup_failure(error, outcome.notes))
+}
+
+/// Prepares capture while keeping recovery notes for a failed start.
+fn start_with_outcome<B: CaptureBackend>(
+    args: &RecordArgs,
+    setup: &Setup,
+    backend: &B,
+    clock: &Arc<dyn Clock>,
+    screen: Option<Screen>,
+    library: Option<Library>,
+    outcome: &mut Outcome,
+) -> Result<(Started<B>, Screening), BoxError> {
     let (ui, ui_events) = mpsc::channel::<Event>();
     let signals = listen_for_signals(ui.clone())?;
     // The terminal first: without one there's nothing to record into.
@@ -199,7 +213,7 @@ pub(super) fn start<B: CaptureBackend>(
 
     let started_save = saver.sender();
     let started = Started {
-        outcome,
+        outcome: std::mem::take(outcome),
         signals,
         draws,
         library,
@@ -221,6 +235,36 @@ pub(super) fn start<B: CaptureBackend>(
         save: started_save,
     };
     Ok((started, screening))
+}
+
+/// A failed start, with the recovery notes it collected first.
+#[derive(Debug)]
+struct StartupFailure {
+    /// What stopped the new recording from starting.
+    error: BoxError,
+    /// What recovery found in earlier sessions.
+    notes: Vec<String>,
+}
+
+impl std::fmt::Display for StartupFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}; {}", self.error, self.notes.join("; "))
+    }
+}
+
+impl std::error::Error for StartupFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.error.as_ref())
+    }
+}
+
+/// Leaves the original cause intact when recovery added nothing.
+fn startup_failure(error: BoxError, notes: Vec<String>) -> BoxError {
+    if notes.is_empty() {
+        error
+    } else {
+        Box::new(StartupFailure { error, notes })
+    }
 }
 
 /// Keeps the new row before recording starts, with one full-disk retry.
@@ -955,6 +999,27 @@ mod salvage_note_tests {
         drop(library);
         remove_fixture(&root);
     }
+    /// Startup names pending repair even when another journal only needs cleanup.
+    #[test]
+    fn startup_reports_cleanup_and_unfinished_repair_together() {
+        use nota_recorder::segment::{FakeStore, salvage};
+        let fixture = crate::record::summary::tests::mixed_fixture();
+        let mut bound = SessionStore::new(
+            fixture.lock.clone(),
+            FakeStore::new(&fixture.fs, &PathBuf::from("/held-db")),
+        );
+        // Startup creates its own report from the two journals retained on disk.
+        let held = salvage(&mut bound, fixture.length).unwrap();
+        assert_eq!(held.not_deleted().len(), 1);
+        assert_eq!(held.not_repaired().len(), 1);
+        let note = salvage_note(&Salvaged::Left(
+            SessionId::new(1),
+            Vec::new(),
+            Box::new(held),
+        ));
+        assert!(note.contains("all its audio is published"), "{note}");
+        assert!(note.contains("seg-t1-000000000000.flac: the segment file doesn't match its stored audio; couldn't repair it (permission denied); its journals are still to publish"), "{note}");
+    }
 }
 
 #[cfg(test)]
@@ -1004,6 +1069,37 @@ mod space_tests {
         }
     }
 
+    /// A title renamed before a full-disk sync failure still belongs to
+    /// the rejected start, so no metadata-only session is left behind.
+    #[test]
+    fn a_full_start_after_the_title_rename_leaves_nothing() {
+        let fs = FakeFs::with_dirs([PathBuf::from("/data"), PathBuf::from("/data/sessions")]);
+        let session = pending_session(&fs);
+        let watch = startup_watch(&fs, std::path::Path::new("/data"), 1_024).unwrap();
+        // Removal, create, write, file sync and rename precede the last sync.
+        fs.fail_after(5, std::io::ErrorKind::StorageFull);
+        let error = keep_session(&watch, &session, &NewSession::bare(session.id)).unwrap_err();
+        assert_eq!(
+            start_error(error).to_string(),
+            "the disk is full: free some space"
+        );
+        assert!(
+            fs.list(std::path::Path::new("/data/sessions"))
+                .unwrap()
+                .is_empty()
+        );
+        // Both the title and the session name stay removed after a crash.
+        for outcome in nota_recorder::fs::fake::CrashOutcome::standard() {
+            let crashed = fs.crash(outcome);
+            assert!(
+                crashed
+                    .list(std::path::Path::new("/data/sessions"))
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
     /// Startup retries a partial row write after freeing the ballast.
     #[test]
     fn a_full_start_frees_ballast_and_keeps_its_row() {
@@ -1039,6 +1135,21 @@ mod space_tests {
         discard_empty(&fs, &session);
         assert_eq!(fs.read(&journal).unwrap(), [7; 40]);
         assert!(fs.list(&session.dir).unwrap().contains(&session.audio()));
+    }
+
+    /// A failed start still tells the user about earlier journals.
+    #[test]
+    fn a_failed_start_keeps_its_recovery_notes() {
+        let error = start_error(std::io::Error::from(std::io::ErrorKind::StorageFull));
+        // Recovery ran before the new session ran out of room.
+        let failure = startup_failure(
+            error,
+            vec!["session 2: its journals are still to publish".into()],
+        );
+        assert_eq!(
+            failure.to_string(),
+            "the disk is full: free some space; session 2: its journals are still to publish"
+        );
     }
 
     /// Errors unrelated to space keep their original cause.

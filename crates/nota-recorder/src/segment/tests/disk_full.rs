@@ -552,3 +552,18 @@ fn check_startup_crash(old: &StartupDisk, settled: &Observed, after: usize, outc
     startup_salvage(&survived).published.unwrap();
     assert_eq!(observe(&survived), recovered);
 }
+
+/// A later session's successful salvage keeps its report after an earlier
+/// session already freed the startup ballast.
+#[test]
+fn successful_startup_salvage_after_freeing_ballast_keeps_its_rows() {
+    let old = stopped_full_disk(StartupBallast::Existing);
+    let watch = DiskWatch::new(old.fs.clone());
+    let ballast = Ballast::find(&old.fs, &data(), BALLAST).unwrap().unwrap();
+    watch.hold(ballast);
+    // Another session's recovery already met the full disk.
+    watch.note_full(None);
+    let done = startup_salvage_into(&old.fs, &watch).unwrap();
+    assert!(!done.segments().is_empty());
+    check_after(&old.promised, &observe(&old.fs)).unwrap();
+}

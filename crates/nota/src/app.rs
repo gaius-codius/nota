@@ -526,6 +526,15 @@ fn session(listed: Listed, salvaged: &[Salvaged], dates: &Dates) -> Session {
         (Needs::Attention(_), Some(Salvaged::Failed(_, e))) => {
             (Status::NeedsYou, Some(format!("salvage failed: {e}")))
         }
+        (Needs::Attention(why), Some(Salvaged::Left(_, _, held))) => {
+            let notes = crate::record::held_notes(held);
+            let detail = if notes.is_empty() {
+                why
+            } else {
+                notes.join("; ")
+            };
+            (Status::NeedsYou, Some(detail))
+        }
         (Needs::Attention(why), _) => (Status::NeedsYou, Some(why)),
         (Needs::InUse, _) => (Status::Processing, Some("being recorded".to_owned())),
         // Salvage at start failed, but a later one (each recording's start

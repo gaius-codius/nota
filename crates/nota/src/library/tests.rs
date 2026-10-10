@@ -1263,3 +1263,42 @@ fn listing_without_kept_metadata_still_has_unknown_title_and_start() {
         assert!(matches!(listed[0].needs, Needs::Attention(_)));
     }
 }
+
+/// A second start mustn't spend the ballast of a live recording, even
+/// before that recording has made its first journal.
+#[test]
+fn startup_keeps_a_live_recordings_ballast() {
+    use nota_recorder::disk::{Ballast, Freed};
+    use nota_recorder::fs::fake::FakeFs;
+    let root = PathBuf::from("/data");
+    let audio = root.join("sessions/1/audio");
+    let fs = FakeFs::with_dirs([audio.clone()]);
+    Ballast::keep(&fs, &root, 1_024, || false).unwrap();
+    let _recording = fs.lock_dir(&audio).unwrap();
+    // Home recovery takes no reserve from a session still being started.
+    let watch = startup_watch(&fs, &root, 1_024).unwrap();
+    fs.set_capacity(Some(1_024));
+    let mut output = watch.fs().create(&root.join("old-segment.tmp")).unwrap();
+    assert_eq!(
+        output.write_all(&[7; 20]).unwrap_err().kind(),
+        io::ErrorKind::StorageFull
+    );
+    assert_eq!(watch.full().map(|f| f.ballast), Some(Freed::None));
+    assert!(Ballast::find(&fs, &root, 1_024).unwrap().is_some());
+}
+
+/// Once another recording releases its lock, recovery can use the ballast.
+#[test]
+fn startup_can_use_ballast_after_the_live_recording_stops() {
+    use nota_recorder::disk::Ballast;
+    use nota_recorder::fs::fake::FakeFs;
+    let root = PathBuf::from("/data");
+    let audio = root.join("sessions/1/audio");
+    let fs = FakeFs::with_dirs([audio.clone()]);
+    Ballast::keep(&fs, &root, 1_024, || false).unwrap();
+    let recording = fs.lock_dir(&audio).unwrap();
+    assert!(!startup_watch(&fs, &root, 1_024).unwrap().holds_ballast());
+    // Releasing the session gives recovery its finishing room back.
+    drop(recording);
+    assert!(startup_watch(&fs, &root, 1_024).unwrap().holds_ballast());
+}

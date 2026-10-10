@@ -262,7 +262,7 @@ pub fn salvage_start<S: Fs + Clone + 'static, T: SegmentStore>(
     watch: &crate::disk::DiskWatch<S>,
 ) -> Result<Published, PublishError> {
     let first = salvage(session, length);
-    if first.is_err()
+    if first.as_ref().is_err_and(startup_space_error::<T>)
         && watch
             .full()
             .is_some_and(|f| f.ballast == crate::disk::Freed::Freed)
@@ -270,6 +270,17 @@ pub fn salvage_start<S: Fs + Clone + 'static, T: SegmentStore>(
         salvage(session, length)
     } else {
         first
+    }
+}
+
+/// Retries only the space failure that spending the ballast can resolve.
+fn startup_space_error<T: SegmentStore>(error: &PublishError) -> bool {
+    match error {
+        PublishError::Io(error) => crate::fs::is_disk_full(error),
+        PublishError::Store(error) => error
+            .downcast_ref::<T::Error>()
+            .is_some_and(T::is_disk_full),
+        _ => false,
     }
 }
 
@@ -1193,5 +1204,35 @@ mod tests {
             ),
             Err(Problem::HashMismatch)
         );
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+    use crate::segment::FakeStore;
+
+    /// A reserve freed earlier does not make a permission error worth retrying.
+    #[test]
+    fn startup_doesnt_retry_a_permission_error() {
+        let error = PublishError::Io(io::ErrorKind::PermissionDenied.into());
+        // The current error, rather than an earlier full disk, decides the retry.
+        assert!(!startup_space_error::<FakeStore>(&error));
+    }
+
+    /// A filesystem space failure can be retried after the reserve is freed.
+    #[test]
+    fn startup_retries_a_filesystem_space_error() {
+        let error = PublishError::Io(io::ErrorKind::StorageFull.into());
+        // This is the error freeing the reserve can resolve.
+        assert!(startup_space_error::<FakeStore>(&error));
+    }
+
+    /// The store's own space classification decides its retry.
+    #[test]
+    fn startup_retries_a_store_space_error() {
+        let error = PublishError::Store(Box::new(io::Error::from(io::ErrorKind::StorageFull)));
+        // FakeStore reports I/O errors, as the watched store reports SQLite errors.
+        assert!(startup_space_error::<FakeStore>(&error));
     }
 }

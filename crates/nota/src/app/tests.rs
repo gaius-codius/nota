@@ -183,6 +183,35 @@ fn the_last_settings_come_from_the_last_session() {
     );
 }
 
+/// Home distinguishes failed cleanup from audio still waiting to publish.
+#[test]
+fn home_names_an_undeletable_published_journal() {
+    let held = crate::record::cleanup_report();
+    assert_eq!(held.not_deleted().len(), 1);
+    // The listing sees the remaining journal; salvage supplies its cause.
+    let listed = Listed {
+        id: SessionId::new(1),
+        title: None,
+        started_at: None,
+        recorded: Some(Duration::from_secs(1)),
+        needs: Needs::Attention("audio still to save".into()),
+    };
+    let shown = session(
+        listed,
+        &[Salvaged::Left(
+            SessionId::new(1),
+            Vec::new(),
+            Box::new(held),
+        )],
+        &dates(),
+    );
+    assert_eq!(shown.status, Status::NeedsYou);
+    assert_eq!(
+        shown.detail.as_deref(),
+        Some("journal-000000: couldn't delete it (permission denied); all its audio is published")
+    );
+}
+
 #[test]
 fn each_session_shows_what_salvage_found() {
     let listed = |needs| Listed {
