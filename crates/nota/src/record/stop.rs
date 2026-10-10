@@ -7,9 +7,10 @@ use nota_store::{StoreError, Wait};
 use nota_recorder::segment::Stopped;
 use nota_recorder::session::SessionWriter;
 
-use super::live::LiveInput;
+use super::live::{LiveEnd, LiveInput};
 use super::start::{RecordFs, Recorded, Started};
 use super::summary::{Outcome, Shown, note_published, note_saved};
+use crate::inhibit::Slept;
 
 /// Stops what `started` started, in order, and finishes the session.
 /// The session is saved by now, so whatever goes wrong while stopping (the
@@ -24,6 +25,7 @@ pub(super) fn stop<B: CaptureBackend>(started: Started<B>, shown: Shown) -> Outc
         session,
         lock,
         captures,
+        sleep,
         disk,
         publisher,
         live_inputs,
@@ -36,14 +38,17 @@ pub(super) fn stop<B: CaptureBackend>(started: Started<B>, shown: Shown) -> Outc
     // Stop, in order.
     drop(captures);
     let writer = recorded(recorder.join(), &mut outcome);
+    // The recording has ended: the machine may sleep while the last
+    // segments are published.
+    drop(sleep);
     let writer_lost = writer.is_none();
     // The writer's last journals are published while the live thread
     // shuts the engine down.
-    let mut log = None;
+    let mut ended = None;
     let meanwhile = || {
         let _ = live_inputs.send(LiveInput::Done);
         drop(live_inputs);
-        log = live.join().ok().flatten();
+        ended = live.join().ok();
     };
     let stopped = if let Some(writer) = writer {
         publisher.finish_recording(writer, meanwhile)
@@ -54,6 +59,11 @@ pub(super) fn stop<B: CaptureBackend>(started: Started<B>, shown: Shown) -> Outc
             published: publisher.finish(),
         }
     };
+    let LiveEnd { log, slept } = ended.unwrap_or(LiveEnd {
+        log: None,
+        slept: Vec::new(),
+    });
+    outcome.notes.extend(slept.iter().map(Slept::note));
     let draw_ends = draws.map(|d| d.times()).unwrap_or_default();
     if let Some(Err(e)) = log.map(|log| log.write(&draw_ends)) {
         outcome.notes.push(format!("writing the latency log: {e}"));

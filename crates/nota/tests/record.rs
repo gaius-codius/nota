@@ -472,6 +472,82 @@ fn s_asks_first_and_y_stops_with_everything_saved() {
     assert_everything_sent_saved(&nota, &tmp.0, 1, &[0, 1], 1_450);
 }
 
+/// What the tones and the stand-in logind did, in order, from the
+/// summary.
+fn tone_events(said: &str) -> Vec<String> {
+    said.lines()
+        .filter_map(|line| line.trim().strip_prefix("tone: "))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+/// The sleep lock is taken before the first stream opens and let go once
+/// the last has stopped: held for the recording, and for no more.
+#[test]
+fn the_sleep_lock_is_held_for_exactly_the_recording() {
+    let tmp = TestDir::new("sleep-lock");
+    let mut nota = recording(&tmp.0);
+    nota.signal(Signal::TERM);
+    let status = nota.exits().expect("nota didn't stop");
+    assert!(status.success(), "{status:?}: {}", nota.output());
+    // The summary is written just before nota exits; the thread reading
+    // the terminal may not have all of it yet.
+    assert!(
+        wait_until(Duration::from_secs(10), || {
+            tone_events(&visible(&nota.output.lock().unwrap())).len() == 6
+        }),
+        "{}",
+        nota.output()
+    );
+    let events = tone_events(&visible(&nota.output.lock().unwrap()));
+    let mic = "the microphone";
+    let system = "the system audio";
+    assert_eq!(events.first().map(String::as_str), Some("sleep lock taken"));
+    assert_eq!(
+        events.last().map(String::as_str),
+        Some("sleep lock released")
+    );
+    // Both streams opened after the lock, and stopped before its release.
+    let mut inside: Vec<_> = events[1..5].to_vec();
+    inside.sort();
+    let mut expected = [
+        format!("{mic} started"),
+        format!("{mic} stopped"),
+        format!("{system} started"),
+        format!("{system} stopped"),
+    ];
+    expected.sort();
+    assert_eq!(inside, expected, "{events:?}");
+    assert_everything_sent_saved(&nota, &tmp.0, 1, &[0, 1], 1_450);
+}
+
+/// A logind that refuses leaves the recording whole, and the summary
+/// says the machine may sleep.
+#[test]
+fn a_refused_sleep_lock_is_said_and_recording_carries_on() {
+    let tmp = TestDir::new("sleep-refused");
+    let mut nota = recording_with(&tmp.0, &[("NOTA_TONE_SLEEP_REFUSED", "1")]);
+    nota.signal(Signal::TERM);
+    let status = nota.exits().expect("nota didn't stop");
+    assert!(status.success(), "{status:?}: {}", nota.output());
+    assert_everything_sent_saved(&nota, &tmp.0, 1, &[0, 1], 1_450);
+    let said = visible(&nota.output.lock().unwrap());
+    assert!(
+        said.contains(
+            "sleep couldn't be held off: the stand-in logind refused; \
+             if the machine sleeps, the recording has a gap there"
+        ),
+        "{said}"
+    );
+    // The tones started and stopped without a lock to note.
+    assert!(
+        tone_events(&said)
+            .iter()
+            .all(|e| !e.starts_with("sleep lock")),
+        "{said}"
+    );
+}
+
 fn stops_on(signal: Signal, name: &str) {
     let tmp = TestDir::new(name);
     let mut nota = recording(&tmp.0);

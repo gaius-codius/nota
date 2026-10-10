@@ -1,0 +1,190 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
+
+use nota_core::{EpochId, FakeClock, SampleIndex, SampleRate, TrackId, TrackTimeline};
+
+use super::*;
+
+/// A logind that counts the locks it has given and how many are still
+/// held, or refuses to give any.
+struct FakeLogind {
+    refuses: bool,
+    given: AtomicUsize,
+    held: Arc<AtomicUsize>,
+}
+
+impl FakeLogind {
+    fn new(refuses: bool) -> Self {
+        Self {
+            refuses,
+            given: AtomicUsize::new(0),
+            held: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn given(&self) -> usize {
+        self.given.load(Ordering::SeqCst)
+    }
+
+    fn held(&self) -> usize {
+        self.held.load(Ordering::SeqCst)
+    }
+}
+
+/// What a [`FakeLogind`] lock holds: dropping it gives the lock back.
+struct Returned(Arc<AtomicUsize>);
+
+impl Drop for Returned {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl Logind for FakeLogind {
+    fn inhibit_sleep(&self) -> Result<SleepLock, SleepNotHeld> {
+        if self.refuses {
+            return Err(SleepNotHeld::new("access denied"));
+        }
+        self.given.fetch_add(1, Ordering::SeqCst);
+        self.held.fetch_add(1, Ordering::SeqCst);
+        Ok(SleepLock::new(Returned(Arc::clone(&self.held))))
+    }
+}
+
+fn ms(ms: u64) -> SessionTime {
+    SessionTime::from_nanos(ms * 1_000_000)
+}
+
+/// A gap of `from` to `to` milliseconds, from a timeline that reopened.
+fn gap(from: u64, to: u64) -> Gap {
+    let rate = SampleRate::new(1_000).unwrap();
+    let mut timeline = TrackTimeline::new(TrackId::new(0));
+    timeline.open_epoch(ms(0), SampleIndex::ZERO, rate).unwrap();
+    timeline
+        .open_epoch(ms(to), SampleIndex::new(from), rate)
+        .unwrap();
+    let gap = timeline.gaps().next().unwrap();
+    assert_eq!(gap.after(), EpochId::new(0));
+    gap
+}
+
+/// The lock is held from the moment it's taken until it's dropped, and
+/// logind is asked once.
+#[test]
+fn the_lock_is_held_until_it_is_dropped() {
+    let logind = FakeLogind::new(false);
+    let clock = FakeClock::new(SessionTime::ZERO);
+    let (ui, screen) = mpsc::channel();
+    let mut notes = Vec::new();
+    assert_eq!(logind.held(), 0);
+    let lock = hold(&logind, &clock, &ui, &mut notes);
+    // The lock is taken now, before anything else is said of it.
+    assert_eq!((logind.given(), logind.held()), (1, 1));
+    drop(lock);
+    assert_eq!((logind.given(), logind.held()), (1, 0));
+    // A lock given says nothing to the screen or the summary.
+    assert_eq!(screen.try_iter().count(), 0);
+    assert_eq!(notes, Vec::<String>::new());
+}
+
+/// A refusal is a warning from the moment recording starts, and a note;
+/// nothing is held, and nothing stops.
+#[test]
+fn a_refusal_warns_and_holds_nothing() {
+    let logind = FakeLogind::new(true);
+    let clock = FakeClock::new(ms(1_500));
+    let (ui, screen) = mpsc::channel();
+    let mut notes = Vec::new();
+    let lock = hold(&logind, &clock, &ui, &mut notes);
+    assert!(lock.is_none());
+    assert_eq!(logind.held(), 0);
+    assert_eq!(
+        screen.try_iter().collect::<Vec<_>>(),
+        [Event::Recorder(recorder::Event::Warning(Warning {
+            cause: Cause::SleepNotHeld,
+            track: None,
+            at: ms(1_500),
+            state: WarningState::Raised,
+        }))]
+    );
+    assert_eq!(
+        notes,
+        [
+            "sleep couldn't be held off: access denied; if the machine sleeps, \
+          the recording has a gap there"
+        ]
+    );
+}
+
+/// A screen that has closed doesn't stop the recording from starting.
+#[test]
+fn a_refusal_with_the_screen_closed_still_notes() {
+    let logind = FakeLogind::new(true);
+    let clock = FakeClock::new(SessionTime::ZERO);
+    let (ui, screen) = mpsc::channel();
+    drop(screen);
+    let mut notes = Vec::new();
+    assert!(hold(&logind, &clock, &ui, &mut notes).is_none());
+    assert_eq!(notes.len(), 1);
+}
+
+/// A sleep's warning is raised at the resume, about no track in
+/// particular.
+#[test]
+fn a_sleep_warns_at_the_resume() {
+    let slept = Slept {
+        resumed: ms(5_000),
+        gap: Some(gap(1_000, 5_000)),
+    };
+    assert_eq!(
+        slept.warning(),
+        recorder::Event::Warning(Warning {
+            cause: Cause::Slept,
+            track: None,
+            at: ms(5_000),
+            state: WarningState::Raised,
+        })
+    );
+}
+
+/// The summary says when the machine slept, from the end of the audio
+/// before it, and for how long.
+#[test]
+fn the_note_for_a_sleep_with_a_gap_says_when_and_how_long() {
+    let slept = Slept {
+        resumed: ms(4_452_000),
+        gap: Some(gap(4_360_000, 4_452_000)),
+    };
+    assert_eq!(
+        slept.note(),
+        "the machine slept at 1:12:40 for 1m 32s; nothing was recorded then"
+    );
+}
+
+/// Without a gap (drift took the stretch, or a new epoch was refused), the
+/// note can only say the machine slept before the resume.
+#[test]
+fn the_note_for_a_sleep_without_a_gap_says_where_audio_resumed() {
+    let slept = Slept {
+        resumed: ms(61_000),
+        gap: None,
+    };
+    assert_eq!(
+        slept.note(),
+        "the machine slept before 0:01:01; the recording may have a gap there"
+    );
+}
+
+/// Lengths show their two largest units.
+#[test]
+fn lengths_show_their_two_largest_units() {
+    let secs = Duration::from_secs;
+    assert_eq!(lasted(secs(0)), "0s");
+    assert_eq!(lasted(secs(59)), "59s");
+    assert_eq!(lasted(secs(60)), "1m 0s");
+    assert_eq!(lasted(secs(92)), "1m 32s");
+    assert_eq!(lasted(secs(3_599)), "59m 59s");
+    assert_eq!(lasted(secs(3_600)), "1h 0m");
+    assert_eq!(lasted(secs(7_500 + 59)), "2h 5m");
+}

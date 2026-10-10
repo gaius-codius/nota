@@ -141,6 +141,9 @@ windows-strings
 crossterm ratatui ratatui-core ratatui-crossterm ratatui-termina
 ratatui-termwiz termina vtparse wezterm-color-types wezterm-input-types
 
+[none: D-Bus IPC; nota asks logind for a sleep lock over the system bus, and no function reads the clock or writes files]
+dbus
+
 [none: audio, codecs, hashing, parsing, data types and system lookups; no function reads the clock or writes files]
 afl block-buffer claxon crc32fast crypto-common dasp_sample digest
 directories errno fallible-iterator fallible-streaming-iterator flacenc
@@ -155,7 +158,7 @@ bindgen bitflags bit-set bit-vec block2 built bumpalo by_address bytemuck
 byteorder bytes bzip2 bzip2-sys castaway cc cexpr cfg_aliases cfg-expr
 cfg-if cipher clang-sys combine compact_str constant_time_eq convert_case
 cookie-factory coreaudio-rs cpufeatures crc crc-catalog crossbeam-utils
-crossterm_winapi csscolorparser darling darling_core darling_macro dbus
+crossterm_winapi csscolorparser darling darling_core darling_macro
 deflate64 defmt defmt-macros defmt-parser deltae deranged derive_arbitrary
 derive_more derive_more-impl dirs-sys dispatch2 displaydoc document-features
 either equivalent euclid fancy-regex fastrand filedescriptor filetime

@@ -13,6 +13,7 @@ use nota_recorder::engine::{EngineEvent, EngineStatus, EngineSupervisor};
 use nota_tui::Event;
 
 use super::save::ToSave;
+use crate::inhibit::Slept;
 use crate::latency::{LatencyLog, Problem};
 use crate::live::{Actions, Live};
 
@@ -25,6 +26,14 @@ pub(super) enum LiveInput {
     Done,
 }
 
+/// What the live thread leaves when it ends.
+pub(super) struct LiveEnd {
+    /// The latency log, if one was asked for.
+    pub(super) log: Option<LatencyLog>,
+    /// The sleeps the machine took during the recording, for the summary.
+    pub(super) slept: Vec<Slept>,
+}
+
 /// The live thread: feeds the engine and the screen until told recording
 /// is done, and hands each text placed for the screen to the saver
 /// (`save`). Then it shuts the engine down, and keeps handing on the text
@@ -32,7 +41,8 @@ pub(super) enum LiveInput {
 /// engine's events end (waiting up to [`LATE_WAIT`] for each). With a
 /// latency log, notes when each text is handed to the screen, and anything
 /// that keeps text from it, by `clock`, including what the engine reports
-/// after the screen has closed, and returns the log.
+/// after the screen has closed, and returns the log, with the sleeps the
+/// recording saw.
 pub(super) fn spawn_live(
     mut live: Live,
     mut engine: Option<EngineSupervisor>,
@@ -40,7 +50,7 @@ pub(super) fn spawn_live(
     ui: Sender<Event>,
     save: Sender<ToSave>,
     mut log: Option<(LatencyLog, Arc<dyn Clock>)>,
-) -> io::Result<JoinHandle<Option<LatencyLog>>> {
+) -> io::Result<JoinHandle<LiveEnd>> {
     thread::Builder::new()
         .name("nota-live".into())
         .spawn(move || {
@@ -98,7 +108,10 @@ pub(super) fn spawn_live(
                     save_heard(live.engine(event).heard, &save);
                 }
             }
-            log.map(|(log, _)| log)
+            LiveEnd {
+                log: log.map(|(log, _)| log),
+                slept: live.slept().to_vec(),
+            }
         })
 }
 
@@ -175,10 +188,217 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::mpsc;
 
-    use nota_core::TrackTimeline;
+    use nota_core::{FakeClock, SampleRate, TrackTimeline};
+    use nota_recorder::capture::{CaptureBackend, CaptureError, CaptureSender, Source};
 
     use super::super::{MIC, RATE, SYSTEM};
     use super::*;
+
+    /// A suspend, run through the real recorder into the live thread. In a
+    /// module of its own, so its helpers count as test code to clippy.
+    #[cfg(test)]
+    mod suspend {
+        use super::*;
+
+        /// What the scripted microphone's clock does between its two seconds of
+        /// audio.
+        #[derive(Clone, Copy)]
+        enum Between {
+            /// The machine suspends: session time and the suspended clock move.
+            Suspend,
+            /// Only session time moves, as a stall would.
+            Stall,
+        }
+
+        /// A microphone that captures a second of audio, goes quiet for four
+        /// seconds in the way `between` says, then captures another second.
+        struct Scripted {
+            between: Between,
+            clock: Arc<FakeClock>,
+            /// Told once the whole script has been sent.
+            sent: Sender<()>,
+        }
+
+        impl CaptureBackend for Scripted {
+            type Stream = ();
+
+            fn start(
+                &self,
+                _: &Source,
+                _: SampleRate,
+                events: CaptureSender,
+            ) -> Result<(), CaptureError> {
+                let (between, clock, sent) =
+                    (self.between, Arc::clone(&self.clock), self.sent.clone());
+                thread::spawn(move || {
+                    let second = Duration::from_secs(1);
+                    // A window of 1,000 samples is a second at 1 kHz.
+                    events.audio(&[100; 1_000]);
+                    clock.advance(second);
+                    match between {
+                        Between::Suspend => clock.suspend(Duration::from_secs(4)),
+                        Between::Stall => clock.advance(Duration::from_secs(4)),
+                    }
+                    events.audio(&[100; 1_000]);
+                    clock.advance(second);
+                    let _ = sent.send(());
+                });
+                Ok(())
+            }
+        }
+
+        /// What the screen and the summary got from one scripted recording.
+        struct Recorded {
+            /// The recorder events the screen got, without levels and byte
+            /// counts.
+            screen: Vec<recorder::Event>,
+            /// What the live thread left.
+            end: LiveEnd,
+            /// The mic's timeline as the recorder left it.
+            timeline: TrackTimeline,
+        }
+
+        /// Records the scripted microphone through the real recorder, with its
+        /// events going to the live thread as `nota record` sends them.
+        fn record_script(between: Between) -> Recorded {
+            use nota_core::{SampleCount, SampleIndex, SampleRate, SessionId, SessionTime};
+            use nota_recorder::capture::{record_track, start};
+            use nota_recorder::fs::fake::FakeFs;
+            use nota_recorder::segment::SegmentLength;
+            use nota_recorder::session::{SessionDir, SessionWriter};
+
+            let rate = SampleRate::new(1_000).unwrap();
+            let fake = Arc::new(FakeClock::new(SessionTime::ZERO));
+            let clock: Arc<dyn Clock> = Arc::clone(&fake) as Arc<dyn Clock>;
+            let dir = PathBuf::from("/session");
+            let fs = FakeFs::with_dirs([dir.clone()]);
+            let session = SessionDir::new(SessionId::new(1), fs, &dir).lock().unwrap();
+            let length = SegmentLength::new(SampleCount::new(1_000)).unwrap();
+            let mut writer =
+                SessionWriter::open(&session, rate, length, Arc::clone(&clock)).unwrap();
+            let mut timeline = TrackTimeline::new(MIC);
+            timeline
+                .open_epoch(SessionTime::ZERO, SampleIndex::ZERO, rate)
+                .unwrap();
+            writer
+                .start_track(MIC, timeline.current().unwrap())
+                .unwrap();
+
+            let (inputs, received) = mpsc::channel();
+            let (ui, screen) = mpsc::channel();
+            let (save, _saved) = mpsc::channel();
+            let live = spawn_live(
+                Live::new(&[timeline.clone()]),
+                None,
+                received,
+                ui,
+                save,
+                None,
+            )
+            .unwrap();
+            let (sent, script_sent) = mpsc::channel();
+            let backend = Scripted {
+                between,
+                clock: fake,
+                sent,
+            };
+            let (capture, events) =
+                start(&backend, MIC, &Source::Microphone, rate, &clock).unwrap();
+            let (finished, done) = mpsc::channel();
+            let to_live = inputs.clone();
+            thread::spawn(move || {
+                let result = record_track(&mut writer, &mut timeline, &events, &mut |event| {
+                    // The real recorder hands finished journals to the
+                    // publisher; there is none here.
+                    if !matches!(event, RecorderEvent::Finished(_)) {
+                        let _ = to_live.send(LiveInput::Recorder(Some(MIC), event));
+                    }
+                });
+                let _ = finished.send((result, timeline));
+            });
+            let bound = Duration::from_secs(10);
+            script_sent.recv_timeout(bound).unwrap();
+            drop(capture);
+            // A recorder that never returns fails the test rather than hanging.
+            let (result, timeline) = done.recv_timeout(bound).unwrap();
+            result.unwrap();
+            // Every event is in the live thread's queue ahead of this.
+            inputs.send(LiveInput::Done).unwrap();
+            // The live thread waits for the senders to go before it ends.
+            drop(inputs);
+            let end = live.join().unwrap();
+            let screen = screen
+                .try_iter()
+                .filter_map(|event| match event {
+                    Event::Recorder(
+                        recorder::Event::Level { .. } | recorder::Event::Recorded(_),
+                    ) => None,
+                    Event::Recorder(event) => Some(event),
+                    other => panic!("{other:?}"),
+                })
+                .collect();
+            Recorded {
+                screen,
+                end,
+                timeline,
+            }
+        }
+
+        /// A suspend mid-recording reaches the screen as the warning,
+        /// then the track's new epoch and the gap, and the summary as one
+        /// sleep, all worked out from the real recorder's reports.
+        #[test]
+        fn a_suspend_reaches_the_screen_and_the_summary() {
+            use nota_core::SessionTime;
+            use nota_core::recorder::{Cause, Warning, WarningState};
+
+            let run = record_script(Between::Suspend);
+            let gap = run.timeline.gaps().next().unwrap();
+            // The first second of audio ended at 1 s; the audio after the
+            // suspend was captured at about 5 s, nearly the span of the sleep.
+            assert_eq!(gap.from(), SessionTime::from_nanos(1_000_000_000));
+            assert!(gap.duration() >= Duration::from_secs(3), "{gap:?}");
+            assert!(gap.duration() < Duration::from_secs(5), "{gap:?}");
+            let epoch = *run.timeline.current().unwrap();
+            // The warning is raised when the audio came back.
+            let warning = recorder::Event::Warning(Warning {
+                cause: Cause::Slept,
+                track: None,
+                at: gap.to(),
+                state: WarningState::Raised,
+            });
+            assert_eq!(
+                run.screen,
+                [
+                    warning,
+                    recorder::Event::Epoch { track: MIC, epoch },
+                    recorder::Event::Gap { track: MIC, gap },
+                ]
+            );
+            assert_eq!(run.end.slept.len(), 1);
+            assert_eq!(run.end.slept[0].gap, Some(gap));
+            assert!(
+                run.end.slept[0]
+                    .note()
+                    .starts_with("the machine slept at 0:00:01 for "),
+                "{}",
+                run.end.slept[0].note()
+            );
+        }
+
+        /// A quiet stretch the clock saw but the machine didn't sleep
+        /// through isn't a sleep: no warning, and nothing for the summary.
+        #[test]
+        fn a_stall_without_a_suspend_is_not_reported_as_a_sleep() {
+            let run = record_script(Between::Stall);
+            let warned = run
+                .screen
+                .iter()
+                .any(|event| matches!(event, recorder::Event::Warning(_)));
+            assert!(!warned, "{:?}", run.screen);
+            assert!(run.end.slept.is_empty());
+        }
+    }
 
     /// Each text is logged with its track, its chunk's span placed through
     /// the track's epoch, and when it was handed to the screen; levels and
@@ -244,7 +464,7 @@ mod tests {
         inputs.send(heard(MIC, 56_000, 72_000)).unwrap();
         drop(inputs);
 
-        let log = live.join().unwrap().unwrap();
+        let log = live.join().unwrap().log.unwrap();
         let shown = screen
             .try_iter()
             .filter(|e| matches!(e, Event::Recorder(recorder::Event::Text(_))))
@@ -307,7 +527,7 @@ mod tests {
                 .send(LiveInput::Engine(EngineEvent::Transcript(text)))
                 .unwrap();
         });
-        assert!(live.join().unwrap().is_none());
+        assert!(live.join().unwrap().log.is_none());
         late.join().unwrap();
         let saved: Vec<_> = saved.try_iter().collect();
         assert_eq!(saved.len(), 1, "{saved:?}");

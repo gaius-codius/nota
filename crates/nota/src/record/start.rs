@@ -23,11 +23,12 @@ use nota_recorder::session::{SessionDir, SessionLock, SessionStore, SessionWrite
 use nota_store::{Heard, NewSession, Track, TrackKind};
 use nota_tui::Event;
 
-use super::live::{LiveInput, spawn_live};
+use super::live::{LiveEnd, LiveInput, spawn_live};
 use super::save::{Saver, ToSave};
 use super::signals::{SignalThread, listen_for_signals};
 use super::summary::{Outcome, file_names, held_notes, track_name};
 use super::{BoxError, MIC, RATE, RecordArgs, SYSTEM, segment_length};
+use crate::inhibit::{self, Logind, SleepLock};
 use crate::latency::{DrawEnds, LatencyLog};
 use crate::library::{
     Library, NewSessionRows, Salvaged, SessionPaths, discard_empty, startup_watch,
@@ -66,12 +67,15 @@ pub(super) struct Started<B: CaptureBackend> {
     pub(super) session: SessionId,
     pub(super) lock: SessionLock<RecordFs>,
     pub(super) captures: Vec<Capture<B::Stream>>,
+    /// Keeps the machine from sleeping, if logind gave the lock; dropped
+    /// once recording has ended.
+    pub(super) sleep: Option<SleepLock>,
     /// Checks the disk and keeps the ballast; stopped after publishing, so
     /// a full disk then is still in the summary.
     pub(super) disk: DiskMonitor<StdFs>,
     pub(super) publisher: Publisher,
     pub(super) live_inputs: Sender<LiveInput>,
-    pub(super) live: JoinHandle<Option<LatencyLog>>,
+    pub(super) live: JoinHandle<LiveEnd>,
     pub(super) saver: Saver,
     pub(super) recorder: JoinHandle<Recorded>,
 }
@@ -91,7 +95,8 @@ pub(super) type Recorded = (
 /// was asked for meanwhile, the session, the publisher and the recorder
 /// follow, and only then the streams, one after another, each track
 /// recorded as soon as its own has started; then the disk monitor, the
-/// saver, the engine and the live thread. The terminal is `screen` and
+/// saver, the engine and the live thread. Sleep is held off (`logind`)
+/// before the first stream opens. The terminal is `screen` and
 /// the library `library` if given (the app's, already set up and open),
 /// else they're set up here. A lent terminal was set up after the app's
 /// own signal listener, so the order holds for it too.
@@ -106,12 +111,21 @@ pub(super) fn start<B: CaptureBackend>(
     setup: &Setup,
     backend: &B,
     clock: &Arc<dyn Clock>,
+    logind: &dyn Logind,
     screen: Option<Screen>,
     library: Option<Library>,
 ) -> Result<(Started<B>, Screening), BoxError> {
     let mut notes = Vec::new();
-    start_with_notes(args, setup, backend, clock, screen, library, &mut notes)
+    let lent = Lent { screen, library };
+    start_with_notes(args, setup, backend, clock, logind, lent, &mut notes)
         .map_err(|error| startup_failure(error, notes))
+}
+
+/// What the app lent the recording: its terminal and its library, if it
+/// did.
+struct Lent {
+    screen: Option<Screen>,
+    library: Option<Library>,
 }
 
 /// Starts as [`start`] says, keeping recovery notes for a failed start.
@@ -120,8 +134,8 @@ fn start_with_notes<B: CaptureBackend>(
     setup: &Setup,
     backend: &B,
     clock: &Arc<dyn Clock>,
-    screen: Option<Screen>,
-    library: Option<Library>,
+    logind: &dyn Logind,
+    Lent { screen, library }: Lent,
     notes: &mut Vec<String>,
 ) -> Result<(Started<B>, Screening), BoxError> {
     let (ui, ui_events) = mpsc::channel::<Event>();
@@ -193,6 +207,8 @@ fn start_with_notes<B: CaptureBackend>(
         disk,
         lock,
     };
+    // Before the first audio, so no stretch of the recording is unguarded.
+    let sleep = inhibit::hold(logind, clock.as_ref(), &ui, notes);
     let (captures, listening, ready) =
         open_streams(ready, starter, backend, &sources, &ui_events, notes)?;
     unmade.keep();
@@ -218,6 +234,7 @@ fn start_with_notes<B: CaptureBackend>(
         session: session.id,
         lock,
         captures,
+        sleep,
         disk,
         publisher,
         live_inputs,
@@ -319,7 +336,7 @@ fn start_live(
     clock: &Arc<dyn Clock>,
     ui: &Sender<Event>,
     saver: &Saver,
-) -> Result<(Sender<LiveInput>, JoinHandle<Option<LatencyLog>>), BoxError> {
+) -> Result<(Sender<LiveInput>, JoinHandle<LiveEnd>), BoxError> {
     let (live_inputs, live_received) = mpsc::channel::<LiveInput>();
     let engine = match &args.models {
         Some((parakeet, vad)) => Some(start_engine(parakeet, vad, clock, &live_inputs)?),
@@ -377,7 +394,7 @@ struct Ready {
     publisher: Publisher,
     saver: Saver,
     live_inputs: Sender<LiveInput>,
-    live: JoinHandle<Option<LatencyLog>>,
+    live: JoinHandle<LiveEnd>,
     disk: DiskMonitor<StdFs>,
     lock: SessionLock<RecordFs>,
 }
