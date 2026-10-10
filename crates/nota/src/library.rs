@@ -42,7 +42,7 @@ use nota_recorder::segment::{
     salvage_start, scan,
 };
 use nota_recorder::session::{SessionDir, SessionStore};
-use nota_store::{NewSession, SegmentRow, SessionState, StoreError, Writer};
+use nota_store::{NewSession, SegmentRow, SessionState, StoreError, Track, Writer};
 
 /// Names under the data directory, and in a session's directory.
 const SESSIONS: &str = "sessions";
@@ -709,6 +709,20 @@ impl NewSessionRows {
     /// The library database.
     pub(crate) const fn db(&self) -> &Writer {
         &self.db
+    }
+
+    /// Names `tracks` as the session's, if its row isn't added yet: the
+    /// tracks whose streams started, of those it was made with. Returns
+    /// whether the row took them.
+    pub(crate) fn set_tracks(&self, tracks: &[Track]) -> bool {
+        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        match &mut *pending {
+            Some(new) => {
+                new.tracks = tracks.to_vec();
+                true
+            }
+            None => false,
+        }
     }
 
     /// Adds the session's row if it isn't added yet. Refuses a call for any

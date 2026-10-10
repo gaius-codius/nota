@@ -806,9 +806,10 @@ mod linux {
         let fs = TapFs(Arc::new(tap));
 
         let session = SessionDir::new(SESSION, fs.clone(), &session_path).lock()?;
-        // Fsyncs on a thread per track, as `nota record` runs them.
+        // Fsyncs as `nota record` runs them: inline for one track, on a
+        // thread per track for more.
         let mut writer = SessionWriter::open(&session, RATE, length, Arc::clone(&clock))?
-            .with_syncing(Syncing::Threads);
+            .with_syncing(Syncing::Auto);
         for &track in &tracks {
             writer.start_track(track, EpochId::new(0), SampleIndex::ZERO)?;
             fs.0.log(&format!("start {} 0", track.get()))?;

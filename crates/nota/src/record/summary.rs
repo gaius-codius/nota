@@ -24,20 +24,40 @@ pub(super) struct Shown {
     /// Marks and notes made.
     pub(super) marks: usize,
     /// Why it closed, if not as asked: the terminal failed (as after a
-    /// hangup). The recording stops all the same.
+    /// hangup), or the screen couldn't start. The recording stops all the
+    /// same.
     pub(super) problem: Option<String>,
 }
 
 /// Shows the Recording screen on `screen` until it's closed, handing each
 /// mark and note to the saver (`save`) as it's made. The terminal is
 /// handed back as it is, unless it failed: then it's restored here, and
-/// `None` comes back.
-///
-/// # Errors
-///
-/// Only if the input thread, or the thread that passes marks and notes
-/// on, can't start; the terminal is restored.
+/// `None` comes back. So it is if the input thread, or the thread that
+/// passes marks and notes on, can't start: the screen closes at once,
+/// with that as its problem.
 pub(super) fn show(
+    screen: Screen,
+    title: &str,
+    listening: &str,
+    clock: &Arc<dyn Clock>,
+    ui: &Sender<Event>,
+    ui_events: &Receiver<Event>,
+    save: &Sender<ToSave>,
+) -> (Shown, Option<Screen>) {
+    match run_screen(screen, title, listening, clock, ui, ui_events, save) {
+        Ok(shown) => shown,
+        Err(e) => (
+            Shown {
+                marks: 0,
+                problem: Some(format!("the screen couldn't start: {e}")),
+            },
+            None,
+        ),
+    }
+}
+
+/// [`show`], failing if a thread it needs can't start.
+fn run_screen(
     mut screen: Screen,
     title: &str,
     listening: &str,
@@ -376,7 +396,7 @@ pub(super) mod tests {
 
     #[test]
     fn the_summary_says_what_wasn_t_saved() {
-        let mut outcome = Outcome::default();
+        let mut outcome = Outcome::new(SessionId::new(1), PathBuf::new());
         note_saved(&mut outcome, &Saved::default(), 2);
         assert!(outcome.notes.is_empty());
         let saved = Saved {
@@ -438,7 +458,7 @@ pub(super) mod tests {
         );
         assert!(!report.is_complete());
 
-        let mut outcome = Outcome::default();
+        let mut outcome = Outcome::new(SessionId::new(1), PathBuf::new());
         note_published(&mut outcome, &report);
         assert!(!outcome.complete);
         assert_eq!(outcome.segments, 1);
@@ -529,7 +549,7 @@ pub(super) mod tests {
             .unwrap();
             assert!(publisher.queue().send(self.journals));
             let report = publisher.finish().unwrap();
-            let mut outcome = Outcome::default();
+            let mut outcome = Outcome::new(SessionId::new(1), PathBuf::new());
             note_published(&mut outcome, &report);
             (report, outcome)
         }

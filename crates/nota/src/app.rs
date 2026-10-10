@@ -168,7 +168,7 @@ impl Pages<'_> {
             match self.record(args, current, said, jobs) {
                 Recorded::Back(back, id) => {
                     screen = Some(back);
-                    processing_session = id;
+                    processing_session = Some(id);
                 }
                 Recorded::Failed(e) => self.notice = Some(format!("the recording failed: {e}")),
                 Recorded::TerminalGone => return Ok(()),
@@ -309,7 +309,7 @@ impl Capture for Recordings {
 /// How a recording from Home went, for what comes next.
 enum Recorded {
     /// It was recorded, and the terminal is back for Home.
-    Back(Screen, Option<SessionId>),
+    Back(Screen, SessionId),
     /// It failed: the terminal was restored, and Home says why.
     Failed(String),
     /// It was recorded, but the terminal failed (as after a hangup):
@@ -369,13 +369,9 @@ fn recorded_result(
                 outcome.segments
             ));
             said.extend(outcome.notes.iter().map(|note| format!("  {note}")));
-            let id = outcome
-                .session
-                .file_name()
-                .and_then(|name| name.to_str())
-                .and_then(|name| name.parse::<u64>().ok())
-                .map(SessionId::new);
-            back.map_or(Recorded::TerminalGone, |screen| Recorded::Back(screen, id))
+            back.map_or(Recorded::TerminalGone, |screen| {
+                Recorded::Back(screen, outcome.id)
+            })
         }
         Err(e) => {
             said.push(format!("nota: the recording failed: {e}"));

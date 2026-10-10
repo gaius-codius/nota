@@ -33,6 +33,18 @@
 //! record. The live thread and the recorder send the screen events, and
 //! the screen gives back marks, notes and the stop as commands.
 //!
+//! # Starting
+//!
+//! Salvage of earlier sessions runs first, with a line on screen; a
+//! signal meanwhile ends nota before any session is made. Then the
+//! session, the publisher and the recorder start, and only then the
+//! streams, one after another: each track joins the recorder as its
+//! stream starts, so its audio is journaled while the next one opens,
+//! and its first epoch opens when its first audio was captured. The
+//! writer fsyncs inline while one track records and on a thread per
+//! track once a second joins (see [`nota_recorder::capture`]). If no
+//! stream starts, the session is removed again.
+//!
 //! # Stopping
 //!
 //! The screen closes when `s` is confirmed with `y`, when a signal arrives,
@@ -186,13 +198,14 @@ pub(crate) fn final_engine(args: &RecordArgs) -> std::io::Result<Option<Engine>>
     }))
 }
 
-/// Records a session until it's stopped, then finishes it.
+/// Records a session until it's stopped, then finishes it. Once the
+/// session is recording, what goes wrong (the screen failing, say) is a
+/// note on the outcome.
 ///
 /// # Errors
 ///
 /// If the session can't be started (no clock, no data directory, no
-/// stream at all), or the screen failed; in the second case the recording
-/// was still finished first.
+/// stream at all, a stop asked for first).
 pub(crate) fn record(args: &RecordArgs) -> Result<Outcome, BoxError> {
     record_in(args, None).map(|(outcome, _)| outcome)
 }
@@ -274,7 +287,7 @@ fn record_with<B: CaptureBackend>(
     let (started, screening) = start::start(args, setup, backend, clock, given, library)?;
 
     // The screen, until it's closed.
-    let shown = show(
+    let (shown, screen) = show(
         screening.screen,
         &setup.title,
         &screening.listening,
@@ -285,10 +298,6 @@ fn record_with<B: CaptureBackend>(
     );
     drop(screening.ui);
     drop(screening.save);
-    let (shown, screen) = match shown {
-        Ok((shown, screen)) => (Ok(shown), screen),
-        Err(e) => (Err(e), None),
-    };
     // `nota record` restores the terminal before stopping; the app keeps
     // it, and shows that the recording is stopping.
     let screen = match (screen, stopping) {
@@ -299,9 +308,9 @@ fn record_with<B: CaptureBackend>(
         _ => None,
     };
 
-    // Recorded, whatever stopping says: the error says it was the stop.
-    let outcome = stop::stop(started, shown).map_err(|e| format!("stopping it: {e}"))?;
-    Ok((outcome, screen))
+    // Recorded, whatever stopping says: anything that went wrong is a
+    // note on the outcome.
+    Ok((stop::stop(started, shown), screen))
 }
 
 #[cfg(test)]

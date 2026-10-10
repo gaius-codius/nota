@@ -56,7 +56,8 @@ pub(crate) struct Live {
 }
 
 impl Live {
-    /// Following `timelines`, as the recorder starts with them.
+    /// Following `timelines`, as the recorder starts with them, and each
+    /// track that joins later from its first epoch.
     pub(crate) fn new(timelines: &[TrackTimeline]) -> Self {
         Self {
             followers: timelines.iter().map(|t| (t.track(), t.clone())).collect(),
@@ -87,8 +88,14 @@ impl Live {
                 // placed by the epochs it has, which is the best it knows.
                 if let Some(follower) = self.followers.get_mut(&track) {
                     let _ = follower.follow(&epoch);
+                    actions.flush = Some(track);
+                } else {
+                    // The track joined: its first epoch, and nothing yet
+                    // to flush.
+                    let mut follower = TrackTimeline::new(track);
+                    let _ = follower.follow(&epoch);
+                    self.followers.insert(track, follower);
                 }
-                actions.flush = Some(track);
             }
             // The stream stopped: what the engine holds of it won't grow.
             (Some(track), RecorderEvent::CaptureFailed(_)) => actions.flush = Some(track),

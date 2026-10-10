@@ -4,22 +4,18 @@ use nota_recorder::capture::CaptureBackend;
 use nota_recorder::disk::{DiskSummary, Freed, MonitorPanicked};
 use nota_store::{StoreError, Wait};
 
-use super::BoxError;
+use nota_recorder::segment::Stopped;
+use nota_recorder::session::SessionWriter;
+
 use super::live::LiveInput;
-use super::start::Started;
+use super::start::{RecordFs, Recorded, Started};
 use super::summary::{Outcome, Shown, note_published, note_saved};
 
 /// Stops what `started` started, in order, and finishes the session.
-///
-/// # Errors
-///
-/// If the recorder or the publisher stopped unexpectedly, or the screen
-/// failed (`shown`); in the last case the recording was still finished
-/// first.
-pub(super) fn stop<B: CaptureBackend>(
-    started: Started<B>,
-    shown: std::io::Result<Shown>,
-) -> Result<Outcome, BoxError> {
+/// The session is saved by now, so whatever goes wrong while stopping (the
+/// recorder or the publisher stopping unexpectedly, the screen failing)
+/// is a note on the outcome, which is reported all the same.
+pub(super) fn stop<B: CaptureBackend>(started: Started<B>, shown: Shown) -> Outcome {
     let Started {
         mut outcome,
         signals,
@@ -39,28 +35,24 @@ pub(super) fn stop<B: CaptureBackend>(
     let full_while_recording = disk.full().is_some();
     // Stop, in order.
     drop(captures);
-    let (writer, how_it_ended, failures, failed_streams) = recorder
-        .join()
-        .map_err(|_| "the recorder stopped unexpectedly")?;
-    if let Err(e) = how_it_ended {
-        outcome.notes.push(format!("recording stopped early: {e}"));
-    }
-    for stream in failed_streams {
-        outcome.notes.push(format!("stopped recording {stream}"));
-    }
-    if failures > 0 {
-        outcome.notes.push(format!(
-            "{failures} journal failures; the audio around them may have gaps"
-        ));
-    }
+    let writer = recorded(recorder.join(), &mut outcome);
     // The writer's last journals are published while the live thread
     // shuts the engine down.
     let mut log = None;
-    let stopped = publisher.finish_recording(writer, || {
+    let meanwhile = || {
         let _ = live_inputs.send(LiveInput::Done);
         drop(live_inputs);
         log = live.join().ok().flatten();
-    });
+    };
+    let stopped = if let Some(writer) = writer {
+        publisher.finish_recording(writer, meanwhile)
+    } else {
+        meanwhile();
+        Stopped {
+            finishing: None,
+            published: publisher.finish(),
+        }
+    };
     let draw_ends = draws.map(|d| d.times()).unwrap_or_default();
     if let Some(Err(e)) = log.map(|log| log.write(&draw_ends)) {
         outcome.notes.push(format!("writing the latency log: {e}"));
@@ -77,7 +69,12 @@ pub(super) fn stop<B: CaptureBackend>(
     // up on, before the session is marked stopped and its jobs queued (and
     // before a failed publisher returns early).
     let saved = saver.finish();
-    note_published(&mut outcome, &stopped.published?);
+    match &stopped.published {
+        Ok(report) => note_published(&mut outcome, report),
+        Err(e) => outcome
+            .notes
+            .push(format!("{e}; the next start publishes what's left")),
+    }
     match library
         .db()
         .with(|db| db.finish_recording(session, full.then_some(Wait::Space)))
@@ -102,12 +99,39 @@ pub(super) fn stop<B: CaptureBackend>(
     }
     drop(lock);
 
-    let shown = shown?;
     if let Some(problem) = shown.problem {
         outcome.notes.push(problem);
     }
     note_saved(&mut outcome, &saved, shown.marks);
-    Ok(outcome)
+    outcome
+}
+
+/// The writer the recorder thread hands back, with how recording went
+/// noted on `outcome`; `None` if the thread panicked, which leaves its
+/// journals for the next start's salvage.
+fn recorded(
+    joined: std::thread::Result<Recorded>,
+    outcome: &mut Outcome,
+) -> Option<SessionWriter<RecordFs>> {
+    let Ok((writer, how_it_ended, failures, failed_streams)) = joined else {
+        outcome.notes.push(
+            "the recorder stopped unexpectedly; the next start publishes what it recorded"
+                .to_owned(),
+        );
+        return None;
+    };
+    if let Err(e) = how_it_ended {
+        outcome.notes.push(format!("recording stopped early: {e}"));
+    }
+    for stream in failed_streams {
+        outcome.notes.push(format!("stopped recording {stream}"));
+    }
+    if failures > 0 {
+        outcome.notes.push(format!(
+            "{failures} journal failures; the audio around them may have gaps"
+        ));
+    }
+    Some(writer)
 }
 
 /// What the summary says of the disk: a full disk (which stopped the
@@ -172,7 +196,7 @@ mod tests {
     use super::*;
 
     fn noted(disk: Result<DiskSummary, MonitorPanicked>, while_recording: bool) -> Vec<String> {
-        let mut outcome = Outcome::default();
+        let mut outcome = Outcome::new(nota_core::SessionId::new(1), PathBuf::new());
         note_disk(&mut outcome, disk, while_recording);
         outcome.notes
     }
@@ -187,6 +211,20 @@ mod tests {
             low: true,
             ..DiskSummary::default()
         }
+    }
+
+    /// Acceptance (GAI-212): the recorder stopping unexpectedly, after the
+    /// session was saved, is a note on the outcome, which is still
+    /// reported, and nothing is published from a writer that's gone.
+    #[test]
+    fn a_recorder_that_panicked_is_a_note_on_the_outcome() {
+        let mut outcome = Outcome::new(nota_core::SessionId::new(1), PathBuf::new());
+        let joined: std::thread::Result<Recorded> = Err(Box::new("the recorder panicked"));
+        assert!(recorded(joined, &mut outcome).is_none());
+        assert_eq!(
+            outcome.notes,
+            ["the recorder stopped unexpectedly; the next start publishes what it recorded"]
+        );
     }
 
     #[test]
