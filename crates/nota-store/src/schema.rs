@@ -16,7 +16,7 @@
 //! | `session` | number, title, language, state, when it started (V3) | `nota record`, and adopting a session found on disk |
 //! | `track` | each track's kind and source | `nota record`, and adopting a session found on disk with its row kept |
 //! | `segment` | each published segment: its track, epoch, samples, SHA-256, decoded-audio digest (V6) | the recorder's publish step and salvage |
-//! | `epoch` | each epoch's first sample, rate and session-time anchor | the epochs package |
+//! | `epoch` | each epoch's first sample, rate and session-time anchor ([`Store::insert_epoch`](crate::Store::insert_epoch)) | the recorder's publish step, before each segment row |
 //! | `utterance`, `word` | the heard text, as the engine confirmed it, with word times; never changed (V4's triggers) | `nota record`'s live text ([`crate::transcript`]) |
 //! | `revision`, `revision_text` | the displayed text: revision 0 is the heard text, each later one a new row holding only what it changes; never changed | revision 0 with the first utterance, later ones by term clean-up |
 //! | `proposal` | a proposed fix, with the revision, model, pack and thresholds it came from | term clean-up |
@@ -274,8 +274,8 @@ BEGIN SELECT RAISE(ABORT, 'a revision is never added to'); END;
 /// The final pass's text is kept apart from the heard text: its own rows,
 /// located by track and sample as the engine gives them, not in
 /// `utterance`, so a revision never shows the two passes mixed. (Placing
-/// it in session time needs each epoch's anchor, which nothing stores
-/// yet.) A row with no text is audio the engine couldn't transcribe.
+/// it in session time needs each epoch's anchor, which the `epoch` table
+/// holds for every segment published since journals kept it.) A row with no text is audio the engine couldn't transcribe.
 /// `final_progress` says how far each track has got: every published
 /// sample before `up_to` is covered, so a pass stopped partway resumes
 /// there.

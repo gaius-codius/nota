@@ -34,8 +34,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use nota_core::{
-    Clock, EpochId, FakeClock, SampleCount, SampleIndex, SampleRate, SessionId, SessionTime,
-    TrackId,
+    Clock, FakeClock, SampleCount, SampleIndex, SampleRate, SessionId, SessionTime, TrackId,
 };
 use nota_recorder::disk::{
     Ballast, DiskMonitor, DiskReport, DiskWatch, Freed, Full, MonitorConfig, Usage,
@@ -196,7 +195,8 @@ fn record(watch: &Arc<DiskWatch<StdFs>>, session_dir: &Path, store: Store) -> Re
         Ok(())
     };
     for track in TRACKS {
-        writer.start_track(track, EpochId::new(0), SampleIndex::ZERO)?;
+        let (_, epoch) = writer.open_first_epoch(track, SessionTime::ZERO)?;
+        writer.start_track(track, &epoch)?;
     }
     let mut failures = Vec::new();
     let mut rounds = 0_u64;

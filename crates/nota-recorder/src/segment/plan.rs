@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nota_core::{EpochId, SampleIndex, SampleRange, SampleRate, TrackId};
+use nota_core::{EpochAnchor, EpochId, SampleIndex, SampleRange, SampleRate, TrackId};
 use nota_store::SegmentRow;
 
 use super::SegmentLength;
@@ -18,6 +18,8 @@ pub(super) struct JournalSummary {
     pub(super) track: TrackId,
     pub(super) epoch: EpochId,
     pub(super) rate: SampleRate,
+    /// How its epoch is timed; `None` for a version 2 journal.
+    pub(super) anchor: Option<EpochAnchor>,
     /// `None` if it has no valid frames.
     pub(super) range: Option<SampleRange>,
 }
@@ -40,6 +42,9 @@ pub(super) struct PlannedSegment {
     pub(super) track: TrackId,
     pub(super) epoch: EpochId,
     pub(super) rate: SampleRate,
+    /// How the epoch is timed, from the newest of its journals that says;
+    /// `None` if none does (version 2 journals).
+    pub(super) anchor: Option<EpochAnchor>,
     pub(super) range: SampleRange,
     pub(super) parts: Vec<Part>,
 }
@@ -83,6 +88,7 @@ pub(super) fn plan(
         // that disagree can't put two rates in one file.
         let mut groups: BTreeMap<(EpochId, u32, u64), BTreeMap<SampleIndex, Part>> =
             BTreeMap::new();
+        let anchors = anchors_of(&mine);
         for journal in mine {
             let Some(range) = journal.range else {
                 continue;
@@ -107,7 +113,8 @@ pub(super) fn plan(
                 continue;
             };
             for run in continuous_runs(parts.into_values()) {
-                if let Some(segment) = segment_of(track, epoch, rate, run) {
+                let anchor = anchors.get(&epoch).copied();
+                if let Some(segment) = segment_of(track, epoch, rate, anchor, run) {
                     segments.push(segment);
                 }
             }
@@ -144,7 +151,7 @@ pub(super) fn cover(row: &SegmentRow, journals: &[JournalSummary]) -> Option<Pla
     let mut claimed = Claimed::default();
     let mut parts: BTreeMap<SampleIndex, Part> = BTreeMap::new();
     let mut rate = None;
-    for journal in mine {
+    for journal in &mine {
         let Some(range) = journal.range else {
             continue;
         };
@@ -173,8 +180,19 @@ pub(super) fn cover(row: &SegmentRow, journals: &[JournalSummary]) -> Option<Pla
     if !runs.is_empty() {
         return None;
     }
-    let segment = segment_of(row.track(), row.epoch(), rate?, run)?;
+    let anchor = anchors_of(&mine).get(&row.epoch()).copied();
+    let segment = segment_of(row.track(), row.epoch(), rate?, anchor, run)?;
     (segment.range == want).then_some(segment)
+}
+
+/// Each epoch's anchor, from the first of `journals` (newest first) that
+/// gives one. Every journal of an epoch carries the same one.
+fn anchors_of(journals: &[&JournalSummary]) -> BTreeMap<EpochId, EpochAnchor> {
+    let mut anchors = BTreeMap::new();
+    for anchor in journals.iter().filter_map(|j| j.anchor) {
+        anchors.entry(anchor.id).or_insert(anchor);
+    }
+    anchors
 }
 
 /// Splits parts, in sample order, wherever one doesn't start where the last
@@ -196,10 +214,13 @@ fn continuous_runs(parts: impl Iterator<Item = Part>) -> Vec<Vec<Part>> {
     runs
 }
 
+/// The segment `parts` make, a non-empty run in sample order, of `track`
+/// in `epoch` at `rate`, timed by `anchor`.
 fn segment_of(
     track: TrackId,
     epoch: EpochId,
     rate: SampleRate,
+    anchor: Option<EpochAnchor>,
     parts: Vec<Part>,
 ) -> Option<PlannedSegment> {
     let range = SampleRange::new(parts.first()?.range.start(), parts.last()?.range.end())?;
@@ -207,6 +228,7 @@ fn segment_of(
         track,
         epoch,
         rate,
+        anchor,
         range,
         parts,
     })
@@ -300,6 +322,7 @@ mod tests {
             track: TrackId::new(track),
             epoch: EpochId::new(epoch),
             rate: SampleRate::SPEECH,
+            anchor: None,
             range: r.map(|(s, e)| range(s, e)),
         }
     }
@@ -507,6 +530,61 @@ mod tests {
         assert_eq!(summary(&plan), [(0, 0, 100, 130, vec![(6, 100, 130)])]);
         assert!(plan.needs[&JournalId::new(5)].is_empty());
         assert_eq!(plan.needs[&JournalId::new(6)].len(), 1);
+    }
+
+    /// Epoch `epoch` of track 0, starting `start` ns in from sample `first`.
+    fn timed(epoch: u32, first: u64, start: u64) -> EpochAnchor {
+        EpochAnchor {
+            id: EpochId::new(epoch),
+            start: nota_core::SessionTime::from_nanos(start),
+            first_sample: SampleIndex::new(first),
+            rate: SampleRate::SPEECH,
+        }
+    }
+
+    /// Each segment carries its epoch's anchor, from the newest journal of
+    /// the epoch that has one, even one whose samples another journal won;
+    /// an epoch only version 2 journals hold has none.
+    #[test]
+    fn segments_carry_their_epoch_s_anchor() {
+        let with = |id, epoch, r, anchor| JournalSummary {
+            anchor,
+            ..journal(id, 0, epoch, Some(r))
+        };
+        let journals = [
+            with(0, 0, (0, 50), Some(timed(0, 0, 5))),
+            with(1, 0, (50, 100), None),
+            with(2, 1, (100, 150), Some(timed(1, 100, 9))),
+            // Newer, holding the same samples: it wins them, and its
+            // anchor is the epoch's.
+            with(3, 1, (100, 150), Some(timed(1, 100, 9))),
+            with(4, 2, (150, 160), None),
+        ];
+        let anchors: Vec<_> = plan(&[], &journals, len(1_000))
+            .segments
+            .iter()
+            .map(|s| (s.epoch.get(), s.anchor))
+            .collect();
+        assert_eq!(
+            anchors,
+            [
+                (0, Some(timed(0, 0, 5))),
+                (1, Some(timed(1, 100, 9))),
+                (2, None)
+            ]
+        );
+        // Rebuilding a row's segment carries the anchor too.
+        let row = SegmentRow::new(
+            TrackId::new(0),
+            EpochId::new(1),
+            range(100, 150),
+            Sha256Digest::new([0; 32]),
+        )
+        .unwrap();
+        assert_eq!(
+            cover(&row, &journals).map(|s| s.anchor),
+            Some(Some(timed(1, 100, 9)))
+        );
     }
 
     #[test]

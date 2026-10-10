@@ -116,7 +116,10 @@ fn record_both(mic: Vec<Step>, system: Vec<Step>) -> Recorded {
     let mut timelines = Vec::new();
     for track in [MIC, SYSTEM] {
         writer
-            .start_track(track, EpochId::new(0), SampleIndex::ZERO)
+            .start_track(
+                track,
+                &writer.test_epoch(track, EpochId::new(0), SampleIndex::ZERO),
+            )
             .unwrap();
         let mut timeline = TrackTimeline::new(track);
         timeline
@@ -263,11 +266,11 @@ fn an_overrun_moves_only_its_own_track_to_a_new_epoch() {
     assert_eq!(mic.epochs()[1].first_sample(), SampleIndex::new(100));
     assert_eq!(system.epochs().len(), 1);
     assert_eq!(
-        run.writer.epoch(MIC),
+        run.writer.epoch(MIC).map(|e| (e.id(), e.first_sample())),
         Some((EpochId::new(1), SampleIndex::new(100)))
     );
     assert_eq!(
-        run.writer.epoch(SYSTEM),
+        run.writer.epoch(SYSTEM).map(|e| (e.id(), e.first_sample())),
         Some((EpochId::new(0), SampleIndex::ZERO))
     );
     let epochs: Vec<_> = run
@@ -338,7 +341,10 @@ fn a_stream_without_a_timeline_waits_for_its_start() {
     let length = SegmentLength::new(SampleCount::new(1_000)).unwrap();
     let mut writer = SessionWriter::open(&session, rate(), length, clock).unwrap();
     writer
-        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .start_track(
+            MIC,
+            &writer.test_epoch(MIC, EpochId::new(0), SampleIndex::ZERO),
+        )
         .unwrap();
     let mut mic = TrackTimeline::new(MIC);
     mic.open_epoch(SessionTime::ZERO, SampleIndex::ZERO, rate())
@@ -391,7 +397,10 @@ fn a_track_that_cant_join_leaves_the_other_recording() {
     let mut writer = SessionWriter::open(&session, rate(), length, clock).unwrap();
     for track in [MIC, SYSTEM] {
         writer
-            .start_track(track, EpochId::new(0), SampleIndex::ZERO)
+            .start_track(
+                track,
+                &writer.test_epoch(track, EpochId::new(0), SampleIndex::ZERO),
+            )
             .unwrap();
     }
     let mut mic = TrackTimeline::new(MIC);
@@ -435,6 +444,76 @@ fn a_track_that_cant_join_leaves_the_other_recording() {
     assert_eq!(writer.next_sample(SYSTEM), Some(SampleIndex::ZERO));
     // Every buffer goes back to be filled again, the refused track's too.
     assert_eq!(events.events.spare(), 3);
+}
+
+/// Joins `SYSTEM` to a writer on `fs`'s session, its stream's first
+/// audio captured `at`; returns what was reported and the writer.
+fn join_system_at(
+    fs: &FakeFs,
+    at: SessionTime,
+) -> (
+    Vec<RecorderEvent>,
+    SessionWriter<FakeFs>,
+    crate::session::SessionLock<FakeFs>,
+) {
+    let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(at));
+    let session = SessionDir::new(SESSION, fs.clone(), &dir()).lock().unwrap();
+    let length = SegmentLength::new(SampleCount::new(1_000)).unwrap();
+    let mut writer = SessionWriter::open(&session, rate(), length, clock).unwrap();
+    let (tx, rx) = test_channel();
+    tx.send(SYSTEM, CaptureEvent::Started);
+    tx.send(SYSTEM, CaptureEvent::Began { at });
+    tx.send(SYSTEM, CaptureEvent::Audio(samples(SYSTEM, 100, 10)));
+    tx.send(SYSTEM, CaptureEvent::Stopped);
+    let events = CaptureReceiver {
+        events: rx,
+        rate: rate(),
+        tracks: test_tracks(&[SYSTEM]),
+    };
+    let mut reported = Vec::new();
+    record_tracks(&mut writer, &mut [], &events, &mut |_, e| reported.push(e)).unwrap();
+    (reported, writer, session)
+}
+
+/// A track joining a resumed session carries on above the epochs it used,
+/// after the audio it recorded; one whose audio would come before that
+/// (the clock wasn't resumed) can't join.
+#[test]
+fn a_track_joining_a_resumed_session_carries_on_after_its_audio() {
+    let fs = FakeFs::with_dirs([dir()]);
+    {
+        // An earlier run: 100 samples from 0 s, to 0.1 s.
+        let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
+        let session = SessionDir::new(SESSION, fs.clone(), &dir()).lock().unwrap();
+        let length = SegmentLength::new(SampleCount::new(1_000)).unwrap();
+        let mut writer = SessionWriter::open(&session, rate(), length, clock).unwrap();
+        let (_, epoch) = writer.open_first_epoch(SYSTEM, SessionTime::ZERO).unwrap();
+        writer.start_track(SYSTEM, &epoch).unwrap();
+        writer.append(SYSTEM, &samples(SYSTEM, 0, 100)).unwrap();
+        writer.finish().unwrap();
+    }
+    let (reported, writer, session) = join_system_at(&fs, SessionTime::ZERO);
+    assert!(
+        matches!(
+            &reported[..],
+            [RecorderEvent::CaptureFailed(e)] if e.to_string().contains("couldn't record it")
+        ),
+        "{reported:?}"
+    );
+    assert_eq!(writer.next_sample(SYSTEM), None);
+    drop((writer, session));
+
+    let resumed = SessionTime::from_nanos(1_000_000_000);
+    let (reported, writer, _session) = join_system_at(&fs, resumed);
+    let epochs: Vec<_> = reported
+        .iter()
+        .filter_map(|e| match e {
+            RecorderEvent::Epoch(e) => Some((e.id(), e.start(), e.first_sample())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(epochs, [(EpochId::new(1), resumed, SampleIndex::new(100))]);
+    assert_eq!(writer.next_sample(SYSTEM), Some(SampleIndex::new(110)));
 }
 
 /// Opens "mic" at once; "system" only once `gate` says so; "late" after
@@ -531,8 +610,9 @@ fn the_first_track_records_while_the_second_stream_is_still_opening() {
     let starting = thread::spawn(move || starter.start(&backend));
     wait_for(&seen, audio_from(MIC, 0));
     // Written to the mic's journal, with the system audio's start still
-    // waiting.
-    assert_eq!(progress[&MIC].now().captured, SampleIndex::new(300));
+    // waiting. The recorder reports the audio before it counts it as
+    // captured, so wait for the count.
+    until_captured(&progress[&MIC], SampleIndex::new(300));
     let journal = read_journal(&fs.read(&dir().join(JournalId::FIRST.file_name())).unwrap());
     assert_eq!(
         journal.header().map(crate::journal::JournalHeader::track),
@@ -626,7 +706,10 @@ fn a_closed_channel_ends_recording() {
     let length = SegmentLength::new(SampleCount::new(1_000)).unwrap();
     let mut writer = SessionWriter::open(&session, rate(), length, clock).unwrap();
     writer
-        .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
+        .start_track(
+            MIC,
+            &writer.test_epoch(MIC, EpochId::new(0), SampleIndex::ZERO),
+        )
         .unwrap();
     let mut mic = TrackTimeline::new(MIC);
     mic.open_epoch(SessionTime::ZERO, SampleIndex::ZERO, rate())
@@ -704,7 +787,10 @@ fn a_track_that_fails_first_leaves_the_other_recording_until_it_stops() {
     let mut timelines = Vec::new();
     for track in [MIC, SYSTEM] {
         writer
-            .start_track(track, EpochId::new(0), SampleIndex::ZERO)
+            .start_track(
+                track,
+                &writer.test_epoch(track, EpochId::new(0), SampleIndex::ZERO),
+            )
             .unwrap();
         let mut timeline = TrackTimeline::new(track);
         timeline
@@ -751,7 +837,10 @@ fn events_from_a_stream_that_never_started_are_dropped() {
     let length = SegmentLength::new(SampleCount::new(1_000)).unwrap();
     let mut writer = SessionWriter::open(&session, rate(), length, clock).unwrap();
     writer
-        .start_track(SYSTEM, EpochId::new(0), SampleIndex::ZERO)
+        .start_track(
+            SYSTEM,
+            &writer.test_epoch(SYSTEM, EpochId::new(0), SampleIndex::ZERO),
+        )
         .unwrap();
     let mut timeline = TrackTimeline::new(SYSTEM);
     timeline
@@ -803,6 +892,21 @@ fn wait_for(
     }
 }
 
+/// Waits up to 10 s for `progress` to count `captured` as captured.
+fn until_captured(progress: &Progress, captured: SampleIndex) {
+    let clock = nota_core::SystemClock::start().unwrap();
+    while progress.now().captured != captured {
+        assert!(
+            clock.now().elapsed() < Duration::from_secs(10),
+            "captured {:?}, never {captured:?}",
+            progress.now().captured
+        );
+        // A wait on a channel nothing sends on: a pause that isn't a sleep.
+        let (_keep, never) = mpsc::channel::<()>();
+        let _ = never.recv_timeout(Duration::from_millis(1));
+    }
+}
+
 /// Whether `event` is `track`'s audio starting at `first`.
 fn audio_from(track: TrackId, first: u64) -> impl Fn(Option<TrackId>, &RecorderEvent) -> bool {
     move |_, event| {
@@ -823,7 +927,10 @@ fn a_stalled_fsync_on_one_track_never_holds_up_the_other() {
     let mut timelines = Vec::new();
     for track in [MIC, SYSTEM] {
         writer
-            .start_track(track, EpochId::new(0), SampleIndex::ZERO)
+            .start_track(
+                track,
+                &writer.test_epoch(track, EpochId::new(0), SampleIndex::ZERO),
+            )
             .unwrap();
         let mut timeline = TrackTimeline::new(track);
         timeline
@@ -913,7 +1020,10 @@ fn the_other_tracks_due_fsync_runs_as_soon_as_a_stream_ends() {
     let mut timelines = Vec::new();
     for track in [MIC, SYSTEM] {
         writer
-            .start_track(track, EpochId::new(0), SampleIndex::ZERO)
+            .start_track(
+                track,
+                &writer.test_epoch(track, EpochId::new(0), SampleIndex::ZERO),
+            )
             .unwrap();
         let mut timeline = TrackTimeline::new(track);
         timeline

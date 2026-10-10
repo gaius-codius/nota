@@ -508,6 +508,10 @@ impl Clock for ReadClock {
         self.readings.send(now).unwrap();
         now
     }
+
+    fn suspended(&self) -> Duration {
+        Duration::ZERO
+    }
 }
 
 /// A spawned runner uses the supplied clock when an engine cannot start.

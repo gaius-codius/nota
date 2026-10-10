@@ -32,9 +32,7 @@ mod linux {
     use std::thread;
     use std::time::Duration;
 
-    use nota_core::{
-        Clock, EpochId, SampleCount, SampleIndex, SampleRate, SessionId, SystemClock, TrackTimeline,
-    };
+    use nota_core::{Clock, SampleCount, SampleIndex, SampleRate, SessionId, SystemClock};
     use nota_recorder::capture::{
         CaptureNotice, PipeWireBackend, RecorderEvent, Source, record_track, start,
     };
@@ -92,8 +90,6 @@ mod linux {
             SegmentLength::default_at(rate),
             Arc::clone(&clock) as Arc<dyn Clock>,
         )?;
-        writer.start_track(TRACK, EpochId::new(0), SampleIndex::ZERO)?;
-
         let (capture, events) = start(
             &PipeWireBackend,
             TRACK,
@@ -102,8 +98,8 @@ mod linux {
             &(Arc::clone(&clock) as Arc<dyn Clock>),
         )?;
         let started = clock.now();
-        let mut timeline = TrackTimeline::new(TRACK);
-        timeline.open_epoch(started, SampleIndex::ZERO, rate)?;
+        let (mut timeline, epoch) = writer.open_first_epoch(TRACK, started)?;
+        writer.start_track(TRACK, &epoch)?;
         let recorder = thread::spawn(move || {
             let mut journals = Vec::new();
             let mut notices = Vec::new();

@@ -24,9 +24,14 @@ pub trait SegmentStore {
     /// The store's error.
     fn rows(&mut self, session: SessionId) -> Result<Vec<SegmentRow>, Self::Error>;
 
-    /// Commits `segment`'s row for `session`, durably, before returning.
-    /// Committing the same row again is fine. Takes a [`DurableSegment`], so
-    /// a row can only be committed for a file that's durable under its final
+    /// Commits `segment`'s row for `session`, durably, before returning,
+    /// and first the anchor of its epoch, if it has one
+    /// ([`DurableSegment::anchor`]), so a committed row's epoch is timed in
+    /// the store. Committing the same row or anchor again is fine. An epoch
+    /// stored with another anchor, or whose stored row doesn't parse, keeps
+    /// what it has and the row is committed all the same: its audio
+    /// matters more than its timing. Takes a [`DurableSegment`], so a row
+    /// can only be committed for a file that's durable under its final
     /// name.
     ///
     /// # Errors
@@ -34,7 +39,7 @@ pub trait SegmentStore {
     /// The store's error, including a different row of the session for the
     /// same track and first sample, a row of the same session and track
     /// whose samples overlap this one's, and a session the store doesn't
-    /// hold.
+    /// hold. A row isn't committed if its anchor failed for another reason.
     fn insert(&mut self, session: SessionId, segment: &DurableSegment) -> Result<(), Self::Error>;
 
     /// Whether `error` says the disk is full (see
@@ -92,6 +97,17 @@ impl SegmentStore for nota_store::Store {
     }
 
     fn insert(&mut self, session: SessionId, segment: &DurableSegment) -> Result<(), Self::Error> {
+        if let Some(anchor) = segment.anchor() {
+            match self.insert_epoch(session, segment.row().track(), anchor) {
+                // The epoch keeps the anchor it has; the row still commits.
+                Ok(_)
+                | Err(
+                    nota_store::StoreError::EpochConflict { .. }
+                    | nota_store::StoreError::Corrupt(_),
+                ) => {}
+                Err(e) => return Err(e),
+            }
+        }
         self.insert_segment(session, segment.row()).map(|_| ())
     }
 
@@ -109,8 +125,7 @@ impl SegmentStore for nota_store::Writer {
     }
 
     fn insert(&mut self, session: SessionId, segment: &DurableSegment) -> Result<(), Self::Error> {
-        self.with(|store| store.insert_segment(session, segment.row()))
-            .map(|_| ())
+        self.with(|store| SegmentStore::insert(store, session, segment))
     }
 
     fn is_disk_full(error: &Self::Error) -> bool {
@@ -148,7 +163,9 @@ mod fake {
     use std::io;
     use std::path::{Path, PathBuf};
 
-    use nota_core::{EpochId, SampleIndex, SampleRange, SessionId, TrackId};
+    use nota_core::{
+        EpochAnchor, EpochId, SampleIndex, SampleRange, SampleRate, SessionId, SessionTime, TrackId,
+    };
     use nota_store::{AudioDigest, SegmentRow, Sha256Digest};
 
     use super::{DurableSegment, SegmentStore};
@@ -160,12 +177,18 @@ mod fake {
     /// CRC-32.
     const ROW_LEN: usize = 8 + 4 + 4 + 8 + 8 + 32 + 1 + 32 + 4;
 
+    /// Bytes in an epoch file: session, track, epoch, first sample, rate,
+    /// start, CRC-32.
+    const EPOCH_LEN: usize = 8 + 4 + 4 + 8 + 4 + 8 + 4;
+
     /// Segment rows as files on a [`FakeFs`], one per row, each published
     /// by temp file, fsync, rename and directory fsync: a commit that's
     /// atomic and durable when it returns, as SQLite's with
     /// `synchronous=FULL`, and that a simulated crash can interrupt. Like
     /// SQLite, it keeps rows by session, and refuses a row whose samples
-    /// overlap another row of the same session and track.
+    /// overlap another row of the same session and track. Epochs' anchors
+    /// are files too, committed the same way; an epoch stored already keeps
+    /// the anchor it has.
     ///
     /// It writes through any [`Fs`], a [`FakeFs`] by default: through one
     /// that wraps a fake (a [`WatchedFs`](crate::disk::WatchedFs), say),
@@ -200,6 +223,112 @@ mod fake {
             file.sync().unwrap();
             self.fs.sync_dir(&self.dir).unwrap();
         }
+    }
+
+    impl<S: Fs> FakeStore<S> {
+        /// Every anchor of `session`, ordered by track then epoch, as
+        /// [`nota_store::Store::epochs`] gives them.
+        ///
+        /// # Errors
+        ///
+        /// Any I/O error, and [`io::ErrorKind::InvalidData`] for a file
+        /// that doesn't decode.
+        pub fn epochs(&self, session: SessionId) -> io::Result<Vec<(TrackId, EpochAnchor)>> {
+            let mut epochs = Vec::new();
+            for path in self.fs.list(&self.dir)? {
+                if path.extension().is_some_and(|e| e == "epoch") {
+                    let bytes = self.fs.read(&path)?;
+                    let (owner, track, anchor) =
+                        decode_epoch(&bytes).ok_or_else(|| corrupt(&path))?;
+                    if owner == session {
+                        epochs.push((track, anchor));
+                    }
+                }
+            }
+            epochs.sort_by_key(|(track, anchor)| (*track, anchor.id));
+            Ok(epochs)
+        }
+
+        /// Commits `track`'s `anchor` for `session`, unless the epoch is
+        /// stored already: it keeps the anchor it has, as SQLite's store
+        /// does through [`SegmentStore::insert`].
+        fn insert_epoch(
+            &self,
+            session: SessionId,
+            track: TrackId,
+            anchor: &EpochAnchor,
+        ) -> io::Result<()> {
+            let path = self.dir.join(format!(
+                "s{}-t{}-e{}.epoch",
+                session.get(),
+                track.get(),
+                anchor.id.get()
+            ));
+            match self.fs.read(&path) {
+                Ok(_) => Ok(()),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    self.commit(&path, &encode_epoch(session, track, anchor))
+                }
+                Err(e) => Err(e),
+            }
+        }
+
+        /// Writes `bytes` to `path` as a commit: temp file, fsync, rename,
+        /// directory fsync.
+        fn commit(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+            let temp = path.with_extension("tmp");
+            match self.fs.remove(&temp) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+            let mut file = self.fs.create(&temp)?;
+            file.write_all(bytes)?;
+            file.sync()?;
+            self.fs.rename(&temp, path)?;
+            if let Err(e) = self.fs.sync_dir(&self.dir) {
+                // Not committed: don't leave a file a later read would
+                // report while its name isn't durable. Best effort.
+                let _ = self.fs.remove(path);
+                return Err(e);
+            }
+            Ok(())
+        }
+    }
+
+    /// The bytes of `track`'s `anchor` in `session`.
+    fn encode_epoch(session: SessionId, track: TrackId, anchor: &EpochAnchor) -> Vec<u8> {
+        let mut out = Vec::with_capacity(EPOCH_LEN);
+        out.extend_from_slice(&session.get().to_le_bytes());
+        out.extend_from_slice(&track.get().to_le_bytes());
+        out.extend_from_slice(&anchor.id.get().to_le_bytes());
+        out.extend_from_slice(&anchor.first_sample.get().to_le_bytes());
+        out.extend_from_slice(&anchor.rate.hz().to_le_bytes());
+        out.extend_from_slice(&anchor.start.as_nanos().to_le_bytes());
+        let crc = crc32fast::hash(&out);
+        out.extend_from_slice(&crc.to_le_bytes());
+        out
+    }
+
+    /// The session, track and anchor in an epoch file's `bytes`, if they
+    /// check out.
+    fn decode_epoch(bytes: &[u8]) -> Option<(SessionId, TrackId, EpochAnchor)> {
+        if bytes.len() != EPOCH_LEN {
+            return None;
+        }
+        let (body, crc) = bytes.split_at(EPOCH_LEN - 4);
+        if crc32fast::hash(body).to_le_bytes() != crc {
+            return None;
+        }
+        let u32_at = |at: usize| Some(u32::from_le_bytes(body.get(at..at + 4)?.try_into().ok()?));
+        let u64_at = |at: usize| Some(u64::from_le_bytes(body.get(at..at + 8)?.try_into().ok()?));
+        let anchor = EpochAnchor {
+            id: EpochId::new(u32_at(12)?),
+            first_sample: SampleIndex::new(u64_at(16)?),
+            rate: SampleRate::new(u32_at(24)?)?,
+            start: SessionTime::from_nanos(u64_at(28)?),
+        };
+        Some((SessionId::new(u64_at(0)?), TrackId::new(u32_at(8)?), anchor))
     }
 
     impl<S> FakeStore<S> {
@@ -285,6 +414,9 @@ mod fake {
         }
 
         fn insert(&mut self, session: SessionId, segment: &DurableSegment) -> io::Result<()> {
+            if let Some(anchor) = segment.anchor() {
+                self.insert_epoch(session, segment.row().track(), anchor)?;
+            }
             let row = segment.row();
             let path = self.row_path(session, row);
             match self.fs.read(&path) {
@@ -310,23 +442,7 @@ mod fake {
                     "a row of this track overlaps this one's samples",
                 ));
             }
-            let temp = path.with_extension("tmp");
-            match self.fs.remove(&temp) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e),
-            }
-            let mut file = self.fs.create(&temp)?;
-            file.write_all(&encode(session, row))?;
-            file.sync()?;
-            self.fs.rename(&temp, &path)?;
-            if let Err(e) = self.fs.sync_dir(&self.dir) {
-                // Not committed: don't leave a row a later `rows` would
-                // report while its name isn't durable. Best effort.
-                let _ = self.fs.remove(&path);
-                return Err(e);
-            }
-            Ok(())
+            self.commit(&path, &encode(session, row))
         }
     }
 
@@ -471,6 +587,50 @@ mod fake {
             assert!(store.rows(SessionId::new(3)).unwrap().is_empty());
         }
 
+        /// An epoch file reads back as written, and a file that's cut,
+        /// flipped or has no real rate isn't one.
+        #[test]
+        fn epochs_round_trip_and_bad_files_are_refused() {
+            let anchor = EpochAnchor {
+                id: EpochId::new(4),
+                start: SessionTime::from_nanos(9),
+                first_sample: SampleIndex::new(u64::MAX),
+                rate: SampleRate::SPEECH,
+            };
+            let bytes = encode_epoch(SESSION, TrackId::new(3), &anchor);
+            assert_eq!(bytes.len(), EPOCH_LEN);
+            assert_eq!(
+                decode_epoch(&bytes),
+                Some((SESSION, TrackId::new(3), anchor))
+            );
+            for cut in 0..bytes.len() {
+                assert_eq!(decode_epoch(&bytes[..cut]), None);
+            }
+            for at in 0..bytes.len() {
+                let mut flipped = bytes.clone();
+                flipped[at] ^= 1;
+                assert_eq!(decode_epoch(&flipped), None, "{at}");
+            }
+            let mut no_rate = bytes;
+            no_rate[24..28].fill(0);
+            let crc = crc32fast::hash(&no_rate[..EPOCH_LEN - 4]);
+            no_rate[EPOCH_LEN - 4..].copy_from_slice(&crc.to_le_bytes());
+            assert_eq!(decode_epoch(&no_rate), None);
+        }
+
+        /// A damaged epoch file is reported, not skipped.
+        #[test]
+        fn a_damaged_epoch_file_is_an_error() {
+            let fs = FakeFs::with_dirs(["/db"]);
+            let mut file = fs.create(Path::new("/db/s1-t0-e0.epoch")).unwrap();
+            file.write_all(b"junk").unwrap();
+            let store = FakeStore::new(&fs, Path::new("/db"));
+            assert_eq!(
+                store.epochs(SESSION).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+
         #[test]
         fn rows_round_trip_and_bad_files_are_refused() {
             let row = SegmentRow::new(
@@ -506,7 +666,9 @@ mod fake {
 mod tests {
     use std::path::Path;
 
-    use nota_core::{EpochId, SampleIndex, SampleRange, SessionId, TrackId};
+    use nota_core::{
+        EpochAnchor, EpochId, SampleIndex, SampleRange, SampleRate, SessionId, SessionTime, TrackId,
+    };
     use nota_store::{NewSession, Store, Writer};
 
     use super::SegmentStore;
@@ -563,6 +725,68 @@ mod tests {
         store.create_session(&session(1)).unwrap();
         store.create_session(&session(2)).unwrap();
         round_trip(&mut store);
+    }
+
+    /// Epoch 0 of the test's track, starting `start` ns in.
+    fn anchor(start: u64) -> EpochAnchor {
+        EpochAnchor {
+            id: EpochId::new(0),
+            start: SessionTime::from_nanos(start),
+            first_sample: SampleIndex::ZERO,
+            rate: SampleRate::SPEECH,
+        }
+    }
+
+    /// Commits a timed segment through `store`: its epoch's anchor is
+    /// committed with it, which `epochs` reads back; a segment whose epoch
+    /// the store times otherwise is committed, and the epoch keeps its
+    /// anchor.
+    fn timed_round_trip<S: SegmentStore>(
+        store: &mut S,
+        epochs: impl Fn(&mut S) -> Vec<(TrackId, EpochAnchor)>,
+    ) {
+        let fs = FakeFs::with_dirs(["/s"]);
+        let one = SessionId::new(1);
+        let segment = durable(&fs, 5).timed_by(Some(anchor(7)));
+        assert_eq!(segment.anchor(), Some(&anchor(7)));
+        store.insert(one, &segment).unwrap();
+        // Again is fine.
+        store.insert(one, &segment).unwrap();
+        assert_eq!(epochs(store), [(TrackId::new(1), anchor(7))]);
+        let other = durable(&fs, 20).timed_by(Some(anchor(8)));
+        store.insert(one, &other).unwrap();
+        assert_eq!(store.rows(one).unwrap(), [*segment.row(), *other.row()]);
+        assert_eq!(epochs(store), [(TrackId::new(1), anchor(7))]);
+        // An untimed segment leaves the epochs as they are.
+        store.insert(one, &durable(&fs, 30)).unwrap();
+        assert_eq!(epochs(store), [(TrackId::new(1), anchor(7))]);
+        assert_eq!(store.rows(one).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn the_library_database_commits_an_epoch_s_anchor_with_its_rows() {
+        let dir = TestDir::new("sqlite-epochs");
+        let mut store = Store::open(&dir.0.join("library.db")).unwrap();
+        store.create_session(&session(1)).unwrap();
+        timed_round_trip(&mut store, |s| s.epochs(SessionId::new(1)).unwrap());
+    }
+
+    #[test]
+    fn a_shared_writer_commits_an_epoch_s_anchor_with_its_rows() {
+        let dir = TestDir::new("writer-epochs");
+        let mut writer = Writer::new(&dir.0.join("library.db"));
+        writer.with(|db| db.create_session(&session(1))).unwrap();
+        timed_round_trip(&mut writer, |w| {
+            w.with(|db| db.epochs(SessionId::new(1))).unwrap()
+        });
+    }
+
+    #[test]
+    fn the_fake_store_commits_an_epoch_s_anchor_with_its_rows() {
+        let fs = FakeFs::with_dirs(["/db"]);
+        let mut store = super::FakeStore::new(&fs, Path::new("/db"));
+        timed_round_trip(&mut store, |s| s.epochs(SessionId::new(1)).unwrap());
+        assert_eq!(store.epochs(SessionId::new(2)).unwrap(), []);
     }
 
     #[test]

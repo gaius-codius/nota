@@ -317,9 +317,7 @@ pub(super) fn track_name(track: Option<TrackId>) -> &'static str {
 #[cfg(test)]
 pub(super) mod tests {
     use nota_core::recorder::{Input, Mark, Note, Setup};
-    use nota_core::{
-        EpochId, FakeClock, SampleCount, SampleIndex, SampleRate, SessionId, SessionTime,
-    };
+    use nota_core::{FakeClock, SampleCount, SampleRate, SessionId, SessionTime};
     use nota_recorder::fs::fake::FakeFs;
     use nota_recorder::fs::{Fs as _, FsFile as _};
     use nota_recorder::segment::{FakeStore, Publisher, SegmentLength};
@@ -434,9 +432,10 @@ pub(super) mod tests {
         let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
         let mut writer =
             SessionWriter::open(&lock, SampleRate::new(1_000).unwrap(), length, clock).unwrap();
-        writer
-            .start_track(TrackId::new(0), EpochId::new(0), SampleIndex::ZERO)
+        let (_, epoch) = writer
+            .open_first_epoch(TrackId::new(0), SessionTime::ZERO)
             .unwrap();
+        writer.start_track(TrackId::new(0), &epoch).unwrap();
         for k in 0..20_i16 {
             let audio: Vec<i16> = (0..50).map(|i| k * 50 + i).collect();
             writer.append(TrackId::new(0), &audio).unwrap();
@@ -503,9 +502,8 @@ pub(super) mod tests {
             let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
             let mut writer =
                 SessionWriter::open(&lock, SampleRate::new(1_000).unwrap(), length, clock).unwrap();
-            writer
-                .start_track(MIC, EpochId::new(0), SampleIndex::ZERO)
-                .unwrap();
+            let (_, epoch) = writer.open_first_epoch(MIC, SessionTime::ZERO).unwrap();
+            writer.start_track(MIC, &epoch).unwrap();
             for _ in 0..20 {
                 writer.append(MIC, &[7; 50]).unwrap();
             }
@@ -641,9 +639,8 @@ pub(super) mod tests {
             clock,
         )
         .unwrap();
-        writer
-            .start_track(SYSTEM, EpochId::new(0), SampleIndex::ZERO)
-            .unwrap();
+        let (_, epoch) = writer.open_first_epoch(SYSTEM, SessionTime::ZERO).unwrap();
+        writer.start_track(SYSTEM, &epoch).unwrap();
         writer.append(SYSTEM, &[9; 50]).unwrap();
         fixture.journals.extend(writer.finish().unwrap());
         // Retain both published journals so the later repair has its original audio.

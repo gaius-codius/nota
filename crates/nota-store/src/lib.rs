@@ -34,10 +34,11 @@ use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
-use nota_core::{SampleIndex, SessionId, TrackId};
+use nota_core::{EpochId, SampleIndex, SessionId, TrackId};
 use rusqlite::{Connection, OpenFlags};
 
 pub mod annotations;
+mod epochs;
 pub mod final_text;
 mod findings;
 pub mod jobs;
@@ -88,6 +89,14 @@ pub enum StoreError {
     Conflict {
         /// The row that is stored.
         existing: SegmentRow,
+    },
+    /// An epoch is stored with another anchor than the one given: an
+    /// epoch's anchor never changes.
+    EpochConflict {
+        /// The epoch's track.
+        track: TrackId,
+        /// The epoch.
+        epoch: EpochId,
     },
     /// The session isn't in the `session` table.
     NoSession(SessionId),
@@ -143,6 +152,12 @@ impl fmt::Display for StoreError {
                 "a different segment already holds track {} from sample {}",
                 existing.track().get(),
                 existing.range().start().get()
+            ),
+            Self::EpochConflict { track, epoch } => write!(
+                f,
+                "epoch {} of track {} is stored with another anchor",
+                epoch.get(),
+                track.get()
             ),
             Self::NoSession(id) => write!(f, "session {} is not in the library", id.get()),
             Self::SessionExists(id) => {

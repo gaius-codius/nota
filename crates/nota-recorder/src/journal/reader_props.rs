@@ -8,6 +8,8 @@
 //!   back exactly the input's first `valid_len` bytes, CRCs included;
 //! - it never returns samples past the first invalid frame: on a damaged
 //!   journal it returns exactly the frames before the damage.
+//! - it never returns a frame from before its epoch's first sample, which
+//!   a version 3 header gives.
 //!
 //! And the scan salvage uses to look past damage ([`frames_after`]): it
 //! never panics, finds every frame of a valid journal, and after damage
@@ -16,7 +18,7 @@
 //! A failure proptest finds is saved in `proptest-regressions/` and replayed
 //! on every run; commit that file with the fix.
 
-use nota_core::{EpochId, SampleIndex, SampleRate, TrackId};
+use nota_core::{EpochAnchor, EpochId, SampleIndex, SampleRate, SessionTime, TrackId};
 use proptest::prelude::*;
 
 use super::format::{HEADER_LEN, MAX_FRAME_SAMPLES, encode_frame, encode_header, frames_after};
@@ -54,6 +56,17 @@ impl Journal {
     }
 }
 
+/// The anchor of epoch `epoch` at `rate`, starting at session time zero and
+/// sample zero, so any frame the strategies make falls inside the epoch.
+fn anchor(epoch: u32, rate: SampleRate) -> EpochAnchor {
+    EpochAnchor {
+        id: EpochId::new(epoch),
+        start: SessionTime::ZERO,
+        first_sample: SampleIndex::ZERO,
+        rate,
+    }
+}
+
 /// Any header: any id, track and epoch, any valid rate.
 fn header() -> impl Strategy<Value = JournalHeader> {
     (
@@ -64,12 +77,7 @@ fn header() -> impl Strategy<Value = JournalHeader> {
     )
         .prop_map(|(id, track, epoch, hz)| {
             let rate = SampleRate::new(hz).unwrap();
-            JournalHeader::new(
-                JournalId::new(id),
-                TrackId::new(track),
-                EpochId::new(epoch),
-                rate,
-            )
+            JournalHeader::new(JournalId::new(id), TrackId::new(track), anchor(epoch, rate))
         })
 }
 
@@ -83,7 +91,7 @@ fn journal() -> impl Strategy<Value = Journal> {
     )
         .prop_map(|(header, runs, start)| {
             let track = header.track();
-            let mut bytes = encode_header(header).to_vec();
+            let mut bytes = encode_header(header);
             let mut next = start;
             let mut frames = Vec::new();
             let mut ends = Vec::new();
@@ -312,7 +320,7 @@ proptest! {
         header in header(),
         noise in prop::collection::vec(any::<u8>(), 0..2_000),
     ) {
-        let mut input = encode_header(header).to_vec();
+        let mut input = encode_header(header);
         input.extend_from_slice(&noise);
         let read = read_journal(&input);
         check_contract(&input, &read)?;
@@ -328,12 +336,7 @@ proptest! {
         hz in 1..=SampleRate::MAX_HZ,
     ) {
         let rate = SampleRate::new(hz).unwrap();
-        let header = JournalHeader::new(
-            JournalId::new(id),
-            TrackId::new(track),
-            EpochId::new(epoch),
-            rate,
-        );
+        let header = JournalHeader::new(JournalId::new(id), TrackId::new(track), anchor(epoch, rate));
         let bytes = encode_header(header);
         prop_assert_eq!(bytes.len(), HEADER_LEN);
         let read = read_journal(&bytes);
@@ -345,6 +348,45 @@ proptest! {
         prop_assert_eq!(got.map(JournalHeader::epoch), Some(EpochId::new(epoch)));
         prop_assert_eq!(got.map(JournalHeader::rate), Some(rate));
         prop_assert_eq!((read.end(), read.valid_len()), (ReadEnd::Complete, HEADER_LEN));
+    }
+
+    /// Any anchor comes back as written, in a version 3 header, and a
+    /// version 2 header comes back untimed; a frame before the epoch's
+    /// first sample is never returned.
+    #[test]
+    fn anchors_round_trip_and_bound_the_frames(
+        epoch in any::<u32>(),
+        start in any::<u64>(),
+        first in 1..u64::MAX / 2,
+        before in 1..1_000u64,
+        hz in 1..=SampleRate::MAX_HZ,
+        untimed in any::<bool>(),
+    ) {
+        let rate = SampleRate::new(hz).unwrap();
+        let anchor = EpochAnchor {
+            id: EpochId::new(epoch),
+            start: SessionTime::from_nanos(start),
+            first_sample: SampleIndex::new(first),
+            rate,
+        };
+        let header = if untimed {
+            JournalHeader::untimed(JournalId::FIRST, TrackId::new(0), anchor.id, rate)
+        } else {
+            JournalHeader::new(JournalId::FIRST, TrackId::new(0), anchor)
+        };
+        let mut bytes = encode_header(header);
+        let read = read_journal(&bytes);
+        prop_assert_eq!(read.header(), Some(header));
+        prop_assert_eq!(
+            read.header().and_then(JournalHeader::anchor),
+            (!untimed).then_some(anchor)
+        );
+        let early = SampleIndex::new(first.saturating_sub(before));
+        encode_frame(&mut bytes, 0, TrackId::new(0), early, &[1, 2, 3]);
+        let read = read_journal(&bytes);
+        check_contract(&bytes, &read)?;
+        // Untimed, nothing bounds the frame; timed, it's before the epoch.
+        prop_assert_eq!(read.frames().len(), usize::from(untimed));
     }
 
     /// A frame that is right in every way but its track: refused as

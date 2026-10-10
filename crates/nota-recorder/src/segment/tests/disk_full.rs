@@ -108,7 +108,10 @@ fn record_until_full_into(
     let mut store = SessionStore::new(lock, FakeStore::new(&disk, &db()));
     let promised = &mut run.promised;
     for (track, at) in [(MIC, 0_u64), (SYSTEM, 700)] {
-        writer.start_track(track, EpochId::new(0), SampleIndex::new(at))?;
+        writer.start_track(
+            track,
+            &writer.test_epoch(track, EpochId::new(0), SampleIndex::new(at)),
+        )?;
         promised.started.insert(track, SampleIndex::new(at));
         promised.durable.insert(track, SampleIndex::new(at));
         promised.captured.insert(track, SampleIndex::new(at));
@@ -173,9 +176,9 @@ fn hit(run: &FullRun) -> Option<Where> {
 /// Where a scan found the disk first filling in each kind of write, past
 /// the ballast: tried first, so each test needn't scan.
 const HINTS: [(Where, u64); 3] = [
-    (Where::Journal, 20_195),
+    (Where::Journal, 20_359),
     (Where::Flac, 20_000),
-    (Where::Row, 20_094),
+    (Where::Row, 20_258),
 ];
 
 /// A capacity at which the disk first fills in a `kind` write: its hint.

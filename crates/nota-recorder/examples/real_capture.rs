@@ -103,8 +103,7 @@ mod linux {
 
     use nota_core::messages::AudioChunk;
     use nota_core::{
-        Clock, EpochId, SampleCount, SampleIndex, SampleRate, SessionId, SessionTime, SystemClock,
-        TrackId, TrackTimeline,
+        Clock, SampleCount, SampleRate, SessionId, SessionTime, SystemClock, TrackId, TrackTimeline,
     };
     use nota_recorder::capture::{
         Capture, CaptureBackend, CaptureNotice, CaptureReceiver, PipeWireBackend, Progress,
@@ -766,6 +765,16 @@ mod linux {
             let store = &mut *self.store;
             self.fs
                 .counted("commit", segment.path(), || {
+                    // As the library's store commits: the epoch's anchor
+                    // first, then the row, which an epoch already timed
+                    // otherwise doesn't stop.
+                    if let Some(anchor) = segment.anchor() {
+                        match store.insert_epoch(session, segment.row().track(), anchor) {
+                            Ok(_)
+                            | Err(StoreError::EpochConflict { .. } | StoreError::Corrupt(_)) => {}
+                            Err(e) => return Err(io::Error::other(e)),
+                        }
+                    }
                     store
                         .insert_segment(session, segment.row())
                         .map(|_| ())
@@ -822,11 +831,6 @@ mod linux {
         // thread per track for more.
         let mut writer = SessionWriter::open(&session, RATE, length, Arc::clone(&clock))?
             .with_syncing(Syncing::Auto);
-        for &track in &tracks {
-            writer.start_track(track, EpochId::new(0), SampleIndex::ZERO)?;
-            fs.0.log(&format!("start {} 0", track.get()))?;
-        }
-
         // Publishing runs on its own thread, so the recorder never waits
         // for an encode.
         let (to_publish, finished) = mpsc::channel::<Vec<FinishedJournal>>();
@@ -835,7 +839,8 @@ mod linux {
             thread::spawn(move || publish(&fs, session, store, length, &finished))
         };
 
-        let (captures, timelines, events) = start_capture(&tracks, &source, &clock)?;
+        let (captures, timelines, events) =
+            start_capture(&mut writer, &fs, &tracks, &source, &clock)?;
         let progress = tracks
             .iter()
             .filter_map(|&t| events.progress(t).map(|p| (t, p)))
@@ -971,8 +976,11 @@ mod linux {
     }
 
     /// The streams `write` records, one per track from `source`, each with
-    /// its timeline's first epoch opened as it started.
+    /// its timeline's first epoch opened as it started. The track starts in
+    /// `writer` in that epoch, and `fs`'s log notes it.
     fn start_capture(
+        writer: &mut SessionWriter<TapFs>,
+        fs: &TapFs,
         tracks: &[TrackId],
         source: &Source,
         clock: &Arc<dyn Clock>,
@@ -987,8 +995,10 @@ mod linux {
         let mut timelines = Vec::new();
         for capture in started {
             let capture = capture?;
-            let mut timeline = TrackTimeline::new(capture.track());
-            timeline.open_epoch(capture.started_at(), SampleIndex::ZERO, RATE)?;
+            let track = capture.track();
+            let (timeline, epoch) = writer.open_first_epoch(track, capture.started_at())?;
+            writer.start_track(track, &epoch)?;
+            fs.0.log(&format!("start {} 0", track.get()))?;
             timelines.push(timeline);
             captures.push(capture);
         }
@@ -1949,16 +1959,14 @@ mod linux {
             SegmentLength::new(SampleCount::new(10 * u64::from(RATE.hz()))).ok_or("bad length")?;
         let mut writer = SessionWriter::open(&session, RATE, length, Arc::clone(&clock))?
             .with_syncing(Syncing::Threads);
-        writer.start_track(TRACK, EpochId::new(0), SampleIndex::ZERO)?;
-
         let sent = Arc::new(AtomicU64::new(0));
         let feeding = {
             let sent = Arc::clone(&sent);
             thread::spawn(move || feeder(supervisor, &feed_rx, &sent))
         };
         let (capture, capture_events) = start(&PipeWireBackend, TRACK, &source, RATE, &clock)?;
-        let mut timeline = TrackTimeline::new(TRACK);
-        timeline.open_epoch(clock.now(), SampleIndex::ZERO, RATE)?;
+        let (mut timeline, epoch) = writer.open_first_epoch(TRACK, clock.now())?;
+        writer.start_track(TRACK, &epoch)?;
         let recorder = thread::spawn(move || {
             // Audio lost before the journal: the engine never sees it either.
             let mut lost = 0_usize;
