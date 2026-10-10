@@ -532,6 +532,61 @@ mod tests {
         assert_eq!(plan.needs[&JournalId::new(6)].len(), 1);
     }
 
+    /// Epoch `epoch` of track 0, starting `start` ns in from sample `first`.
+    fn timed(epoch: u32, first: u64, start: u64) -> EpochAnchor {
+        EpochAnchor {
+            id: EpochId::new(epoch),
+            start: nota_core::SessionTime::from_nanos(start),
+            first_sample: SampleIndex::new(first),
+            rate: SampleRate::SPEECH,
+        }
+    }
+
+    /// Each segment carries its epoch's anchor, from the newest journal of
+    /// the epoch that has one, even one whose samples another journal won;
+    /// an epoch only version 2 journals hold has none.
+    #[test]
+    fn segments_carry_their_epoch_s_anchor() {
+        let with = |id, epoch, r, anchor| JournalSummary {
+            anchor,
+            ..journal(id, 0, epoch, Some(r))
+        };
+        let journals = [
+            with(0, 0, (0, 50), Some(timed(0, 0, 5))),
+            with(1, 0, (50, 100), None),
+            with(2, 1, (100, 150), Some(timed(1, 100, 9))),
+            // Newer, holding the same samples: it wins them, and its
+            // anchor is the epoch's.
+            with(3, 1, (100, 150), Some(timed(1, 100, 9))),
+            with(4, 2, (150, 160), None),
+        ];
+        let anchors: Vec<_> = plan(&[], &journals, len(1_000))
+            .segments
+            .iter()
+            .map(|s| (s.epoch.get(), s.anchor))
+            .collect();
+        assert_eq!(
+            anchors,
+            [
+                (0, Some(timed(0, 0, 5))),
+                (1, Some(timed(1, 100, 9))),
+                (2, None)
+            ]
+        );
+        // Rebuilding a row's segment carries the anchor too.
+        let row = SegmentRow::new(
+            TrackId::new(0),
+            EpochId::new(1),
+            range(100, 150),
+            Sha256Digest::new([0; 32]),
+        )
+        .unwrap();
+        assert_eq!(
+            cover(&row, &journals).map(|s| s.anchor),
+            Some(Some(timed(1, 100, 9)))
+        );
+    }
+
     #[test]
     fn gaps_epochs_and_windows_split_segments() {
         let plan = plan(

@@ -582,6 +582,50 @@ mod fake {
             assert!(store.rows(SessionId::new(3)).unwrap().is_empty());
         }
 
+        /// An epoch file reads back as written, and a file that's cut,
+        /// flipped or has no real rate isn't one.
+        #[test]
+        fn epochs_round_trip_and_bad_files_are_refused() {
+            let anchor = EpochAnchor {
+                id: EpochId::new(4),
+                start: SessionTime::from_nanos(9),
+                first_sample: SampleIndex::new(u64::MAX),
+                rate: SampleRate::SPEECH,
+            };
+            let bytes = encode_epoch(SESSION, TrackId::new(3), &anchor);
+            assert_eq!(bytes.len(), EPOCH_LEN);
+            assert_eq!(
+                decode_epoch(&bytes),
+                Some((SESSION, TrackId::new(3), anchor))
+            );
+            for cut in 0..bytes.len() {
+                assert_eq!(decode_epoch(&bytes[..cut]), None);
+            }
+            for at in 0..bytes.len() {
+                let mut flipped = bytes.clone();
+                flipped[at] ^= 1;
+                assert_eq!(decode_epoch(&flipped), None, "{at}");
+            }
+            let mut no_rate = bytes;
+            no_rate[24..28].fill(0);
+            let crc = crc32fast::hash(&no_rate[..EPOCH_LEN - 4]);
+            no_rate[EPOCH_LEN - 4..].copy_from_slice(&crc.to_le_bytes());
+            assert_eq!(decode_epoch(&no_rate), None);
+        }
+
+        /// A damaged epoch file is reported, not skipped.
+        #[test]
+        fn a_damaged_epoch_file_is_an_error() {
+            let fs = FakeFs::with_dirs(["/db"]);
+            let mut file = fs.create(Path::new("/db/s1-t0-e0.epoch")).unwrap();
+            file.write_all(b"junk").unwrap();
+            let store = FakeStore::new(&fs, Path::new("/db"));
+            assert_eq!(
+                store.epochs(SESSION).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+
         #[test]
         fn rows_round_trip_and_bad_files_are_refused() {
             let row = SegmentRow::new(
@@ -617,7 +661,9 @@ mod fake {
 mod tests {
     use std::path::Path;
 
-    use nota_core::{EpochId, SampleIndex, SampleRange, SessionId, TrackId};
+    use nota_core::{
+        EpochAnchor, EpochId, SampleIndex, SampleRange, SampleRate, SessionId, SessionTime, TrackId,
+    };
     use nota_store::{NewSession, Store, Writer};
 
     use super::SegmentStore;
@@ -674,6 +720,66 @@ mod tests {
         store.create_session(&session(1)).unwrap();
         store.create_session(&session(2)).unwrap();
         round_trip(&mut store);
+    }
+
+    /// Epoch 0 of the test's track, starting `start` ns in.
+    fn anchor(start: u64) -> EpochAnchor {
+        EpochAnchor {
+            id: EpochId::new(0),
+            start: SessionTime::from_nanos(start),
+            first_sample: SampleIndex::ZERO,
+            rate: SampleRate::SPEECH,
+        }
+    }
+
+    /// Commits a timed segment through `store`: its epoch's anchor is
+    /// committed with it, which `epochs` reads back; a segment whose epoch
+    /// the store times otherwise isn't committed.
+    fn timed_round_trip<S: SegmentStore>(
+        store: &mut S,
+        epochs: impl Fn(&mut S) -> Vec<(TrackId, EpochAnchor)>,
+    ) {
+        let fs = FakeFs::with_dirs(["/s"]);
+        let one = SessionId::new(1);
+        let segment = durable(&fs, 5).timed_by(Some(anchor(7)));
+        assert_eq!(segment.anchor(), Some(&anchor(7)));
+        store.insert(one, &segment).unwrap();
+        // Again is fine.
+        store.insert(one, &segment).unwrap();
+        assert_eq!(epochs(store), [(TrackId::new(1), anchor(7))]);
+        let other = durable(&fs, 20).timed_by(Some(anchor(8)));
+        assert!(store.insert(one, &other).is_err());
+        assert_eq!(store.rows(one).unwrap(), [*segment.row()]);
+        // An untimed segment leaves the epochs as they are.
+        store.insert(one, &durable(&fs, 30)).unwrap();
+        assert_eq!(epochs(store), [(TrackId::new(1), anchor(7))]);
+        assert_eq!(store.rows(one).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn the_library_database_commits_an_epoch_s_anchor_with_its_rows() {
+        let dir = TestDir::new("sqlite-epochs");
+        let mut store = Store::open(&dir.0.join("library.db")).unwrap();
+        store.create_session(&session(1)).unwrap();
+        timed_round_trip(&mut store, |s| s.epochs(SessionId::new(1)).unwrap());
+    }
+
+    #[test]
+    fn a_shared_writer_commits_an_epoch_s_anchor_with_its_rows() {
+        let dir = TestDir::new("writer-epochs");
+        let mut writer = Writer::new(&dir.0.join("library.db"));
+        writer.with(|db| db.create_session(&session(1))).unwrap();
+        timed_round_trip(&mut writer, |w| {
+            w.with(|db| db.epochs(SessionId::new(1))).unwrap()
+        });
+    }
+
+    #[test]
+    fn the_fake_store_commits_an_epoch_s_anchor_with_its_rows() {
+        let fs = FakeFs::with_dirs(["/db"]);
+        let mut store = super::FakeStore::new(&fs, Path::new("/db"));
+        timed_round_trip(&mut store, |s| s.epochs(SessionId::new(1)).unwrap());
+        assert_eq!(store.epochs(SessionId::new(2)).unwrap(), []);
     }
 
     #[test]

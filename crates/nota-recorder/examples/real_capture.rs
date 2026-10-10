@@ -765,6 +765,13 @@ mod linux {
             let store = &mut *self.store;
             self.fs
                 .counted("commit", segment.path(), || {
+                    // As the library's store commits: the epoch's anchor
+                    // first, then the row.
+                    if let Some(anchor) = segment.anchor() {
+                        store
+                            .insert_epoch(session, segment.row().track(), anchor)
+                            .map_err(io::Error::other)?;
+                    }
                     store
                         .insert_segment(session, segment.row())
                         .map(|_| ())

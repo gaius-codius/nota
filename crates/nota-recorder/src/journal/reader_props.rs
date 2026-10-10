@@ -8,6 +8,8 @@
 //!   back exactly the input's first `valid_len` bytes, CRCs included;
 //! - it never returns samples past the first invalid frame: on a damaged
 //!   journal it returns exactly the frames before the damage.
+//! - it never returns a frame from before its epoch's first sample, which
+//!   a version 3 header gives.
 //!
 //! And the scan salvage uses to look past damage ([`frames_after`]): it
 //! never panics, finds every frame of a valid journal, and after damage
@@ -346,6 +348,45 @@ proptest! {
         prop_assert_eq!(got.map(JournalHeader::epoch), Some(EpochId::new(epoch)));
         prop_assert_eq!(got.map(JournalHeader::rate), Some(rate));
         prop_assert_eq!((read.end(), read.valid_len()), (ReadEnd::Complete, HEADER_LEN));
+    }
+
+    /// Any anchor comes back as written, in a version 3 header, and a
+    /// version 2 header comes back untimed; a frame before the epoch's
+    /// first sample is never returned.
+    #[test]
+    fn anchors_round_trip_and_bound_the_frames(
+        epoch in any::<u32>(),
+        start in any::<u64>(),
+        first in 1..u64::MAX / 2,
+        before in 1..1_000u64,
+        hz in 1..=SampleRate::MAX_HZ,
+        untimed in any::<bool>(),
+    ) {
+        let rate = SampleRate::new(hz).unwrap();
+        let anchor = EpochAnchor {
+            id: EpochId::new(epoch),
+            start: SessionTime::from_nanos(start),
+            first_sample: SampleIndex::new(first),
+            rate,
+        };
+        let header = if untimed {
+            JournalHeader::untimed(JournalId::FIRST, TrackId::new(0), anchor.id, rate)
+        } else {
+            JournalHeader::new(JournalId::FIRST, TrackId::new(0), anchor)
+        };
+        let mut bytes = encode_header(header);
+        let read = read_journal(&bytes);
+        prop_assert_eq!(read.header(), Some(header));
+        prop_assert_eq!(
+            read.header().and_then(JournalHeader::anchor),
+            (!untimed).then_some(anchor)
+        );
+        let early = SampleIndex::new(first.saturating_sub(before));
+        encode_frame(&mut bytes, 0, TrackId::new(0), early, &[1, 2, 3]);
+        let read = read_journal(&bytes);
+        check_contract(&bytes, &read)?;
+        // Untimed, nothing bounds the frame; timed, it's before the epoch.
+        prop_assert_eq!(read.frames().len(), usize::from(untimed));
     }
 
     /// A frame that is right in every way but its track: refused as

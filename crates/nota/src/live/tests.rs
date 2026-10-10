@@ -225,3 +225,21 @@ fn a_joining_track_is_followed_from_its_first_epoch() {
         [(ms(2_500), ms(2_900), "welcome".to_owned())]
     );
 }
+
+/// A track that joins a resumed session starts in an epoch above zero,
+/// from the sample its earlier audio ended at, and is followed from it all
+/// the same.
+#[test]
+fn a_joining_track_of_a_resumed_session_is_followed_from_its_first_epoch() {
+    let mut live = Live::new(&[]);
+    let mut resumed = TrackTimeline::starting_after(SYSTEM, nota_core::EpochId::new(4)).unwrap();
+    resumed
+        .open_epoch(ms(60_000), SampleIndex::new(1_000), rate())
+        .unwrap();
+    let first = resumed.epochs()[0];
+    live.recorder(Some(SYSTEM), RecorderEvent::Epoch(first));
+    assert_eq!(
+        texts(&live.engine(heard(SYSTEM, 1_500, 1_900, "again")).updates),
+        [(ms(60_500), ms(60_900), "again".to_owned())]
+    );
+}

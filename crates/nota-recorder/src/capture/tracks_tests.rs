@@ -446,6 +446,76 @@ fn a_track_that_cant_join_leaves_the_other_recording() {
     assert_eq!(events.events.spare(), 3);
 }
 
+/// Joins `SYSTEM` to a writer on `fs`'s session, its stream's first
+/// audio captured `at`; returns what was reported and the writer.
+fn join_system_at(
+    fs: &FakeFs,
+    at: SessionTime,
+) -> (
+    Vec<RecorderEvent>,
+    SessionWriter<FakeFs>,
+    crate::session::SessionLock<FakeFs>,
+) {
+    let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(at));
+    let session = SessionDir::new(SESSION, fs.clone(), &dir()).lock().unwrap();
+    let length = SegmentLength::new(SampleCount::new(1_000)).unwrap();
+    let mut writer = SessionWriter::open(&session, rate(), length, clock).unwrap();
+    let (tx, rx) = test_channel();
+    tx.send(SYSTEM, CaptureEvent::Started);
+    tx.send(SYSTEM, CaptureEvent::Began { at });
+    tx.send(SYSTEM, CaptureEvent::Audio(samples(SYSTEM, 100, 10)));
+    tx.send(SYSTEM, CaptureEvent::Stopped);
+    let events = CaptureReceiver {
+        events: rx,
+        rate: rate(),
+        tracks: test_tracks(&[SYSTEM]),
+    };
+    let mut reported = Vec::new();
+    record_tracks(&mut writer, &mut [], &events, &mut |_, e| reported.push(e)).unwrap();
+    (reported, writer, session)
+}
+
+/// A track joining a resumed session carries on above the epochs it used,
+/// after the audio it recorded; one whose audio would come before that
+/// (the clock wasn't resumed) can't join.
+#[test]
+fn a_track_joining_a_resumed_session_carries_on_after_its_audio() {
+    let fs = FakeFs::with_dirs([dir()]);
+    {
+        // An earlier run: 100 samples from 0 s, to 0.1 s.
+        let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
+        let session = SessionDir::new(SESSION, fs.clone(), &dir()).lock().unwrap();
+        let length = SegmentLength::new(SampleCount::new(1_000)).unwrap();
+        let mut writer = SessionWriter::open(&session, rate(), length, clock).unwrap();
+        let (_, epoch) = writer.open_first_epoch(SYSTEM, SessionTime::ZERO).unwrap();
+        writer.start_track(SYSTEM, &epoch).unwrap();
+        writer.append(SYSTEM, &samples(SYSTEM, 0, 100)).unwrap();
+        writer.finish().unwrap();
+    }
+    let (reported, writer, session) = join_system_at(&fs, SessionTime::ZERO);
+    assert!(
+        matches!(
+            &reported[..],
+            [RecorderEvent::CaptureFailed(e)] if e.to_string().contains("couldn't record it")
+        ),
+        "{reported:?}"
+    );
+    assert_eq!(writer.next_sample(SYSTEM), None);
+    drop((writer, session));
+
+    let resumed = SessionTime::from_nanos(1_000_000_000);
+    let (reported, writer, _session) = join_system_at(&fs, resumed);
+    let epochs: Vec<_> = reported
+        .iter()
+        .filter_map(|e| match e {
+            RecorderEvent::Epoch(e) => Some((e.id(), e.start(), e.first_sample())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(epochs, [(EpochId::new(1), resumed, SampleIndex::new(100))]);
+    assert_eq!(writer.next_sample(SYSTEM), Some(SampleIndex::new(110)));
+}
+
 /// Opens "mic" at once; "system" only once `gate` says so; "late" after
 /// the clock has moved on 2 s. Each then sends its audio from a thread of
 /// its own: 300, 200 and 100 samples.
