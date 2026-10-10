@@ -7,6 +7,7 @@
 //! backend is made: a server that starts or stops afterwards isn't
 //! noticed until the next recording.
 
+use std::ffi::OsString;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
@@ -55,8 +56,36 @@ pub fn choose_host(probe: &dyn HostProbe) -> Host {
 }
 
 /// The probe for the machine nota runs on.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct SystemProbe;
+#[derive(Debug, Clone)]
+pub struct SystemProbe {
+    /// `PIPEWIRE_REMOTE`: which socket the daemon listens on.
+    remote: Option<String>,
+    /// The directory the daemon's socket is in.
+    runtime_dir: Option<PathBuf>,
+}
+
+impl SystemProbe {
+    /// The probe for what the environment says about `PipeWire`.
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self {
+            remote: std::env::var("PIPEWIRE_REMOTE").ok(),
+            runtime_dir: runtime_dir(
+                std::env::var_os("PIPEWIRE_RUNTIME_DIR"),
+                std::env::var_os("XDG_RUNTIME_DIR"),
+            ),
+        }
+    }
+}
+
+/// The directory `PipeWire`'s socket is in: `pipewire_dir` (its
+/// `PIPEWIRE_RUNTIME_DIR`) if it's set and not empty, else `xdg_dir`.
+fn runtime_dir(pipewire_dir: Option<OsString>, xdg_dir: Option<OsString>) -> Option<PathBuf> {
+    pipewire_dir
+        .filter(|dir| !dir.is_empty())
+        .or(xdg_dir)
+        .map(PathBuf::from)
+}
 
 /// What `PipeWire` calls its socket when `PIPEWIRE_REMOTE` doesn't say.
 const DEFAULT_PIPEWIRE_REMOTE: &str = "pipewire-0";
@@ -79,12 +108,7 @@ impl HostProbe for SystemProbe {
     /// Connects to the daemon's socket: a stale socket file from a daemon
     /// that has gone refuses, which is how it's told from one running.
     fn pipewire_running(&self) -> bool {
-        let remote = std::env::var("PIPEWIRE_REMOTE").ok();
-        let runtime_dir = std::env::var_os("PIPEWIRE_RUNTIME_DIR")
-            .filter(|dir| !dir.is_empty())
-            .or_else(|| std::env::var_os("XDG_RUNTIME_DIR"))
-            .map(PathBuf::from);
-        pipewire_socket(remote.as_deref(), runtime_dir.as_deref())
+        pipewire_socket(self.remote.as_deref(), self.runtime_dir.as_deref())
             .is_some_and(|socket| UnixStream::connect(socket).is_ok())
     }
 
@@ -106,7 +130,7 @@ impl AudioBackend {
     /// The backend for this machine's host, as [`SystemProbe`] finds it.
     #[must_use]
     pub fn detect() -> Self {
-        Self::with_probe(&SystemProbe)
+        Self::with_probe(&SystemProbe::from_env())
     }
 
     /// The backend for the host `probe` finds.
@@ -161,12 +185,14 @@ impl CaptureBackend for AudioBackend {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::os::unix::net::UnixListener;
     use std::sync::Arc;
 
     use nota_core::{Clock, FakeClock, SessionTime, TrackId};
 
     use super::super::start;
     use super::*;
+    use crate::test_dir::TestDir;
 
     /// A probe with fixed answers that counts how often it was asked.
     struct Fake {
@@ -231,6 +257,18 @@ mod tests {
         }
     }
 
+    /// The backend lists the devices of the host it chose: on ALSA, the
+    /// one input that is its default.
+    #[test]
+    fn the_backend_lists_through_its_host() {
+        let backend = AudioBackend::with_probe(&Fake::new(false, false));
+        match backend.devices() {
+            Ok(devices) => assert_eq!(devices.default_input.as_deref(), Some("default")),
+            Err(CaptureError::HostUnavailable(_)) => {}
+            Err(other) => panic!("{other}"),
+        }
+    }
+
     /// On ALSA only, the system audio fails to start through the
     /// backend, with the message that says what would let it record. (It
     /// is refused before any device is opened, so this needs no sound
@@ -253,6 +291,38 @@ mod tests {
             error.to_string(),
             "system audio needs PipeWire or PulseAudio; only the microphone records on ALSA"
         );
+    }
+
+    /// A daemon is running where its socket accepts connections, and not
+    /// where there's no socket, or one nothing listens on (a daemon that
+    /// has gone leaves its file behind).
+    #[test]
+    fn pipewire_runs_where_its_socket_accepts_connections() {
+        let dir = TestDir::new("pipewire-probe");
+        let probe = |remote: Option<&str>| SystemProbe {
+            remote: remote.map(str::to_owned),
+            runtime_dir: Some(dir.0.clone()),
+        };
+        assert!(!probe(None).pipewire_running(), "no socket");
+        let _daemon = UnixListener::bind(dir.0.join("pipewire-0")).unwrap();
+        assert!(probe(None).pipewire_running(), "listening");
+        assert!(!probe(Some("pipewire-1")).pipewire_running(), "another");
+        let stale = dir.0.join("stale");
+        drop(UnixListener::bind(&stale).unwrap());
+        assert!(stale.exists(), "the socket file is left behind");
+        assert!(!probe(Some("stale")).pipewire_running(), "stale");
+    }
+
+    /// `PIPEWIRE_RUNTIME_DIR` wins over `XDG_RUNTIME_DIR` unless it's
+    /// empty.
+    #[test]
+    fn the_pipewire_runtime_dir_comes_before_the_xdg_one() {
+        let dir =
+            |p: Option<&str>, x: Option<&str>| runtime_dir(p.map(Into::into), x.map(Into::into));
+        assert_eq!(dir(Some("/pw"), Some("/xdg")), Some(PathBuf::from("/pw")));
+        assert_eq!(dir(Some(""), Some("/xdg")), Some(PathBuf::from("/xdg")));
+        assert_eq!(dir(None, Some("/xdg")), Some(PathBuf::from("/xdg")));
+        assert_eq!(dir(None, None), None);
     }
 
     /// `PIPEWIRE_REMOTE` names a socket in the runtime directory, or is

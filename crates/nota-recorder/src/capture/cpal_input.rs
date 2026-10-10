@@ -82,6 +82,11 @@ pub(super) fn open(
     Ok(PlainStream { _stream: stream })
 }
 
+/// Whether a device of `direction` plays (a sink) rather than records.
+pub(super) fn plays(direction: cpal::DeviceDirection) -> bool {
+    direction == cpal::DeviceDirection::Output
+}
+
 /// One device as a host lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Listed {
@@ -145,6 +150,16 @@ mod tests {
             name: name.into(),
             description: description.into(),
             plays,
+        }
+    }
+
+    /// Only an output direction plays; a duplex device records too.
+    #[test]
+    fn only_the_output_direction_plays() {
+        use cpal::DeviceDirection::{Duplex, Input, Output, Unknown};
+        assert!(plays(Output));
+        for direction in [Input, Duplex, Unknown] {
+            assert!(!plays(direction), "{direction:?}");
         }
     }
 

@@ -9,7 +9,7 @@
 //! and reports no device events but the stream's own failure.
 
 use cpal::traits::{DeviceTrait, HostTrait};
-use cpal::{BufferSize, DeviceDirection, DeviceId, HostId};
+use cpal::{BufferSize, DeviceId, HostId};
 use nota_core::SampleRate;
 
 use super::cpal_input::{self, Listed, PlainStream};
@@ -61,7 +61,7 @@ impl CaptureBackend for AlsaBackend {
             .map_err(|e| CaptureError::Backend(e.to_string()))?
             .filter_map(|device| {
                 let description = device.description().ok()?;
-                if description.direction() == DeviceDirection::Output {
+                if cpal_input::plays(description.direction()) {
                     return None;
                 }
                 Some(Listed {
@@ -122,6 +122,21 @@ mod tests {
             input_for(&Source::Device("hw:1,0".to_owned())),
             Input::Named("hw:1,0")
         );
+    }
+
+    /// ALSA can always list: its default input is "default", which cpal
+    /// builds itself, whatever sound cards the machine has.
+    #[test]
+    fn alsa_lists_its_default_input() {
+        match AlsaBackend.devices() {
+            Ok(devices) => {
+                assert_eq!(devices.default_input.as_deref(), Some("default"));
+                assert_eq!(devices.default_output, None);
+                assert!(devices.outputs.is_empty(), "{devices:?}");
+            }
+            Err(CaptureError::HostUnavailable(_)) => {}
+            Err(other) => panic!("{other}"),
+        }
     }
 
     /// Asked for the system audio, ALSA refuses before it touches any

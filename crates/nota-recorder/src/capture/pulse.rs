@@ -32,7 +32,7 @@
 //! stops answering can hold up a start, and Setup's preview.
 
 use cpal::traits::{DeviceTrait, HostTrait};
-use cpal::{BufferSize, DeviceDirection, DeviceId, HostId};
+use cpal::{BufferSize, DeviceId, HostId};
 use nota_core::SampleRate;
 
 use super::cpal_input::{self, PlainStream};
@@ -78,23 +78,19 @@ fn host() -> Result<cpal::Host, CaptureError> {
     cpal::host_from_id(HostId::PulseAudio).map_err(|e| CaptureError::HostUnavailable(e.to_string()))
 }
 
-/// The id string of `device`, if it has one.
-fn id_of(device: &cpal::Device) -> Option<String> {
-    device.id().ok().map(|id| id.id().to_owned())
-}
-
 impl CaptureBackend for PulseBackend {
     type Stream = PlainStream;
 
     fn devices(&self) -> Result<Devices, CaptureError> {
         let host = host()?;
+        let id_of = |device: &cpal::Device| device.id().ok().map(|id| id.id().to_owned());
         let listed = host
             .devices()
             .map_err(|e| CaptureError::Backend(e.to_string()))?
             .filter_map(|device| {
                 let name = id_of(&device)?;
                 let description = device.description().ok()?;
-                let plays = description.direction() == DeviceDirection::Output;
+                let plays = cpal_input::plays(description.direction());
                 cpal_input::listed_unless_monitor(name, description.name().to_owned(), plays)
             });
         Ok(cpal_input::devices_from(
@@ -111,13 +107,11 @@ impl CaptureBackend for PulseBackend {
         events: CaptureSender,
     ) -> Result<PlainStream, CaptureError> {
         let host = host()?;
+        let id_of = |device: &cpal::Device| device.id().ok().map(|id| id.id().to_owned());
         let sinks: Vec<String> = host
             .devices()
             .map_err(|e| CaptureError::Backend(e.to_string()))?
-            .filter(|d| {
-                d.description()
-                    .is_ok_and(|d| d.direction() == DeviceDirection::Output)
-            })
+            .filter(|d| (d.description()).is_ok_and(|d| cpal_input::plays(d.direction())))
             .filter_map(|d| id_of(&d))
             .collect();
         let (name, follows) = source_name(
