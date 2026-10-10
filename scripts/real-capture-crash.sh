@@ -25,7 +25,7 @@
 # Operations are numbered as they happen, and their count varies a little
 # from run to run (capture timing), so the points are numbered from one
 # uncrashed run; a point past the end of a shorter run is reported as
-# unreached, not failed. The summary counts points by the operation they
+# unreached, not failed, unless the writer exited with an error. The summary counts points by the operation they
 # stopped at.
 #
 # With --tracks T, the recorder captures T tracks, each its own stream of
@@ -33,6 +33,9 @@
 # and every check holds for each track. The lag reported is the worst
 # track's; `lag_by_track` gives each track's lag behind the audio delivered,
 # overall and at the fsyncs that end a journal at a window boundary (ms).
+# The recorder starts first and each track joins it as its stream starts,
+# as in `nota record`; the summary counts the crash points by how many
+# tracks had joined, so the points before the second track joins show.
 #
 # --measure-only runs just the uncrashed recording and its check: the lag
 # measurement, without the crash points.
@@ -417,7 +420,15 @@ run_point() {
     return 1
   fi
   if [[ ! -e $log.stopped ]]; then
-    kill_writer
+    # It finished before point N: unreached, unless it failed.
+    local status=0
+    wait "$WRITER_PID" 2> /dev/null || status=$?
+    WRITER_PID=
+    if [[ $status -ne 0 ]]; then
+      { echo "$mode $n: the writer failed (exit $status) before its crash point:"; cat "$dir/write.out"; } > "$dir/result"
+      unmount
+      return 1
+    fi
     unmount
     [[ $KEEP -eq 1 ]] || rm -rf "$dir"
     return 2
@@ -509,6 +520,7 @@ for mode in "${MODES[@]}"; do
       if (v["beyond_durable_ms"] + 0 > beyond) beyond = v["beyond_durable_ms"] + 0
       if (v["cut_state"] != "") cut++
       split(v["stop"], s, ":"); kinds[s[2] ":" s[3]]++
+      joined[v["joined"]]++
       delete v
     }
     END {
@@ -519,6 +531,9 @@ for mode in "${MODES[@]}"; do
       printf "    slowest disk operation: %s\n", (slowest_what == "" ? "none over 100 ms" : slowest_what)
       printf "    crash points by operation:"
       for (k in kinds) printf " %s=%d", k, kinds[k]
+      printf "\n"
+      printf "    crash points by tracks joined:"
+      for (k in joined) printf " %s=%d", k, joined[k]
       printf "\n"
     }' "$RESULTS"
 done
