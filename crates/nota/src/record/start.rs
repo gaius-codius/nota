@@ -129,15 +129,7 @@ fn start_with_outcome<B: CaptureBackend>(
     };
 
     let library = library.map_or_else(|| Library::open(&args.data), Ok)?;
-    let ballast_len = ballast_length(args);
-    let recovery = startup_watch(&StdFs, &args.data, ballast_len)?;
-    for salvaged in library.salvage_watched(segment_length(), &recovery)? {
-        outcome.notes.push(salvage_note(&salvaged));
-    }
-    // Recovery has its own watch: a full disk it got past mustn't stop
-    // the new recording. Hold whatever ballast is still there.
-    let watch = startup_watch(&StdFs, &args.data, ballast_len)?;
-    let session = create_session(&library, &watch)?;
+    let (watch, session) = recover_for_start(&library, args, outcome)?;
     outcome.session.clone_from(&session.dir);
     let (lock, mut writer) = open_session(&session, &watch, clock)?;
 
@@ -164,14 +156,7 @@ fn start_with_outcome<B: CaptureBackend>(
     // Keep the title before recording starts, through the same watch as
     // the journals. With no room, startup leaves no empty session behind.
     let row = session_row(setup, session.id, &sources, &captures);
-    if let Err(error) = keep_session(&watch, &session, &row) {
-        if is_disk_full(&error) {
-            return Err(start_error(error));
-        }
-        outcome.notes.push(format!(
-            "the session's title and tracks weren't kept with its audio: {error}"
-        ));
-    }
+    keep_before_recording(&watch, &session, &row, outcome)?;
     watch.start_recording();
     let disk = watch_disk(args, &session.audio(), captures.len(), &watch, &ui, clock)?;
 
@@ -265,6 +250,42 @@ fn startup_failure(error: BoxError, notes: Vec<String>) -> BoxError {
     } else {
         Box::new(StartupFailure { error, notes })
     }
+}
+
+/// Recovers earlier sessions, then makes this start's empty directories.
+fn recover_for_start(
+    library: &Library,
+    args: &RecordArgs,
+    outcome: &mut Outcome,
+) -> Result<(Arc<DiskWatch<StdFs>>, SessionPaths), BoxError> {
+    let ballast_len = ballast_length(args);
+    let recovery = startup_watch(&StdFs, &args.data, ballast_len)?;
+    for salvaged in library.salvage_watched(segment_length(), &recovery)? {
+        outcome.notes.push(salvage_note(&salvaged));
+    }
+    // Recovery has its own watch: a full disk it got past mustn't stop
+    // the new recording. Hold whatever ballast is still there.
+    let watch = startup_watch(&StdFs, &args.data, ballast_len)?;
+    let session = create_session(library, &watch)?;
+    Ok((watch, session))
+}
+
+/// A space failure rejects this start; other title failures remain notes.
+fn keep_before_recording(
+    watch: &Arc<DiskWatch<StdFs>>,
+    session: &SessionPaths,
+    row: &NewSession,
+    outcome: &mut Outcome,
+) -> Result<(), BoxError> {
+    if let Err(error) = keep_session(watch, session, row) {
+        if is_disk_full(&error) {
+            return Err(start_error(error));
+        }
+        outcome.notes.push(format!(
+            "the session's title and tracks weren't kept with its audio: {error}"
+        ));
+    }
+    Ok(())
 }
 
 /// Keeps the new row before recording starts, with one full-disk retry.
