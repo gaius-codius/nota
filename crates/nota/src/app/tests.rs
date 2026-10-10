@@ -520,68 +520,107 @@ fn remove_file(path: &Path) {
     std::fs::remove_file(path).unwrap();
 }
 
-#[test]
-fn home_tracks_waiting_running_failed_and_done_jobs() {
-    let tmp = TestDir::new("job-status");
-    let library = library_of_three(&tmp.0);
-    let clock = Arc::new(FakeClock::new(SessionTime::ZERO));
-    let wall = Arc::new(AtomicI64::new(day(3)));
-    let mut listing = listing_of(&library, &clock, &wall);
+/// A stopped session's final pass and the page listing it.
+fn stopped_job(library: &Library) -> nota_store::Job {
     let id = SessionId::new(3);
     library
         .db()
         .with(|db| db.finish_recording(id, None))
         .unwrap();
-    let job = library
+    library
         .db()
         .with(|db| db.session_jobs(id))
         .unwrap()
-        .remove(0);
-    assert_eq!(
-        listing
-            .sessions()
-            .unwrap()
-            .into_iter()
-            .find(|s| s.id == 3)
-            .unwrap()
-            .status,
-        Status::Processing
-    );
-    library.db().with(|db| db.start_job(job.id)).unwrap();
-    assert_eq!(
-        listing
-            .sessions()
-            .unwrap()
-            .into_iter()
-            .find(|s| s.id == 3)
-            .unwrap()
-            .status,
-        Status::Processing
-    );
-    library
-        .db()
-        .with(|db| db.end_job(job.id, &nota_store::JobEnd::Failed("broken".into())))
-        .unwrap();
-    let shown = listing
+        .remove(0)
+}
+
+/// Session 3 as Home lists it after its job changes.
+fn shown_job(library: &Library) -> Session {
+    let clock = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let wall = Arc::new(AtomicI64::new(day(3)));
+    listing_of(library, &clock, &wall)
         .sessions()
         .unwrap()
         .into_iter()
         .find(|s| s.id == 3)
+        .unwrap()
+}
+
+/// A queued final pass shows that the session is still being processed.
+#[test]
+fn home_shows_waiting_job() {
+    let tmp = TestDir::new("job-waiting");
+    let library = library_of_three(&tmp.0);
+    // Stopping queues the pass without starting it.
+    stopped_job(&library);
+    assert_eq!(shown_job(&library).status, Status::Processing);
+}
+
+/// A running final pass keeps the session marked as processing.
+#[test]
+fn home_shows_running_job() {
+    let tmp = TestDir::new("job-running");
+    let library = library_of_three(&tmp.0);
+    let job = stopped_job(&library);
+    // Starting the queued pass must not make the session ready.
+    library.db().with(|db| db.start_job(job.id)).unwrap();
+    assert_eq!(shown_job(&library).status, Status::Processing);
+}
+
+/// A failed final pass shows its reason under the session.
+#[test]
+fn home_shows_failed_job_reason() {
+    let tmp = TestDir::new("job-failed");
+    let library = library_of_three(&tmp.0);
+    let job = stopped_job(&library);
+    // The stored reason is shown with the failed state.
+    library
+        .db()
+        .with(|db| db.end_job(job.id, &nota_store::JobEnd::Failed("broken".into())))
         .unwrap();
+    let shown = shown_job(&library);
     assert_eq!(shown.status, Status::NeedsYou);
     assert_eq!(shown.detail.as_deref(), Some("processing failed: broken"));
+}
+
+/// A finished final pass makes the session ready.
+#[test]
+fn home_shows_done_job() {
+    let tmp = TestDir::new("job-done");
+    let library = library_of_three(&tmp.0);
+    let job = stopped_job(&library);
+    // Ending the queued pass clears the processing status.
     library
         .db()
         .with(|db| db.end_job(job.id, &nota_store::JobEnd::Done))
         .unwrap();
+    assert_eq!(shown_job(&library).status, Status::Ready);
+}
+
+/// A new recording from Processing shows the listed sessions while it stops.
+#[test]
+fn home_keeps_sessions_during_stop_from_processing() {
+    let tmp = TestDir::new("processing-stop-home");
+    let library = library_of_three(&tmp.0);
+    let clock = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let wall = Arc::new(AtomicI64::new(day(3)));
+    let mut listing = listing_of(&library, &clock, &wall);
+    // Home is listed before opening a session, and kept while it is open.
+    let mut home = Home::new(listing.sessions().unwrap(), "parakeet", Theme::default());
+    let mut processing =
+        nota_tui::Processing::new("Finishing".into(), "parakeet".into(), Theme::default());
+    // The new recording is requested from Processing rather than Home.
     assert_eq!(
-        listing
-            .sessions()
-            .unwrap()
-            .into_iter()
-            .find(|s| s.id == 3)
-            .unwrap()
-            .status,
-        Status::Ready
+        processing.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)),
+        Some(nota_tui::ProcessingAction::Record),
     );
+    // The stop callback draws the kept page while the recorder finishes.
+    stopping_home(&mut home);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal.draw(|frame| home.draw(frame)).unwrap();
+    let drawn = terminal.backend().to_string();
+    assert!(drawn.contains(STOPPING));
+    for title in ["Joinery", "Turning", "Finishing"] {
+        assert!(drawn.contains(title), "{title} missing during stop");
+    }
 }
