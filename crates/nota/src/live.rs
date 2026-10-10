@@ -160,11 +160,15 @@ impl Live {
                 // placed by the epochs it has, which is the best it knows.
                 if let Some(follower) = self.followers.get_mut(&track) {
                     // An epoch that follows straight on (drift corrected)
-                    // breaks nothing the engine is hearing.
-                    let straight_on = follower
-                        .current()
-                        .and_then(|current| current.time_of(epoch.first_sample()))
-                        == Some(epoch.start());
+                    // breaks nothing the engine is hearing. One moved to
+                    // the old audio's end (a reopened stream whose stamps
+                    // overlapped it) starts there too, but its audio comes
+                    // from another device or after a stretch missed.
+                    let straight_on = epoch.overrun().is_zero()
+                        && follower
+                            .current()
+                            .and_then(|current| current.time_of(epoch.first_sample()))
+                            == Some(epoch.start());
                     let followed = follower.follow(&epoch).is_ok();
                     if !followed || !straight_on {
                         actions.flush = Some(track);

@@ -2,9 +2,11 @@
 //! instance `scripts/pipewire-devices.sh` starts: a followed default output
 //! switched is `Changed` and opens an epoch that starts with the new
 //! sink's audio, a pinned sink removed is `Lost` and ends its track, within
-//! 2 s each. And the device snapshot Setup lists lists the instance's
-//! sinks and sources, and its defaults, as they come and go. Skips (and says so) unless the script runs it: switching
-//! a default anywhere else would change the user's (AGENTS.md section 8).
+//! 2 s each. And the device snapshot, which Setup lists, names the
+//! instance's sinks and sources, and its defaults, as they come and go.
+//! Skips (and says so) unless the script runs it: switching a default
+//! anywhere else would change the user's (AGENTS.md section 8). The script
+//! runs the tests one at a time, since each sets the defaults.
 
 // Test code throughout: clippy allows unwraps and panics in it.
 #![cfg(test)]
@@ -44,6 +46,10 @@ mod linux {
     /// The peaks of the tones played on sinks B and A.
     const LOUD: f64 = 8_000.0;
     const QUIET: f64 = 1_000.0;
+
+    /// How many samples before B's tone reaches [`TONE_ONSET`] it may ring
+    /// in by, through the resampler: about 25 measured.
+    const ONSET_RING: u64 = 64; // check-bound
 
     /// The most a switch's epoch may start late by: the new sink's first
     /// buffer is stamped tens of milliseconds before the old sink's audio
@@ -297,21 +303,18 @@ mod linux {
             }
         }
 
-        /// The first epoch `track` opened after `after`, or what refused
-        /// one.
-        fn reopening(
-            &self,
-            track: TrackId,
-            after: SessionTime,
-        ) -> Option<Result<Epoch, EpochError>> {
+        /// The epochs `track` opened after `after`, in order, and what
+        /// refused any.
+        fn reopenings(&self, track: TrackId, after: SessionTime) -> Vec<Result<Epoch, EpochError>> {
             self.seen
                 .iter()
                 .filter(|(at, t, _)| *t == Some(track) && *at >= after)
-                .find_map(|(_, _, e)| match e {
+                .filter_map(|(_, _, e)| match e {
                     RecorderEvent::Epoch(epoch) => Some(Ok(*epoch)),
                     RecorderEvent::EpochRefused(refused) => Some(Err(*refused)),
                     _ => None,
                 })
+                .collect()
         }
 
         /// Where `track`'s audio received before `at` ends.
@@ -359,30 +362,30 @@ mod linux {
     }
 
     /// The switch opened an epoch, late by no more than [`MOST_LATE`], that
-    /// starts with B's audio: its first 10 ms are silence (the new link's
-    /// first buffer is) or as loud as B's tone, never A's quiet tone, and
-    /// B's tone follows within 100 ms. A's last audio stays in the epoch
-    /// before.
+    /// starts with B's audio: silence (the new link's first buffer is) up
+    /// to B's tone, which follows within 100 ms, never A's quiet tone. A's
+    /// last audio stays in the epoch before. The switch opens that one
+    /// epoch, though the stream and the watch both report it.
     fn check_reopening(heard: &mut Heard, switched: SessionTime) {
-        let epoch = match heard.reopening(SYSTEM, switched) {
-            Some(Ok(epoch)) => epoch,
-            Some(Err(refused)) => panic!("the switch's epoch was refused: {refused}"),
-            None => panic!("the switch opened no epoch"),
+        let epoch = match heard.reopenings(SYSTEM, switched).as_slice() {
+            [Ok(epoch)] => *epoch,
+            other => panic!("the switch opened not one epoch but {other:?}"),
         };
         assert!(epoch.overrun() <= MOST_LATE, "{:?} late", epoch.overrun());
         let first = epoch.first_sample().get();
         let tone = heard.wait_for_tone(SYSTEM, first);
-        let opening = heard.audio_from(SYSTEM, first, 160);
-        assert_eq!(opening.len(), 160, "10 ms recorded in the epoch");
-        assert!(
-            opening.iter().all(|&s| s == 0)
-                || opening.iter().any(|s| s.unsigned_abs() >= TONE_ONSET),
-            "A's tone began the switch's epoch: {opening:?}"
-        );
         assert!(
             tone - first <= 1_600,
             "B's tone began {} samples in",
             tone - first
+        );
+        // Up to B's tone, only silence, but for the few samples its onset
+        // rings in by: no buffer of A's, which holds hundreds of samples.
+        let silent = (tone - first).saturating_sub(ONSET_RING);
+        let opening = heard.audio_from(SYSTEM, first, silent);
+        assert!(
+            opening.iter().all(|&s| s == 0),
+            "A's tone began the switch's epoch: {opening:?}"
         );
         let before = heard.audio_from(SYSTEM, first - 160, 160);
         assert!(
@@ -433,8 +436,9 @@ mod linux {
     /// A followed default switched and a pinned sink removed, on the
     /// private instance: each shows within 2 s, the pinned track ends with
     /// nothing recorded after, and the capture moves to the new sink in an
-    /// epoch that starts with the new sink's audio, not the old's. With no microphone left, the followed microphone is lost but
-    /// follows the next default.
+    /// epoch that starts with the new sink's audio, not the old's. With no
+    /// microphone left, the followed microphone is lost but follows the
+    /// next default.
     #[test]
     fn device_changes_show_on_real_pipewire() {
         let Some(_private) = private_instance() else {
@@ -583,7 +587,9 @@ mod linux {
     /// on the private instance: each null sink made is an output and the
     /// source an input, under their descriptions, with the defaults as
     /// named; a node removed is gone from the next snapshot, and so is
-    /// the default it was.
+    /// the default it was. Only the defaults are waited for: the session
+    /// manager names them a moment after `pactl` asks, while `pactl` adds
+    /// and removes a node before it returns.
     #[test]
     fn the_snapshot_lists_what_the_instance_has() {
         let Some(_private) = private_instance() else {
@@ -614,25 +620,37 @@ mod linux {
         assert!(named.inputs.contains(&device(SNAP_MIC)), "{named:#?}");
         assert!(!named.outputs.contains(&device(SNAP_MIC)), "{named:#?}");
 
-        // The default sink removed: gone, and no longer the default.
+        // The default sink removed: gone from the next snapshot, and the
+        // default, if any, one that's listed.
         fixtures.remove(&b);
-        let gone = snapshot_until(&clock, "sink B gone", |d| {
-            !d.outputs.iter().any(|o| o.name == SNAP_SINK_B.0)
-        });
-        assert_ne!(
-            gone.default_output.as_deref(),
-            Some(SNAP_SINK_B.0),
+        let gone = PipeWireBackend.devices().unwrap();
+        assert!(
+            !gone.outputs.iter().any(|o| o.name == SNAP_SINK_B.0),
+            "{gone:#?}"
+        );
+        assert!(
+            listed_default(&gone.outputs, gone.default_output.as_deref()),
             "{gone:#?}"
         );
         assert!(gone.outputs.contains(&device(SNAP_SINK_A)), "{gone:#?}");
         assert!(gone.inputs.contains(&device(SNAP_MIC)), "{gone:#?}");
 
-        // The default source removed: gone, and no longer the default.
+        // The default source removed: the same.
         fixtures.remove(&mic);
-        let gone = snapshot_until(&clock, "the source gone", |d| {
-            !d.inputs.iter().any(|i| i.name == SNAP_MIC.0)
-        });
-        assert_ne!(gone.default_input.as_deref(), Some(SNAP_MIC.0), "{gone:#?}");
+        let gone = PipeWireBackend.devices().unwrap();
+        assert!(
+            !gone.inputs.iter().any(|i| i.name == SNAP_MIC.0),
+            "{gone:#?}"
+        );
+        assert!(
+            listed_default(&gone.inputs, gone.default_input.as_deref()),
+            "{gone:#?}"
+        );
         assert!(gone.outputs.contains(&device(SNAP_SINK_A)), "{gone:#?}");
+    }
+
+    /// Whether `default` is none, or one of `devices`.
+    fn listed_default(devices: &[Device], default: Option<&str>) -> bool {
+        default.is_none_or(|name| devices.iter().any(|d| d.name == name))
     }
 }

@@ -985,6 +985,43 @@ fn a_change_both_report_opens_one_epoch() {
     );
 }
 
+/// Changes each reported by one source alone, the stream's first and then
+/// the watch's, each open an epoch; so do two quick changes both report.
+#[test]
+fn changes_one_source_alone_reports_open_an_epoch_each() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let script = vec![
+        Step::Audio(samples(0, 100)),
+        Step::Advance(secs(1)),
+        Step::Notice(CaptureNotice::RouteChanged),
+        Step::Advance(secs(1)),
+        Step::Audio(samples(100, 100)),
+        // Past the window: a change of its own, not the one before.
+        Step::Advance(secs(3)),
+        Step::Device(DeviceChange::Changed("C".into())),
+        Step::Advance(secs(1)),
+        Step::Audio(samples(200, 100)),
+        // Two changes half a second apart, each reported by both.
+        Step::Advance(secs(1)),
+        Step::Notice(CaptureNotice::RouteChanged),
+        Step::Device(DeviceChange::Changed("D".into())),
+        Step::Audio(samples(300, 100)),
+        Step::Advance(Duration::from_millis(500)),
+        Step::Device(DeviceChange::Changed("E".into())),
+        Step::Notice(CaptureNotice::RouteChanged),
+        Step::Audio(samples(400, 100)),
+    ];
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    let firsts: Vec<_> = run
+        .timeline
+        .epochs()
+        .iter()
+        .map(|e| e.first_sample().get())
+        .collect();
+    assert_eq!(firsts, [0, 100, 200, 300, 400]);
+}
+
 /// A new device's first buffer stamped before the end of the old audio
 /// placed (as `PipeWire` stamps it after a default switch) opens its epoch
 /// where that audio ends, late by the overlap: no refusal, no gap, and no
@@ -1025,9 +1062,10 @@ fn a_reopening_stamped_before_the_old_audio_ends_starts_at_its_end() {
     assert_eq!(journal_epochs(&fs, &journals), [(0, 0, 500), (1, 500, 700)]);
 }
 
-/// The same after a suspend, from a stream that doesn't stamp its
-/// buffers: audio the clock times before the old audio's end starts at
-/// that end.
+/// The same from a stream that doesn't stamp its buffers, reopened after
+/// a suspend: audio the clock times before the old audio's end (here the
+/// old audio ran ahead of the clock, which a real stream's does by much
+/// less) starts at that end.
 #[test]
 fn an_unstamped_reopening_before_the_old_audio_ends_starts_at_its_end() {
     let fs = FakeFs::with_dirs([dir()]);

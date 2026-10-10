@@ -393,55 +393,91 @@ pub struct CaptureSender {
     rate: SampleRate,
 }
 
-/// The route changes a stream's sender has been told of, and how many of
-/// them its audio has reopened for.
+/// The route changes a stream's sender has been told of, and whether its
+/// audio has reopened for the last.
 ///
 /// A stream that follows the default hears of each new device twice: from
 /// the stream itself ([`CaptureNotice::RouteChanged`], cpal's
 /// `DeviceChanged`) and from the backend's watch on the audio server
 /// ([`DeviceChange::Changed`]). Either may be missing (cpal reports a
 /// failed watch of its own as a warning), late (the watch's poll catches
-/// what its events missed up to a second after), or report a change the
-/// other doesn't (a default swapped within the watch's grace). So each is
-/// counted apart, and the audio reopens whenever either has counted more
-/// changes than it has reopened for: once for a change both report, and
-/// once for a change only one does.
+/// what its events missed about a second after), or report a change the
+/// other doesn't (a default swapped within the watch's grace). So a report
+/// is the same change as the other source's last one if that came within
+/// [`SAME_CHANGE`] before it and isn't already paired; otherwise it's a new
+/// change, and the audio reopens for it. A change both report opens one
+/// epoch, in either order, and a change only one reports opens one too.
 ///
 /// The reopening is the first buffer sent after the first report: the old
 /// device's buffers sent before stay in the old epoch. Both reports come
 /// from the server's `default` metadata, which the session manager
 /// changes before it moves the stream; on `PipeWire`, the next buffer is
 /// the new device's (`scripts/pipewire-devices.sh` checks it).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Reroutes {
-    /// The route changes the stream reported.
+    /// When the stream last reported a change the watch hasn't, in session
+    /// nanoseconds, or [`UNPAIRED`] if there's none.
     stream: AtomicU64,
-    /// The new devices the watch reported.
+    /// When the watch last reported a change the stream hasn't, as
+    /// [`Self::stream`].
     watch: AtomicU64,
-    /// How many changes the audio has reopened for: the most either had
-    /// counted when it last did.
-    taken: AtomicU64,
+    /// Set by a new change, until the audio reopens for it.
+    due: AtomicBool,
+}
+
+/// How far apart the stream's and the watch's reports of one change may
+/// come: 2 s. The watch's poll catches what its events missed within about
+/// a second, and a change must show within 2 s (development plan, T4).
+const SAME_CHANGE: Duration = Duration::from_secs(2);
+
+/// No report waiting to be paired.
+const UNPAIRED: u64 = u64::MAX;
+
+impl Default for Reroutes {
+    fn default() -> Self {
+        Self {
+            stream: AtomicU64::new(UNPAIRED),
+            watch: AtomicU64::new(UNPAIRED),
+            due: AtomicBool::new(false),
+        }
+    }
 }
 
 impl Reroutes {
-    /// Counts a route change the stream reported.
-    fn stream_moved(&self) {
-        self.stream.fetch_add(1, Ordering::SeqCst);
+    /// Takes in a route change the stream reported at `at`.
+    fn stream_moved(&self, at: SessionTime) {
+        self.reported(&self.stream, &self.watch, at);
     }
 
-    /// Counts a new device the watch reported.
-    fn watch_moved(&self) {
-        self.watch.fetch_add(1, Ordering::SeqCst);
+    /// Takes in a new device the watch reported at `at`.
+    fn watch_moved(&self, at: SessionTime) {
+        self.reported(&self.watch, &self.stream, at);
     }
 
-    /// Whether the audio about to be sent is due to reopen for a change
-    /// either reported since it last did; it then has.
+    /// Takes in a change one source reported at `at`, `mine` being when
+    /// it last reported one unpaired and `other` the other source's: the
+    /// same change as `other`'s, which pairs them, or a new one, due a
+    /// reopening.
+    fn reported(&self, mine: &AtomicU64, other: &AtomicU64, at: SessionTime) {
+        let at = at.as_nanos();
+        let window = u64::try_from(SAME_CHANGE.as_nanos()).unwrap_or(u64::MAX);
+        // The other's report may be stamped a moment after this one: its
+        // thread read the clock later but got here first.
+        let paired = other
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |was| {
+                (was != UNPAIRED && at.saturating_sub(was) <= window).then_some(UNPAIRED)
+            })
+            .is_ok();
+        if !paired {
+            mine.store(at, Ordering::SeqCst);
+            self.due.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Whether the audio about to be sent is due to reopen for a new
+    /// change; it then has.
     fn take(&self) -> bool {
-        let reported = self
-            .stream
-            .load(Ordering::SeqCst)
-            .max(self.watch.load(Ordering::SeqCst));
-        self.taken.fetch_max(reported, Ordering::SeqCst) < reported
+        self.due.swap(false, Ordering::SeqCst)
     }
 }
 
@@ -536,14 +572,14 @@ impl CaptureSender {
     /// Reports something that doesn't stop the stream, stamped with the
     /// session time now. After a [`CaptureNotice::RouteChanged`], the
     /// stream's next audio opens a new epoch, unless a
-    /// [`DeviceChange::Changed`] already did for the same change: each
-    /// source's reports are counted apart, and the audio reopens whenever
-    /// either has reported more changes than it has reopened for.
+    /// [`DeviceChange::Changed`] reported within 2 s before is the same
+    /// change: a change both report opens one epoch, and a change only one
+    /// reports opens one too.
     pub fn notice(&self, notice: CaptureNotice) {
-        if notice == CaptureNotice::RouteChanged {
-            self.reroutes.stream_moved();
-        }
         let at = self.clock.now();
+        if notice == CaptureNotice::RouteChanged {
+            self.reroutes.stream_moved(at);
+        }
         self.events
             .send(self.track, CaptureEvent::Notice { notice, at });
     }
@@ -571,7 +607,7 @@ impl CaptureSender {
             return;
         }
         if matches!(change, DeviceChange::Changed(_)) {
-            self.reroutes.watch_moved();
+            self.reroutes.watch_moved(at);
         }
         self.send_device(change, at);
     }
