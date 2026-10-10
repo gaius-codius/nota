@@ -78,27 +78,31 @@ fn the_lock_is_held_until_it_is_dropped() {
     let (ui, screen) = mpsc::channel();
     let mut notes = Vec::new();
     assert_eq!(logind.held(), 0);
-    let lock = hold(&logind, &clock, &ui, &mut notes);
+    let sleep = hold(&logind);
     // The lock is taken now, before anything else is said of it.
     assert_eq!((logind.given(), logind.held()), (1, 1));
-    drop(lock);
+    sleep.report(&clock, &ui, &mut notes);
+    drop(sleep);
     assert_eq!((logind.given(), logind.held()), (1, 0));
     // A lock given says nothing to the screen or the summary.
     assert_eq!(screen.try_iter().count(), 0);
     assert_eq!(notes, Vec::<String>::new());
 }
 
-/// A refusal is a warning from the moment recording starts, and a note;
-/// nothing is held, and nothing stops.
+/// A refusal is a warning and a note, said when the recording asks for
+/// them and not before; nothing is held, and nothing stops.
 #[test]
 fn a_refusal_warns_and_holds_nothing() {
     let logind = FakeLogind::new(true);
     let clock = FakeClock::new(ms(1_500));
     let (ui, screen) = mpsc::channel();
     let mut notes = Vec::new();
-    let lock = hold(&logind, &clock, &ui, &mut notes);
-    assert!(lock.is_none());
+    let sleep = hold(&logind);
     assert_eq!(logind.held(), 0);
+    // Nothing is said until the recording has started.
+    assert_eq!(screen.try_iter().count(), 0);
+    assert_eq!(notes, Vec::<String>::new());
+    sleep.report(&clock, &ui, &mut notes);
     assert_eq!(
         screen.try_iter().collect::<Vec<_>>(),
         [Event::Recorder(recorder::Event::Warning(Warning {
@@ -125,8 +129,25 @@ fn a_refusal_with_the_screen_closed_still_notes() {
     let (ui, screen) = mpsc::channel();
     drop(screen);
     let mut notes = Vec::new();
-    assert!(hold(&logind, &clock, &ui, &mut notes).is_none());
+    hold(&logind).report(&clock, &ui, &mut notes);
     assert_eq!(notes.len(), 1);
+}
+
+/// D-Bus's error name is kept with its message, whichever is missing.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_dbus_error_keeps_its_name_and_message() {
+    let name = Some("org.freedesktop.DBus.Error.AccessDenied");
+    assert_eq!(
+        dbus_reason(name, Some("not allowed")),
+        "org.freedesktop.DBus.Error.AccessDenied: not allowed"
+    );
+    assert_eq!(
+        dbus_reason(name, None),
+        "org.freedesktop.DBus.Error.AccessDenied"
+    );
+    assert_eq!(dbus_reason(None, Some("not allowed")), "not allowed");
+    assert_eq!(dbus_reason(None, None), "no reason given");
 }
 
 /// A sleep's warning is raised at the resume, about no track in

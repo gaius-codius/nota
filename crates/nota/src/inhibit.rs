@@ -8,9 +8,11 @@
 //! screen and a note in the summary:
 //!
 //! - **Logind refuses** (or can't be reached): recording goes on, with
-//!   [`Cause::SleepNotHeld`] from the start.
-//! - **The machine sleeps anyway** (a forced suspend, or one logind
-//!   doesn't ask the inhibitor about): the capture notices it (see
+//!   [`Cause::SleepNotHeld`] once the streams have started
+//!   ([`Sleep::report`]).
+//! - **The machine sleeps anyway** (a forced suspend, or a lid closed
+//!   while logind's `LidSwitchIgnoreInhibited` is on, which it is by
+//!   default): the capture notices it (see
 //!   `nota_recorder::capture`) and opens a new epoch at the resume. The
 //!   live view turns that into a [`Slept`], which is the warning
 //!   ([`Slept::warning`]) and the gap between the epochs.
@@ -70,6 +72,24 @@ impl SleepNotHeld {
             reason: reason.to_string(),
         }
     }
+
+    /// A refusal for D-Bus's `error`, with its name (`AccessDenied`, say),
+    /// which its own text leaves out.
+    #[cfg(target_os = "linux")]
+    fn from_dbus(error: &dbus::Error) -> Self {
+        Self::new(dbus_reason(error.name(), error.message()))
+    }
+}
+
+/// How D-Bus's error `name` and `message` read together; either may be
+/// missing.
+#[cfg(target_os = "linux")]
+fn dbus_reason(name: Option<&str>, message: Option<&str>) -> String {
+    match (name, message) {
+        (Some(name), Some(message)) => format!("{name}: {message}"),
+        (Some(only), None) | (None, Some(only)) => only.to_owned(),
+        (None, None) => "no reason given".to_owned(),
+    }
 }
 
 impl fmt::Display for SleepNotHeld {
@@ -80,40 +100,62 @@ impl fmt::Display for SleepNotHeld {
 
 impl Error for SleepNotHeld {}
 
-/// Takes the lock for a recording. If logind refuses, recording goes on:
-/// the screen gets [`Cause::SleepNotHeld`] at once, and the summary says
-/// the machine may sleep (`notes` is the summary's).
-pub(crate) fn hold(
-    logind: &dyn Logind,
-    clock: &dyn Clock,
-    ui: &Sender<Event>,
-    notes: &mut Vec<String>,
-) -> Option<SleepLock> {
+/// What came of asking for the sleep lock: the lock, held until this is
+/// dropped, or why there is none.
+pub(crate) struct Sleep {
+    /// The lock, if logind gave it.
+    _lock: Option<SleepLock>,
+    /// Why there is no lock.
+    refused: Option<SleepNotHeld>,
+}
+
+/// Asks `logind` for the lock a recording keeps. A refusal doesn't stop
+/// anything: it is said once the recording has started ([`Sleep::report`]).
+pub(crate) fn hold(logind: &dyn Logind) -> Sleep {
     match logind.inhibit_sleep() {
-        Ok(lock) => Some(lock),
-        Err(refused) => {
-            notes.push(format!(
-                "{refused}; if the machine sleeps, the recording has a gap there"
-            ));
-            let warning = Warning {
-                cause: Cause::SleepNotHeld,
-                track: None,
-                at: clock.now(),
-                state: WarningState::Raised,
-            };
-            // The screen may have closed already.
-            let _ = ui.send(Event::Recorder(recorder::Event::Warning(warning)));
-            None
-        }
+        Ok(lock) => Sleep {
+            _lock: Some(lock),
+            refused: None,
+        },
+        Err(refused) => Sleep {
+            _lock: None,
+            refused: Some(refused),
+        },
     }
 }
 
-/// Sleep taken from the real logind.
+impl Sleep {
+    /// If logind refused: [`Cause::SleepNotHeld`] for the screen, raised at
+    /// `clock`'s now, and a note for the summary (`notes`). Said only once
+    /// the streams have started, so a start that fails doesn't leave a
+    /// warning about a recording that never was, and the screen's startup
+    /// checks (which drain the channel) can't swallow it.
+    pub(crate) fn report(&self, clock: &dyn Clock, ui: &Sender<Event>, notes: &mut Vec<String>) {
+        let Some(refused) = &self.refused else {
+            return;
+        };
+        notes.push(format!(
+            "{refused}; if the machine sleeps, the recording has a gap there"
+        ));
+        let warning = Warning {
+            cause: Cause::SleepNotHeld,
+            track: None,
+            at: clock.now(),
+            state: WarningState::Raised,
+        };
+        // The screen may have closed already.
+        let _ = ui.send(Event::Recorder(recorder::Event::Warning(warning)));
+    }
+}
+
+/// The real logind, reached over the system bus.
 #[cfg(target_os = "linux")]
 pub(crate) struct SystemLogind;
 
-/// The longest the call waits for logind. Recording starts after it, so a
-/// bus that doesn't answer costs this much and no more.
+/// The longest the `Inhibit` call waits for logind's answer. Recording
+/// starts after it, so a logind that doesn't answer costs this much. Making
+/// the connection isn't bounded by it: libdbus waits as long as it does for
+/// the bus's own greeting.
 #[cfg(target_os = "linux")]
 const CALL_TIMEOUT_MS: i32 = 2_000;
 
@@ -124,7 +166,8 @@ impl Logind for SystemLogind {
 
         // `Inhibit(what, who, why, mode)` returns the lock as a file
         // descriptor: logind drops the lock when the last copy closes.
-        let connection = Connection::get_private(BusType::System).map_err(SleepNotHeld::new)?;
+        let connection =
+            Connection::get_private(BusType::System).map_err(|e| SleepNotHeld::from_dbus(&e))?;
         let mut call = Message::new_method_call(
             "org.freedesktop.login1",
             "/org/freedesktop/login1",
@@ -140,7 +183,7 @@ impl Logind for SystemLogind {
         ]);
         let reply = connection
             .send_with_reply_and_block(call, CALL_TIMEOUT_MS)
-            .map_err(SleepNotHeld::new)?;
+            .map_err(|e| SleepNotHeld::from_dbus(&e))?;
         match reply.get_items().into_iter().next() {
             Some(MessageItem::UnixFd(lock)) => Ok(SleepLock::new(lock)),
             _ => Err(SleepNotHeld::new("logind gave no lock")),

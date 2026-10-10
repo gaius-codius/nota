@@ -28,7 +28,7 @@ use super::save::{Saver, ToSave};
 use super::signals::{SignalThread, listen_for_signals};
 use super::summary::{Outcome, file_names, held_notes, track_name};
 use super::{BoxError, MIC, RATE, RecordArgs, SYSTEM, segment_length};
-use crate::inhibit::{self, Logind, SleepLock};
+use crate::inhibit::{self, Logind, Sleep};
 use crate::latency::{DrawEnds, LatencyLog};
 use crate::library::{
     Library, NewSessionRows, Salvaged, SessionPaths, discard_empty, startup_watch,
@@ -69,7 +69,7 @@ pub(super) struct Started<B: CaptureBackend> {
     pub(super) captures: Vec<Capture<B::Stream>>,
     /// Keeps the machine from sleeping, if logind gave the lock; dropped
     /// once recording has ended.
-    pub(super) sleep: Option<SleepLock>,
+    pub(super) sleep: Sleep,
     /// Checks the disk and keeps the ballast; stopped after publishing, so
     /// a full disk then is still in the summary.
     pub(super) disk: DiskMonitor<StdFs>,
@@ -208,9 +208,10 @@ fn start_with_notes<B: CaptureBackend>(
         lock,
     };
     // Before the first audio, so no stretch of the recording is unguarded.
-    let sleep = inhibit::hold(logind, clock.as_ref(), &ui, notes);
+    let sleep = inhibit::hold(logind);
     let (captures, listening, ready) =
         open_streams(ready, starter, backend, &sources, &ui_events, notes)?;
+    sleep.report(clock.as_ref(), &ui, notes);
     unmade.keep();
     keep_started(&rows, &watch, &session, &asked, &captures, notes);
     let Ready {
