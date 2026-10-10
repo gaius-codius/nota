@@ -216,7 +216,7 @@ impl Watcher {
             let watcher = this.borrow();
             let mut caught_up = false;
             for subscription in watcher.current.iter().chain(&watcher.fresh) {
-                caught_up |= subscription.borrow_mut().answered(seq);
+                caught_up |= subscription.borrow_mut().pending.answered(seq);
             }
             caught_up
         };
@@ -225,7 +225,7 @@ impl Watcher {
             if watcher
                 .fresh
                 .as_ref()
-                .is_some_and(|s| s.borrow().caught_up())
+                .is_some_and(|s| s.borrow().pending.caught_up())
             {
                 watcher.current = watcher.fresh.take();
             }
@@ -272,7 +272,31 @@ struct Subscription {
     graph: Graph,
     /// Syncs not yet answered: until they are, the graph may be missing
     /// what the server has.
-    pending: Vec<AsyncSeq>,
+    pending: Pending,
+}
+
+/// The syncs a subscription has sent and the server hasn't yet answered.
+#[derive(Debug, Default)]
+struct Pending(Vec<AsyncSeq>);
+
+impl Pending {
+    /// Notes sync `seq`, sent.
+    fn sent(&mut self, seq: AsyncSeq) {
+        self.0.push(seq);
+    }
+
+    /// Takes in the answer to sync `seq`. `true` if that was the last one
+    /// unanswered; an answer to another's sync is nothing.
+    fn answered(&mut self, seq: AsyncSeq) -> bool {
+        let before = self.0.len();
+        self.0.retain(|&pending| pending != seq);
+        before != self.0.len() && self.0.is_empty()
+    }
+
+    /// Whether every sync sent has been answered.
+    fn caught_up(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 impl Subscription {
@@ -314,7 +338,7 @@ impl Subscription {
                 metadata: None,
                 graph: Graph::default(),
                 // The registry announces what it has before it answers.
-                pending: vec![seq],
+                pending: Pending(vec![seq]),
             })
         }))
     }
@@ -382,21 +406,8 @@ impl Subscription {
         let mut subscription = this.borrow_mut();
         subscription.metadata = Some((metadata, listener));
         if let Ok(seq) = core.sync(0) {
-            subscription.pending.push(seq);
+            subscription.pending.sent(seq);
         }
-    }
-
-    /// Takes in the answer to sync `seq`. `true` if that was its last
-    /// unanswered one.
-    fn answered(&mut self, seq: AsyncSeq) -> bool {
-        let before = self.pending.len();
-        self.pending.retain(|&pending| pending != seq);
-        before != self.pending.len() && self.pending.is_empty()
-    }
-
-    /// Whether every sync has been answered.
-    fn caught_up(&self) -> bool {
-        self.pending.is_empty()
     }
 }
 
@@ -437,7 +448,101 @@ fn default_event(key: Option<&str>, value: Option<&str>) -> Option<GraphEvent> {
 
 #[cfg(test)]
 mod tests {
+    use pw::properties::PropertiesBox;
+
     use super::*;
+
+    /// Registry properties holding `pairs`.
+    fn props(pairs: &[(&str, &str)]) -> PropertiesBox {
+        let mut props = PropertiesBox::new();
+        for (key, value) in pairs {
+            props.insert(*key, *value);
+        }
+        props
+    }
+
+    /// A sink, a source, a virtual source and a duplex node are audio nodes
+    /// of their kind, named as the user knows them.
+    #[test]
+    fn audio_nodes_are_read_with_their_kind() {
+        for (class, kind) in [
+            ("Audio/Sink", Class::Sink),
+            ("Audio/Source", Class::Source),
+            ("Audio/Source/Virtual", Class::Source),
+            ("Audio/Duplex", Class::Other),
+        ] {
+            let node = props(&[
+                ("media.class", class),
+                ("node.name", "alsa.x"),
+                ("node.description", "Speakers"),
+                ("node.nick", "Spk"),
+            ]);
+            assert_eq!(
+                audio_node(node.as_ref()),
+                Some(Node {
+                    name: "alsa.x".into(),
+                    description: "Speakers".into(),
+                    class: kind,
+                }),
+                "{class}"
+            );
+        }
+    }
+
+    /// A node with no description goes by its nick, then by its name.
+    #[test]
+    fn a_node_without_a_description_goes_by_its_nick_or_name() {
+        let nick = props(&[
+            ("media.class", "Audio/Sink"),
+            ("node.name", "n"),
+            ("node.nick", "Nick"),
+        ]);
+        let bare = props(&[("media.class", "Audio/Sink"), ("node.name", "n")]);
+        let described = |p: &PropertiesBox| audio_node(p.as_ref()).map(|n| n.description);
+        assert_eq!(
+            (described(&nick), described(&bare)),
+            (Some("Nick".into()), Some("n".into()))
+        );
+    }
+
+    /// Streams, video and nameless nodes aren't audio devices.
+    #[test]
+    fn other_nodes_are_not_audio_devices() {
+        for node in [
+            props(&[("media.class", "Stream/Input/Audio"), ("node.name", "rec")]),
+            props(&[("media.class", "Video/Source"), ("node.name", "cam")]),
+            props(&[("media.class", "Audio/Sink")]),
+            props(&[("node.name", "x")]),
+        ] {
+            assert_eq!(audio_node(node.as_ref()), None);
+        }
+    }
+
+    /// A subscription has caught up once every sync it sent is answered,
+    /// and only its own answers count.
+    #[test]
+    fn a_subscription_catches_up_on_its_last_answer() {
+        let mut pending = Pending::default();
+        assert!(pending.caught_up());
+        pending.sent(AsyncSeq::from_seq(1));
+        pending.sent(AsyncSeq::from_seq(2));
+        assert!(!pending.answered(AsyncSeq::from_seq(9)), "another's sync");
+        assert!(!pending.answered(AsyncSeq::from_seq(1)));
+        assert!(!pending.caught_up());
+        assert!(pending.answered(AsyncSeq::from_seq(2)));
+        assert!(pending.caught_up());
+        // Answered again, it's nothing new.
+        assert!(!pending.answered(AsyncSeq::from_seq(2)));
+    }
+
+    /// A watch that can't run says so, and why.
+    #[test]
+    fn a_watch_that_cant_run_says_why() {
+        assert_eq!(
+            unwatched(&"no socket"),
+            CaptureNotice::Warning("device changes aren't watched: no socket".into())
+        );
+    }
 
     /// The default sink and source keys give the node they name; a cleared
     /// key gives none; other keys nothing.
