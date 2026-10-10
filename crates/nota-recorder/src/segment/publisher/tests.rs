@@ -9,6 +9,7 @@ use nota_core::{
 use super::*;
 use crate::fs::FsFile;
 use crate::fs::fake::FakeFs;
+use crate::fs::sweep::Sweep;
 use crate::segment::{DurableSegment, FakeStore, needs_salvage};
 use crate::session::{SessionDir, SessionLock, SessionWriter};
 
@@ -390,13 +391,20 @@ fn a_set_aside_is_reported_whatever_fails_after_it() {
             report,
             disk.paths().contains(&aside),
             disk.attempted() - start,
+            disk.has_failed(),
         )
     };
-    let (_, renamed, ops) = run(None);
+    let (_, renamed, ops, _) = run(None);
     assert!(renamed);
     let mut failed_after_rename = 0;
+    let mut sweep = Sweep::new();
     for at in 0..ops {
-        let (report, renamed, _) = run(Some(at));
+        let (report, renamed, _, failed) = run(Some(at));
+        if failed {
+            sweep.interrupted();
+        } else {
+            sweep.finished();
+        }
         assert_eq!(
             report.set_aside() == std::slice::from_ref(&aside),
             renamed,
@@ -408,7 +416,9 @@ fn a_set_aside_is_reported_whatever_fails_after_it() {
         }
     }
     // The directory sync after the rename, and the store read at the end.
-    assert!(failed_after_rename >= 1, "{failed_after_rename}");
+    assert!(failed_after_rename >= 1, "{failed_after_rename}"); // check-bound
+    // Not vacuous: the failure fired at every operation of the publish.
+    sweep.interrupted_at_least(ops); // check-bound
 }
 
 /// The final report names the path and cause holding publication back.

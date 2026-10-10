@@ -757,7 +757,15 @@ fn a_write_crashed_at_every_operation_leaves_the_old_findings_or_the_new() {
     // Which the first crash left: the new findings or not.
     let mut sweep = Sweep::with_outcomes();
     let mut retries = Sweep::new();
-    // Every retry's crash point but its last, under every outcome.
+    // More partial outcomes than usual for the retry: the case that
+    // matters is a reused temp name whose unlink is lost but whose rename
+    // survives, which few seeds pick.
+    let seconds: Vec<CrashOutcome> = CrashOutcome::standard()
+        .into_iter()
+        .chain((8..64).map(|seed| CrashOutcome::Partial { seed }))
+        .collect();
+    // Every retry's crash point but its last, under every outcome, worked
+    // out from each retry's operations before its sweep runs.
     let mut retry_floor = 0;
     for after in 0..=ops {
         for outcome in CrashOutcome::standard() {
@@ -774,17 +782,13 @@ fn a_write_crashed_at_every_operation_leaves_the_old_findings_or_the_new() {
                 rec(&probe, &[b], Verification::Unavailable).unwrap();
                 probe.attempted()
             };
+            retry_floor += retry_ops * seconds.len();
             for again in 0..=retry_ops {
-                // More partial outcomes than usual: the case that matters is
-                // a reused temp name whose unlink is lost but whose rename
-                // survives, which few seeds pick.
-                let seconds = (8..64).map(|seed| CrashOutcome::Partial { seed });
-                for second in CrashOutcome::standard().into_iter().chain(seconds) {
+                for &second in &seconds {
                     let run = survived.copy_disk();
                     run.crash_after(again);
                     let _ = rec(&run, &[b], Verification::Unavailable);
                     retries.crash_point(&run);
-                    retry_floor += usize::from(again < retry_ops);
                     let twice = run.crash(second);
                     let case = format!("{case}, then after {again}, {second:?}");
                     old_or_new(&twice, &old, &new, &case);

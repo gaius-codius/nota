@@ -175,7 +175,8 @@ for want in nota-recorder/src/segment/tests.rs:48 nota-recorder/src/capture/stop
   nota/src/library/kept.rs:1 nota-recorder/examples/capture_wall_time.rs:3 \
   nota-recorder/src/disk/tests.rs:4 nota-recorder/src/segment/findings/tests.rs:5 \
   nota-recorder/src/segment/tests/repair.rs:3 nota-recorder/src/session/marks.rs:2 \
-  nota-recorder/src/session/tests.rs:1 nota/src/record/start.rs:4; do
+  nota-recorder/src/session/tests.rs:1 nota/src/record/start.rs:4 \
+  nota-recorder/src/segment/publisher/tests.rs:2; do
   file=$repo/crates/${want%:*}
   # Only a tag after code counts: a comment of its own sets no bound.
   got=$(grep -cE '^[[:space:]]*[^/[:space:]].*//[[:space:]]*check-bound([^A-Za-z0-9_-]|$)' "$file" || true)
@@ -186,9 +187,9 @@ done
 # (`nota-recorder/src/fs/sweep.rs`) and states a floor there, which fails
 # a sweep that reached too little. A sweep is a loop (`for`, `while`,
 # `loop` or `for_each`) that crashes, fails or stops the fake filesystem,
-# at a point or with a seed it may vary, or that calls a function doing so
-# at a point it's given without a floor of its own (followed through
-# several calls); or a crash test run expected to pass. A function needs
+# at a point or with a seed it may vary, or that calls a function or a
+# closure doing so at a point it's given without a floor of its own
+# (followed through several calls); or a crash test run expected to pass. A function needs
 # at least as many floors as the sweeps it runs, so a new sweep can't be
 # added without one, even beside another; the helper fails at run time a
 # sweep it never floors. A loop over a list of outcomes written out in
@@ -200,7 +201,11 @@ done
 # crash or fail at a point they're given and floor nothing; with pass=2,
 # each function running more sweeps than it floors. Comments in it would
 # end the quoting at their first apostrophe, so they're here: strings,
-# block comments and line comments are dropped before matching; a loop
+# block comments and line comments are dropped before matching; floors
+# count once per sweep they name (`sweep`, `summary.scenario()`), so two
+# floors on one sweep don't cover another; a closure (`let run = |..|`)
+# that crashes or fails at a point it's given counts as a helper within
+# its function; a method call (`.run(`) is never a helper's; a loop
 # ends when the body it opened closes (its head may span lines), and one
 # that runs a crash test counts as that run; a run whose next line is
 # `.unwrap_err()` expects a failure.
@@ -224,6 +229,7 @@ sweep_awk='
     match($0, /fn [a-z_0-9]+/)
     name = substr($0, RSTART + 3, RLENGTH - 3)
     start = FNR; sweeps = 0; floors = 0; point = 0; loops = 0; marked = 0; pending = 0; ran = 0
+    split("", floored); split("", local); closure = ""
   }
   {
     code = $0
@@ -233,11 +239,19 @@ sweep_awk='
     if (code ~ /^[[:space:]]*(for .* in |while |loop \{)|\.for_each\(/) {
       loops++; at[loops] = depth; opened[loops] = 0
     }
-    if (code ~ /(crash_after|fail_after)\(\*?[a-z_]/) point = 1
+    if (closure == "" && match(code, /let (mut )?[a-z_][a-z_0-9]* = (move )?\|/)) {
+      closure = substr(code, RSTART + 4, RLENGTH - 4)
+      sub(/^mut /, "", closure); sub(/ .*/, "", closure)
+      closure_at = depth; closure_opened = 0
+    }
+    raw = code ~ /(crash_after|fail_after)\(\*?[a-z_]/
+    if (raw) point = 1
+    if (raw && closure != "") local[closure] = 1
     hit = code ~ /crash_after\(|fail_after\(|(fail_at|stop_after_ops): Some\(\*?[a-z_]|Partial \{ seed(: [^0-9 }][^}]*)? \}/
-    rest = code
-    while (match(rest, /[a-z_][a-z_0-9]*\(/)) {
-      if ((family "|" substr(rest, RSTART, RLENGTH - 1)) in at_point) { hit = 1; point = 1 }
+    rest = " " code
+    while (match(rest, /[^.A-Za-z_0-9][a-z_][a-z_0-9]*\(/)) {
+      f = substr(rest, RSTART + 1, RLENGTH - 2)
+      if ((family "|" f) in at_point || f in local) { hit = 1; point = 1 }
       rest = substr(rest, RSTART + RLENGTH)
     }
     if (loops && hit) marked = 1
@@ -248,8 +262,19 @@ sweep_awk='
       ran = loops > 0
       pending = code ~ /\.run\(\)[[:space:]]*$/
     }
-    floors += gsub(/\.(interrupted_more_than|interrupted_at_least|saw_more_than|saw_each)\(/, "&", code)
+    rest = code
+    while (match(rest, /\.(interrupted_more_than|interrupted_at_least|saw_more_than|saw_each)\(/)) {
+      key = substr(rest, 1, RSTART - 1)
+      gsub(/[[:space:]]/, "", key)
+      if (key == "") key = "line " FNR
+      if (!(key in floored)) { floored[key] = 1; floors++ }
+      rest = substr(rest, RSTART + RLENGTH)
+    }
     depth += gsub(/\{/, "{", code) - gsub(/\}/, "}", code)
+    if (closure != "") {
+      if (depth > closure_at) closure_opened = 1
+      if (closure_opened ? depth <= closure_at : code ~ /;[[:space:]]*$/) closure = ""
+    }
     while (loops) {
       if (depth > at[loops]) opened[loops] = 1
       if (!opened[loops] || depth > at[loops]) break
@@ -262,13 +287,19 @@ sweep_awk='
 sweep_awk_cmd=(awk)
 if command -v gawk >/dev/null; then sweep_awk_cmd=(gawk --posix); fi
 bypassing() { # files; prints each function with more sweeps than floors
-  local points="" next _
-  # Each round finds the callers of the last round's functions.
-  for _ in 1 2 3 4 5; do
+  local points="" next round
+  # Each round finds the callers of the last round's functions, until a
+  # round adds none. One that never settles is an error, not a pass with
+  # some helpers unfollowed.
+  for round in $(seq 1 50); do
     next=$("${sweep_awk_cmd[@]}" -v pass=1 -v points="$points" "$sweep_awk" "$@" | sort -u | tr '\n' ' ')
     [[ $next == "$points" ]] && break
     points=$next
   done
+  if [[ $next != "$points" ]]; then
+    echo "bypassing: helpers still unsettled after $round rounds"
+    return
+  fi
   "${sweep_awk_cmd[@]}" -v pass=2 -v points="$points" "$sweep_awk" "$@"
 }
 cat >"$dir/sweeps.rs" <<'RUST'
@@ -381,6 +412,35 @@ fn sweeps_two_calls_deep() {
         checks_at(&fs, at);
     }
 }
+fn two_floors_on_one_sweep_cover_one() {
+    let mut sweep = Sweep::with_outcomes();
+    for at in 0..9 {
+        fs.crash_after(at);
+        sweep.crash_point(&fs);
+        sweep.saw(at);
+    }
+    sweep.interrupted_at_least(3); // check-bound
+    sweep.saw_each([1, 2]); // check-bound
+    for at in 0..9 {
+        fs.crash_after(at);
+    }
+}
+fn sweeps_through_a_closure() {
+    let run = |fail_at: Option<usize>| {
+        if let Some(at) = fail_at {
+            disk.fail_after(at, kind);
+        }
+        salvage(&disk)
+    };
+    for at in 0..ops {
+        run(Some(at));
+    }
+}
+fn calls_a_method_named_like_a_helper() {
+    for job in jobs {
+        job.crashes_at(&fs, 3);
+    }
+}
 RUST
 cat >"$dir/tail.rs" <<'RUST'
 fn the_last_function() {
@@ -389,6 +449,32 @@ fn the_last_function() {
     }
 }
 RUST
+# A helper is followed within its module's family (a parent's `tests.rs`
+# and the files in its `tests/`), not into another module with a function
+# of the same name.
+mkdir -p "$dir/x/tests" "$dir/z"
+cat >"$dir/x/tests.rs" <<'RUST'
+fn crashes_here(fs: &FakeFs, after: usize) {
+    fs.crash_after(after);
+}
+RUST
+cat >"$dir/x/tests/y.rs" <<'RUST'
+fn sweeps_through_a_parent_helper() {
+    for after in 0..9 {
+        crashes_here(&fs, after);
+    }
+}
+RUST
+cat >"$dir/z/tests.rs" <<'RUST'
+fn calls_another_modules_name() {
+    for after in 0..9 {
+        crashes_here(&fs, after);
+    }
+}
+RUST
+got=$(cd "$dir" && bypassing x/tests.rs x/tests/y.rs z/tests.rs)
+[[ $got == "x/tests/y.rs:1: sweeps_through_a_parent_helper runs 1 sweeps with 0 floors" ]] ||
+  fail "the sweep guard followed helpers across the wrong modules: $got"
 got=$(cd "$dir" && bypassing sweeps.rs tail.rs)
 want='sweeps.rs:1: bypasses runs 1 sweeps with 0 floors
 sweeps.rs:7: seeds_without runs 1 sweeps with 0 floors
@@ -400,19 +486,21 @@ sweeps.rs:88: seed_from_an_expression runs 1 sweeps with 0 floors
 sweeps.rs:93: fails_through_a_recording runs 1 sweeps with 0 floors
 sweeps.rs:98: runs_one_to_pass_one_to_fail runs 1 sweeps with 0 floors
 sweeps.rs:105: sweeps_two_calls_deep runs 1 sweeps with 0 floors
+sweeps.rs:110: two_floors_on_one_sweep_cover_one runs 2 sweeps with 1 floors
+sweeps.rs:123: sweeps_through_a_closure runs 1 sweeps with 0 floors
 tail.rs:1: the_last_function runs 1 sweeps with 0 floors'
 [[ $got == "$want" ]] || fail "the sweep guard found the wrong sweeps: $got"
-# The files checked: every one with tests that uses the fake filesystem,
-# so a new crash test file is covered without naming it here. The fake,
-# the crash test and the sweep helper are left out: their own tests check
-# the instruments, crashing them on purpose to see them work.
+# The files checked: every one with tests, so a new crash test file is
+# covered without naming it here, even one that reaches the fake
+# filesystem only through its parent's helpers. The fake, the crash test
+# and the sweep helper are left out: their own tests check the
+# instruments, crashing them on purpose to see them work.
 swept=()
 while IFS= read -r file; do
   swept+=("$file")
-done < <(cd "$repo/crates" && grep -rlE --include='*.rs' 'FakeFs' . |
-  xargs grep -l '#\[test\]' | sed 's#^\./##' |
+done < <(cd "$repo/crates" && grep -rl --include='*.rs' '#\[test\]' . | sed 's#^\./##' |
   grep -vxE 'nota-recorder/src/fs/(fake|crash|sweep)\.rs' | sort)
-(( ${#swept[@]} >= 20 )) || fail "expected at least 20 crash test files: ${swept[*]}"
+(( ${#swept[@]} >= 40 )) || fail "expected at least 40 test files: ${swept[*]-}"
 found=$(cd "$repo/crates" && bypassing "${swept[@]}")
 [[ -z $found ]] || fail "a sweep without the helper's floor:"$'\n'"$found"
 # Each floor the helper checks is a bound, wherever it is.
