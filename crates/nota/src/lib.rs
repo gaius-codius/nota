@@ -1,7 +1,8 @@
 //! The `nota` program. Every role is this one executable:
 //!
 //! - `nota`: the Home screen, which lists the library's sessions and
-//!   records a new one with `R` (see `app`);
+//!   sets up a new recording with `r`, or records with the last settings
+//!   with `R` (see `app`);
 //! - `nota record`: records a session, the system audio and the microphone
 //!   as two tracks, with live text on the Recording screen (see `record`
 //!   for how it stops safely);
@@ -225,8 +226,8 @@ fn parse_app(args: &[OsString]) -> Result<RecordArgs, String> {
 fn parse_record(args: &[OsString]) -> Result<RecordArgs, String> {
     let mut setup = Setup {
         title: "Recording".to_owned(),
-        mic: Input::Default,
-        system: Input::Default,
+        mic: Some(Input::Default),
+        system: Some(Input::Default),
     };
     // Only the test and measurement builds take the options that set these.
     #[cfg(feature = "fake-capture")]
@@ -250,8 +251,8 @@ fn parse_record(args: &[OsString]) -> Result<RecordArgs, String> {
             "--data" => data = Some(PathBuf::from(value)),
             "--parakeet" => parakeet = Some(PathBuf::from(value)),
             "--vad" => vad = Some(PathBuf::from(value)),
-            "--mic" => setup.mic = Input::Device(text()?),
-            "--system" => setup.system = Input::Device(text()?),
+            "--mic" => setup.mic = Some(Input::Device(text()?)),
+            "--system" => setup.system = Some(Input::Device(text()?)),
             #[cfg(feature = "fake-capture")]
             "--tone" => tone = text()? == "yes",
             #[cfg(feature = "fake-capture")]

@@ -12,7 +12,7 @@
 //!
 //! | Message | Sent by | When |
 //! |---|---|---|
-//! | [`Command::Start`] | `nota record`, from its arguments (later, the Setup screen) | Once, to start a session with a [`Setup`] |
+//! | [`Command::Start`] | `nota record`, from its arguments, or the Setup screen | Once, to start a session with a [`Setup`] |
 //! | [`Command::Mark`] | the Recording screen | `m`: a [`Mark`] at the moment of the key |
 //! | [`Command::Note`] | the Recording screen | `⏎` after `n`, or the screen closing with a note half typed: a [`Note`] pinned to the moment of `n` |
 //! | [`Command::Stop`] | the Recording screen | The stop is confirmed (`s` or Ctrl+C, then `y`) |
@@ -67,10 +67,12 @@ pub enum Command {
 pub struct Setup {
     /// The session's title.
     pub title: String,
-    /// Where the microphone's track records from.
-    pub mic: Input,
-    /// Where the system audio's track records from.
-    pub system: Input,
+    /// Where the microphone's track records from, or `None` for no
+    /// microphone track.
+    pub mic: Option<Input>,
+    /// Where the system audio's track records from, or `None` for no
+    /// system audio track.
+    pub system: Option<Input>,
 }
 
 /// Where a track records from.

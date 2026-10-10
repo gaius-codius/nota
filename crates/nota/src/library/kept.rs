@@ -173,7 +173,9 @@ fn set_once<T>(slot: &mut Option<T>, value: T, name: &str) -> Result<(), String>
     Ok(())
 }
 
-fn escape(value: &str) -> String {
+/// `value` as a line of a kept file holds it: `\\`, line breaks and carriage
+/// returns escaped.
+pub(crate) fn escape(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for c in value.chars() {
         match c {
@@ -186,7 +188,8 @@ fn escape(value: &str) -> String {
     out
 }
 
-fn unescape(value: &str) -> Result<String, String> {
+/// `value` as [`escape`] wrote it.
+pub(crate) fn unescape(value: &str) -> Result<String, String> {
     let mut out = String::with_capacity(value.len());
     let mut chars = value.chars();
     while let Some(c) = chars.next() {

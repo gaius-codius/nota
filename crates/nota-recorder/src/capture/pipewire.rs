@@ -22,9 +22,11 @@
 //! cpal stamps each buffer with when `PipeWire` captured it: the graph
 //! cycle's time less the stream's delay, on `CLOCK_MONOTONIC`, or the
 //! callback's time less the buffer's length when the driver hasn't started.
-//! Each buffer is sent with its stamp
-//! ([`CaptureSender::audio_captured`]), so the recorder times losses and
-//! drift by it.
+//! Each buffer is sent with its stamp and that delay, the cycle's time
+//! less the stamp ([`CaptureSender::audio_captured`]), so the recorder
+//! times losses and drift by them. The delay steps when the graph's
+//! quantum changes, and cpal holds the stamp back rather than let it go
+//! back; the cycle's time steps only when the graph does.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -38,7 +40,7 @@ use thread_priority::{
     set_thread_priority_and_policy, thread_native_id,
 };
 
-use super::{CaptureBackend, CaptureError, CaptureNotice, CaptureSender, Source};
+use super::{CaptureBackend, CaptureError, CaptureNotice, CaptureSender, Devices, Source};
 
 mod watch;
 
@@ -122,6 +124,10 @@ impl std::fmt::Debug for PipeWireStream {
 impl CaptureBackend for PipeWireBackend {
     type Stream = PipeWireStream;
 
+    fn devices(&self) -> Result<Devices, CaptureError> {
+        watch::Subscription::snapshot()
+    }
+
     fn start(
         &self,
         source: &Source,
@@ -161,8 +167,12 @@ impl CaptureBackend for PipeWireBackend {
                     promotion.on_buffer(promote_current_thread);
                     // cpal stamps the buffer with PipeWire's capture time,
                     // on CLOCK_MONOTONIC.
-                    match u64::try_from(info.timestamp().capture.as_nanos()) {
-                        Ok(nanos) => events.audio_captured(samples, Duration::from_nanos(nanos)),
+                    let stamp = info.timestamp();
+                    let delay = stamp.callback.duration_since(stamp.capture);
+                    match u64::try_from(stamp.capture.as_nanos()) {
+                        Ok(nanos) => {
+                            events.audio_captured(samples, Duration::from_nanos(nanos), delay);
+                        }
                         Err(_) => events.audio(samples),
                     }
                 },
@@ -253,6 +263,21 @@ mod tests {
 
     fn error(kind: ErrorKind) -> cpal::Error {
         cpal::Error::with_message(kind, "detail")
+    }
+
+    /// A server that answers lists its devices, and one that can't be
+    /// reached says so: never an empty list for either. (CI has no
+    /// server; a machine with one has devices.)
+    #[test]
+    fn the_server_lists_its_devices_or_is_unavailable() {
+        match PipeWireBackend.devices() {
+            Ok(devices) => assert!(
+                !devices.outputs.is_empty() || !devices.inputs.is_empty(),
+                "{devices:?}"
+            ),
+            Err(CaptureError::HostUnavailable(_)) => {}
+            Err(other) => panic!("{other}"),
+        }
     }
 
     #[test]

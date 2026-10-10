@@ -33,6 +33,7 @@ use nota_core::SessionTime;
 use nota_core::recorder::DeviceChange;
 
 use super::Source;
+use super::devices::{Device, Devices};
 
 /// How long a followed default may be missing before it's lost: 1 s. When
 /// a device is swapped for another (a Bluetooth profile change, a USB
@@ -132,6 +133,31 @@ impl Graph {
         self.nodes
             .values()
             .find(|node| node.name == name && class.is_none_or(|class| node.class == class))
+    }
+
+    /// The sinks and sources the graph holds, and its defaults, as Setup
+    /// lists them. Other audio nodes ([`Class::Other`]) aren't offered:
+    /// nothing says which way they'd record.
+    pub(super) fn devices(&self) -> Devices {
+        let of = |class| {
+            let mut list: Vec<Device> = self
+                .nodes
+                .values()
+                .filter(|node| node.class == class)
+                .map(|node| Device {
+                    name: node.name.clone(),
+                    description: node.description.clone(),
+                })
+                .collect();
+            list.sort_by(|a, b| (&a.description, &a.name).cmp(&(&b.description, &b.name)));
+            list
+        };
+        Devices {
+            outputs: of(Class::Sink),
+            inputs: of(Class::Source),
+            default_output: self.default_sink.clone(),
+            default_input: self.default_source.clone(),
+        }
     }
 }
 

@@ -11,7 +11,7 @@
 //! │ ▸ ! Pharmacy law · scheduling                  58m  2 Oct  │  selected, pinned
 //! │     stopped early: disk full · free space to finish        │  what it needs
 //! │   ✓ Pharmacy workshop · chronic conditions  2h 42m  today  │
-//! ╰─ R last settings  ⏎ open ──────────────────────── parakeet ─╯
+//! ╰─ r record  R last settings  ⏎ open ──────────────── parakeet ─╯
 //! ```
 //!
 //! Sessions that need you (`!`) are pinned to the top, however old; the
@@ -22,8 +22,8 @@
 //! shows on the line above `recent` until a key is pressed once it has been
 //! drawn there.
 //!
-//! The footer offers only keys that work: `r` joins it with Setup, `/`
-//! with search and `?` with the keys overlay. `⏎` asks the app to open the
+//! The footer offers only keys that work: `/` joins it with search and `?`
+//! with the keys overlay. `⏎` asks the app to open the
 //! selected session on its Processing screen.
 
 use std::time::Duration;
@@ -79,6 +79,8 @@ pub struct Session {
 pub enum Action {
     /// `⏎`: open the selected session.
     Open(u64),
+    /// `r`: set up a recording first.
+    Setup,
     /// `R`: record with the last settings.
     Record,
     /// `q`, `esc` or Ctrl+C: close nota.
@@ -167,7 +169,7 @@ impl Home {
 
     /// Handles a key press. Returns what Home asks for, if anything.
     ///
-    /// - `R` records with the last settings.
+    /// - `r` asks for Setup, and `R` records with the last settings.
     /// - `↑`/`↓` (or `k`/`j`) move the selection.
     /// - `⏎` asks to open the selected session.
     /// - `q`, `esc` and Ctrl+C close nota.
@@ -194,6 +196,7 @@ impl Home {
             return None;
         }
         match key.code {
+            KeyCode::Char('r') => return Some(Action::Setup),
             KeyCode::Char('R') => return Some(Action::Record),
             KeyCode::Char('q') | KeyCode::Esc => return Some(Action::Quit),
             KeyCode::Up | KeyCode::Char('k') => self.selected = self.selected.saturating_sub(1),
@@ -268,7 +271,8 @@ impl Home {
         // is busy (finishing a recording) no keys are read at all.
         let mut left = Vec::new();
         if self.busy.is_none() {
-            left.extend(key("R", " last settings"));
+            left.extend(key("r", " record"));
+            left.extend(key("  R", " last settings"));
             if !self.sessions.is_empty() {
                 left.extend(key("  ⏎", " open"));
             }
@@ -323,7 +327,7 @@ impl Home {
             buf.set_string(
                 list.x + 3,
                 list.y,
-                "nothing recorded yet · R to record",
+                "nothing recorded yet · r to record",
                 self.theme.text_hint,
             );
             return;
@@ -435,7 +439,7 @@ fn drawn(text: &str) -> String {
 
 /// A session's length as Home shows it: `58m`, `2h 42m`, `1h 05m`; under a
 /// minute, `<1m`.
-fn duration(length: Duration) -> String {
+pub(crate) fn duration(length: Duration) -> String {
     let minutes = length.as_secs() / 60;
     match (minutes / 60, minutes % 60) {
         (0, 0) => "<1m".to_owned(),

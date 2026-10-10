@@ -1,0 +1,26 @@
+---
+source: crates/nota-tui/tests/setup_screen.rs
+expression: terminal.backend()
+---
+"╭─ ≈ nota · new recording ─────────────────────────── last settings ─╮"
+"│                                                                    │"
+"│   Title      Joinery · mortise and tenon                           │"
+"│                                                                    │"
+"│ ▸ Listen to  pick the one that moves                               │"
+"│              ○ System audio  Headphones             ▁▁▁▁▁▁▁▁       │"
+"│              ○ Microphone    Seiren Mini · default  ⚠ no signal    │"
+"│              ● Both                                                │"
+"│                                                                    │"
+"│              Records everything playing on Headphones,             │"
+"│              notifications included.                               │"
+"│              Records the room through Seiren Mini.                 │"
+"│                                                                    │"
+"│   Engines    parakeet                                              │"
+"│              ✓ everything stays on this machine                    │"
+"│                                                                    │"
+"│                                                                    │"
+"│                                                                    │"
+"│                                                                    │"
+"│                                                                    │"
+"│                                                                    │"
+"╰─ ⏎ start  tab next  ↑↓ source  esc back ──────────── R skips this ─╯"
