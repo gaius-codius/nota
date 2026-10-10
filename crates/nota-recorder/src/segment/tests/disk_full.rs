@@ -176,9 +176,9 @@ fn hit(run: &FullRun) -> Option<Where> {
 /// Where a scan found the disk first filling in each kind of write, past
 /// the ballast: tried first, so each test needn't scan.
 const HINTS: [(Where, u64); 3] = [
-    (Where::Journal, 20_359),
+    (Where::Journal, 20_387),
     (Where::Flac, 20_000),
-    (Where::Row, 20_258),
+    (Where::Row, 20_286),
 ];
 
 /// A capacity at which the disk first fills in a `kind` write: its hint.

@@ -18,6 +18,12 @@
 //!
 //! A resumed session's clock carries on from a stored session time
 //! ([`SystemClock::resume`]), so the new recording comes after the old one.
+//!
+//! Audio servers stamp their buffers on the clock that stops during
+//! suspend (`CLOCK_MONOTONIC` on Linux). [`Clock::awake_to_session`] places
+//! such a stamp in session time, by how far the two clocks have parted so
+//! far, so a buffer can be timed by when it was captured rather than by
+//! when nota got it.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -33,6 +39,13 @@ pub trait Clock: Send + Sync + std::fmt::Debug {
     /// far as the clock can tell. It never goes backwards; it grows only
     /// while the machine is suspended, by about the time it was.
     fn suspended(&self) -> Duration;
+
+    /// The session time of `awake`, a recent reading of the system's clock
+    /// that stops during suspend (as an audio server stamps its buffers).
+    /// `None` if it comes before the session clock started, or the clock
+    /// can't place it. A reading from before a suspend is placed as if the
+    /// suspend came before it.
+    fn awake_to_session(&self, awake: Duration) -> Option<SessionTime>;
 }
 
 /// The real session clock: monotonic, counting through suspend, from the
@@ -110,7 +123,23 @@ impl Clock for SystemClock {
         let before = self.asleep.fetch_max(nanos, Ordering::SeqCst);
         Duration::from_nanos(before.max(nanos))
     }
+
+    fn awake_to_session(&self, awake: Duration) -> Option<SessionTime> {
+        if !PLACES_AWAKE_READINGS {
+            return None;
+        }
+        // On the clock that counts through suspend, by how far the two have
+        // parted so far.
+        let asleep = asleep_now(monotonic_now()?);
+        let elapsed = awake.checked_add(asleep)?.checked_sub(self.origin)?;
+        self.base.checked_add(elapsed)
+    }
 }
+
+/// Whether [`SystemClock`] can place a reading of the clock that stops
+/// during suspend: on Linux, where audio servers stamp buffers with
+/// `CLOCK_MONOTONIC`. Elsewhere not until v2.
+const PLACES_AWAKE_READINGS: bool = cfg!(any(target_os = "linux", target_os = "android"));
 
 /// The calendar's time now, to the second, or `None` if the system's date
 /// is before 1970 or past the year 292 billion.
@@ -257,6 +286,12 @@ mod fake {
         fn suspended(&self) -> Duration {
             Duration::from_nanos(self.asleep.load(Ordering::SeqCst))
         }
+
+        /// The fake's clock that stops during suspend reads its session
+        /// time less the time it has spent suspended.
+        fn awake_to_session(&self, awake: Duration) -> Option<SessionTime> {
+            SessionTime::from_elapsed(awake.checked_add(self.suspended())?)
+        }
     }
 }
 
@@ -355,6 +390,51 @@ mod tests {
         let clock = FakeClock::default();
         clock.advance(Duration::MAX);
         assert_eq!(clock.now(), SessionTime::from_nanos(u64::MAX));
+    }
+
+    /// A reading of the clock that stops during suspend, taken just now,
+    /// is placed at about the session time now.
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test reads the clock an audio server stamps buffers with"
+    )]
+    fn an_awake_reading_is_placed_at_the_session_time_it_was_taken() {
+        let clock = SystemClock::resume(SessionTime::from_nanos(7_000_000_000)).unwrap();
+        let before = clock.now();
+        let awake = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
+        let after = clock.now();
+        let placed = clock
+            .awake_to_session(Duration::try_from(awake).unwrap())
+            .unwrap();
+        // The two clocks are read a moment apart, so allow that much.
+        let slack = 100_000_000;
+        assert!(
+            placed.as_nanos() + slack >= before.as_nanos(),
+            "{placed:?} {before:?}"
+        );
+        assert!(
+            placed.as_nanos() <= after.as_nanos() + slack,
+            "{placed:?} {after:?}"
+        );
+        // A reading from before the clock started has no session time.
+        assert_eq!(clock.awake_to_session(Duration::ZERO), None);
+    }
+
+    /// The fake places an awake reading after the time it spent suspended.
+    #[test]
+    fn a_fake_places_awake_readings_after_its_suspends() {
+        let clock = FakeClock::new(SessionTime::ZERO);
+        assert_eq!(
+            clock.awake_to_session(Duration::from_secs(1)),
+            Some(SessionTime::from_nanos(1_000_000_000))
+        );
+        clock.suspend(Duration::from_secs(5));
+        assert_eq!(
+            clock.awake_to_session(Duration::from_secs(1)),
+            Some(SessionTime::from_nanos(6_000_000_000))
+        );
+        assert_eq!(clock.awake_to_session(Duration::MAX), None);
     }
 
     #[test]

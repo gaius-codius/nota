@@ -1,6 +1,8 @@
 use std::path::Path;
 
-use nota_core::SessionId;
+use nota_core::{
+    Drift, EpochAnchor, EpochId, SampleIndex, SampleRate, SessionId, SessionTime, TrackId,
+};
 use rusqlite::params;
 
 use super::*;
@@ -37,7 +39,7 @@ fn a_new_file_gets_the_current_schema() {
     let dir = TestDir::new("fresh");
     let store = Store::open(&dir.db()).unwrap();
     assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
-    assert_eq!(STEPS.len(), 5);
+    assert_eq!(STEPS.len(), 6);
     assert_eq!(STEPS.len(), usize::try_from(VERSION - FIRST + 1).unwrap());
     // Opening again changes nothing.
     drop(store);
@@ -47,7 +49,7 @@ fn a_new_file_gets_the_current_schema() {
 
 #[test]
 fn unknown_versions_are_refused_and_left_alone() {
-    for version in [VERSION + 1, 7, -1] {
+    for version in [VERSION + 1, 8, -1] {
         let dir = TestDir::new(&format!("version{version}"));
         raw(&dir.db())
             .pragma_update(None, "user_version", version)
@@ -433,7 +435,7 @@ fn version_4_upgrades_to_5_keeping_its_jobs() {
 /// A version 5 library keeps its segment rows, with no audio digest, and
 /// gains the findings index; new rows can carry a digest.
 #[test]
-fn version_5_upgrades_to_6_keeping_its_rows_without_a_digest() {
+fn version_5_upgrades_keeping_its_rows_without_a_digest() {
     let dir = TestDir::new("v5");
     {
         let conn = raw(&dir.db());
@@ -449,7 +451,7 @@ fn version_5_upgrades_to_6_keeping_its_rows_without_a_digest() {
         .unwrap();
     }
     let mut store = Store::open(&dir.db()).unwrap();
-    assert_eq!(store.pragma_text("user_version"), "6");
+    assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
     let old = row(0, 0, 0, 480, 0);
     assert_eq!(store.segments(SessionId::new(1)).unwrap(), [old]);
     assert_eq!(old.audio(), None);
@@ -457,4 +459,47 @@ fn version_5_upgrades_to_6_keeping_its_rows_without_a_digest() {
     store.insert_segment(SessionId::new(1), &new).unwrap();
     assert_eq!(store.segments(SessionId::new(1)).unwrap(), [old, new]);
     assert_eq!(store.findings(SessionId::new(1)).unwrap(), []);
+}
+
+/// A version 6 library keeps its epoch rows, read as having no drift, and
+/// new rows keep theirs.
+#[test]
+fn version_6_upgrades_to_7_keeping_its_epochs_with_no_drift() {
+    let dir = TestDir::new("v6");
+    {
+        let conn = raw(&dir.db());
+        for step in [schema::V2, schema::V3, schema::V4, schema::V5, schema::V6] {
+            conn.execute_batch(step).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 6).unwrap();
+        conn.execute_batch(
+            "INSERT INTO session (id, state) VALUES (1, 'stopped');
+             INSERT INTO epoch (session_id, track, epoch, first_sample, rate, anchor_ns)
+             VALUES (1, 0, 0, 0, 16000, 5);",
+        )
+        .unwrap();
+    }
+    let mut store = Store::open(&dir.db()).unwrap();
+    assert_eq!(store.pragma_text("user_version"), "7");
+    let old = EpochAnchor {
+        id: EpochId::new(0),
+        start: SessionTime::from_nanos(5),
+        first_sample: SampleIndex::ZERO,
+        rate: SampleRate::SPEECH,
+        drift: Drift::ZERO,
+    };
+    let new = EpochAnchor {
+        id: EpochId::new(1),
+        start: SessionTime::from_nanos(1_000_000_000),
+        first_sample: SampleIndex::new(16_000),
+        drift: Drift::from_ppb(-42_000).unwrap(),
+        ..old
+    };
+    store
+        .insert_epoch(SessionId::new(1), TrackId::new(0), &new)
+        .unwrap();
+    assert_eq!(
+        store.epochs(SessionId::new(1)).unwrap(),
+        [(TrackId::new(0), old), (TrackId::new(0), new)]
+    );
 }

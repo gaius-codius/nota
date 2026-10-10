@@ -18,7 +18,7 @@
 //! A failure proptest finds is saved in `proptest-regressions/` and replayed
 //! on every run; commit that file with the fix.
 
-use nota_core::{EpochAnchor, EpochId, SampleIndex, SampleRate, SessionTime, TrackId};
+use nota_core::{Drift, EpochAnchor, EpochId, SampleIndex, SampleRate, SessionTime, TrackId};
 use proptest::prelude::*;
 
 use super::format::{HEADER_LEN, MAX_FRAME_SAMPLES, encode_frame, encode_header, frames_after};
@@ -64,6 +64,7 @@ fn anchor(epoch: u32, rate: SampleRate) -> EpochAnchor {
         start: SessionTime::ZERO,
         first_sample: SampleIndex::ZERO,
         rate,
+        drift: Drift::ZERO,
     }
 }
 
@@ -350,9 +351,9 @@ proptest! {
         prop_assert_eq!((read.end(), read.valid_len()), (ReadEnd::Complete, HEADER_LEN));
     }
 
-    /// Any anchor comes back as written, in a version 3 header, and a
-    /// version 2 header comes back untimed; a frame before the epoch's
-    /// first sample is never returned.
+    /// Any anchor comes back as written, drift and all, in a version 4
+    /// header, and a version 2 header comes back untimed; a frame before
+    /// the epoch's first sample is never returned.
     #[test]
     fn anchors_round_trip_and_bound_the_frames(
         epoch in any::<u32>(),
@@ -360,6 +361,7 @@ proptest! {
         first in 1..u64::MAX / 2,
         before in 1..1_000u64,
         hz in 1..=SampleRate::MAX_HZ,
+        ppb in -Drift::MAX_PPB..=Drift::MAX_PPB,
         untimed in any::<bool>(),
     ) {
         let rate = SampleRate::new(hz).unwrap();
@@ -368,6 +370,7 @@ proptest! {
             start: SessionTime::from_nanos(start),
             first_sample: SampleIndex::new(first),
             rate,
+            drift: Drift::from_ppb(ppb).unwrap(),
         };
         let header = if untimed {
             JournalHeader::untimed(JournalId::FIRST, TrackId::new(0), anchor.id, rate)

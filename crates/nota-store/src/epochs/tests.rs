@@ -1,4 +1,6 @@
-use nota_core::{EpochAnchor, EpochId, SampleIndex, SampleRate, SessionId, SessionTime, TrackId};
+use nota_core::{
+    Drift, EpochAnchor, EpochId, SampleIndex, SampleRate, SessionId, SessionTime, TrackId,
+};
 use rusqlite::params;
 
 use crate::test_dir::TestDir;
@@ -28,6 +30,7 @@ fn anchor(id: u32, first: u64, start: u64) -> EpochAnchor {
         start: SessionTime::from_nanos(start),
         first_sample: SampleIndex::new(first),
         rate: SampleRate::SPEECH,
+        drift: Drift::ZERO,
     }
 }
 
@@ -83,6 +86,7 @@ fn an_epoch_s_anchor_never_changes() {
     // Another rate is another anchor too.
     let faster = EpochAnchor {
         rate: SampleRate::new(48_000).unwrap(),
+        drift: Drift::ZERO,
         ..anchor(1, 10, 20)
     };
     assert!(store.insert_epoch(S1, MIC, &faster).is_err());

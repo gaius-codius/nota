@@ -512,6 +512,10 @@ impl Clock for ReadClock {
     fn suspended(&self) -> Duration {
         Duration::ZERO
     }
+
+    fn awake_to_session(&self, _: Duration) -> Option<SessionTime> {
+        None
+    }
 }
 
 /// A spawned runner uses the supplied clock when an engine cannot start.

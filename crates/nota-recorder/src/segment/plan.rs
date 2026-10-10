@@ -539,6 +539,7 @@ mod tests {
             start: nota_core::SessionTime::from_nanos(start),
             first_sample: SampleIndex::new(first),
             rate: SampleRate::SPEECH,
+            drift: nota_core::Drift::ZERO,
         }
     }
 

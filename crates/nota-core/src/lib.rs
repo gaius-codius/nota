@@ -6,8 +6,10 @@
 //!
 //! Time has one source, the [`Clock`]. Each track maps its sample count to
 //! session time through a [`TrackTimeline`] of epochs; a new epoch starts
-//! whenever the track's stream is reopened or the audio server reports an
-//! overrun (audio lost), and the time between epochs is a gap with no audio.
+//! whenever the track's stream is reopened or audio is lost, and the time
+//! between epochs is a gap with no audio. Each epoch maps its samples at the
+//! rate its device was measured running at ([`Drift`]), so a device clock
+//! that runs fast or slow doesn't pull its audio away from session time.
 //!
 //! ```
 //! use std::time::Duration;
@@ -28,6 +30,7 @@
 //! ```
 
 pub mod clock;
+pub mod drift;
 pub mod epoch;
 pub mod ids;
 pub mod lifeline;
@@ -40,6 +43,7 @@ pub mod utterance;
 #[cfg(any(test, feature = "fake-clock"))]
 pub use clock::FakeClock;
 pub use clock::{Clock, ClockUnavailable, SystemClock, wall_now};
+pub use drift::{Drift, DriftMeter};
 pub use epoch::{Epoch, EpochAnchor, EpochError, Gap, OpenedEpoch, TrackTimeline};
 pub use ids::{EpochId, SessionId, TrackId};
 pub use time::{SampleCount, SampleIndex, SampleRange, SampleRate, SessionTime, WallTime};
