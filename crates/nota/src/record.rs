@@ -118,6 +118,7 @@ use nota_recorder::engine::EngineCommand;
 use nota_recorder::segment::SegmentLength;
 use nota_store::HeardBy;
 
+mod health;
 mod live;
 mod save;
 mod signals;

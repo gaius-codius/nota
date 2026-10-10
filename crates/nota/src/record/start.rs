@@ -24,6 +24,7 @@ use nota_recorder::session::{SessionDir, SessionLock, SessionStore, SessionWrite
 use nota_store::{Heard, NewSession, Track, TrackKind};
 use nota_tui::Event;
 
+use super::health::{LibraryHealth, ReportingStore};
 use super::live::{LiveEnd, LiveInput, spawn_live};
 use super::save::{Saver, ToSave, to_screen};
 use super::signals::{SignalThread, listen_for_signals};
@@ -173,18 +174,14 @@ fn start_with_notes<B: CaptureBackend>(
     // Everything that can fail to start does so before any stream opens,
     // while there's no audio to lose.
     let rows = NewSessionRows::new(library.db().clone(), asked.clone());
-    // SQLite writes the database itself, so the segment rows' commits are
-    // watched for a full disk too.
-    let store = WatchedStore::new(rows.clone(), Arc::clone(&watch), &library.db_path());
-    let publisher = Publisher::spawn(SessionStore::new(lock.clone(), store), segment_length())?;
-    // The live text, marks and notes are stored as they come, on a thread
-    // of their own; whichever of it and the publisher writes first adds the
-    // session's row.
-    let saver = Saver::spawn(
-        saving(rows.clone(), session.id, args.models.as_ref().map(heard_by)),
-        ui.clone(),
-        Arc::clone(clock),
-    )?;
+    let writers = Writers {
+        rows: &rows,
+        session: session.id,
+        lock: &lock,
+        watch: &watch,
+        db_path: library.db_path(),
+    };
+    let (saver, publisher) = start_writers(&writers, args, &ui, clock)?;
     let (live_inputs, live) = start_live(args, clock, &ui, &saver)?;
     // Usage is reckoned for every track asked for: a little early with a
     // low disk if one doesn't start.
@@ -258,6 +255,52 @@ fn start_with_notes<B: CaptureBackend>(
         save: started_save,
     };
     Ok((running, screening))
+}
+
+/// What the library's two writers during a recording need: the session's
+/// rows, its lock and the disk watch, and the database's path.
+struct Writers<'a> {
+    rows: &'a NewSessionRows,
+    session: SessionId,
+    lock: &'a SessionLock<RecordFs>,
+    watch: &'a Arc<DiskWatch<StdFs>>,
+    db_path: PathBuf,
+}
+
+/// Starts the saver and the publisher. The live text, marks and notes are
+/// stored as they come, on a thread of their own; whichever of it and the
+/// publisher writes first adds the session's row. Both note whether the
+/// library takes their writes, for the one warning that says it doesn't.
+fn start_writers(
+    writers: &Writers<'_>,
+    args: &RecordArgs,
+    ui: &Sender<Event>,
+    clock: &Arc<dyn Clock>,
+) -> std::io::Result<(Saver, Publisher)> {
+    let health = LibraryHealth::default();
+    let saver = Saver::spawn(
+        saving(
+            writers.rows.clone(),
+            writers.session,
+            args.models.as_ref().map(heard_by),
+        ),
+        ui.clone(),
+        Arc::clone(clock),
+        health.clone(),
+    )?;
+    let reporting = ReportingStore::new(
+        writers.rows.clone(),
+        health,
+        ui.clone(),
+        saver.sender(),
+        Arc::clone(clock),
+    );
+    // SQLite writes the database itself, so the segment rows' commits are
+    // watched for a full disk too.
+    let store = WatchedStore::new(reporting, Arc::clone(writers.watch), &writers.db_path);
+    let session = SessionStore::new(writers.lock.clone(), store);
+    let publisher = Publisher::spawn(session, segment_length())?;
+    Ok((saver, publisher))
 }
 
 /// Says on screen that earlier sessions are being checked, so a long
@@ -1380,7 +1423,13 @@ mod tests {
         let fake = Arc::new(FakeClock::new(SessionTime::from_nanos(5_000_000_000)));
         let clock: Arc<dyn Clock> = Arc::clone(&fake) as Arc<dyn Clock>;
         let (ui, screen) = mpsc::channel::<Event>();
-        let saver = Saver::spawn(saving(rows, id, None), ui.clone(), Arc::clone(&clock)).unwrap();
+        let saver = Saver::spawn(
+            saving(rows, id, None),
+            ui.clone(),
+            Arc::clone(&clock),
+            LibraryHealth::default(),
+        )
+        .unwrap();
 
         through_live(&saver, &ui, &clock);
 

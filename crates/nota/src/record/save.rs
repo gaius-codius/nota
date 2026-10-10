@@ -5,15 +5,16 @@
 //! the screen and the engine never wait on the library database. The
 //! saver writes each item through the library's one writer, in the order
 //! given. When a write fails, the item waits with the ones after it and is
-//! tried again (every [`RETRY_EVERY`], and as more come), the screen is
-//! warned ([`Cause::LibraryUnavailable`]), and the warning is cleared once
-//! a write goes through. The warning is kept on the session's timeline
-//! like every other change: it waits in the same line, so once the
-//! database takes writes again it's stored, raised and then cleared. Each
-//! try takes everything waiting, so a store that fails slowly costs one
-//! try, not one per item. What's still unsaved
-//! when the recording stops is tried once more, then counted as lost: the
-//! audio has it, and the final pass can rebuild the text from it.
+//! tried again (every [`RETRY_EVERY`], and as more come). The screen is
+//! warned ([`Cause::LibraryUnavailable`]) while the saver's writes fail or
+//! the publisher's segment rows do, and the warning is cleared once
+//! neither does ([`LibraryHealth`]). The warning is kept on the session's
+//! timeline like every other change; the saver's own waits in the same
+//! line, so once the database takes writes again it's stored, raised and
+//! then cleared. Each try takes everything waiting, so a store that fails
+//! slowly costs one try, not one per item. What's still unsaved when the
+//! recording stops is tried once more, then counted as lost: the audio has
+//! it, and the final pass can rebuild the text from it.
 //!
 //! The Recording screen shows the warning (`⚠ library offline`); the
 //! summary says what wasn't saved. [`to_screen`] is how whatever else
@@ -26,10 +27,12 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use nota_core::recorder::{Cause, Event as RecorderEvent, Warning, WarningState};
+use nota_core::recorder::{Cause, Event as RecorderEvent, WarningState};
 use nota_core::{Clock, SessionTime, Utterance, Word};
 use nota_store::{Annotation, Happened, StoreError, TimelineEvent};
 use nota_tui::Event;
+
+use super::health::{LibraryHealth, Writer, library_warning};
 
 /// How often unsaved items are tried again while nothing new comes.
 const RETRY_EVERY: Duration = Duration::from_secs(1);
@@ -113,8 +116,10 @@ pub(super) struct Saver {
 }
 
 impl Saver {
-    /// Starts the saver, storing each item with `write`, and warning on
-    /// `ui` while writes fail, at times read from `clock`.
+    /// Starts the saver, storing each item with `write`, and noting in
+    /// `health` whether its writes fail: when that changes whether the
+    /// library is failing at all, it warns on `ui`, at times read from
+    /// `clock`.
     ///
     /// # Errors
     ///
@@ -123,6 +128,7 @@ impl Saver {
         write: impl FnMut(&ToSave) -> Result<(), StoreError> + Send + 'static,
         ui: Sender<Event>,
         clock: Arc<dyn Clock>,
+        health: LibraryHealth,
     ) -> io::Result<Self> {
         let (sender, inputs) = mpsc::channel();
         let thread = thread::Builder::new()
@@ -132,8 +138,9 @@ impl Saver {
                     write,
                     ui,
                     clock,
+                    health,
                     pending: VecDeque::new(),
-                    warned: false,
+                    failing: false,
                     saved: Saved::default(),
                 };
                 saving.run(&inputs);
@@ -163,9 +170,12 @@ struct Saving<W> {
     write: W,
     ui: Sender<Event>,
     clock: Arc<dyn Clock>,
+    /// Whether the library is failing, as the saver and the publisher
+    /// find it.
+    health: LibraryHealth,
     pending: VecDeque<ToSave>,
-    /// The screen has been warned, and not told it's cleared.
-    warned: bool,
+    /// Whether the saver's last write failed.
+    failing: bool,
     saved: Saved,
 }
 
@@ -218,19 +228,26 @@ impl<W: FnMut(&ToSave) -> Result<(), StoreError>> Saving<W> {
                 Ok(()) => {
                     self.saved.stored(item);
                     self.pending.pop_front();
-                    if self.warned {
-                        self.warn(WarningState::Cleared);
-                    }
+                    self.note(false);
                 }
                 Err(e) => {
                     self.saved.error = Some(e.to_string());
-                    if !self.warned {
-                        self.warn(WarningState::Raised);
-                    }
+                    self.note(true);
                     return;
                 }
             }
         }
+    }
+
+    /// Notes whether the saver's last write `failed`, if that changed,
+    /// warning as [`LibraryHealth::note`] says.
+    fn note(&mut self, failed: bool) {
+        if self.failing == failed {
+            return;
+        }
+        self.failing = failed;
+        let health = self.health.clone();
+        health.note(Writer::Saver, failed, |state| self.warn(state));
     }
 
     /// Warns the screen, and queues the change for the timeline behind
@@ -241,14 +258,8 @@ impl<W: FnMut(&ToSave) -> Result<(), StoreError>> Saving<W> {
     /// went on, and a store that fails every other write can't grow the
     /// queue that way.
     fn warn(&mut self, state: WarningState) {
-        self.warned = state == WarningState::Raised;
         let at = self.clock.now();
-        let event = RecorderEvent::Warning(Warning {
-            cause: Cause::LibraryUnavailable,
-            track: None,
-            at,
-            state,
-        });
+        let event = library_warning(state, self.clock.as_ref());
         let clear_waits = matches!(
             self.pending.back(),
             Some(ToSave::Event(TimelineEvent {

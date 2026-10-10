@@ -5,6 +5,7 @@ use nota_core::{FakeClock, SessionTime, TrackId};
 use nota_store::Happened;
 
 use super::*;
+use crate::record::health::LibraryHealth;
 
 fn ms(ms: u64) -> SessionTime {
     SessionTime::from_nanos(ms * 1_000_000)
@@ -121,7 +122,7 @@ fn eventually(mut done: impl FnMut() -> bool) {
 fn everything_given_is_stored_in_order() {
     let fake = Fake::default();
     let (ui, screen) = mpsc::channel();
-    let saver = Saver::spawn(fake.write(), ui, clock()).unwrap();
+    let saver = Saver::spawn(fake.write(), ui, clock(), LibraryHealth::default()).unwrap();
     let given = [text(1), mark(2), event(3), text(4)];
     let sender = saver.sender();
     for item in &given {
@@ -151,7 +152,7 @@ fn everything_given_is_stored_in_order() {
 fn what_fails_is_kept_tried_again_and_stored_once_it_can_be() {
     let fake = Fake::default();
     let (ui, screen) = mpsc::channel();
-    let saver = Saver::spawn(fake.write(), ui, clock()).unwrap();
+    let saver = Saver::spawn(fake.write(), ui, clock(), LibraryHealth::default()).unwrap();
     let sender = saver.sender();
     sender.send(text(1)).unwrap();
     eventually(|| fake.stored().len() == 1);
@@ -201,7 +202,7 @@ fn a_store_down_for_good_loses_what_it_was_given_and_says_so() {
     let fake = Fake::default();
     fake.fail(true);
     let (ui, screen) = mpsc::channel();
-    let saver = Saver::spawn(fake.write(), ui, clock()).unwrap();
+    let saver = Saver::spawn(fake.write(), ui, clock(), LibraryHealth::default()).unwrap();
     let sender = saver.sender();
     for at in 0..3 {
         sender.send(text(at)).unwrap();
@@ -248,7 +249,7 @@ fn the_oldest_are_dropped_past_the_bound() {
         }
     };
     let (ui, _screen) = mpsc::channel();
-    let saver = Saver::spawn(gated_write, ui, clock()).unwrap();
+    let saver = Saver::spawn(gated_write, ui, clock(), LibraryHealth::default()).unwrap();
     let sender = saver.sender();
     sender.send(mark(0)).unwrap();
     entering.recv().unwrap();
@@ -282,7 +283,7 @@ fn a_slow_failing_store_is_tried_once_for_everything_waiting() {
         }
     };
     let (ui, _screen) = mpsc::channel();
-    let saver = Saver::spawn(slow, ui, clock()).unwrap();
+    let saver = Saver::spawn(slow, ui, clock(), LibraryHealth::default()).unwrap();
     let sender = saver.sender();
     for at in 0..500 {
         sender.send(text(at)).unwrap();
@@ -312,8 +313,9 @@ fn a_store_that_fails_every_other_write_does_not_grow_the_queue() {
         },
         ui,
         clock: clock(),
+        health: LibraryHealth::default(),
         pending: VecDeque::new(),
-        warned: false,
+        failing: false,
         saved: Saved::default(),
     };
     for at in 1..=5 {
@@ -327,4 +329,34 @@ fn a_store_that_fails_every_other_write_does_not_grow_the_queue() {
     // The five given and the raise, at most.
     assert_eq!(longest, 6);
     assert_eq!(saving.saved.text, 5);
+}
+
+/// While the publisher's rows fail, the saver's own failure and recovery
+/// say nothing: the library's one warning is already up, and stays up
+/// until the publisher gets through too.
+#[test]
+fn the_saver_getting_through_leaves_the_publisher_s_warning_up() {
+    use crate::record::health::Writer;
+
+    let health = LibraryHealth::default();
+    health.note(Writer::Publisher, true, drop);
+    let fake = Fake::default();
+    let (ui, screen) = mpsc::channel();
+    let saver = Saver::spawn(fake.write(), ui, clock(), health.clone()).unwrap();
+    let sender = saver.sender();
+    fake.fail(true);
+    sender.send(text(1)).unwrap();
+    // Tried and refused, then tried again once it works.
+    eventually(|| fake.tries() >= 1);
+    fake.fail(false);
+    eventually(|| fake.stored().len() == 1);
+    drop(sender);
+    let report = saver.finish();
+    assert_eq!(warnings(&screen), []);
+    assert_eq!(fake.stored(), [text(1)]);
+    assert_eq!(report.events, 0);
+    // The publisher getting through is what clears it.
+    let mut cleared = None;
+    health.note(Writer::Publisher, false, |state| cleared = Some(state));
+    assert_eq!(cleared, Some(WarningState::Cleared));
 }
