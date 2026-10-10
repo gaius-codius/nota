@@ -3,13 +3,13 @@
 //! and `scripts/real-engine-kill.sh`.
 //!
 //! - `write <dir> <log> <ref> --source NODE --seconds S --segment-seconds K
-//!   [--tracks T] [--stop-after N] [--ballast BYTES] [--ballast-after S]`
+//!   [--tracks T] [--stop-after N] [--ballast BYTES] [--ballast-after A]`
 //!   captures `T` tracks (default 1), each
 //!   its own stream from the `PipeWire` node `NODE`, at 16 kHz for `S`
 //!   seconds into `<dir>/session`, with the store at
 //!   `<dir>/library.db`, publishing each finished journal on a publisher
 //!   thread as it goes, in `K`-second segment windows. With `--ballast`,
-//!   `S` seconds in (default 2) a thread makes a ballast of `BYTES` in
+//!   `A` seconds in (default 2) a thread makes a ballast of `BYTES` in
 //!   `<dir>`, as the disk monitor's thread does, so the recording's fsyncs
 //!   run while it's written; its start and end are logged, and `check`
 //!   reports the lag at the fsyncs that overlapped it (GAI-357). Keep it
@@ -793,6 +793,7 @@ mod linux {
             .optional("stop-after")?
             .map(usize::try_from)
             .transpose()?;
+        let ballast_plan = ballast_plan(args)?;
         let mut marker = log_path.clone().into_os_string();
         marker.push(".stopped");
 
@@ -844,7 +845,7 @@ mod linux {
             let fs = fs.clone();
             thread::spawn(move || record(writer, timelines, &events, &to_publish, &fs))
         };
-        let ballast = spawn_ballast(args, &fs, &clock, &dir)?;
+        let ballast = spawn_ballast(ballast_plan, &fs, &clock, &dir);
         wait(Duration::from_secs(seconds));
         drop(captures);
         fs.0.note("stopped")?;
@@ -854,15 +855,14 @@ mod linux {
         // Finished even if the stream failed, so its last unsynced audio is
         // fsync'd before the error is reported.
         let last = writer.finish();
-        if let Some(ballast) = ballast {
-            ballast
-                .join()
-                .map_err(|_| "the ballast thread panicked")??;
-        }
+        // The recording's own errors come first; the ballast's, with its
+        // cause named, after them.
+        let ballast = join_ballast(ballast);
         result?;
         if let Some(e) = unlogged {
             return Err(e.into());
         }
+        ballast?;
         let last = last?;
         let _ = to_publish.send(last);
         drop(to_publish);
@@ -889,21 +889,39 @@ mod linux {
         Ok(failures == 0)
     }
 
-    /// Starts the `--ballast` thread, if the flag is given.
-    fn spawn_ballast(
-        args: &Args,
-        fs: &TapFs,
-        clock: &Arc<dyn Clock>,
-        dir: &Path,
-    ) -> Res<Option<thread::JoinHandle<Res<()>>>> {
+    /// The `--ballast` flags: the ballast's length and how long after
+    /// capture starts it's written, if one is wanted.
+    fn ballast_plan(args: &Args) -> Res<Option<(u64, Duration)>> {
         let Some(len) = args.optional("ballast")? else {
             return Ok(None);
         };
         let after = Duration::from_secs(args.optional("ballast-after")?.unwrap_or(2));
+        Ok(Some((len, after)))
+    }
+
+    /// Waits for the ballast thread, if there was one.
+    fn join_ballast(ballast: Option<thread::JoinHandle<Res<()>>>) -> Res<()> {
+        let Some(ballast) = ballast else {
+            return Ok(());
+        };
+        ballast
+            .join()
+            .map_err(|_| "the ballast thread panicked")?
+            .map_err(|e| format!("the ballast: {e}").into())
+    }
+
+    /// Starts the ballast thread, if one is wanted.
+    fn spawn_ballast(
+        plan: Option<(u64, Duration)>,
+        fs: &TapFs,
+        clock: &Arc<dyn Clock>,
+        dir: &Path,
+    ) -> Option<thread::JoinHandle<Res<()>>> {
+        let (len, after) = plan?;
         let (fs, clock, dir) = (fs.clone(), Arc::clone(clock), dir.to_path_buf());
-        Ok(Some(thread::spawn(move || {
+        Some(thread::spawn(move || {
             make_ballast(&fs, &*clock, &dir, len, after)
-        })))
+        }))
     }
 
     /// Makes a ballast of `len` bytes in `dir` after `after`, as the disk
@@ -1584,11 +1602,14 @@ mod linux {
     }
 
     /// What the fsyncs that overlapped the ballast's writing showed, for
-    /// the result: `none` if none was written, else `<ms to write>ms` (or
-    /// `unmade`), the fsyncs that overlapped it, the worst lag behind the
-    /// audio delivered and the slowest fsync among them (ms), and whether
-    /// the lag stayed within the 2 s bound (`none-overlapped` if no fsync
-    /// overlapped the ballast, which then measured nothing).
+    /// the result: `none` if none was written, else
+    /// `<ms to write>ms:<fsyncs that overlapped it>:<worst lag behind the
+    /// audio delivered, ms>:<slowest fsync, ms>:<bound>:<percent of the
+    /// writing the recording covered>`. The bound is `within` or `over`
+    /// the 2 s bound; `within-partial` if the recording stopped before the
+    /// ballast was whole; `none-overlapped` if no fsync overlapped it and
+    /// `unmade` if there was no room or another process held the lock,
+    /// where nothing was measured.
     fn ballast_report(p: &Promised) -> String {
         let Some((began, ended, made)) = p.ballast else {
             return "none".to_owned();
@@ -1611,17 +1632,26 @@ mod linux {
             reason = "times in a measurement run are far below 2^52"
         )]
         let to_ms = |ns: u64| ns as f64 / 1_000_000.0;
+        // The recording may stop before the ballast is whole; the lag after
+        // that wasn't measured.
+        let length = ended.saturating_sub(began).max(1);
+        let covered = p
+            .stopped
+            .map_or(length, |s| s.clamp(began, ended).saturating_sub(began));
+        let partial = covered < length;
+        let bound = match (made, count, lag > MAX_LAG, partial) {
+            (false, ..) => "unmade",
+            (_, 0, ..) => "none-overlapped",
+            (_, _, true, _) => "over",
+            (_, _, false, true) => "within-partial",
+            (_, _, false, false) => "within",
+        };
         format!(
-            "{:.0}ms{}:{count}:{:.0}:{:.0}:{}",
+            "{:.0}ms:{count}:{:.0}:{:.0}:{bound}:{:.0}",
             to_ms(ended.saturating_sub(began)),
-            if made { "" } else { "(unmade)" },
             ms(lag),
             to_ms(took),
-            match (count, lag > MAX_LAG) {
-                (0, _) => "none-overlapped",
-                (_, true) => "over",
-                (_, false) => "within",
-            }
+            to_ms(covered) * 100.0 / to_ms(length)
         )
     }
 
@@ -2129,21 +2159,35 @@ mod linux {
                 ],
                 true,
             );
-            assert_eq!(ballast_report(&p), "3000ms:2:1000:2500:within");
+            assert_eq!(ballast_report(&p), "3000ms:2:1000:2500:within:100");
         }
 
         #[test]
         fn past_two_seconds_is_over() {
             let p = promised(&[(3 * SEC, 0, 32_001, 3 * SEC - 1)], true);
-            assert!(ballast_report(&p).ends_with(":over"));
+            assert!(ballast_report(&p).contains(":over:"));
             let p = promised(&[(3 * SEC, 0, 32_000, 3 * SEC - 1)], true);
-            assert!(ballast_report(&p).ends_with(":within"));
+            assert!(ballast_report(&p).contains(":within:"));
         }
 
         #[test]
         fn an_unmade_ballast_and_no_overlap_say_so() {
             let p = promised(&[(SEC, 0, 100_000, SEC - 1)], false);
-            assert_eq!(ballast_report(&p), "3000ms(unmade):0:0:0:none-overlapped");
+            assert_eq!(ballast_report(&p), "3000ms:0:0:0:unmade:100");
+            let p = promised(&[(SEC, 0, 100_000, SEC - 1)], true);
+            assert_eq!(ballast_report(&p), "3000ms:0:0:0:none-overlapped:100");
+        }
+
+        /// An fsync already running when the ballast began is counted, and a
+        /// recording that stopped before the ballast was whole says so.
+        #[test]
+        fn a_running_fsync_counts_and_a_short_recording_is_partial() {
+            let mut p = promised(&[(5 * SEC / 2, 0, 8_000, 3 * SEC / 2)], true);
+            assert_eq!(ballast_report(&p), "3000ms:1:500:1000:within:100");
+            p.stopped = Some(3 * SEC);
+            assert_eq!(ballast_report(&p), "3000ms:1:500:1000:within-partial:33");
+            p.tracks.get_mut(&0).unwrap().syncs[0].3 = 32_001;
+            assert!(ballast_report(&p).contains(":over:33"));
         }
     }
 }

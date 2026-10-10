@@ -50,8 +50,9 @@
 # a few seconds into a --measure-only run, so the journal fsyncs run while
 # it's written, and reports the worst lag behind the audio delivered and the
 # slowest fsync among the fsyncs that overlapped it against the 2 s bound
-# (reported, not failed). Use --seconds 12 or more, and put --scratch on the
-# disk to measure: a slow one (an HDD, an SD card, ext4 on either) is what
+# (reported, not failed). Use --seconds long enough to outlast the ballast's
+# writing (the result says how much of it the recording covered), and put
+# --scratch on the disk to measure: a slow one (an HDD, an SD card, ext4 on either) is what
 # it's for.
 #
 # Run it on a real disk: on tmpfs every fsync is free, so the lag measures
@@ -327,11 +328,18 @@ if [[ $DISK_LOAD -eq 1 ]]; then
     sed 's/^\([0-9]*\)@\([^:]*\):\([^/]*\)\/fsync\([^/]*\)\/before\(.*\)$/  track \1 at \2: \3 behind; its fsync took \4, the one before \5/' || true
 fi
 if [[ $BALLAST -eq 1 ]]; then
-  # <ms to write>ms:<fsyncs overlapping>:<worst lag ms>:<slowest fsync ms>:<bound>
-  IFS=: read -r wrote overlapping lag took bound \
+  # <ms to write>ms:<fsyncs overlapping>:<worst lag ms>:<slowest fsync ms>:<bound>:<covered %>
+  IFS=: read -r wrote overlapping lag took bound covered \
     <<<"$(sed -n 's/.* ballast=\([^ ]*\).*/\1/p' "$WORK/count/check.out")"
-  echo "ballast written in $wrote: $overlapping fsyncs overlapped it, worst lag $lag ms behind" \
-    "the audio delivered, slowest fsync $took ms; bound check: $bound (2 s, reported, not failed)"
+  echo "ballast written in $wrote ($covered% of it while recording): $overlapping fsyncs" \
+    "overlapped it, worst lag $lag ms behind the audio delivered, slowest fsync $took ms;" \
+    "bound check: $bound (2 s, reported, not failed)"
+  case $bound in
+    within | over) ;;
+    *) echo "  not a measurement of the whole ballast (a recording that ends before it" \
+      "does, or none overlapping it): try a longer --seconds or a slower --scratch;" \
+      "unmade: it needs a --scratch with more than 512 MiB free" ;;
+  esac
 fi
 if [[ $MEASURE_ONLY -eq 1 ]]; then
   slow=$(grep -c '^slow ' "$WORK/count/log" || true)

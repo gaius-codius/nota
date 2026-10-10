@@ -62,23 +62,28 @@ fi
 if [[ $EXT4 -eq 1 ]]; then
   FUSE2FS=${FUSE2FS:-fuse2fs}
   command -v "$FUSE2FS" > /dev/null || { echo "disk-full: no fuse2fs (set FUSE2FS)" >&2; exit 2; }
+  command -v fusermount3 > /dev/null || { echo "disk-full: no fusermount3" >&2; exit 2; }
   command -v mkfs.ext4 > /dev/null || { echo "disk-full: no mkfs.ext4" >&2; exit 2; }
 fi
 
 # ext4_run SIZE DIR CMD...: runs CMD with a fresh ext4 of SIZE mounted on DIR
 # (fuse2fs forks into the background once it has mounted), then unmounts it
-# and removes the image. The mount is in this user's namespace, so it's
-# unmounted by its mount point.
+# and removes the image. It is called inside `$(...)`, where `set -e` is
+# off, so every step is checked: a mount that failed must not run CMD on
+# the host's own disk. The mount is in the system's mount table (not in a
+# namespace of its own, as the tmpfs one is), so it's unmounted by its mount
+# point on every way out, an interrupt included.
 ext4_run() {
   local size=$1 dir=$2 image status=0
   shift 2
-  image=$(mktemp)
-  truncate -s "$size" "$image"
-  mkfs.ext4 -q -F "$image"
-  "$FUSE2FS" "$image" "$dir" -o fakeroot
+  image=$(mktemp) || return 1
+  # shellcheck disable=SC2064 # $image and $dir are fixed from here on
+  trap "fusermount3 -u '$dir' 2> /dev/null || fusermount3 -uz '$dir' 2> /dev/null; rm -f '$image'" RETURN
+  truncate -s "$size" "$image" || return 1
+  mkfs.ext4 -q -F "$image" || return 1
+  "$FUSE2FS" "$image" "$dir" -o fakeroot || return 1
+  mountpoint -q "$dir" || { echo "disk-full: $dir isn't a mount point" >&2; return 1; }
   "$@" || status=$?
-  fusermount3 -u "$dir" || fusermount3 -uz "$dir" || true
-  rm -f "$image"
   return "$status"
 }
 
@@ -90,7 +95,8 @@ bin=$target/debug/examples/disk_full
 failed=0
 for size in "${SIZES[@]}"; do
   dir=$(mktemp -d)
-  # The mount lives only in the namespace, and goes with it.
+  # A tmpfs mount lives only in its namespace, and goes with it; an ext4
+  # one is unmounted by ext4_run.
   if [[ $EXT4 -eq 1 ]]; then
     run=(ext4_run "$size" "$dir" "$bin" "$dir" "${FLAGS[@]}")
   else
