@@ -150,7 +150,7 @@ fn start_with_notes<B: CaptureBackend>(
     let library = library.map_or_else(|| Library::open(&args.data), Ok)?;
     show_recovering(&mut screen);
     let watch = recover(&library, args, notes)?;
-    if stop_asked(&ui_events) {
+    if stop_asked(&ui, &ui_events) {
         return Err(STOPPED_BEFORE.into());
     }
     let session = create_session(&library, &watch)?;
@@ -210,7 +210,7 @@ fn start_with_notes<B: CaptureBackend>(
     // Before the first audio, so no stretch of the recording is unguarded.
     let sleep = inhibit::hold(logind);
     let (captures, listening, ready) =
-        open_streams(ready, starter, backend, &sources, &ui_events, notes)?;
+        open_streams(ready, starter, backend, &sources, &ui, &ui_events, notes)?;
     sleep.report(clock.as_ref(), &ui, notes);
     unmade.keep();
     keep_started(&rows, &watch, &session, &asked, &captures, notes);
@@ -275,11 +275,20 @@ fn show_recovering(screen: &mut Screen) {
 pub(super) const RECOVERING: &str = "Checking earlier recordings…";
 
 /// Whether a signal asked for a stop since the signals were first
-/// listened for. Before the screen, they're all that can be waiting.
-fn stop_asked(ui_events: &Receiver<Event>) -> bool {
-    ui_events
+/// listened for. Signals aren't all that can be waiting: the disk monitor
+/// starts before the streams and reports at once, so every other event is
+/// sent back to the channel (through `ui`, the receiver's own sender) for
+/// the screen. They're all taken out before any is sent back, so the
+/// check can't read its own events again.
+fn stop_asked(ui: &Sender<Event>, ui_events: &Receiver<Event>) -> bool {
+    let (stops, kept): (Vec<_>, Vec<_>) = ui_events
         .try_iter()
-        .any(|event| matches!(event, Event::Recorder(recorder::Event::Stopping)))
+        .partition(|event| matches!(event, Event::Recorder(recorder::Event::Stopping)));
+    for event in kept {
+        // The receiver is `ui_events`, which the caller holds.
+        let _ = ui.send(event);
+    }
+    !stops.is_empty()
 }
 
 /// Opens the streams once everything else has started, unless a stop was
@@ -290,11 +299,12 @@ fn open_streams<B: CaptureBackend>(
     starter: TrackStarter,
     backend: &B,
     sources: &[(TrackId, Source)],
+    ui: &Sender<Event>,
     ui_events: &Receiver<Event>,
     notes: &mut Vec<String>,
 ) -> Result<Opened<B::Stream>, BoxError> {
     // A stop asked for while all that started: still no audio.
-    if stop_asked(ui_events) {
+    if stop_asked(ui, ui_events) {
         drop(starter);
         ready.abandon();
         return Err(STOPPED_BEFORE.into());
@@ -905,6 +915,53 @@ mod tests {
                 (SYSTEM, Source::Device("speakers.monitor".to_owned()))
             ]
         );
+    }
+
+    /// The events the screen should see once it exists: the monitor's
+    /// space and low-disk warning, in the order it sent them.
+    fn disk_events() -> [Event; 2] {
+        let disk = recorder::Event::Disk(recorder::Disk {
+            free_bytes: 1 << 30,
+            left: None,
+        });
+        let low = recorder::Event::Warning(Warning {
+            cause: Cause::DiskLow,
+            track: None,
+            at: nota_core::SessionTime::ZERO,
+            state: WarningState::Raised,
+        });
+        [Event::Recorder(disk), Event::Recorder(low)]
+    }
+
+    /// A start that wasn't asked to stop leaves what the disk monitor
+    /// reported for the screen, in order.
+    #[test]
+    fn a_start_not_asked_to_stop_keeps_the_disk_events() {
+        let (ui, ui_events) = mpsc::channel();
+        let events = disk_events();
+        for event in events.clone() {
+            ui.send(event).unwrap();
+        }
+
+        assert!(!stop_asked(&ui, &ui_events));
+
+        // The check ran once; the events must still be there to read.
+        assert_eq!(ui_events.try_iter().collect::<Vec<_>>(), events);
+    }
+
+    /// A queued stop makes the start give up, and the events queued beside
+    /// it are still left for the screen.
+    #[test]
+    fn a_queued_stop_ends_the_start_and_keeps_the_other_events() {
+        let (ui, ui_events) = mpsc::channel();
+        let events = disk_events();
+        ui.send(events[0].clone()).unwrap();
+        ui.send(Event::Recorder(recorder::Event::Stopping)).unwrap();
+        ui.send(events[1].clone()).unwrap();
+
+        assert!(stop_asked(&ui, &ui_events));
+
+        assert_eq!(ui_events.try_iter().collect::<Vec<_>>(), events);
     }
 
     /// The saver's writes add the session's row if nothing has yet, then
