@@ -921,7 +921,7 @@ mod tests {
     /// space and low-disk warning, in the order it sent them.
     fn disk_events() -> [Event; 2] {
         let disk = recorder::Event::Disk(recorder::Disk {
-            free_bytes: 1 << 30,
+            free_bytes: 5_000_000_000,
             left: None,
         });
         let low = recorder::Event::Warning(Warning {
