@@ -170,7 +170,8 @@ deflate64 defmt defmt-macros defmt-parser deltae deranged derive_arbitrary
 derive_more derive_more-impl dirs-sys dispatch2 displaydoc document-features
 either equivalent euclid fancy-regex fastrand filedescriptor filetime
 find-msvc-tools finl_unicode fixedbitset flate2 fnv foldhash form_urlencoded
-futures-core futures-task futures-util getrandom glob hash32 hashbrown
+enum-primitive-derive futures futures-channel futures-core futures-executor
+futures-io futures-macro futures-sink futures-task futures-util getrandom glob hash32 hashbrown
 hashlink heapless heck hex hmac home icu_collections icu_locale_core
 icu_normalizer icu_normalizer_data icu_properties icu_properties_data
 icu_provider ident_case idna idna_adapter indexmap indoc inout instability
@@ -186,7 +187,7 @@ parking_lot parking_lot_core pbkdf2 percent-encoding pest pest_derive
 pest_generator pest_meta phf phf_codegen phf_generator phf_macros phf_shared
 pin-project-lite pipewire-sys pkg-config portable-atomic
 portable-atomic-util potential_utf powerfmt ppv-lite86 proc-macro2
-proc-macro-crate quote rand_chacha rand_xorshift redox_syscall redox_users
+proc-macro-crate pulseaudio quote rand_chacha rand_xorshift redox_syscall redox_users
 r-efi regex regex-automata regex-syntax ring rustc-hash rustc_version
 rustls rustls-pki-types rustls-webpki rustversion ryu same-file scopeguard
 semver seq-macro serde serde_derive serde_json sha1 sherpa-onnx-sys shlex

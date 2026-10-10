@@ -283,7 +283,7 @@ pub(crate) fn record_in(
     return record_with(
         args,
         setup,
-        &nota_recorder::capture::PipeWireBackend,
+        &nota_recorder::capture::AudioBackend::detect(),
         &clock,
         &SystemLogind,
         lent,

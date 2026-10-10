@@ -222,7 +222,7 @@ fn follows(source: &Source) -> bool {
 /// (no device of the kind is left): the stream isn't ended, so it follows
 /// the next default there is (cpal reports that as a change), and the
 /// watch reports the loss once its grace has run out.
-fn stream_error(
+pub(super) fn stream_error(
     source: &Source,
     error: &cpal::Error,
     promoted: bool,
@@ -248,7 +248,7 @@ fn stream_error(
 }
 
 /// Why the stream couldn't be opened or started.
-fn start_error(source: &Source, error: &cpal::Error) -> CaptureError {
+pub(super) fn start_error(source: &Source, error: &cpal::Error) -> CaptureError {
     match error.kind() {
         ErrorKind::HostUnavailable => CaptureError::HostUnavailable(error.to_string()),
         ErrorKind::DeviceNotAvailable => CaptureError::DeviceNotAvailable(source.clone()),

@@ -75,7 +75,7 @@ pub(super) fn show(screen: &mut Screen, page: &Page<'_>) -> Result<Done, BoxErro
         return show_with(screen, page, tone);
     }
     #[cfg(target_os = "linux")]
-    return show_with(screen, page, nota_recorder::capture::PipeWireBackend);
+    return show_with(screen, page, nota_recorder::capture::AudioBackend::detect());
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (screen, page);

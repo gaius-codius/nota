@@ -59,7 +59,7 @@ sha2.workspace = true
 # (the same pipewire-rs cpal's host is built on, MIT) watches the graph's
 # registry and default devices, for each track's device events.
 [target.'cfg(target_os = "linux")'.dependencies]
-cpal = { workspace = true, features = ["pipewire", "realtime-dbus"] }
+cpal = { workspace = true, features = ["pipewire", "pulseaudio", "realtime-dbus"] }
 pipewire.workspace = true
 thread-priority.workspace = true
 
