@@ -386,7 +386,8 @@ fn enospc_at_any_operation_frees_the_ballast_and_loses_nothing_promised() {
                 .unwrap_or_else(|e| panic!("op {at}, {outcome:?}: {e}"));
         }
     }
-    for kind in [Where::Journal, Where::Flac, Where::Row, Where::Marks] {
+    let must_reach = [Where::Journal, Where::Flac, Where::Row, Where::Marks]; // check-bound
+    for kind in must_reach {
         assert!(kinds.contains(&kind), "{kinds:?}"); // check-bound
     }
 }

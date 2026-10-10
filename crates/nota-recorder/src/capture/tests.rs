@@ -1826,7 +1826,7 @@ fn a_drifting_device_is_retimed_and_reported_past_the_limit() {
     assert!(gap_spans(&run.timeline).is_empty());
     assert!(!epoch_events(&run.reported).is_empty());
     let last = run.timeline.current().copied().unwrap();
-    assert!((last.drift().ppb() - 400_000).abs() <= 2, "{last:?}");
+    assert!((last.drift().ppb() - 400_000).abs() <= 2, "{last:?}"); // check-bound
     let drifted: Vec<Drift> = run
         .reported
         .iter()
@@ -2053,6 +2053,6 @@ fn a_loss_epoch_keeps_the_measured_drift() {
         .unwrap();
     // The epoch before was slewing, off the measured drift.
     assert!((before.drift().ppb() - 400_000).abs() > 1_000, "{before:?}"); // check-bound
-    assert!((opened.drift().ppb() - 400_000).abs() <= 2, "{opened:?}");
+    assert!((opened.drift().ppb() - 400_000).abs() <= 2, "{opened:?}"); // check-bound
     assert_eq!(gap_spans(&run.timeline).len(), 1);
 }

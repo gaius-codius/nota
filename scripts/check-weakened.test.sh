@@ -169,10 +169,11 @@ tagged "the crash sweeps' floors" "$(grep -rhE --include='*.rs' \
   "$repo/crates" || true)"
 for want in nota-recorder/src/segment/tests.rs:35 nota-recorder/src/capture/stop_tests.rs:6 \
   nota-recorder/src/journal/tests.rs:6 nota-recorder/src/segment/tests/epochs.rs:3 \
-  nota-recorder/src/segment/tests/disk_full.rs:5 nota-recorder/src/capture/tests.rs:7 \
+  nota-recorder/src/segment/tests/disk_full.rs:6 nota-recorder/src/capture/tests.rs:9 \
   nota/src/library/kept.rs:1 nota-recorder/examples/capture_wall_time.rs:3; do
   file=$repo/crates/${want%:*}
-  got=$(grep -cE '//[[:space:]]*check-bound([^A-Za-z0-9_-]|$)' "$file" || true)
+  # Only a tag after code counts: a comment of its own sets no bound.
+  got=$(grep -cE '^[[:space:]]*[^/[:space:]].*//[[:space:]]*check-bound([^A-Za-z0-9_-]|$)' "$file" || true)
   (( got >= ${want#*:} )) || fail "${want%:*} has $got tagged bounds, expected at least ${want#*:}"
 done
 floors=$(grep -E '^min_[a-z_]+=' "$scripts/real-capture-crash.sh" || true)
