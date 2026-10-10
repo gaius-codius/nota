@@ -79,7 +79,7 @@ impl PublishReport {
     }
 
     /// Journals still needing publication after the last try. A journal
-    /// whose audio is all in durable rows but couldn't be deleted is
+    /// whose audio is all in saved segments but couldn't be deleted is
     /// reported by [`Self::held`] instead.
     #[must_use]
     pub fn left(&self) -> &[FinishedJournal] {

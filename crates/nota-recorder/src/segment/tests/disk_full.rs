@@ -391,7 +391,7 @@ fn enospc_at_any_operation_frees_the_ballast_and_loses_nothing_promised() {
 /// Whether an old stopped session has a reserve to free at startup.
 #[derive(Debug, Clone, Copy)]
 enum StartupBallast {
-    /// A durable reserve left by the previous recording.
+    /// A reserve left by the previous recording.
     Existing,
     /// No reserve was available to the previous recording.
     Missing,
@@ -399,9 +399,9 @@ enum StartupBallast {
 
 /// An old stopped recording on a disk with no free bytes.
 struct StartupDisk {
-    /// Durable journals and, when requested, the existing reserve.
+    /// Synced journals and, when requested, the existing reserve.
     fs: FakeFs,
-    /// The audio the stopped recording promised durable.
+    /// The audio the stopped recording had synced.
     promised: Promised,
 }
 
@@ -423,7 +423,7 @@ fn stopped_full_disk(ballast: StartupBallast) -> StartupDisk {
                 .is_some()
         );
     }
-    // Make the old session the durable starting point for every retry.
+    // Copy what reached the disk before trying each recovery point.
     let fs = fs.copy_disk();
     let used = fs
         .paths()
@@ -502,7 +502,7 @@ fn startup_salvage_on_a_full_disk_without_ballast_keeps_journals() {
         .filter(|(p, _)| is_journal(p))
         .collect();
     assert!(!journals.is_empty());
-    // A failed publish must leave its only durable audio sources intact.
+    // A failed publish must keep the journals holding the stopped audio.
     let run = startup_salvage(&old.fs);
     assert!(run.published.is_err());
     assert_eq!(
