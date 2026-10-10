@@ -12,8 +12,9 @@
 //! mapping says its first sample plays:
 //! - A buffer [`LOSS_MIN`] or more later than the buffer before it puts it
 //!   is a hole: audio was lost before it ([`Reading::Lost`]), and the
-//!   caller opens a new epoch at its capture time, so the loss shows as a
-//!   gap.
+//!   caller opens a new epoch where the buffer came, so the loss shows as
+//!   a gap. So is a run that has built up [`LOSS_BUILT_UP`] behind once
+//!   it has settled.
 //! - Otherwise the difference is drift. Once the meter has watched
 //!   [`MIN_WINDOW`] of audio it knows the device's rate, and when the
 //!   mapping is more than [`RETIME_AFTER`] off it asks for a new epoch
@@ -45,11 +46,15 @@
 //!   over the next 10 to 20 s. So for
 //!   [`SETTLE`] after a run's first buffer the meter neither learns nor
 //!   retimes, and then takes the difference it has reached as the run's
-//!   own: it measures and corrects only what changes after that.
+//!   base: it measures and corrects only what changes after that. The
+//!   timeline so stays on the samples rather than the stamps through the
+//!   settling, and keeps the difference: up to about 14 ms either way, and
+//!   any drift built up over a first run's settling (1 ms at 100 ppm).
 //!
-//! On that hardware each quantum change also lost 20 to 95 ms of audio, a
+//! On that hardware each quantum change also lost 20 to 105 ms of audio, a
 //! jump between one buffer and the next, which reads as a loss as it
-//! should.
+//! should. The gap is placed by the cycle times too, so a delay step
+//! neither widens nor hides it.
 
 use std::time::Duration;
 
@@ -149,10 +154,24 @@ impl Drift {
 
 /// How much later than the buffer before it puts it a buffer must have
 /// been captured to count as audio lost before it, rather than drift:
-/// 10 ms, more than [`RETIME_AFTER`] and a timestamp's jitter, and less
-/// than the smallest buffer an audio server usually loses whole (about
-/// 21 ms at its default quantum).
-pub const LOSS_MIN: Duration = Duration::from_millis(10);
+/// 4 ms. Measured over 58,000 buffers, consecutive cycle times never
+/// strayed by more than 2.1 ms except where audio was lost, and a stream
+/// settling moves them by under a millisecond a buffer. A graph that
+/// loses one quantum of 256 frames at 48 kHz loses 5.3 ms, and one that
+/// restarts can win back up to 14 ms of its buffering as it loses audio,
+/// so the jump it shows is that much less than the loss.
+pub const LOSS_MIN: Duration = Duration::from_millis(4);
+
+/// How far behind the mapping, beyond where it settled, a settled run may
+/// fall before the meter takes what built up for audio lost rather than
+/// drift: 15 ms. Losses smaller than [`LOSS_MIN`] each, a quantum of 64 or
+/// 128 frames, then still show as a gap once they add up, as does a
+/// mapping that drift correction can't keep up with. It leaves room for
+/// [`RETIME_AFTER`], a millisecond of jitter either side, and a first
+/// correction made on a [`MIN_WINDOW`] estimate that jitter has put 150 ppm
+/// out for a whole [`SLEW`]; measured, a settled stream's cycles move by
+/// under a millisecond more.
+pub const LOSS_BUILT_UP: Duration = Duration::from_millis(15);
 
 /// How far an epoch's mapping may stray from the stream's timestamps
 /// before the meter asks for a new epoch to correct it: 4 ms.
@@ -214,13 +233,16 @@ pub enum Reading {
     /// The buffer is where the epoch's mapping says, near enough.
     Steady,
     /// The buffer came at least [`LOSS_MIN`] later than the one before it
-    /// puts it: audio was lost before it. The meter didn't learn from it,
-    /// and reads every buffer after it as lost too until
-    /// [`DriftMeter::restart`]. A new epoch at its capture time makes the
-    /// loss a gap; then call [`DriftMeter::restart`].
+    /// puts it, or a settled run fell [`LOSS_BUILT_UP`] behind: audio was
+    /// lost before it. The meter didn't learn from it, and reads every
+    /// buffer after it as lost too until [`DriftMeter::restart`]. A new
+    /// epoch `hole` after where the mapping puts the buffer makes the loss
+    /// a gap; then call [`DriftMeter::restart`].
     Lost {
-        /// How much later than the mapping it was captured; zero if it
-        /// wasn't later.
+        /// How much audio was lost, as the run reads it: how much later
+        /// than the mapping the buffer came, by the stream's cycle times,
+        /// beyond where the run's first buffer came. Zero if that isn't
+        /// later.
         hole: Duration,
     },
     /// The mapping has strayed by more than [`RETIME_AFTER`] (or a
@@ -271,8 +293,14 @@ struct Run {
     delay: i128,
     /// How much later than the mapping the last buffer read came.
     last_off: i128,
-    /// Whether the run has settled, and how far off it was then, or has
-    /// read as lost.
+    /// How much later than the mapping the run's first buffer came: where
+    /// the run is anchored, and what a loss is measured from.
+    origin: i128,
+    /// How much later than the mapping the run reads as on time: its
+    /// first buffer's difference, then once it has settled, the difference
+    /// reached as it did.
+    base: i128,
+    /// Whether the run is settling, settled or lost.
     phase: Phase,
 }
 
@@ -283,12 +311,8 @@ enum Phase {
     /// watches for a loss.
     Settling,
     /// Settled: the meter measures and corrects by how much later than the
-    /// mapping a buffer comes, less `base` nanoseconds, the difference
-    /// reached as it settled.
-    Settled {
-        /// The difference reached as the run settled.
-        base: i128,
-    },
+    /// mapping a buffer comes, beyond the run's base.
+    Settled,
     /// A buffer read as lost: every buffer does until the meter restarts.
     Lost,
 }
@@ -297,10 +321,13 @@ impl Run {
     /// A run whose first buffer starts at sample `first`, stamped `stamp`,
     /// where the mapping says `first` plays at `mapped` nanoseconds.
     fn start(first: SampleIndex, stamp: Stamp, mapped: i128) -> Self {
+        let off = i128::from(stamp.at.as_nanos()) - mapped;
         Self {
             from: (first, stamp.cycle()),
             delay: nanos(stamp.delay),
-            last_off: i128::from(stamp.at.as_nanos()) - mapped,
+            last_off: off,
+            origin: off,
+            base: off,
             phase: Phase::Settling,
         }
     }
@@ -362,26 +389,25 @@ impl DriftMeter {
         let off = stamp.cycle() - run.delay - mapped;
         let jump = off - run.last_off;
         run.last_off = off;
-        if run.phase == Phase::Lost || jump >= nanos(LOSS_MIN) {
+        if let Some(hole) = lost(&run, jump, off) {
             run.phase = Phase::Lost;
             self.run = Some(run);
-            let late = i128::from(stamp.at.as_nanos()) - mapped;
             return Reading::Lost {
-                hole: Duration::from_nanos(u64::try_from(late).unwrap_or(0)),
+                hole: Duration::from_nanos(u64::try_from(hole).unwrap_or(0)),
             };
         }
         let settled = settle(&mut run, first, stamp.cycle(), off);
         self.run = Some(run);
-        let Phase::Settled { base } = settled else {
+        if settled != Phase::Settled {
             return Reading::Steady;
-        };
+        }
         let (from, from_cycle) = run.from;
         self.learn(
             first.saturating_count_since(from),
             stamp.cycle() - from_cycle,
             epoch.rate(),
         );
-        self.correct(first, off - base, epoch.rate())
+        self.correct(first, off - run.base, epoch.rate())
     }
 
     /// What a settled run's buffer from `first`, `off` nanoseconds later
@@ -435,15 +461,32 @@ impl DriftMeter {
     }
 }
 
+/// How much audio was lost before a buffer of `run` that came `jump`
+/// nanoseconds later than the buffer before it puts it, and `off` later
+/// than the mapping: how much later than the run's first buffer puts it it
+/// came, none if it didn't; or `None` if nothing was lost. Lost if the run
+/// already is, so every loss of a burst counts; if the buffer jumped
+/// [`LOSS_MIN`] or more; or, once the run has settled, if it has built up
+/// [`LOSS_BUILT_UP`] behind its base.
+fn lost(run: &Run, jump: i128, off: i128) -> Option<i128> {
+    let is_lost = match run.phase {
+        Phase::Lost => true,
+        Phase::Settled => jump >= nanos(LOSS_MIN) || off - run.base >= nanos(LOSS_BUILT_UP),
+        Phase::Settling => jump >= nanos(LOSS_MIN),
+    };
+    is_lost.then_some((off - run.origin).max(0))
+}
+
 /// Moves `run` to settled at its buffer from sample `first`, at cycle time
 /// `cycle` and `off` nanoseconds later than the mapping, if it's still
 /// settling and [`SETTLE`] has passed since its first buffer: it measures
-/// from that buffer on, and takes `off` as its own. The run's phase as it
+/// from that buffer on, and takes `off` as its base. The run's phase as it
 /// reads this buffer: still settling at the buffer that settles it.
 fn settle(run: &mut Run, first: SampleIndex, cycle: i128, off: i128) -> Phase {
     let phase = run.phase;
     if phase == Phase::Settling && cycle - run.from.1 >= nanos(SETTLE) {
-        run.phase = Phase::Settled { base: off };
+        run.phase = Phase::Settled;
+        run.base = off;
         run.from = (first, cycle);
     }
     phase

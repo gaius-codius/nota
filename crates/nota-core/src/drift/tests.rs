@@ -150,11 +150,11 @@ fn a_run_s_first_buffer_only_starts_it() {
         read(&mut meter, &timeline, 1_600, 600_000_000),
         Reading::Steady
     );
-    // Then 10 ms later than that: a loss, the whole way behind it.
+    // Then 10 ms later than that: a loss of 10 ms.
     assert_eq!(
         read(&mut meter, &timeline, 3_200, 710_000_000),
         Reading::Lost {
-            hole: Duration::from_millis(510)
+            hole: Duration::from_millis(10)
         }
     );
 }
@@ -169,13 +169,13 @@ fn a_buffer_late_by_the_loss_minimum_is_a_loss() {
     let mut short = meter.clone();
     // Sample 1,600 plays at 100 ms.
     assert_eq!(
-        read(&mut short, &timeline, 1_600, 109_999_999),
+        read(&mut short, &timeline, 1_600, 103_999_999),
         Reading::Steady
     );
     assert_eq!(
-        read(&mut meter, &timeline, 1_600, 110_000_000),
+        read(&mut meter, &timeline, 1_600, 104_000_000),
         Reading::Lost {
-            hole: Duration::from_millis(10)
+            hole: Duration::from_millis(4)
         }
     );
 }
@@ -219,6 +219,36 @@ fn a_slide_past_the_loss_minimum_is_not_a_loss() {
     }
 }
 
+/// Once a run has settled, small steps that build up [`LOSS_BUILT_UP`]
+/// behind where it settled are a loss, however small each one.
+#[test]
+fn small_losses_built_up_after_settling_are_a_loss() {
+    let timeline = epoch_at(Drift::ZERO);
+    let mut meter = DriftMeter::new();
+    settle_run(&mut meter, &timeline);
+    // A 2.7 ms quantum lost every 100 ms: under the loss minimum each.
+    let quantum = 2_700_000;
+    let readings: Vec<Reading> = (1..=6)
+        .map(|n| {
+            let at = SETTLED_AT + n * (100_000_000 + quantum);
+            read(&mut meter, &timeline, SETTLED + n * 1_600, at)
+        })
+        .collect();
+    assert_eq!(
+        readings,
+        [
+            Reading::Steady,
+            Reading::Steady,
+            Reading::Steady,
+            Reading::Steady,
+            Reading::Steady,
+            Reading::Lost {
+                hole: Duration::from_nanos(6 * quantum)
+            }
+        ]
+    );
+}
+
 /// After a restart the next buffer starts a new run, and the drift
 /// measured before is kept.
 #[test]
@@ -235,6 +265,14 @@ fn a_restart_starts_a_new_run_and_keeps_the_drift() {
         Reading::Steady
     );
     assert_eq!(meter.measured(), Some(Drift::ZERO));
+    // Read from where that buffer put it: 20 ms later than that is a loss
+    // of 20 ms.
+    assert_eq!(
+        read(&mut meter, &timeline, 501_600, 32_370_000_000),
+        Reading::Lost {
+            hole: Duration::from_millis(20)
+        }
+    );
 }
 
 /// Until a run has settled the meter neither measures nor corrects,
@@ -244,11 +282,13 @@ fn nothing_is_measured_while_a_run_settles() {
     let timeline = epoch_at(Drift::ZERO);
     let mut meter = DriftMeter::new();
     meter.measured = Some(Drift::ZERO);
-    read(&mut meter, &timeline, 0, 0);
+    // A run starting 100 s in, so its settling counts from there.
+    let start = 100_000_000_000;
+    read(&mut meter, &timeline, 1_600_000, start);
     // 9 ms behind just short of SETTLE, reached a millisecond a buffer.
     for n in 1..=9 {
-        let at = n * 1_000_000_000 + n * 1_000_000;
-        let first = n * 16_000;
+        let at = start + n * 1_000_000_000 + n * 1_000_000;
+        let first = 1_600_000 + n * 16_000;
         let reading = read(&mut meter, &timeline, first, at);
         assert_eq!(reading, Reading::Steady, "{n}");
     }
@@ -264,16 +304,13 @@ fn no_retime_before_the_rate_is_known() {
     let timeline = epoch_at(Drift::ZERO);
     let mut meter = DriftMeter::new();
     settle_run(&mut meter, &timeline);
-    // 9 ms behind at 9 s on: past the retime limit, short of a loss.
-    assert_eq!(
-        read(
-            &mut meter,
-            &timeline,
-            SETTLED + 144_000,
-            SETTLED_AT + 9_009_000_000
-        ),
-        Reading::Steady
-    );
+    // 9 ms behind by 9 s on, a millisecond a second: past the retime
+    // limit, short of a loss.
+    for n in 1..=9 {
+        let at = SETTLED_AT + n * 1_001_000_000;
+        let reading = read(&mut meter, &timeline, SETTLED + n * 16_000, at);
+        assert_eq!(reading, Reading::Steady, "{n}");
+    }
     assert_eq!(meter.measured(), None);
 }
 
@@ -294,8 +331,8 @@ fn a_run_measures_from_where_it_settled() {
         Reading::Steady
     );
     assert_eq!(
-        meter.run.map(|r| r.phase),
-        Some(Phase::Settled { base: 8_000_000 })
+        meter.run.map(|r| (r.phase, r.base)),
+        Some((Phase::Settled, 8_000_000))
     );
     // 10 s on, still 8 ms behind: no drift, so nothing to correct.
     let later = SETTLED + 160_000;
@@ -312,13 +349,21 @@ fn a_mapping_off_by_the_retime_limit_is_left() {
     let timeline = epoch_at(Drift::ZERO);
     let mut meter = DriftMeter::new();
     settle_run(&mut meter, &timeline);
-    // Sample 320,000 plays at 20 s; it was captured 4 ms later.
+    // 2 ms behind halfway; then sample 320,000, which plays at 20 s, was
+    // captured 4 ms later.
+    read(
+        &mut meter,
+        &timeline,
+        SETTLED + 80_000,
+        SETTLED_AT + 5_002_000_000,
+    );
+    let mut exact = meter.clone();
     let first = SETTLED + 160_000;
     assert_eq!(
-        read(&mut meter, &timeline, first, SETTLED_AT + 10_004_000_000),
+        read(&mut exact, &timeline, first, SETTLED_AT + 10_004_000_000),
         Reading::Steady
     );
-    assert!(meter.measured().is_some());
+    assert!(exact.measured().is_some());
     assert_eq!(
         read(&mut meter, &timeline, first, SETTLED_AT + 10_004_000_001),
         Reading::Retime(Drift(-399_841 - 66_666))
@@ -429,7 +474,12 @@ fn a_short_window_past_the_limit_is_not_reported() {
     let timeline = epoch_at(Drift::ZERO);
     let mut meter = DriftMeter::new();
     settle_run(&mut meter, &timeline);
-    // 5 ms short over 10 s: 500 ppm slow, as one unseen loss makes it.
+    // 5 ms short over 10 s, a millisecond at a time, as quanta lost too
+    // small to see make it: 500 ppm slow.
+    for n in 1..=5 {
+        let at = SETTLED_AT + n * 1_001_000_000;
+        read(&mut meter, &timeline, SETTLED + n * 16_000, at);
+    }
     read(
         &mut meter,
         &timeline,
@@ -621,6 +671,8 @@ fn a_stream_settling_as_measured_is_neither_lost_nor_drifting() {
             stamped(true_ns.saturating_add_signed(settling(shape, true_ns)))
         });
         assert_eq!(run.epochs, 1, "{shape:?}");
+        // On the samples throughout, not the stamps.
+        assert!(run.worst < Duration::from_millis(1), "{:?}", run.worst); // check-bound
         let measured = run.measured.map(Drift::ppb);
         assert!(
             measured.is_some_and(|ppb| ppb.abs() < 2_000),
