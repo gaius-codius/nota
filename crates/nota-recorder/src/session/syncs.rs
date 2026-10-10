@@ -144,7 +144,7 @@ impl<Y: FileSyncer> TrackSyncs<Y> {
     }
 
     /// Which way the fsyncs run now: [`Syncing::Inline`] or
-    /// [`Syncing::Threads`] (or [`Syncing::Manual`]), never
+    /// [`Syncing::Threads`] (or, in tests, held for the test), never
     /// [`Syncing::Auto`].
     pub(super) const fn syncing(&self) -> Syncing {
         match self.runner {
