@@ -13,6 +13,7 @@ use nota_tui::{
 };
 use std::io;
 
+/// How often Processing reads the session again.
 const REFRESH: Duration = Duration::from_secs(1);
 
 /// The speech engines named on Processing's bottom border.
@@ -36,6 +37,7 @@ impl EngineLine {
     }
 }
 
+/// Opens a session on Processing until it asks for another page.
 pub(super) fn show(
     screen: &mut Screen,
     library: &Library,
@@ -69,6 +71,7 @@ pub(super) fn show(
     ran
 }
 
+/// Runs the page with input timed by the app clock.
 fn run(
     screen: &mut Screen,
     page: &mut Processing,
@@ -117,6 +120,7 @@ struct Data<'a> {
 }
 
 impl Data<'_> {
+    /// Reads the session when due, keeping the page usable if reading fails.
     fn refresh(&mut self, page: &mut Processing) {
         let now = self.clock.now();
         page.tick(now);
@@ -138,6 +142,7 @@ impl Data<'_> {
         }
     }
 
+    /// Reads the title, steps and words for this session.
     fn read(&self) -> Result<SessionView, StoreError> {
         self.library.db().with(|db| {
             let session = db.session(self.id)?.ok_or(StoreError::NoSession(self.id))?;
@@ -157,6 +162,7 @@ impl Data<'_> {
         })
     }
 
+    /// Whether the recording has stopped and all its audio is saved.
     fn saved(&self, state: SessionState) -> ProcessingState {
         if state == SessionState::Recording {
             return waiting(ProcessingWait::Recording);
@@ -171,6 +177,7 @@ impl Data<'_> {
         }
     }
 
+    /// The saved recording followed by its queued work.
     fn steps(
         &self,
         state: SessionState,
@@ -191,6 +198,7 @@ impl Data<'_> {
     }
 }
 
+/// A step that cannot run yet, with no progress to show.
 fn waiting(reason: ProcessingWait) -> ProcessingState {
     ProcessingState::Waiting {
         reason,
@@ -224,6 +232,7 @@ fn transcript(
     lines
 }
 
+/// The track name beside final words, or its number if it is unknown.
 fn track_name(id: nota_core::TrackId, tracks: &[nota_store::Track]) -> String {
     tracks.iter().find(|track| track.track == id).map_or_else(
         || format!("Track {}", id.get()),
@@ -234,6 +243,7 @@ fn track_name(id: nota_core::TrackId, tracks: &[nota_store::Track]) -> String {
     )
 }
 
+/// A stored job as one Processing step.
 fn step(job: Job, engine: &str) -> ProcessingJob {
     let progress = progress(job.progress);
     let state = match job.state {
@@ -263,6 +273,7 @@ fn step(job: Job, engine: &str) -> ProcessingJob {
     }
 }
 
+/// The completed fraction in percent, limited to 100.
 fn progress(progress: nota_store::Progress) -> u8 {
     if progress.total == 0 {
         return 0;

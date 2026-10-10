@@ -597,30 +597,37 @@ fn home_shows_done_job() {
     assert_eq!(shown_job(&library).status, Status::Ready);
 }
 
-/// A new recording from Processing shows the listed sessions while it stops.
+/// Entering Home reads a changed session before the usual interval passes.
 #[test]
-fn home_keeps_sessions_during_stop_from_processing() {
-    let tmp = TestDir::new("processing-stop-home");
+fn entering_home_lists_before_the_interval() {
+    let tmp = TestDir::new("enter-home-relist");
     let library = library_of_three(&tmp.0);
     let clock = Arc::new(FakeClock::new(SessionTime::ZERO));
     let wall = Arc::new(AtomicI64::new(day(3)));
     let mut listing = listing_of(&library, &clock, &wall);
-    // Home is listed before opening a session, and kept while it is open.
-    let mut home = Home::new(listing.sessions().unwrap(), "parakeet", Theme::default());
-    let mut processing =
-        nota_tui::Processing::new("Finishing".into(), "parakeet".into(), Theme::default());
-    // The new recording is requested from Processing rather than Home.
-    assert_eq!(
-        processing.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)),
-        Some(nota_tui::ProcessingAction::Record),
-    );
-    // The stop callback draws the kept page while the recorder finishes.
-    stopping_home(&mut home);
-    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-    terminal.draw(|frame| home.draw(frame)).unwrap();
-    let drawn = terminal.backend().to_string();
-    assert!(drawn.contains(STOPPING));
-    for title in ["Joinery", "Turning", "Finishing"] {
-        assert!(drawn.contains(title), "{title} missing during stop");
-    }
+    let mut home = Home::new(listing.sessions().unwrap(), "parakeet", Theme::no_color());
+    // A remaining journal changes the status without advancing the clock.
+    leave_journal(&tmp.0, 1);
+    listing.relist(&mut home);
+    assert_eq!(home.sessions()[0].id, 1);
+    assert_eq!(home.sessions()[0].status, Status::NeedsYou);
+}
+
+/// A read before a new recording keeps the listed sessions if it fails.
+#[test]
+fn a_failed_relist_before_recording_keeps_home() {
+    let tmp = TestDir::new("before-recording-relist-fails");
+    let library = library_of_three(&tmp.0);
+    let clock = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let wall = Arc::new(AtomicI64::new(day(3)));
+    let mut listing = listing_of(&library, &clock, &wall);
+    let mut home = Home::new(listing.sessions().unwrap(), "parakeet", Theme::no_color());
+    let listed = home.sessions().to_vec();
+    // Replacing the directory with a file makes the next read fail.
+    let sessions = tmp.0.join("sessions");
+    rename(&sessions, &tmp.0.join("sessions-aside"));
+    write_file(&sessions);
+    listing.relist(&mut home);
+    assert_eq!(home.sessions(), listed);
+    assert!(home.notice().unwrap().contains("couldn't be listed"));
 }

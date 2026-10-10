@@ -185,6 +185,7 @@ impl Pages<'_> {
         said: &mut Vec<String>,
         jobs: &Background,
     ) -> Recorded {
+        self.listing.relist(&mut self.home);
         record_from(
             args,
             self.listing.library,
@@ -216,7 +217,7 @@ impl Pages<'_> {
         if let Some(notice) = self.notice.take() {
             self.home.set_notice(Some(notice));
         }
-        self.listing.refresh(&mut self.home);
+        self.listing.relist(&mut self.home);
         Ok(
             match show_home(screen, &mut self.home, &mut self.listing, self.quit)? {
                 Action::Quit => nota_tui::ProcessingAction::Quit,
@@ -501,9 +502,13 @@ impl Listing<'_> {
     /// fails, Home keeps the list it has and says why, once until a
     /// listing works again, without replacing another problem it shows.
     fn refresh(&mut self, home: &mut Home) {
-        if !self.due() {
-            return;
+        if self.due() {
+            self.relist(home);
         }
+    }
+
+    /// Lists now after a page change, keeping the old list if reading fails.
+    fn relist(&mut self, home: &mut Home) {
         match self.sessions() {
             Ok(sessions) => {
                 if self
