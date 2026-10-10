@@ -322,7 +322,7 @@ fn crash_swept(kind: Where, partial: bool) {
     })
     .run()
     .unwrap_or_else(|failure| panic!("{kind:?}: {failure}"));
-    assert!(summary.scenario_ops > 100, "{summary:?}"); // check-bound
+    summary.scenario().interrupted_more_than(100); // check-bound
 }
 
 #[test]
@@ -354,7 +354,7 @@ fn enospc_at_any_operation_frees_the_ballast_and_loses_nothing_promised() {
     assert!(whole.promised.rows.len() >= 4, "{:?}", whole.promised.rows); // check-bound
     assert_eq!(whole.full, None);
     let ops = clean.attempted();
-    let mut kinds = BTreeSet::new();
+    let mut sweep = Sweep::with_outcomes();
     // After the ballast is made: its own failures are another test's.
     let made = {
         let probe = FakeFs::with_dirs([session(), db(), data()]);
@@ -367,10 +367,15 @@ fn enospc_at_any_operation_frees_the_ballast_and_loses_nothing_promised() {
         let run = record_rounds(&fs, capacity, Some(BALLAST), rounds);
         if let Some(full) = &run.full {
             assert_eq!(full.ballast, Freed::Freed, "op {at}");
-            kinds.extend(hit(&run));
+            sweep.interrupted();
+            if let Some(kind) = hit(&run) {
+                sweep.saw(kind);
+            }
             assert_eq!(run.left, 0, "op {at}: {run:?}");
             // The retry found the ballast's room: no audio lost.
             assert_eq!(run.error, None, "op {at}: {run:?}");
+        } else {
+            sweep.finished();
         }
         for outcome in [CrashOutcome::LoseUnsynced, CrashOutcome::KeepAll] {
             let crashed = fs.crash(outcome);
@@ -386,10 +391,10 @@ fn enospc_at_any_operation_frees_the_ballast_and_loses_nothing_promised() {
                 .unwrap_or_else(|e| panic!("op {at}, {outcome:?}: {e}"));
         }
     }
-    let must_reach = [Where::Journal, Where::Flac, Where::Row, Where::Marks]; // check-bound
-    for kind in must_reach {
-        assert!(kinds.contains(&kind), "{kinds:?}"); // check-bound
-    }
+    // Not vacuous: most failures met the recording and stopped it, in
+    // each kind of write.
+    sweep.interrupted_at_least(210); // check-bound
+    sweep.saw_each([Where::Journal, Where::Flac, Where::Row, Where::Marks]); // check-bound
 }
 
 /// Whether an old stopped session has a reserve to free at startup.
@@ -531,18 +536,30 @@ fn startup_salvage_on_a_full_disk_crashed_anywhere_keeps_all_durable_audio() {
     let settled = observe(&probe);
     check_after(&old.promised, &settled).unwrap();
     // Crash both the first attempt and its reserve-backed retry at each operation.
+    let mut sweep = Sweep::new();
     for after in 0..=operations {
         for outcome in CrashOutcome::standard() {
-            check_startup_crash(&old, &settled, after, outcome);
+            check_startup_crash(&old, &settled, after, outcome, &mut sweep);
         }
     }
+    // Not vacuous: the crash cut the first attempt short at every point
+    // but the last, under every outcome.
+    sweep.interrupted_at_least(operations * CrashOutcome::standard().len()); // check-bound
 }
 
-/// Recovers a particular crash without raising the disk's capacity.
-fn check_startup_crash(old: &StartupDisk, settled: &Observed, after: usize, outcome: CrashOutcome) {
+/// Recovers a particular crash without raising the disk's capacity, and
+/// records in `sweep` whether the crash cut the first attempt short.
+fn check_startup_crash(
+    old: &StartupDisk,
+    settled: &Observed,
+    after: usize,
+    outcome: CrashOutcome,
+    sweep: &mut Sweep,
+) {
     let run = old.fs.copy_disk();
     run.crash_after(after);
     let _ = startup_salvage(&run);
+    sweep.crash_point(&run);
     let survived = run.crash(outcome);
     // A fresh watch holds any reserve whose unlink was lost in the crash.
     startup_salvage(&survived)

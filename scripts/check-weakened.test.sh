@@ -7,7 +7,8 @@
 # reported, and a tag quoted or mentioned in a shell comment isn't one; a
 # base with no merge base is an error; and a call with no base prints its
 # usage. Also checks that the crash harnesses' bounds in this repo carry the
-# tag.
+# tag, and that every crash or seed sweep in the crash test files reports
+# into the sweep helper, whose floor proves it wasn't vacuous.
 #
 # Requires: bash, git.
 set -euo pipefail
@@ -167,9 +168,9 @@ tagged "the crash harnesses' limits" "$bounds"
 tagged "the crash sweeps' floors" "$(grep -rhE --include='*.rs' \
   'summary\.(scenario_ops|recovery_crashed|rerun_crashed) >|worst(\.get\(\))? >=' \
   "$repo/crates" || true)"
-for want in nota-recorder/src/segment/tests.rs:35 nota-recorder/src/capture/stop_tests.rs:6 \
-  nota-recorder/src/journal/tests.rs:6 nota-recorder/src/segment/tests/epochs.rs:3 \
-  nota-recorder/src/segment/tests/disk_full.rs:6 nota-recorder/src/capture/tests.rs:9 \
+for want in nota-recorder/src/segment/tests.rs:48 nota-recorder/src/capture/stop_tests.rs:6 \
+  nota-recorder/src/journal/tests.rs:9 nota-recorder/src/segment/tests/epochs.rs:3 \
+  nota-recorder/src/segment/tests/disk_full.rs:7 nota-recorder/src/capture/tests.rs:9 \
   nota/src/library/kept.rs:1 nota-recorder/examples/capture_wall_time.rs:3; do
   file=$repo/crates/${want%:*}
   # Only a tag after code counts: a comment of its own sets no bound.
@@ -184,20 +185,24 @@ done
 # loop varies, or that runs a crash test expecting it to pass. One that
 # never names the helper fails here, so a new sweep can't be added without
 # a floor; the helper fails at run time one that names it but checks no
-# floor. A loop over a list of outcomes written out in full isn't a sweep:
-# nothing in it can go unreached.
+# floor. A loop that calls a function crashing or failing the filesystem
+# at a point it's given, without a sweep of its own, is a sweep too. A loop over a list of outcomes
+# written out in full isn't one: nothing in it can go unreached.
 # shellcheck disable=SC2016 # the awk program's `$` aren't the shell's.
 bypassing() { # files; prints each sweep that doesn't use the helper
+  # The first pass finds the functions that crash or fail at a point they
+  # are given; the second, the sweeps.
   awk '
     function flush() {
-      if (name != "" && (sweep || (runs && !negative)) && !helper)
+      if (pass == 1 && name != "" && raw && !helper) at_point[name] = 1
+      if (pass == 2 && name != "" && (sweep || (runs && !negative)) && !helper)
         printf "%s:%d: %s sweeps without the helper\n", FILENAME, start, name
     }
     /^[[:space:]]*(pub(\([a-z]+\))? )?fn [a-z_0-9]+/ {
       flush()
       match($0, /fn [a-z_0-9]+/)
       name = substr($0, RSTART + 3, RLENGTH - 3)
-      start = FNR; sweep = 0; runs = 0; negative = 0; helper = 0; loops = 0
+      start = FNR; sweep = 0; runs = 0; negative = 0; helper = 0; loops = 0; raw = 0
     }
     {
       # Braces and markers in strings and comments are not code.
@@ -207,14 +212,19 @@ bypassing() { # files; prints each sweep that doesn't use the helper
       if (code ~ /^[[:space:]]*for .* in /) {
         loops++; at[loops] = depth; opened[loops] = 0
       }
+      if (code ~ /(crash_after|fail_after)\([a-z_]/) raw = 1
       if (loops && code ~ /crash_after\(|fail_after\(|(fail_at|stop_after_ops): Some\([a-z_]|Partial \{ seed(: [a-z_][a-z_0-9]*)? \}/)
         sweep = 1
+      for (f in at_point)
+        if (loops && code ~ ("(^|[^a-z_0-9])" f "\\("))
+          sweep = 1
       # A crash test run, its result unwrapped (the chain may go on to
       # the next line). The run of a sync job returns no result to unwrap.
       # (No apostrophes in this program: it is quoted.)
       if (code ~ /\.run\(\)[[:space:]]*($|\.unwrap)/) runs = 1
       if (code ~ /\.unwrap_err\(\)/) negative = 1
-      if (code ~ /Sweep|\.(scenario|recovery|reruns)\(\)\.(interrupted|saw)_/) helper = 1
+      if (code ~ /Sweep|\.(interrupted_more_than|interrupted_at_least|saw_more_than|saw_each)\(/)
+        helper = 1
       depth += gsub(/\{/, "{", code) - gsub(/\}/, "}", code)
       # A loop ends when its body closes; its head may span lines.
       while (loops) {
@@ -224,7 +234,7 @@ bypassing() { # files; prints each sweep that doesn't use the helper
       }
     }
     ENDFILE { flush(); name = ""; depth = 0 }
-  ' "$@"
+  ' pass=1 "$@" pass=2 "$@"
 }
 cat >"$dir/sweeps.rs" <<'RUST'
 fn bypasses() {
@@ -262,6 +272,14 @@ fn floors_a_crash_test() {
 fn expects_a_failure() {
     let failure = CrashTest::new(a, b, c).run().unwrap_err();
 }
+fn crashes_at(fs: &FakeFs, after: usize) {
+    fs.crash_after(after);
+}
+fn sweeps_through_a_helper() {
+    for after in 0..=ops {
+        crashes_at(&fs, after);
+    }
+}
 fn lists_its_outcomes() {
     for outcome in [
         CrashOutcome::Partial { seed: 1 },
@@ -271,11 +289,25 @@ fn lists_its_outcomes() {
     }
     fs.crash_after(3);
 }
+fn sweeps_from(fs: &FakeFs, from: usize) {
+    let mut sweep = Sweep::new();
+    for after in from..9 {
+        fs.crash_after(after);
+        sweep.crash_point(fs);
+    }
+    sweep.interrupted_at_least(3); // check-bound
+}
+fn runs_whole_sweeps() {
+    for from in [0, 3] {
+        sweeps_from(&fs, from);
+    }
+}
 RUST
 got=$(bypassing "$dir/sweeps.rs" | sed 's/^[^:]*://')
 want='1: bypasses sweeps without the helper
 7: seeds_without sweeps without the helper
-12: runs_without sweeps without the helper'
+12: runs_without sweeps without the helper
+39: sweeps_through_a_helper sweeps without the helper'
 [[ $got == "$want" ]] || fail "the sweep guard found the wrong sweeps: $got"
 swept=(nota-recorder/src/journal/tests.rs nota-recorder/src/segment/tests.rs
   nota-recorder/src/segment/tests/epochs.rs nota-recorder/src/segment/tests/disk_full.rs

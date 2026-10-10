@@ -228,8 +228,8 @@ fn salvage_rebuilds_every_epoch_s_timing_after_a_crash_anywhere() {
     .sample_recovery(SAMPLE)
     .run()
     .unwrap_or_else(|failure| panic!("{failure}"));
-    assert!(summary.scenario_ops > 60, "{summary:?}"); // check-bound
-    assert!(summary.recovery_crashed > 100, "{summary:?}"); // check-bound
+    summary.scenario().interrupted_more_than(60); // check-bound
+    summary.recovery().interrupted_more_than(100); // check-bound
     // Many crashes left rows either side of the gap to time across it.
     assert!(both.get() > 100, "{}", both.get()); // check-bound
 }

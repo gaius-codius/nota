@@ -565,7 +565,7 @@ fn a_long_append_never_leaves_more_than_the_sync_interval_unsynced() {
     // One append of ten seconds, crashed after every operation: whatever
     // the writer reports, captured is never more than the sync interval
     // ahead of durable, and the durable part survives.
-    let mut sweep = Sweep::<()>::new();
+    let mut sweep = Sweep::new();
     for crash_at in 0..60 {
         let fs = FakeFs::with_dirs(["/session"]);
         let (_clock, dyn_clock) = fake_clock();
@@ -728,7 +728,7 @@ fn torn_frame_with_a_corrupt_byte_fails_its_crc() {
 #[test]
 fn partial_crashes_of_the_unsynced_frame_never_misread() {
     let (fs, _synced_len, _full) = journal_with_unsynced_frame();
-    let mut sweep = Sweep::new();
+    let mut sweep = Sweep::with_outcomes();
     for seed in 0..2_000 {
         let after = fs.crash(CrashOutcome::Partial { seed });
         let read = read_journal(&after.read(&journal_path(0)).unwrap());
@@ -1293,7 +1293,7 @@ fn create_needs_a_directory() {
 fn a_failed_create_removes_its_file_so_a_retry_works() {
     // Fail each step after the file exists: the header write, its fsync,
     // the directory fsync.
-    let mut sweep = Sweep::<()>::new();
+    let mut sweep = Sweep::new();
     for step in 1..=3 {
         let fs = FakeFs::with_dirs(["/session"]);
         let (_clock, dyn_clock) = fake_clock();

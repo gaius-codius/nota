@@ -10,8 +10,8 @@
 //! Each sweep reports into a [`Sweep`]: every point it ran, whether the
 //! crash or failure interrupted the operation there, and what the point led
 //! to. It then states its floor: at least so many interrupted points, or
-//! every outcome it must reach. The line stating a floor ends with
-//! `// check-bound`, so `scripts/check-weakened.sh` reports any change to
+//! every outcome it must reach. The line stating a floor ends with the
+//! check-bound tag, so `scripts/check-weakened.sh` reports any change to
 //! it. A sweep dropped without a floor fails the test, and
 //! `scripts/check-weakened.test.sh` fails on a sweep in the crash tests that
 //! doesn't report into one.
@@ -23,6 +23,7 @@ use std::fmt;
 use std::thread;
 
 use super::crash::CrashSummary;
+use super::fake::FakeFs;
 
 /// What a sweep reached, checked against its floor before it's dropped.
 ///
@@ -41,9 +42,17 @@ pub struct Sweep<K = ()> {
     floored: bool,
 }
 
-impl<K> Sweep<K> {
-    /// A sweep that has run no points.
+impl Sweep {
+    /// A sweep that has run no points, with a floor on its interruptions.
     pub fn new() -> Self {
+        Self::counted(0, 0)
+    }
+}
+
+impl<K> Sweep<K> {
+    /// A sweep that has run no points, with a floor on the outcomes it
+    /// sees.
+    pub fn with_outcomes() -> Self {
         Self::counted(0, 0)
     }
 
@@ -70,6 +79,27 @@ impl<K> Sweep<K> {
         self.points += 1;
     }
 
+    /// Records a point of a crash sweep, once the operation has run on
+    /// `fs`: interrupted if `fs` crashed before it finished.
+    pub fn crash_point(&mut self, fs: &FakeFs) {
+        if fs.has_crashed() {
+            self.interrupted();
+        } else {
+            self.finished();
+        }
+    }
+
+    /// Records a point of a failure sweep, once the operation has run on
+    /// `fs` set to fail its operation numbered `at` (counting from 0):
+    /// interrupted if the operation got that far, so the failure fired.
+    pub fn failure_point(&mut self, fs: &FakeFs, at: usize) {
+        if fs.attempted() > at {
+            self.interrupted();
+        } else {
+            self.finished();
+        }
+    }
+
     /// Records whether the point interrupted the operation, from its
     /// result: an error is an interruption.
     pub fn result<T, E>(&mut self, result: &Result<T, E>) {
@@ -81,14 +111,16 @@ impl<K> Sweep<K> {
     }
 }
 
-impl<K> Default for Sweep<K> {
+impl Default for Sweep {
     fn default() -> Self {
         Self::new()
     }
 }
 
 impl<K: PartialEq + fmt::Debug> Sweep<K> {
-    /// Records that a point led to `outcome`.
+    /// Records that a point led to `outcome`. It doesn't count the point:
+    /// a sweep with a floor on its interruptions also calls
+    /// [`Self::interrupted`] or [`Self::finished`].
     pub fn saw(&mut self, outcome: K) {
         if !self.seen.contains(&outcome) {
             self.seen.push(outcome);
@@ -198,7 +230,11 @@ impl CrashSummary {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+    use std::path::Path;
+
     use super::*;
+    use crate::fs::Fs;
 
     /// A sweep of `interrupted` interrupted points and `finished` others.
     fn swept(interrupted: usize, finished: usize) -> Sweep {
@@ -222,6 +258,34 @@ mod tests {
     }
 
     #[test]
+    fn a_crash_point_is_interrupted_only_if_the_crash_came() {
+        let mut sweep = Sweep::new();
+        for budget in [0, 1, 2] {
+            let fs = FakeFs::new();
+            fs.crash_after(budget);
+            let _ = fs.create_dir(Path::new("/a"));
+            sweep.crash_point(&fs);
+        }
+        // One operation: only a budget of none stops it.
+        assert_eq!((sweep.points, sweep.interrupted), (3, 1));
+        sweep.interrupted_at_least(1);
+    }
+
+    #[test]
+    fn a_failure_point_is_interrupted_only_if_the_failure_fired() {
+        let mut sweep = Sweep::new();
+        for at in [0, 1, 2] {
+            let fs = FakeFs::new();
+            fs.fail_after(at, io::ErrorKind::Other);
+            let _ = fs.create_dir(Path::new("/a"));
+            sweep.failure_point(&fs, at);
+        }
+        // One operation: only failing the first one hits it.
+        assert_eq!((sweep.points, sweep.interrupted), (3, 1));
+        sweep.interrupted_at_least(1);
+    }
+
+    #[test]
     fn interrupted_floors_pass_at_their_bound() {
         swept(3, 9).interrupted_at_least(3);
         swept(3, 9).interrupted_more_than(2);
@@ -242,7 +306,7 @@ mod tests {
 
     #[test]
     fn outcomes_are_counted_once_each() {
-        let mut sweep = Sweep::new();
+        let mut sweep = Sweep::with_outcomes();
         for n in [3, 4, 3, 3, 4] {
             sweep.saw(n);
         }
@@ -254,7 +318,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "want more than 2 outcomes")]
     fn too_few_outcomes_fail_their_floor() {
-        let mut sweep = Sweep::new();
+        let mut sweep = Sweep::with_outcomes();
         for n in [3, 4, 3] {
             sweep.saw(n);
         }
@@ -264,7 +328,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "never saw 4")]
     fn an_outcome_never_seen_fails_its_floor() {
-        let mut sweep = Sweep::new();
+        let mut sweep = Sweep::with_outcomes();
         sweep.saw(3);
         sweep.saw_each([3, 4]);
     }

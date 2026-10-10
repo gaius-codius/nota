@@ -358,7 +358,7 @@ mod tests {
         .dirs([DIR])
         .run()
         .unwrap_or_else(|failure| panic!("{failure}"));
-        assert!(summary.scenario_ops >= 5, "{summary:?}"); // check-bound
+        summary.scenario().interrupted_at_least(5); // check-bound
     }
 
     /// The crash test can tell: without the directory sync, a row reported
