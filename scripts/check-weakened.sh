@@ -51,21 +51,31 @@ done < <(git diff -U0 "$mb" "$head" -- '*.rs' \
 
 # Bounds a test or harness checks (a crash test's loss limit, a capture
 # harness's lag bound) carry a `// check-bound` comment on the line that sets
-# them, so changing one is reported however it's done: a new value, a
-# deleted constant or a dropped tag. A tagged line moved unchanged appears
-# on both sides of the diff and isn't counted.
-bound_lines() {
+# them, so a change to that line is reported: a new value, a deleted
+# constant or a dropped tag. A bound loosened where it's compared, not where
+# it's set, is left to review. Lines are compared with their file's path, so
+# a tagged line moved unchanged within its file isn't counted, and two files
+# swapping values are.
+bound_lines() { # - for the base's side, + for the branch's
   git diff -U0 "$mb" "$head" -- '*.rs' \
-    | grep -E "^[$1][^$1]" \
-    | grep -E '//[[:space:]]*check-bound\b' \
-    | sed "s/^[$1][[:space:]]*//" | sort || true
+    | awk -v side="$1" '
+        /^diff --git / { header = 1; next }
+        header && /^--- / { old = substr($0, 5); sub(/^a\//, "", old); next }
+        header && /^\+\+\+ / { new = substr($0, 5); sub(/^b\//, "", new); next }
+        /^@@/ { header = 0; next }
+        header { next }
+        substr($0, 1, 1) == side && /\/\/[ \t]*check-bound([^A-Za-z0-9_-]|$)/ {
+          line = substr($0, 2); sub(/^[ \t]+/, "", line)
+          print (side == "-" ? old : new) ": " line
+        }' \
+    | LC_ALL=C sort || true
 }
 while IFS= read -r line; do
   [[ -n $line ]] && findings+=("bound set: $line")
-done < <(comm -13 <(bound_lines -) <(bound_lines +))
+done < <(LC_ALL=C comm -13 <(bound_lines -) <(bound_lines +))
 while IFS= read -r line; do
   [[ -n $line ]] && findings+=("bound was: $line")
-done < <(comm -23 <(bound_lines -) <(bound_lines +))
+done < <(LC_ALL=C comm -23 <(bound_lines -) <(bound_lines +))
 
 # Tests removed: more #[test] attributes deleted than added.
 removed=$(git diff -U0 "$mb" "$head" -- '*.rs' | grep -cE '^-[[:space:]]*#\[(test|proptest|rstest)' || true)

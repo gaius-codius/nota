@@ -1480,7 +1480,7 @@ mod linux {
         }
 
         // The writer's own budget: the sync interval's worth of audio.
-        let max_journal_lag = SampleCount::started_within(SYNC_INTERVAL, RATE)
+        let max_journal_lag = SampleCount::started_within(SYNC_INTERVAL, RATE) // check-bound
             .ok_or("the sync interval overflows")?
             .get();
         let mut worst = Lag::default();
