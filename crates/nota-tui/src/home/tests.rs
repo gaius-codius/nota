@@ -57,15 +57,15 @@ fn sessions_that_need_you_are_pinned_then_newest_first() {
 }
 
 #[test]
-fn r_records_and_q_esc_and_ctrl_c_quit() {
+fn r_sets_up_a_recording_and_shift_r_records_and_q_esc_and_ctrl_c_quit() {
     let mut home = home_of(vec![session(1, Status::Ready)], Theme::default());
     assert_eq!(press(&mut home, KeyCode::Char('R')), Some(Action::Record));
     assert_eq!(press(&mut home, KeyCode::Char('q')), Some(Action::Quit));
     assert_eq!(press(&mut home, KeyCode::Esc), Some(Action::Quit));
     let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(home.handle_key(ctrl_c), Some(Action::Quit));
-    // `r` waits for Setup, and `/` for search: neither does anything yet.
-    assert_eq!(press(&mut home, KeyCode::Char('r')), None);
+    // `r` goes to Setup first; `/` waits for search and does nothing yet.
+    assert_eq!(press(&mut home, KeyCode::Char('r')), Some(Action::Setup));
     assert_eq!(press(&mut home, KeyCode::Char('/')), None);
     // Held with Ctrl or Alt, they're other keys.
     let alt_r = KeyEvent::new(KeyCode::Char('R'), KeyModifiers::ALT | KeyModifiers::SHIFT);

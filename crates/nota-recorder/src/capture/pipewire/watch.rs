@@ -33,6 +33,7 @@ use pw::spa::utils::dict::DictRef;
 use pw::spa::utils::result::AsyncSeq;
 use pw::types::ObjectType;
 
+use super::super::devices::Devices;
 use super::super::route::{self, Class, Graph, GraphEvent, Node, Route};
 use super::super::{CaptureError, CaptureNotice, CaptureSender, Source};
 
@@ -50,6 +51,11 @@ const POLL: Duration = Duration::from_secs(1);
 const DEFAULT_METADATA: &str = "default";
 const DEFAULT_SINK: &str = "default.audio.sink";
 const DEFAULT_SOURCE: &str = "default.audio.source";
+
+/// How long [`Subscription::snapshot`] waits for the server to answer: well over the few
+/// local messages a snapshot takes, short enough that Setup isn't held up
+/// by a server that never answers.
+const SNAPSHOT_WAIT: Duration = Duration::from_secs(3);
 
 /// A running watch. Dropping it stops the watch and waits for its thread.
 pub(super) struct Watch {
@@ -180,6 +186,66 @@ fn run(
     Ok(())
 }
 
+impl Subscription {
+    /// Reads the server's sinks, sources and defaults once, on a connection
+    /// of its own: the same subscription the watch takes, until it has
+    /// caught up.
+    ///
+    /// # Errors
+    ///
+    /// [`CaptureError::HostUnavailable`] if the server can't be reached or
+    /// doesn't answer within [`SNAPSHOT_WAIT`].
+    pub(super) fn snapshot() -> Result<Devices, CaptureError> {
+        let unavailable =
+            |error: &dyn std::fmt::Display| CaptureError::HostUnavailable(error.to_string());
+        pw::init();
+        let mainloop = MainLoopRc::new(None).map_err(|e| unavailable(&e))?;
+        let context = ContextRc::new(&mainloop, None).map_err(|e| unavailable(&e))?;
+        let core = context.connect_rc(None).map_err(|e| unavailable(&e))?;
+        // No watcher to tell of changes: the weak link never upgrades.
+        let subscription = Self::start(&core, Weak::new()).map_err(|e| unavailable(&e))?;
+        let found: Rc<RefCell<Option<Devices>>> = Rc::default();
+        let _core = core
+            .add_listener_local()
+            .done({
+                let subscription = Rc::clone(&subscription);
+                let found = Rc::clone(&found);
+                let mainloop = mainloop.clone();
+                move |id, seq| {
+                    if id != PW_ID_CORE {
+                        return;
+                    }
+                    let mut subscription = subscription.borrow_mut();
+                    subscription.pending.answered(seq);
+                    if subscription.pending.caught_up() {
+                        *found.borrow_mut() = Some(subscription.graph.devices());
+                        mainloop.quit();
+                    }
+                }
+            })
+            .error({
+                let mainloop = mainloop.clone();
+                move |id, _seq, _res, _message| {
+                    if id == PW_ID_CORE {
+                        mainloop.quit();
+                    }
+                }
+            })
+            .register();
+        let give_up = mainloop.loop_().add_timer({
+            let mainloop = mainloop.clone();
+            move |_| mainloop.quit()
+        });
+        // Can't fail for a timer the loop just made.
+        let _ = give_up.update_timer(Some(SNAPSHOT_WAIT), None);
+        mainloop.run();
+        let devices = found.borrow_mut().take();
+        devices.ok_or_else(|| {
+            CaptureError::HostUnavailable("the audio server didn't list its devices".to_owned())
+        })
+    }
+}
+
 /// The watch's state, on its loop's thread.
 struct Watcher {
     /// The connection.
@@ -271,7 +337,7 @@ fn report(events: &CaptureSender, source: &Source, changes: route::Changes) {
 
 /// One subscription to the graph: the registry and the `default` metadata,
 /// with the graph they've given so far.
-struct Subscription {
+pub(super) struct Subscription {
     /// The registry.
     registry: RegistryRc,
     /// Its listener; dropping it ends the subscription.

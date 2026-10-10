@@ -38,7 +38,7 @@ use thread_priority::{
     set_thread_priority_and_policy, thread_native_id,
 };
 
-use super::{CaptureBackend, CaptureError, CaptureNotice, CaptureSender, Source};
+use super::{CaptureBackend, CaptureError, CaptureNotice, CaptureSender, Devices, Source};
 
 mod watch;
 
@@ -121,6 +121,10 @@ impl std::fmt::Debug for PipeWireStream {
 
 impl CaptureBackend for PipeWireBackend {
     type Stream = PipeWireStream;
+
+    fn devices(&self) -> Result<Devices, CaptureError> {
+        watch::Subscription::snapshot()
+    }
 
     fn start(
         &self,
@@ -253,6 +257,21 @@ mod tests {
 
     fn error(kind: ErrorKind) -> cpal::Error {
         cpal::Error::with_message(kind, "detail")
+    }
+
+    /// A server that answers lists its devices, and one that can't be
+    /// reached says so: never an empty list for either. (CI has no
+    /// server; a machine with one has devices.)
+    #[test]
+    fn the_server_lists_its_devices_or_is_unavailable() {
+        match PipeWireBackend.devices() {
+            Ok(devices) => assert!(
+                !devices.outputs.is_empty() || !devices.inputs.is_empty(),
+                "{devices:?}"
+            ),
+            Err(CaptureError::HostUnavailable(_)) => {}
+            Err(other) => panic!("{other}"),
+        }
     }
 
     #[test]

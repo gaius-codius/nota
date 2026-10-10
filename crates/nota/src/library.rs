@@ -804,7 +804,7 @@ fn parent_of(dir: &Path) -> Option<&Path> {
     }
 }
 
-mod kept;
+pub(crate) mod kept;
 
 #[cfg(test)]
 mod tests;

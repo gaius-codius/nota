@@ -195,8 +195,10 @@ use crate::session::{FinishedJournal, SessionError, SessionWriter};
 #[cfg(test)]
 mod detect_tests;
 mod detectors;
+mod devices;
 #[cfg(target_os = "linux")]
 mod pipewire;
+mod preview;
 mod queue;
 // The route is followed by the PipeWire backend's watch; other platforms
 // have no backend yet, and nothing there would use it.
@@ -209,8 +211,10 @@ mod tests;
 #[cfg(test)]
 mod tracks_tests;
 
+pub use devices::{Device, Devices};
 #[cfg(target_os = "linux")]
 pub use pipewire::PipeWireBackend;
+pub use preview::{Preview, PreviewEvent};
 pub use queue::{Positions, Progress};
 
 use detectors::Detectors;
@@ -623,6 +627,20 @@ pub trait CaptureBackend {
         rate: SampleRate,
         events: CaptureSender,
     ) -> Result<Self::Stream, CaptureError>;
+
+    /// The devices the audio server has now, for Setup to offer.
+    ///
+    /// A backend with no server to ask can't list any, which is what this
+    /// says unless it's overridden.
+    ///
+    /// # Errors
+    ///
+    /// A [`CaptureError`] if the server can't be asked.
+    fn devices(&self) -> Result<Devices, CaptureError> {
+        Err(CaptureError::Backend(
+            "this backend can't list devices".to_owned(),
+        ))
+    }
 }
 
 /// A running capture. Dropping it stops the stream, then tells the
