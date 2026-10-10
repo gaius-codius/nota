@@ -16,7 +16,9 @@ use crate::app::tests::TestDir;
 const WAIT: Duration = Duration::from_secs(10);
 
 /// A backend that opens no real stream: each source it's asked to start
-/// is sent on a channel, so a test sees what the preview listens to.
+/// is sent on a channel, so a test sees what the preview listens to. It
+/// has the same devices as [`screen`], so the preview's first report
+/// doesn't change the list a test pressed keys against.
 struct Opened(Sender<Capture>);
 
 impl CaptureBackend for Opened {
@@ -30,6 +32,22 @@ impl CaptureBackend for Opened {
     ) -> Result<(), CaptureError> {
         let _ = self.0.send(source.clone());
         Ok(())
+    }
+
+    fn devices(&self) -> Result<Devices, CaptureError> {
+        let device = |name: &str, description: &str| Device {
+            name: name.to_owned(),
+            description: description.to_owned(),
+        };
+        Ok(Devices {
+            outputs: vec![
+                device("alsa.speakers", "Speakers"),
+                device("bluez.headphones", "Headphones"),
+            ],
+            inputs: vec![device("usb.seiren", "Seiren Mini")],
+            default_output: Some("alsa.speakers".to_owned()),
+            default_input: Some("usb.seiren".to_owned()),
+        })
     }
 }
 
