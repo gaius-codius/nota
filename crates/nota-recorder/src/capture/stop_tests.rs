@@ -65,7 +65,7 @@ fn db() -> PathBuf {
 /// interval with room for a chunk being written when the process dies.
 /// Stricter than the bounded-loss rule (about 2 s on a quiet disk), which
 /// also allows for a slow fsync; these tests' fsyncs are instant.
-const LOSS_LIMIT: u64 = 1_100;
+const LOSS_LIMIT: u64 = 1_100; // check-bound
 
 /// The sample a test track holds at `index`: distinct per track and
 /// position, so misplaced audio shows.

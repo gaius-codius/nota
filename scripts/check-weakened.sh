@@ -49,6 +49,24 @@ done < <(git diff -U0 "$mb" "$head" -- '*.rs' \
   | grep -E '#!?\[(allow|expect)\(|#\[ignore|cfg_attr\([^)]*(allow|expect|ignore)|no_mangle|\bunsafe\b' \
   | sed 's/^+[[:space:]]*//' || true)
 
+# Bounds a test or harness checks (a crash test's loss limit, a capture
+# harness's lag bound) carry a `// check-bound` comment on the line that sets
+# them, so changing one is reported however it's done: a new value, a
+# deleted constant or a dropped tag. A tagged line moved unchanged appears
+# on both sides of the diff and isn't counted.
+bound_lines() {
+  git diff -U0 "$mb" "$head" -- '*.rs' \
+    | grep -E "^[$1][^$1]" \
+    | grep -E '//[[:space:]]*check-bound\b' \
+    | sed "s/^[$1][[:space:]]*//" | sort || true
+}
+while IFS= read -r line; do
+  [[ -n $line ]] && findings+=("bound set: $line")
+done < <(comm -13 <(bound_lines -) <(bound_lines +))
+while IFS= read -r line; do
+  [[ -n $line ]] && findings+=("bound was: $line")
+done < <(comm -23 <(bound_lines -) <(bound_lines +))
+
 # Tests removed: more #[test] attributes deleted than added.
 removed=$(git diff -U0 "$mb" "$head" -- '*.rs' | grep -cE '^-[[:space:]]*#\[(test|proptest|rstest)' || true)
 added=$(git diff -U0 "$mb" "$head" -- '*.rs' | grep -cE '^\+[[:space:]]*#\[(test|proptest|rstest)' || true)
