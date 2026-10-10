@@ -172,9 +172,12 @@ use crate::detect::Condition;
 use crate::fs::Fs;
 use crate::session::{FinishedJournal, SessionError, SessionWriter};
 
+#[cfg(test)]
+mod detect_tests;
 #[cfg(target_os = "linux")]
 mod pipewire;
 mod queue;
+mod route;
 #[cfg(test)]
 mod stop_tests;
 #[cfg(test)]
