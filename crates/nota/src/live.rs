@@ -13,19 +13,14 @@ use std::time::Duration;
 
 use nota_core::messages::{AudioChunk, Transcript};
 use nota_core::recorder::{Event, Level};
-use nota_core::{Gap, SessionTime, TrackId, TrackTimeline, Utterance, Word};
+use nota_core::{Epoch, Gap, SessionTime, TrackId, TrackTimeline, Utterance, Word};
 use nota_recorder::capture::{CaptureNotice, RecorderEvent};
 use nota_recorder::engine::EngineEvent;
 
-use crate::inhibit::Slept;
+use crate::inhibit::{Slept, Unrecorded};
 
 /// How often each track's level is sent: well within the screen's 250 ms.
 const LEVEL_EVERY: Duration = Duration::from_millis(100);
-
-/// How far apart two tracks' first audio after a sleep can be and still be
-/// the same sleep when there are no gaps to compare: each stream wakes on
-/// its own, within a buffer or two.
-const SAME_SLEEP: Duration = Duration::from_secs(2);
 
 /// What to do about one report.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -145,13 +140,16 @@ impl Live {
 
     /// What the screen is told when `chunk` is the first audio of a track
     /// after the machine slept: the warning, once for the sleep however
-    /// many tracks woke from it, and the track's new epoch and the gap
-    /// before it. The epoch is the capture's own, opened before this audio
-    /// ([`RecorderEvent::Epoch`]). If it didn't start after a gap that
-    /// began where the track's audio ended (the timeline took the stretch
-    /// as drift, or refused a new epoch, and an earlier gap is all there
-    /// is), only the warning is sent. The warning isn't cleared: the sleep
-    /// is over, and the screen decides how long to show it.
+    /// many tracks woke from it, and for each gap the track's timeline kept
+    /// since its audio ended, the epoch after it and the gap. The epochs
+    /// are the capture's own, opened before this audio
+    /// ([`RecorderEvent::Epoch`]); there are several if the audio server
+    /// reported an overrun on the way back, or a stream stalled on after
+    /// the resume. If there is no gap that began where the track's audio
+    /// ended (the timeline took the stretch as drift, or refused a new
+    /// epoch, and an earlier gap is all there is), only the warning is
+    /// sent. The warning isn't cleared: the sleep is over, and the screen
+    /// decides how long to show it.
     fn woke_with(&mut self, chunk: &AudioChunk) -> Vec<Event> {
         let track = chunk.track();
         if !self.sleeping.remove(&track) {
@@ -163,45 +161,41 @@ impl Live {
         let Some((resumed, _)) = timeline.span_of(chunk.range()) else {
             return Vec::new();
         };
-        let epoch = timeline.epoch_of(chunk.range().start()).copied();
         let heard_to = self.heard_to.get(&track).copied();
-        let gap = epoch
-            .and_then(|e| timeline.gaps().find(|gap| gap.to() == e.start()))
-            .filter(|gap| heard_to.is_none_or(|end| gap.to() > end));
+        let gaps = timeline
+            .epoch_of(chunk.range().start())
+            .map(|epoch| gaps_before(timeline, epoch, heard_to))
+            .unwrap_or_default();
+        let unrecorded = gaps
+            .first()
+            .zip(gaps.last())
+            .map(|(first, last)| Unrecorded {
+                from: first.from(),
+                to: last.to(),
+            });
+        let seen = Slept {
+            resumed,
+            unrecorded,
+        };
         let mut updates = Vec::new();
-        if self.same_sleep_as_last(track, resumed, gap) {
+        let last = self
+            .slept
+            .last_mut()
+            .filter(|last| !self.woke_from_last.contains(&track) && last.same_sleep_as(&seen));
+        if let Some(last) = last {
+            *last = last.merged_with(&seen);
             self.woke_from_last.insert(track);
         } else {
-            let slept = Slept { resumed, gap };
-            updates.push(slept.warning());
-            self.slept.push(slept);
+            updates.push(seen.warning());
+            self.slept.push(seen);
             self.woke_from_last = BTreeSet::from([track]);
         }
-        if let (Some(epoch), Some(gap)) = (epoch, gap) {
-            updates.push(Event::Epoch { track, epoch });
+        for gap in gaps {
+            let after = timeline.epochs().iter().find(|e| e.start() == gap.to());
+            updates.extend(after.map(|&epoch| Event::Epoch { track, epoch }));
             updates.push(Event::Gap { track, gap });
         }
         updates
-    }
-
-    /// Whether `track`'s first audio after a sleep, at `resumed` after
-    /// `gap`, ends the last sleep seen rather than starting another: a
-    /// track that hadn't woken from it yet, whose gap overlaps its gap (or,
-    /// with no gap to compare, which resumed within [`SAME_SLEEP`] of it).
-    fn same_sleep_as_last(&self, track: TrackId, resumed: SessionTime, gap: Option<Gap>) -> bool {
-        let Some(last) = self.slept.last() else {
-            return false;
-        };
-        if self.woke_from_last.contains(&track) {
-            return false;
-        }
-        if let (Some(last), Some(gap)) = (last.gap, gap) {
-            return gap.from() < last.to() && last.from() < gap.to();
-        }
-        let apart = resumed
-            .checked_duration_since(last.resumed)
-            .or_else(|| last.resumed.checked_duration_since(resumed));
-        apart.is_some_and(|apart| apart <= SAME_SLEEP)
     }
 
     /// Notes where `chunk` ends, as its track's audio so far.
@@ -257,6 +251,27 @@ impl Live {
             level,
         })
     }
+}
+
+/// The gaps in `timeline` between the end of the track's audio so far
+/// (`heard_to`) and the start of `epoch`, the epoch its first audio after a
+/// sleep is in, oldest first: more than one if an epoch with no audio was
+/// opened on the way back. Empty if the last of them doesn't end where
+/// `epoch` starts, so nothing was missed before it. Without `heard_to`
+/// (nothing was heard yet) only the one that leads into `epoch` counts.
+fn gaps_before(timeline: &TrackTimeline, epoch: &Epoch, heard_to: Option<SessionTime>) -> Vec<Gap> {
+    let mut gaps: Vec<Gap> = timeline
+        .gaps()
+        .filter(|gap| gap.to() <= epoch.start())
+        .filter(|gap| heard_to.is_none_or(|end| gap.from() >= end))
+        .collect();
+    if heard_to.is_none() {
+        gaps.drain(..gaps.len().saturating_sub(1));
+    }
+    if gaps.last().is_none_or(|last| last.to() != epoch.start()) {
+        gaps.clear();
+    }
+    gaps
 }
 
 #[cfg(test)]

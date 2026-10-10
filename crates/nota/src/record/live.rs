@@ -354,11 +354,11 @@ mod tests {
 
             let run = record_script(Between::Suspend);
             let gap = run.timeline.gaps().next().unwrap();
-            // The first second of audio ended at 1 s; the audio after the
-            // suspend was captured at about 5 s, nearly the span of the sleep.
-            assert_eq!(gap.from(), SessionTime::from_nanos(1_000_000_000));
-            assert!(gap.duration() >= Duration::from_secs(3), "{gap:?}");
-            assert!(gap.duration() < Duration::from_secs(5), "{gap:?}");
+            // The first second of audio ended at 1 s. The audio after the
+            // suspend reached the recorder at 5 s, and is stamped when its
+            // first sample was captured: a second (its span) earlier.
+            let second = |n: u64| SessionTime::from_nanos(n * 1_000_000_000);
+            assert_eq!((gap.from(), gap.to()), (second(1), second(4)));
             let epoch = *run.timeline.current().unwrap();
             // The warning is raised when the audio came back.
             let warning = recorder::Event::Warning(Warning {
@@ -376,18 +376,20 @@ mod tests {
                 ]
             );
             assert_eq!(run.end.slept.len(), 1);
-            assert_eq!(run.end.slept[0].gap, Some(gap));
-            assert!(
-                run.end.slept[0]
-                    .note()
-                    .starts_with("the machine slept at 0:00:01 for "),
-                "{}",
-                run.end.slept[0].note()
+            assert_eq!(
+                run.end.slept[0].unrecorded.map(|u| (u.from, u.to)),
+                Some((gap.from(), gap.to()))
+            );
+            assert_eq!(
+                run.end.slept[0].note(),
+                "the machine slept at 0:00:01 for 3s; nothing was recorded then"
             );
         }
 
         /// A quiet stretch the clock saw but the machine didn't sleep
         /// through isn't a sleep: no warning, and nothing for the summary.
+        /// The recorder opens no epoch for it, so this is the capture's
+        /// side of that; the live view's own rule is in `live::tests`.
         #[test]
         fn a_stall_without_a_suspend_is_not_reported_as_a_sleep() {
             let run = record_script(Between::Stall);

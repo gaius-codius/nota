@@ -531,6 +531,15 @@ fn a_refused_sleep_lock_is_said_and_recording_carries_on() {
     let status = nota.exits().expect("nota didn't stop");
     assert!(status.success(), "{status:?}: {}", nota.output());
     assert_everything_sent_saved(&nota, &tmp.0, 1, &[0, 1], 1_450);
+    // The tones' own lines come after the samples sent, and may not all
+    // have been read yet.
+    assert!(
+        wait_until(Duration::from_secs(10), || {
+            tone_events(&visible(&nota.output.lock().unwrap())).len() == 4
+        }),
+        "{}",
+        nota.output()
+    );
     let said = visible(&nota.output.lock().unwrap());
     assert!(
         said.contains(
@@ -539,13 +548,43 @@ fn a_refused_sleep_lock_is_said_and_recording_carries_on() {
         ),
         "{said}"
     );
-    // The tones started and stopped without a lock to note.
-    assert!(
-        tone_events(&said)
-            .iter()
-            .all(|e| !e.starts_with("sleep lock")),
+    // The two tones started and stopped, and no lock was taken or let go.
+    let mut events = tone_events(&said);
+    events.sort();
+    assert_eq!(
+        events,
+        [
+            "the microphone started",
+            "the microphone stopped",
+            "the system audio started",
+            "the system audio stopped",
+        ],
         "{said}"
     );
+}
+
+/// A start that fails (no stream opens) says nothing of sleep, though
+/// logind refused: there was no recording to sleep through.
+#[test]
+fn a_failed_start_says_nothing_of_a_refused_sleep_lock() {
+    let tmp = TestDir::new("sleep-refused-no-start");
+    let mut nota = Running::start_as(
+        &tmp.0,
+        &["--mic", "missing", "--system", "missing"],
+        false,
+        &[("NOTA_TONE_SLEEP_REFUSED", "1")],
+    );
+    let status = nota
+        .exits()
+        .expect("nota did not reject the missing inputs");
+    assert!(!status.success(), "{status:?}");
+    let said = visible(&nota.output.lock().unwrap());
+    assert_eq!(
+        said.matches("not recording device missing").count(),
+        2,
+        "{said}"
+    );
+    assert!(!said.contains("sleep"), "{said}");
 }
 
 fn stops_on(signal: Signal, name: &str) {

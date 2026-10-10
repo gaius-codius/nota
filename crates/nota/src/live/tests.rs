@@ -338,7 +338,10 @@ fn the_first_audio_after_a_suspend_warns_and_reports_the_gap() {
         live.slept(),
         [Slept {
             resumed: ms(5_000),
-            gap: Some(gap)
+            unrecorded: Some(Unrecorded {
+                from: gap.from(),
+                to: gap.to()
+            })
         }]
     );
 }
@@ -426,7 +429,7 @@ fn a_suspend_the_timeline_refused_still_warns_without_a_gap() {
         live.slept(),
         [Slept {
             resumed: ms(0),
-            gap: None
+            unrecorded: None
         }]
     );
 }
@@ -526,7 +529,7 @@ fn a_refused_epoch_does_not_borrow_an_earlier_gap() {
         live.slept(),
         [Slept {
             resumed: ms(8_000),
-            gap: None
+            unrecorded: None
         }]
     );
 }
@@ -555,4 +558,194 @@ fn tracks_without_gaps_wake_from_one_sleep_if_they_resume_within_two_seconds() {
     assert_eq!(wake((MIC, 1_000), (SYSTEM, 1_500)), 1);
     assert_eq!(wake((SYSTEM, 1_500), (MIC, 1_000)), 1);
     assert_eq!(wake((MIC, 1_000), (SYSTEM, 4_000)), 2);
+}
+
+/// An overrun reported on the way back from a sleep opens an epoch with no
+/// audio, and a stall after it another: the sleep is the whole stretch
+/// from the last audio to the first, and the screen gets each epoch and gap.
+#[test]
+fn a_sleep_followed_by_an_overrun_is_one_stretch() {
+    let mut timeline = reopened_at(5_000, 1_000);
+    timeline
+        .open_epoch(ms(6_000), SampleIndex::new(1_000), rate())
+        .unwrap();
+    let (first, second) = (timeline.epochs()[1], timeline.epochs()[2]);
+    let gaps: Vec<_> = timeline.gaps().collect();
+    let mut live = Live::new(&[opened(MIC, 0)]);
+    live.recorder(
+        Some(MIC),
+        RecorderEvent::Audio(chunk(MIC, 0, vec![1; 1_000])),
+    );
+    live.recorder(Some(MIC), suspended());
+    live.recorder(Some(MIC), RecorderEvent::Epoch(first));
+    live.recorder(Some(MIC), RecorderEvent::Epoch(second));
+    let woke = live.recorder(
+        Some(MIC),
+        RecorderEvent::Audio(chunk(MIC, 1_000, vec![1; 100])),
+    );
+    assert_eq!(
+        told(woke.updates),
+        [
+            slept_warning(ms(6_000)),
+            Event::Epoch {
+                track: MIC,
+                epoch: first
+            },
+            Event::Gap {
+                track: MIC,
+                gap: gaps[0]
+            },
+            Event::Epoch {
+                track: MIC,
+                epoch: second
+            },
+            Event::Gap {
+                track: MIC,
+                gap: gaps[1]
+            },
+        ]
+    );
+    assert_eq!(
+        live.slept(),
+        [Slept {
+            resumed: ms(6_000),
+            unrecorded: Some(Unrecorded {
+                from: ms(1_000),
+                to: ms(6_000)
+            })
+        }]
+    );
+}
+
+/// What the machine slept through is what no track recorded: a track that
+/// came back late doesn't stretch the sleep.
+#[test]
+fn a_late_track_does_not_stretch_the_sleep() {
+    let mic = reopened_at(5_000, 1_000);
+    let mut system = opened(SYSTEM, 0);
+    system
+        .open_epoch(ms(9_000), SampleIndex::new(1_000), rate())
+        .unwrap();
+    let mut live = Live::new(&[opened(MIC, 0), opened(SYSTEM, 0)]);
+    // The late track is handled first, so its longer stretch is the first
+    // one seen.
+    for (track, timeline) in [(SYSTEM, &system), (MIC, &mic)] {
+        live.recorder(
+            Some(track),
+            RecorderEvent::Audio(chunk(track, 0, vec![1; 1_000])),
+        );
+        live.recorder(Some(track), suspended());
+        live.recorder(Some(track), RecorderEvent::Epoch(timeline.epochs()[1]));
+        live.recorder(
+            Some(track),
+            RecorderEvent::Audio(chunk(track, 1_000, vec![1; 10])),
+        );
+    }
+    assert_eq!(
+        live.slept(),
+        [Slept {
+            resumed: ms(5_000),
+            unrecorded: Some(Unrecorded {
+                from: ms(1_000),
+                to: ms(5_000)
+            })
+        }]
+    );
+}
+
+/// Wakes `track` from a sleep, with `epoch` the epoch it was reopened in
+/// (`None` if the timeline refused one), and `first` its first sample.
+fn wake(live: &mut Live, track: TrackId, epoch: Option<Epoch>, first: u64) {
+    live.recorder(Some(track), suspended());
+    let reopened = match epoch {
+        Some(epoch) => RecorderEvent::Epoch(epoch),
+        None => RecorderEvent::EpochRefused(nota_core::EpochError::TimeOverflow),
+    };
+    live.recorder(Some(track), reopened);
+    live.recorder(
+        Some(track),
+        RecorderEvent::Audio(chunk(track, first, vec![1; 10])),
+    );
+}
+
+/// A track whose epoch was refused is the same sleep if its audio came back
+/// in the other track's stretch or just after it, and another sleep if it
+/// came back long after.
+#[test]
+fn a_track_with_no_gap_is_judged_against_the_other_tracks_stretch() {
+    let mic = reopened_at(5_000, 1_000);
+    for (first, sleeps) in [(1_000, 1), (6_999, 1), (7_500, 2)] {
+        let mut live = Live::new(&[opened(MIC, 0), opened(SYSTEM, 0)]);
+        wake(&mut live, MIC, Some(mic.epochs()[1]), 1_000);
+        wake(&mut live, SYSTEM, None, first);
+        assert_eq!(live.slept().len(), sleeps, "system back at {first} ms");
+    }
+}
+
+/// Two tracks whose gaps don't overlap (the system audio had stopped well
+/// after the mic's gap ended) didn't sleep together.
+#[test]
+fn tracks_with_gaps_that_do_not_overlap_are_separate_sleeps() {
+    let mic = reopened_at(5_000, 1_000);
+    let mut system = opened(SYSTEM, 0);
+    system
+        .open_epoch(ms(9_000), SampleIndex::new(6_000), rate())
+        .unwrap();
+    let mut live = Live::new(&[opened(MIC, 0), opened(SYSTEM, 0)]);
+    live.recorder(
+        Some(MIC),
+        RecorderEvent::Audio(chunk(MIC, 0, vec![1; 1_000])),
+    );
+    live.recorder(
+        Some(SYSTEM),
+        RecorderEvent::Audio(chunk(SYSTEM, 0, vec![1; 6_000])),
+    );
+    wake(&mut live, MIC, Some(mic.epochs()[1]), 1_000);
+    wake(&mut live, SYSTEM, Some(system.epochs()[1]), 6_000);
+    let resumed: Vec<_> = live.slept().iter().map(|s| s.resumed).collect();
+    assert_eq!(resumed, [ms(5_000), ms(9_000)]);
+}
+
+/// A track that woke with the others and then sleeps again, soon enough
+/// that its audio comes back inside the first sleep's reach, is another
+/// sleep: it already woke from that one.
+#[test]
+fn a_track_that_woke_from_a_sleep_does_not_join_it_again() {
+    let mic = reopened_at(5_000, 1_000);
+    let mut system = opened(SYSTEM, 0);
+    system
+        .open_epoch(ms(5_040), SampleIndex::new(1_000), rate())
+        .unwrap();
+    let mut live = Live::new(&[opened(MIC, 0), opened(SYSTEM, 0)]);
+    wake(&mut live, MIC, Some(mic.epochs()[1]), 1_000);
+    wake(&mut live, SYSTEM, Some(system.epochs()[1]), 1_000);
+    assert_eq!(live.slept().len(), 1);
+    // The system audio sleeps again at once; its epoch is refused, so its
+    // audio is timed 100 ms after its last, inside the first sleep's reach.
+    wake(&mut live, SYSTEM, None, 1_010);
+    assert_eq!(live.slept().len(), 2);
+}
+
+/// An epoch that follows its predecessor with no gap (the timeline took
+/// the stretch as drift) isn't the end of an older gap: with no audio of
+/// the track heard yet to say where this stretch began, the warning comes
+/// without a gap rather than with the older one.
+#[test]
+fn an_epoch_with_no_gap_before_it_does_not_report_an_older_one() {
+    let mut timeline = reopened_at(5_000, 1_000);
+    // The second epoch starts where the first's audio ends: no gap.
+    timeline
+        .open_epoch(ms(6_000), SampleIndex::new(2_000), rate())
+        .unwrap();
+    assert_eq!(timeline.gaps().count(), 1);
+    let mut live = Live::new(&[opened(MIC, 0)]);
+    live.recorder(Some(MIC), RecorderEvent::Epoch(timeline.epochs()[1]));
+    live.recorder(Some(MIC), RecorderEvent::Epoch(timeline.epochs()[2]));
+    live.recorder(Some(MIC), suspended());
+    let woke = live.recorder(
+        Some(MIC),
+        RecorderEvent::Audio(chunk(MIC, 2_000, vec![1; 100])),
+    );
+    assert_eq!(told(woke.updates), [slept_warning(ms(6_000))]);
+    assert_eq!(live.slept()[0].unrecorded, None);
 }
