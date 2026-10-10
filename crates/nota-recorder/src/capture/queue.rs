@@ -187,13 +187,15 @@ impl QueueSender {
     /// is one.
     #[cfg(test)]
     pub(super) fn audio(&self, track: TrackId, samples: &[i16]) {
-        self.first_audio(track, samples, None, None);
+        self.first_audio(track, samples, None, None, None);
     }
 
     /// Queues a copy of `samples` from `track`, in a spare buffer if there
-    /// is one; first [`CaptureEvent::Began`], at the time `first` gives,
-    /// if its flag isn't set yet, or else [`CaptureEvent::Reopened`] at
-    /// `reopened`, if given. The flag is set and `Began` queued under the
+    /// is one, as [`CaptureEvent::TimedAudio`] if the stream stamped it as
+    /// `captured`, or else [`CaptureEvent::Audio`]; first
+    /// [`CaptureEvent::Began`], at the time `first` gives, if its flag
+    /// isn't set yet, or else [`CaptureEvent::Reopened`] at `reopened`, if
+    /// given. The flag is set and `Began` queued under the
     /// queue's lock, so no audio from `track` can come before it, however
     /// many senders the stream sends through; a stream's first audio opens
     /// its first epoch, so it's never also a reopening.
@@ -203,6 +205,7 @@ impl QueueSender {
         samples: &[i16],
         first: Option<(&AtomicBool, SessionTime)>,
         reopened: Option<SessionTime>,
+        captured: Option<SessionTime>,
     ) {
         let mut state = self.0.lock();
         if state.closed {
@@ -229,7 +232,14 @@ impl QueueSender {
         }
         buffer.clear();
         buffer.extend_from_slice(samples);
-        state.events.push_back((track, CaptureEvent::Audio(buffer)));
+        let event = match captured {
+            Some(at) => CaptureEvent::TimedAudio {
+                samples: buffer,
+                at,
+            },
+            None => CaptureEvent::Audio(buffer),
+        };
+        state.events.push_back((track, event));
         drop(state);
         self.0.changed.notify_one();
     }
@@ -528,7 +538,13 @@ mod tests {
                 .map(|sender| {
                     let began = Arc::clone(&began);
                     std::thread::spawn(move || {
-                        sender.first_audio(MIC, &[1], Some((&began, SessionTime::ZERO)), None);
+                        sender.first_audio(
+                            MIC,
+                            &[1],
+                            Some((&began, SessionTime::ZERO)),
+                            None,
+                            None,
+                        );
                     })
                 })
                 .collect();

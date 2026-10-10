@@ -42,8 +42,9 @@ pub struct Epoch {
 
 impl Epoch {
     /// How far this epoch's start was pushed back because the previous
-    /// epoch's audio, at its nominal rate, ran past the requested start: the
-    /// drift measured at this reopening. Zero normally.
+    /// epoch's audio, at its rate and drift, ran past the requested start:
+    /// the error its mapping had built up by this reopening. Zero
+    /// normally.
     #[must_use]
     pub const fn overrun(&self) -> Duration {
         self.overrun
@@ -212,9 +213,9 @@ pub struct OpenedEpoch {
     /// Where it starts: the requested start, or later if the previous
     /// epoch's audio hadn't ended by then.
     pub start: SessionTime,
-    /// How far the previous epoch's audio, timed at its nominal rate, ran
+    /// How far the previous epoch's audio, timed at its rate and drift, ran
     /// past the requested start. Zero normally; more means the device's
-    /// clock ran fast against the session clock, and this is the drift it
+    /// clock ran faster than its drift says, and this is the error it
     /// built up.
     pub overrun: Duration,
 }
@@ -234,7 +235,7 @@ pub enum EpochError {
     /// audio ended that drift can't explain it: more audio arrived than
     /// time passed, by more than 1000 ppm plus 10 ms.
     ImplausibleOverrun {
-        /// When the previous epoch's audio ended, at its nominal rate.
+        /// When the previous epoch's audio ended, at its rate and drift.
         previous_end: SessionTime,
         /// The refused start.
         start: SessionTime,

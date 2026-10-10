@@ -16,9 +16,19 @@
 //! process's `RLIMIT_RTTIME` soft limit to about one quantum: a real-time
 //! thread that runs that long without blocking gets `SIGXCPU`. The callback
 //! blocks every buffer, so it stays well inside.
+//!
+//! # Timestamps
+//!
+//! cpal stamps each buffer with when `PipeWire` captured it: the graph
+//! cycle's time less the stream's delay, on `CLOCK_MONOTONIC`, or the
+//! callback's time less the buffer's length when the driver hasn't started.
+//! Each buffer is sent with its stamp
+//! ([`CaptureSender::audio_captured`]), so the recorder times losses and
+//! drift by it.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, DeviceId, ErrorKind, HostId, StreamConfig};
@@ -135,9 +145,14 @@ impl CaptureBackend for PipeWireBackend {
                 // no I/O, no waiting on the recorder, and in the steady
                 // state no allocation. The first buffer also asks for
                 // real-time priority, a few system calls.
-                move |samples: &[i16], _| {
+                move |samples: &[i16], info: &cpal::InputCallbackInfo| {
                     promotion.on_buffer(promote_current_thread);
-                    events.audio(samples);
+                    // cpal stamps the buffer with PipeWire's capture time,
+                    // on CLOCK_MONOTONIC.
+                    match u64::try_from(info.timestamp().capture.as_nanos()) {
+                        Ok(nanos) => events.audio_captured(samples, Duration::from_nanos(nanos)),
+                        Err(_) => events.audio(samples),
+                    }
                 },
                 move |error: cpal::Error| match stream_error(
                     &failed_source,

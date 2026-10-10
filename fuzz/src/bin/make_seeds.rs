@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use nota_core::{
-    Clock, EpochAnchor, EpochId, SampleIndex, SampleRate, SessionTime, SystemClock, TrackId,
+    Clock, Drift, EpochAnchor, EpochId, SampleIndex, SampleRate, SessionTime, SystemClock, TrackId,
 };
 use nota_recorder::fs::{Fs, FsFile, StdFile, StdFs};
 use nota_recorder::journal::format::MAX_FRAME_SAMPLES;
@@ -75,8 +75,9 @@ fn main() -> Result<()> {
     ensure_dir(dir)?;
     ensure_dir(scratch)?;
     // Each journal's epoch starts at its first sample, `first`, a second
-    // per epoch number into the session.
-    let speech = |id, track, epoch, first| {
+    // per epoch number into the session; a later epoch is a device 120 ppm
+    // slow.
+    let speech = |id, track, epoch: u32, first| {
         JournalHeader::new(
             JournalId::new(id),
             TrackId::new(track),
@@ -85,6 +86,11 @@ fn main() -> Result<()> {
                 start: SessionTime::from_nanos(u64::from(epoch) * 1_000_000_000),
                 first_sample: SampleIndex::new(first),
                 rate: SampleRate::SPEECH,
+                drift: if epoch > 0 {
+                    Drift::from_ppb(-120_000).unwrap_or(Drift::ZERO)
+                } else {
+                    Drift::ZERO
+                },
             },
         )
     };
@@ -130,34 +136,37 @@ fn main() -> Result<()> {
             Ok(())
         },
     )?;
-    untimed_copy(dir, "one_track.journal", "untimed.journal")?;
+    older_copy(dir, "one_track.journal", "untimed.journal", 2)?;
+    older_copy(dir, "later_journal.journal", "undrifted.journal", 3)?;
     Ok(())
 }
 
-/// Bytes in a version 3 header, and in a version 2 one, which has no
-/// anchor (bytes 30..46 of version 3).
-const TIMED_HEADER: usize = 50;
-const UNTIMED_HEADER: usize = 34;
+/// Bytes in a version 4 header.
+const HEADER: usize = 54;
 
-/// Writes the seed `name` in `dir` as the version 2 journal an older nota
-/// wrote: the seed `from` with its header's anchor taken out, version 2,
-/// and the CRC over the fields left. The frames are as they were.
-fn untimed_copy(dir: &Path, from: &str, name: &str) -> Result<()> {
+/// Writes the seed `name` in `dir` as the journal of `version` an older
+/// nota wrote: the seed `from` with its header cut to the fields that
+/// version had (version 3 has no drift, bytes 46..50 of version 4;
+/// version 2 no anchor, bytes 30..50), and the CRC over the fields left.
+/// The frames are as they were.
+fn older_copy(dir: &Path, from: &str, name: &str, version: u16) -> Result<()> {
     let target = dir.join(name);
     if target.exists() {
         return Ok(());
     }
+    let fields = match version {
+        3 => 46,
+        2 => 30,
+        _ => return Err(format!("no older version {version}").into()),
+    };
     let timed = StdFs.read(&dir.join(from))?;
-    let (Some(fields), Some(frames)) = (timed.get(..30), timed.get(TIMED_HEADER..)) else {
+    let (Some(kept), Some(frames)) = (timed.get(..fields), timed.get(HEADER..)) else {
         return Err(format!("{from} is shorter than a header").into());
     };
-    let mut bytes = fields.to_vec();
-    bytes[8..10].copy_from_slice(&2_u16.to_le_bytes());
+    let mut bytes = kept.to_vec();
+    bytes[8..10].copy_from_slice(&version.to_le_bytes());
     let crc = crc32fast::hash(&bytes);
     bytes.extend_from_slice(&crc.to_le_bytes());
-    if bytes.len() != UNTIMED_HEADER {
-        return Err("the untimed header came out the wrong length".into());
-    }
     bytes.extend_from_slice(frames);
     let mut out = StdFs.create(&target)?;
     out.write_all(&bytes)?;
