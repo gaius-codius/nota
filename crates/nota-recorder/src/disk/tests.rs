@@ -1054,3 +1054,126 @@ fn a_wrapper_without_directory_removal_refuses_cleanup() {
     assert_eq!(error.kind(), io::ErrorKind::Unsupported);
     assert_eq!(fs.list(&p("/data")).unwrap(), [p("/data/s")]);
 }
+
+/// A watch over `fs` holding a ballast of `len` bytes in `/data`, shared
+/// with a recording into `/data/live`: claimed while that's locked.
+fn shared(fs: &FakeFs, len: u64) -> Arc<DiskWatch<FakeFs>> {
+    let watch = watched(fs, len);
+    let under = fs.clone();
+    watch.share(move |_| {
+        under
+            .lock_dir(&p("/data/live"))
+            .is_err_and(|e| e.kind() == io::ErrorKind::WouldBlock)
+    });
+    watch
+}
+
+/// A recording that started after a startup watch took the ballast keeps
+/// it: the full disk leaves it on disk, freeing nothing.
+#[test]
+fn a_shared_ballast_a_live_recording_claims_is_kept_when_the_disk_fills() {
+    let fs = FakeFs::with_dirs(["/data/live"]);
+    let watch = shared(&fs, 100);
+    // The recording starts after the watch took the ballast.
+    let _recording = fs.lock_dir(&p("/data/live")).unwrap();
+    watch.note_full(Some(&p("/data/old-segment.tmp")));
+    assert_eq!(watch.full().map(|f| f.ballast), Some(Freed::None));
+    assert!(!watch.holds_ballast());
+    assert!(Ballast::find(&fs, &p("/data"), 100).unwrap().is_some());
+}
+
+/// With no live recording claiming it, a shared ballast is freed as any
+/// other is.
+#[test]
+fn a_shared_ballast_no_recording_claims_is_freed_when_the_disk_fills() {
+    let fs = FakeFs::with_dirs(["/data/live"]);
+    let watch = shared(&fs, 100);
+    // Nothing holds `/data/live`: the check finds no recording.
+    watch.note_full(Some(&p("/data/old-segment.tmp")));
+    assert_eq!(watch.full().map(|f| f.ballast), Some(Freed::Freed));
+    assert!(Ballast::find(&fs, &p("/data"), 100).unwrap().is_none());
+}
+
+/// Once the watch starts recording, its ballast is its own: another
+/// recording's lock no longer keeps it.
+#[test]
+fn a_started_recording_frees_the_ballast_it_shared() {
+    let fs = FakeFs::with_dirs(["/data/live"]);
+    let watch = shared(&fs, 100);
+    let _other = fs.lock_dir(&p("/data/live")).unwrap();
+    // This watch's own recording now needs the room to finish.
+    watch.start_recording();
+    watch.note_full(Some(&p("/data/journal-000000")));
+    assert_eq!(watch.full().map(|f| f.ballast), Some(Freed::Freed));
+    assert!(Ballast::find(&fs, &p("/data"), 100).unwrap().is_none());
+}
+
+/// A ballast held after the disk filled is freed at once, unless a live
+/// recording claims it.
+#[test]
+fn a_ballast_held_once_full_is_kept_if_a_live_recording_claims_it() {
+    let fs = FakeFs::with_dirs(["/data/live"]);
+    let watch = DiskWatch::new(fs.clone());
+    let under = fs.clone();
+    watch.share(move |_| under.lock_dir(&p("/data/live")).is_err());
+    watch.note_full(None);
+    let _recording = fs.lock_dir(&p("/data/live")).unwrap();
+    // Found after the disk filled, while the recording runs.
+    let ballast = Ballast::keep(&fs, &p("/data"), 100, || false)
+        .unwrap()
+        .unwrap();
+    watch.hold(ballast);
+    assert_eq!(watch.full().map(|f| f.ballast), Some(Freed::None));
+    assert!(Ballast::find(&fs, &p("/data"), 100).unwrap().is_some());
+}
+
+/// A shared watch shows that it's shared when debugged, without trying
+/// to show the check itself.
+#[test]
+fn a_shared_watch_says_so_when_debugged() {
+    let fs = FakeFs::with_dirs(["/data/live"]);
+    let watch = shared(&fs, 100);
+    let shown = format!("{watch:?}");
+    assert!(shown.contains("claimed: Some(Claimed(..))"), "{shown}");
+}
+
+/// A watch over `fs` holding a ballast of `len` bytes in `/data`, shared
+/// as startup shares it: `/data/live` claims it while locked by anyone
+/// but the watch itself.
+fn shared_past_own(fs: &FakeFs, len: u64) -> Arc<DiskWatch<FakeFs>> {
+    let watch = watched(fs, len);
+    let under = fs.clone();
+    watch.share(move |own| {
+        let live = p("/data/live");
+        !own.contains(&live)
+            && under
+                .lock_dir(&live)
+                .is_err_and(|e| e.kind() == io::ErrorKind::WouldBlock)
+    });
+    watch
+}
+
+/// A directory locked through the watch is its own while held: the full
+/// disk frees the ballast.
+#[test]
+fn a_lock_the_watch_holds_doesnt_claim_its_ballast() {
+    let fs = FakeFs::with_dirs(["/data/live"]);
+    let watch = shared_past_own(&fs, 100);
+    let _own = watch.fs().lock_dir(&p("/data/live")).unwrap();
+    watch.note_full(None);
+    assert_eq!(watch.full().map(|f| f.ballast), Some(Freed::Freed));
+}
+
+/// Once the watch lets a directory go, whoever locks it next is a
+/// recording, and keeps the ballast.
+#[test]
+fn a_lock_the_watch_let_go_is_no_longer_its_own() {
+    let fs = FakeFs::with_dirs(["/data/live"]);
+    let watch = shared_past_own(&fs, 100);
+    drop(watch.fs().lock_dir(&p("/data/live")).unwrap());
+    // A recording takes the directory the watch just unlocked.
+    let _recording = fs.lock_dir(&p("/data/live")).unwrap();
+    watch.note_full(None);
+    assert_eq!(watch.full().map(|f| f.ballast), Some(Freed::None));
+    assert!(Ballast::find(&fs, &p("/data"), 100).unwrap().is_some());
+}
