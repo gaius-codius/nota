@@ -328,7 +328,7 @@ jobs:
       - id: diff
         shell: bash
         run: |
-          if git diff --quiet HEAD^1 HEAD -- .github/workflows/ci.yml .config/nextest.toml rust-toolchain.toml; then
+          if git diff --quiet HEAD^1 HEAD -- .github/workflows/ci.yml .config/nextest.toml .cargo/config.toml rust-toolchain.toml; then
             echo changed=false >>"$GITHUB_OUTPUT"
           else
             echo changed=true >>"$GITHUB_OUTPUT"
@@ -360,16 +360,26 @@ jobs:
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: cargo-llvm-cov,cargo-nextest
-      # A process killed while it writes its profile at exit (the tests kill
-      # engines and re-run test binaries as children) leaves a truncated
-      # .profraw, and llvm-profdata's default then refuses to merge any.
-      # --failure-mode all skips the bad file, still fails when no profile
-      # merges, and each skipped file is shown as a warning.
+      # llvm-profdata's default refuses to merge any profile when one is
+      # unreadable. Main once failed that way after every test passed, and a
+      # rerun of the same commit passed: most likely a process killed while
+      # writing its profile at exit (the tests kill engines and re-run test
+      # binaries as children), though it hasn't been reproduced.
+      # --failure-mode all skips an unreadable profile and still fails when
+      # none merges. Each profile warning is raised as an annotation, and
+      # more than three fail the job: one binary's profiles unreadable on
+      # every run would otherwise drop its coverage quietly.
       - name: Run the tests with coverage
         shell: bash
         run: |
           cargo llvm-cov nextest --workspace --all-targets --locked --no-tests=fail --failure-mode all --lcov --output-path lcov.info 2>&1 | tee "$RUNNER_TEMP/coverage.log"
-          grep -E '^warning: .*\.profraw: ' "$RUNNER_TEMP/coverage.log" | sed 's/^warning: /::warning title=Coverage profile skipped::/' || true
+          warned=$(grep -cE '^warning: .*\.profraw: ' "$RUNNER_TEMP/coverage.log" || true)
+          grep -E '^warning: .*\.profraw: ' "$RUNNER_TEMP/coverage.log" | sed 's/^warning: /::warning title=Coverage profile warning::/' || true
+          echo "Coverage profiles with warnings (skipped if unreadable): $warned" >>"$GITHUB_STEP_SUMMARY"
+          if [ "$warned" -gt 3 ]; then
+            echo "::error::$warned coverage profiles had warnings; more than 3 means a systematic loss, not a one-off"
+            exit 1
+          fi
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage
