@@ -380,7 +380,7 @@ fn open_streams<B: CaptureBackend>(
     let streams = start_streams(starter, backend, sources, notes);
     if streams.captures.is_empty() {
         ready.abandon();
-        return Err("nothing to record".into());
+        return Err(NOTHING_TO_RECORD.into());
     }
     Ok((streams, ready))
 }
@@ -499,6 +499,9 @@ fn start_live(
 
 /// What opening the streams came to, and what started before them.
 type Opened<S> = (Streams<S>, Ready);
+
+/// What a start says when no stream started.
+const NOTHING_TO_RECORD: &str = "nothing to record";
 
 /// What a start that fails before any stream opens says.
 const STOPPED_BEFORE: &str = "stopped before recording started; no session was made";
@@ -1828,6 +1831,73 @@ mod salvage_note_tests {
         ));
         assert!(note.contains("all its audio is published"), "{note}");
         assert!(note.contains("seg-t1-000000000000.flac: the segment file doesn't match its stored audio; couldn't repair it (permission denied); its journals are still to publish"), "{note}");
+    }
+
+    /// Startup names each file salvage holds once, with its cause, however
+    /// the failures combine; the published journal is never called
+    /// unpublished.
+    #[test]
+    fn startup_names_each_held_file_once_across_combined_failures() {
+        use crate::library::held::{Beside, Held};
+        for beside in Beside::ALL {
+            let note = salvage_note(&Held::new(beside).salvaged());
+            // The whole note: a lost or changed cause, or a file named
+            // twice, fails it.
+            let expected = format!("salvaged session 1: {}", beside.held_at_start().join("; "));
+            assert_eq!(note, expected, "{beside:?}");
+        }
+    }
+
+    /// A backend whose every stream fails to start, as when no input is
+    /// there.
+    struct RefusesAll;
+
+    impl CaptureBackend for RefusesAll {
+        type Stream = ();
+
+        fn start(
+            &self,
+            source: &Source,
+            _: nota_core::SampleRate,
+            _: nota_recorder::capture::CaptureSender,
+        ) -> Result<(), nota_recorder::capture::CaptureError> {
+            Err(nota_recorder::capture::CaptureError::DeviceNotAvailable(
+                source.clone(),
+            ))
+        }
+    }
+
+    /// A start that fails after recovery, because no input started, still
+    /// shows every recovery note and each input's failure, each once.
+    #[test]
+    fn a_failed_start_keeps_combined_recovery_notes_beside_its_input_failures() {
+        use crate::library::held::{Beside, Held};
+        let recovered: Vec<String> = Beside::ALL
+            .iter()
+            .map(|&beside| salvage_note(&Held::new(beside).salvaged()))
+            .collect();
+        // The streams start after recovery has noted what it found.
+        let mut notes = recovered.clone();
+        let clock: Arc<dyn Clock> = Arc::new(nota_core::FakeClock::new(SessionTime::ZERO));
+        let sources = [(MIC, Source::Microphone), (SYSTEM, Source::SystemAudio)];
+        let (starter, events) = prepare_tracks(&sources, RATE, &clock);
+        let streams = start_streams(starter, &RefusesAll, &sources, &mut notes);
+        drop(events);
+        assert!(streams.captures.is_empty());
+        let failure = startup_failure(NOTHING_TO_RECORD.into(), notes).to_string();
+        let inputs = sources.map(|(_, source)| {
+            let why = nota_recorder::capture::CaptureError::DeviceNotAvailable(source.clone());
+            format!("not recording {source}: {why}")
+        });
+        assert_eq!(
+            failure,
+            format!(
+                "nothing to record; {}; {}",
+                recovered.join("; "),
+                inputs.join("; ")
+            )
+        );
+        assert_eq!(failure.matches("not recording ").count(), 2, "{failure}");
     }
 }
 

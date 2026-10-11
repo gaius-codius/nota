@@ -1420,3 +1420,80 @@ fn startup_keeps_the_ballast_when_it_cant_list_the_sessions() {
     assert_eq!(watch.full().map(|f| f.ballast), Some(Freed::None));
     assert!(Ballast::find(&fs, &root, 1_024).unwrap().is_some());
 }
+
+/// Each combined failure leaves the session for the next start, with the
+/// mic's journal reported as published but kept, and the system track's
+/// file held for its own cause.
+#[test]
+fn combined_failures_leave_the_session_with_each_held_file_reported() {
+    use nota_recorder::journal::JournalId;
+    use nota_recorder::segment::Problem;
+
+    use super::held::{Beside, Held, SESSION, stray_temp, system_segment, system_temp};
+
+    let refused = io::ErrorKind::PermissionDenied;
+    for beside in Beside::ALL {
+        let salvaged = Held::new(beside).salvaged();
+        // Journals are still on disk, so this start isn't done with it.
+        let Salvaged::Left(id, aside, held) = &salvaged else {
+            panic!("{beside:?}: {salvaged:?}");
+        };
+        assert_eq!((*id, aside.as_slice()), (SESSION, &[][..]), "{beside:?}");
+        assert_eq!(
+            held.not_deleted(),
+            [(JournalId::new(0), refused)],
+            "{beside:?}"
+        );
+        // The system journal goes only once its audio is published.
+        let deleted: &[JournalId] = if beside == Beside::StrayTemp {
+            &[JournalId::new(1)]
+        } else {
+            &[]
+        };
+        assert_eq!(held.deleted(), deleted, "{beside:?}");
+        let blocked = match beside {
+            Beside::Blocked => vec![(system_segment(), io::ErrorKind::IsADirectory)],
+            Beside::TempKept => vec![(system_temp(), refused)],
+            Beside::StrayTemp | Beside::Unread | Beside::Unrepaired => Vec::new(),
+        };
+        assert_eq!(held.blocked(), blocked, "{beside:?}");
+        let temps = match beside {
+            Beside::TempKept => vec![(system_temp(), refused)],
+            Beside::StrayTemp => vec![(stray_temp(), refused)],
+            _ => Vec::new(),
+        };
+        assert_eq!(held.temps_kept(), temps, "{beside:?}");
+        let unread: Vec<_> = held
+            .unread()
+            .iter()
+            .map(|(j, kind)| (j.id(), *kind))
+            .collect();
+        let expected = if beside == Beside::Unread {
+            vec![(JournalId::new(1), refused)]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(unread, expected, "{beside:?}");
+        let unrepaired: Vec<_> = held
+            .not_repaired()
+            .iter()
+            .map(|&(row, kind)| (row.track(), kind))
+            .collect();
+        let findings: Vec<_> = held
+            .findings()
+            .iter()
+            .map(|f| (f.row().track(), f.problem()))
+            .collect();
+        let system = TrackId::new(1);
+        let (expected_unrepaired, expected_findings) = if beside == Beside::Unrepaired {
+            (
+                vec![(system, refused)],
+                vec![(system, Problem::HashMismatch)],
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        assert_eq!(unrepaired, expected_unrepaired, "{beside:?}");
+        assert_eq!(findings, expected_findings, "{beside:?}");
+    }
+}

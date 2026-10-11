@@ -107,7 +107,9 @@ impl Published {
     /// Segment temp files salvage found but couldn't remove, with the
     /// error's kind (a directory under the name, an immutable file). Each is
     /// left as it is; it's never the only copy of anything. Only
-    /// [`salvage`] removes temp files, so only it reports these.
+    /// [`salvage`] reports these: publishing removes a temp file in a
+    /// segment's way too, but one it can't remove is that segment's
+    /// [`Self::blocked`] name.
     #[must_use]
     pub fn temps_kept(&self) -> &[(PathBuf, io::ErrorKind)] {
         &self.temps_kept
