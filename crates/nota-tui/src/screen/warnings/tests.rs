@@ -474,6 +474,27 @@ fn a_capture_warning_gives_way_to_a_loss_but_not_to_a_gold_condition() {
     );
 }
 
+/// The recorder never clears these, so a clear that does arrive (from a
+/// timeline read back, say) isn't taken for a raise.
+#[test]
+fn a_cleared_capture_warning_shows_nothing() {
+    let mut warnings = two_tracks();
+    clear(
+        &mut warnings,
+        Cause::DevicesUnwatched("no watch".into()),
+        Some(MIC),
+        5,
+    );
+    clear(
+        &mut warnings,
+        Cause::CaptureWarning("hiccup".into()),
+        Some(MIC),
+        6,
+    );
+    assert_eq!(warnings.top(secs(6)), None);
+    assert!(warnings.changes().is_empty());
+}
+
 /// Drift is corrected as it's measured, so the screen says nothing of it.
 #[test]
 fn drift_shows_nothing() {
