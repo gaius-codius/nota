@@ -2075,6 +2075,34 @@ fn a_channel_closed_inside_a_burst_still_shows_its_losses() {
     assert_eq!(epoch_events(&reported).len(), 2);
 }
 
+/// A reopening inside a burst's window opens its own epoch, whose gap
+/// takes in the losses held back: the track's end then opens nothing more.
+#[test]
+fn a_reopening_inside_a_burst_leaves_nothing_held_for_the_end() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let mut buffers = Buffers::new();
+    buffers.on_time();
+    buffers.on_time();
+    for _ in 0..3 {
+        buffers.lose(30);
+        buffers.on_time();
+    }
+    // The stream moves, and its audio resumes 500 ms on.
+    buffers
+        .script
+        .push(Step::Notice(CaptureNotice::RouteChanged));
+    buffers.millis += 500;
+    buffers.on_time();
+    buffers.on_time();
+    let run = run(&fs, buffers.script.clone(), Vec::new(), |_| {});
+    run.result.unwrap();
+    let ms = |ms: u64| SessionTime::from_nanos(ms * 1_000_000);
+    assert_eq!(
+        epoch_starts(&run.timeline),
+        [(0, ms(0), 0), (1, ms(130), 100), (2, ms(840), 250)]
+    );
+}
+
 /// After a route change, the new device's drift takes over within about
 /// 20 s, once its run has settled and been watched for the minimum window,
 /// not the minute a long earlier run's estimate would hold it off for: a
@@ -2098,7 +2126,9 @@ fn a_new_device_after_a_route_change_is_retimed_by_its_own_drift() {
     assert_eq!(epochs[1].start(), at(91));
     assert_eq!(epochs[1].drift(), Drift::ZERO);
     let new = epochs.last().unwrap();
-    assert!(new.drift().ppb() > 300_000, "{epochs:?}"); // check-bound
+    // About 400 ppm, and the slew's closing term on top.
+    let ppb = new.drift().ppb();
+    assert!((300_000..=600_000).contains(&ppb), "{epochs:?}"); // check-bound
 }
 
 /// When the buffer holding the stream's `sample`th sample was captured, if

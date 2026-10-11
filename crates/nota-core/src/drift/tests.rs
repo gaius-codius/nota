@@ -243,13 +243,12 @@ fn small_losses_built_up_while_settling_are_a_loss() {
         read(&mut short, &timeline, 32_000, at(10) - 1),
         Reading::Steady
     );
-    // 25 ms above the lowest, 14 ms later than the first buffer: the hole
-    // is measured from the first buffer, as for any loss in a run that
-    // hasn't settled.
+    // 25 ms above the lowest, though only 14 ms later than the first
+    // buffer: the hole is all that built up, as a single jump's would be.
     assert_eq!(
         read(&mut meter, &timeline, 32_000, at(10)),
         Reading::Lost {
-            hole: Duration::from_millis(14)
+            hole: Duration::from_millis(25)
         }
     );
 }
@@ -294,7 +293,8 @@ fn small_losses_while_settling_as_measured_read_as_lost() {
         });
         let (when, hole) = found.unwrap_or_else(|| panic!("{shape:?}: no loss read"));
         assert!(when < SETTLED_AT, "{shape:?}: {when}");
-        assert!(hole > Duration::ZERO, "{shape:?}: {hole:?}");
+        // At least what lifted it above its lowest.
+        assert!(hole >= SETTLING_BUILT_UP, "{shape:?}: {hole:?}");
     }
 }
 

@@ -186,11 +186,16 @@ pub const LOSS_BUILT_UP: Duration = Duration::from_millis(15);
 /// shown as a gap: a settling run can't tell them from the stamps
 /// settling. It leaves room for the 14 ms a stream's cycles were measured
 /// to rise as it settled (see the module docs), a millisecond of jitter
-/// either side, and the 5 ms that 500 ppm of drift, still uncorrected,
-/// builds up over [`SETTLE`]. Measured from the lowest point rather than
+/// either side, and the 5 ms that 500 ppm of drift still uncorrected
+/// builds up over [`SETTLE`]: a device's own drift on a first run, or after
+/// a reopening, how far the new device's is from the old one's. Two
+/// devices past [`DRIFT_LIMIT`] the opposite way can pass it, and read a
+/// loss where there was none. Measured from the lowest point rather than
 /// the first buffer, so a stream whose stamps settle early, as a USB DAC's
-/// monitor's did by 11 ms, shows a loss no later than one that settles
-/// late.
+/// monitor's did by 11 ms, needs no more built up than the limit itself,
+/// not the limit plus how early it settled. One whose stamps rise as they
+/// settle, as a microphone's did by 14 ms, shows a loss sooner, the rise
+/// counting toward the limit.
 pub const SETTLING_BUILT_UP: Duration = Duration::from_millis(25);
 
 /// How far an epoch's mapping may stray from the stream's timestamps
@@ -213,7 +218,8 @@ pub const MIN_WINDOW: Duration = Duration::from_secs(10);
 pub const SETTLE: Duration = Duration::from_secs(10);
 
 /// How long a run must be before its measured drift is trusted over a
-/// longer earlier run's, or is judged against [`DRIFT_LIMIT`]: 60 s. A
+/// longer earlier run's (unless the stream reopened since:
+/// [`DriftMeter::reopened`]), or is judged against [`DRIFT_LIMIT`]: 60 s. A
 /// quantum lost unseen, or a stamp a few milliseconds off, then moves the
 /// estimate by under about 100 ppm.
 pub const TRUSTED_WINDOW: Duration = Duration::from_secs(60);
@@ -264,11 +270,11 @@ pub enum Reading {
         /// than the mapping the buffer came, by the stream's cycle times,
         /// beyond the earliest of where the run's first buffer came, where
         /// it settled, and for a loss shown by a jump, where the buffer
-        /// before it came. So at least the jump, and at least what built
-        /// up behind the base, but measured from the first buffer when
-        /// that's earlier, as for a graph restart that wins back buffering
-        /// as it loses audio. Zero if the buffer is earlier than all of
-        /// them.
+        /// before it came, or for one built up while settling, the lowest
+        /// the run came. So at least the jump, and at least what built up,
+        /// but measured from the first buffer when that's earlier, as for
+        /// a graph restart that wins back buffering as it loses audio.
+        /// Zero if the buffer is earlier than all of them.
         hole: Duration,
     },
     /// The mapping has strayed by more than [`RETIME_AFTER`] (or a
@@ -290,7 +296,8 @@ pub struct DriftMeter {
     run: Option<Run>,
     /// The drift measured over the current run, once it reached
     /// [`MIN_WINDOW`]; or after a restart, the earlier run's, until the new
-    /// one is as long or reaches [`TRUSTED_WINDOW`].
+    /// one is as long or reaches [`TRUSTED_WINDOW`] (after a reopening,
+    /// until the new one reaches [`MIN_WINDOW`]).
     measured: Option<Drift>,
     /// How long a run `measured` was measured over.
     measured_over: Duration,
@@ -484,7 +491,8 @@ impl DriftMeter {
     /// Updates the measured drift from `samples` delivered in `elapsed`
     /// nanoseconds of the settled run, if that's long enough:
     /// [`MIN_WINDOW`], and after a restart, as long as the run measured
-    /// before or [`TRUSTED_WINDOW`], whichever is shorter.
+    /// before or [`TRUSTED_WINDOW`], whichever is shorter (after a
+    /// reopening, [`MIN_WINDOW`] alone: its `measured_over` is zero).
     fn learn(&mut self, samples: SampleCount, elapsed: i128, rate: SampleRate) {
         let Some(elapsed) = u64::try_from(elapsed).ok().map(Duration::from_nanos) else {
             return;
@@ -511,14 +519,14 @@ impl DriftMeter {
 /// every loss of a burst counts, measured from where the first was; if the
 /// buffer jumped [`LOSS_MIN`] or more; once the run has settled, if it has
 /// built up [`LOSS_BUILT_UP`] behind its base; and while it settles, if it
-/// has risen [`SETTLING_BUILT_UP`] above its lowest.
+/// has risen [`SETTLING_BUILT_UP`] above its lowest, measured from there.
 fn lost(run: &Run, before: i128, off: i128) -> Option<i128> {
     let anchor = run.origin.min(run.base);
     let from = match run.phase {
         Phase::Lost { from } => from,
         _ if off - before >= nanos(LOSS_MIN) => anchor.min(before),
         Phase::Settled if off - run.base >= nanos(LOSS_BUILT_UP) => anchor,
-        Phase::Settling if off - run.low >= nanos(SETTLING_BUILT_UP) => anchor,
+        Phase::Settling if off - run.low >= nanos(SETTLING_BUILT_UP) => anchor.min(run.low),
         Phase::Settled | Phase::Settling => return None,
     };
     Some(from)

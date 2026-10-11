@@ -1355,12 +1355,13 @@ pub fn record_tracks<S: Fs>(
                         Ok(())
                     }
                     Handled::Ended => {
-                        let flushed = open_for_held(writer, &mut timelines, track, report);
                         let next = writer.next_sample(track);
                         let timeline = timelines.get_mut(track).map(|(timeline, _)| &*timeline);
+                        // First, so what they raised ends where the audio
+                        // did, not after a held loss's gap.
                         detectors.end(track, next, timeline, report);
                         live.remove(&track);
-                        flushed.map_err(|e| (track, e))
+                        open_for_held(writer, &mut timelines, track, report).map_err(|e| (track, e))
                     }
                 };
             settle(writer, outcome, report)?;
@@ -1830,7 +1831,8 @@ fn open_for_held<S: Fs>(
     let Some((timeline, stamps)) = timelines.get_mut(track) else {
         return Ok(());
     };
-    let Some(hole) = stamps.held.take() else {
+    // A hole of none would open an epoch with no gap to show.
+    let Some(hole) = stamps.held.take().filter(|hole| !hole.is_zero()) else {
         return Ok(());
     };
     let resumed = writer
