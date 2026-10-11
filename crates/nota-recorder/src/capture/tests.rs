@@ -1999,6 +1999,108 @@ fn a_burst_of_overruns_opens_one_epoch_then_one_for_the_rest() {
     assert_eq!(changes, [0, 1, 2], "{ids:?}");
 }
 
+/// The epochs and gaps a burst that ends with the track should leave: the
+/// first loss's epoch at the third buffer, and one for the other two
+/// losses, 60 ms, at the end, where the stamps put the track's next sample.
+fn assert_burst_shows_at_the_end(timeline: &TrackTimeline) {
+    let ms = |ms: u64| SessionTime::from_nanos(ms * 1_000_000);
+    assert_eq!(
+        epoch_starts(timeline),
+        [(0, ms(0), 0), (1, ms(130), 100), (2, ms(340), 250)]
+    );
+    assert_eq!(
+        gap_spans(timeline),
+        [(ms(100), ms(130)), (ms(280), ms(340))]
+    );
+}
+
+/// A recording that stops inside a burst's window still shows the losses
+/// held back for the window: an epoch at the track's end, after a gap of
+/// all of them, rather than none.
+#[test]
+fn a_stop_inside_a_burst_still_shows_its_losses() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let mut buffers = Buffers::new();
+    buffers.on_time();
+    buffers.on_time();
+    for _ in 0..3 {
+        buffers.lose(30);
+        buffers.on_time();
+    }
+    let run = run(&fs, buffers.script.clone(), Vec::new(), |_| {});
+    run.result.unwrap();
+    assert_burst_shows_at_the_end(&run.timeline);
+    let journals = all_journals(run.writer, &run.reported);
+    assert_eq!(journaled(&fs, &journals), samples(0, 250));
+}
+
+/// So does a channel whose senders all go without the stream's end: the
+/// held losses reach the timeline before recording returns.
+#[test]
+fn a_channel_closed_inside_a_burst_still_shows_its_losses() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let session = SessionDir::new(SESSION, fs.clone(), &dir()).lock().unwrap();
+    let length = SegmentLength::new(SampleCount::new(1_000)).unwrap();
+    let mut writer = SessionWriter::open(&session, rate(), length, clock).unwrap();
+    let mut timeline = epoch_zero();
+    writer
+        .start_track(MIC, timeline.current().unwrap())
+        .unwrap();
+    let (tx, rx) = test_channel();
+    // Stamped as the burst above: 30 ms lost before each of the last three.
+    for (n, millis) in [0, 50, 130, 210, 290].into_iter().enumerate() {
+        let first = u64::try_from(n).unwrap() * Buffers::LEN;
+        let stamp = Stamp {
+            at: SessionTime::from_nanos(millis * 1_000_000),
+            delay: Duration::ZERO,
+        };
+        let samples = samples(first, Buffers::LEN);
+        tx.send(MIC, CaptureEvent::TimedAudio { samples, stamp });
+    }
+    drop(tx);
+    let events = CaptureReceiver {
+        events: rx,
+        rate: rate(),
+        tracks: test_tracks(&[MIC]),
+        clock: Arc::new(FakeClock::new(SessionTime::ZERO)),
+        thresholds: BTreeMap::new(),
+    };
+    let mut reported = Vec::new();
+    record_track(&mut writer, &mut timeline, &events, &mut |e| {
+        reported.push(e);
+    })
+    .unwrap();
+    assert_burst_shows_at_the_end(&timeline);
+    assert_eq!(epoch_events(&reported).len(), 2);
+}
+
+/// After a route change, the new device's drift takes over within about
+/// 20 s, once its run has settled and been watched for the minimum window,
+/// not the minute a long earlier run's estimate would hold it off for: a
+/// device 400 ppm fast is retimed toward its rate by 30 s in.
+#[test]
+fn a_new_device_after_a_route_change_is_retimed_by_its_own_drift() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let mut script: Vec<Step> = (0..900)
+        .map(|n| Step::TimedAudio(samples(n * 100, 100), Duration::from_millis(n * 100)))
+        .collect();
+    script.push(Step::Advance(secs(91)));
+    script.push(Step::Notice(CaptureNotice::RouteChanged));
+    script.extend((0..300).map(|n| {
+        let stamp = secs(91) + fast_stamp(n * 100);
+        Step::TimedAudio(samples(90_000 + n * 100, 100), stamp)
+    }));
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    let epochs = run.timeline.epochs();
+    // The old device ran at its nominal rate: nothing to correct.
+    assert_eq!(epochs[1].start(), at(91));
+    assert_eq!(epochs[1].drift(), Drift::ZERO);
+    let new = epochs.last().unwrap();
+    assert!(new.drift().ppb() > 300_000, "{epochs:?}"); // check-bound
+}
+
 /// When the buffer holding the stream's `sample`th sample was captured, if
 /// the device runs 400 ppm fast: its samples last a little less than the
 /// nominal time each.
