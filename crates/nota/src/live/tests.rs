@@ -172,6 +172,25 @@ fn a_new_epoch_flushes_the_engine_and_places_later_text_after_the_gap() {
     );
 }
 
+/// A reopening moved to the old audio's end (its stamps overlapped it)
+/// leaves no gap, but its audio is from another device: the engine is
+/// flushed, and no gap is sent.
+#[test]
+fn a_reopening_moved_to_the_old_audios_end_flushes_the_engine() {
+    let recorder_mic = {
+        let mut t = opened(MIC, 0);
+        t.reopen(ms(900), SampleIndex::new(1_000), rate(), Drift::ZERO)
+            .unwrap();
+        t
+    };
+    let mut live = Live::new(&[opened(MIC, 0)]);
+    let epoch = recorder_mic.epochs()[1];
+    assert_eq!(epoch.start(), ms(1_000));
+    let actions = live.recorder(Some(MIC), RecorderEvent::Epoch(epoch));
+    assert_eq!(actions.flush, Some(MIC));
+    assert!(actions.updates.is_empty());
+}
+
 /// A retimed epoch follows straight on, with no gap: the engine keeps what
 /// it's hearing, and later text is placed by the new epoch's drift.
 #[test]

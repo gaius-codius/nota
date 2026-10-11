@@ -581,6 +581,32 @@ fn the_graph_lists_its_sinks_and_sources() {
     assert_eq!(devices.default_input.as_deref(), Some("seiren"));
 }
 
+/// A default whose node has gone (the session manager hasn't named
+/// another yet), or that names a node of the other kind, isn't listed as
+/// the default.
+#[test]
+fn the_graph_names_only_a_listed_default() {
+    let mut graph = Graph::default();
+    graph.apply(GraphEvent::Added {
+        id: 1,
+        node: sink("tv", "TV"),
+    });
+    graph.apply(GraphEvent::Added {
+        id: 2,
+        node: source("seiren", "Seiren Mini"),
+    });
+    graph.apply(default(Class::Sink, "seiren"));
+    graph.apply(default(Class::Source, "seiren"));
+    assert_eq!(graph.devices().default_output, None);
+    assert_eq!(graph.devices().default_input.as_deref(), Some("seiren"));
+    graph.apply(GraphEvent::Removed { id: 2 });
+    let devices = graph.devices();
+    assert_eq!(
+        (devices.default_output, devices.default_input),
+        (None, None)
+    );
+}
+
 /// A graph with nothing in it lists nothing and has no defaults.
 #[test]
 fn an_empty_graph_lists_nothing() {

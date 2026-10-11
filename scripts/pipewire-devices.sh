@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # The recorder's device events against real PipeWire (the
-# `pipewire_devices` test in nota-recorder): a followed default output
-# switched is Changed, a pinned sink removed is Lost and ends its track,
-# and a route change's epoch holds only the new device's audio.
+# `pipewire_devices` tests in nota-recorder): a followed default output
+# switched is Changed and opens an epoch that starts with the new device's
+# audio, a pinned sink removed is Lost and ends its track; and the device
+# snapshot Setup lists (`PipeWireBackend::devices`) names each sink and
+# source the test makes, and the defaults, and drops each one it removes.
 #
 # Switching a default can't be tested on the user's own PipeWire without
 # changing their defaults (AGENTS.md section 8), so this starts a private
@@ -106,5 +108,7 @@ if pactl list short sinks | grep -v auto_null | grep -q . ||
   exit 1
 fi
 
+# One test at a time: each sets the instance's defaults and checks them.
 NOTA_PRIVATE_PIPEWIRE=$XDG_RUNTIME_DIR \
-  cargo nextest run --locked -p nota-recorder --test pipewire_devices --no-capture
+  cargo nextest run --locked -p nota-recorder --test pipewire_devices --no-capture \
+  --test-threads 1

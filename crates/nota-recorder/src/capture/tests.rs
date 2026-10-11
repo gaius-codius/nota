@@ -49,6 +49,8 @@ enum Step {
     /// cycle.
     Delayed(Vec<i16>, Duration, Duration),
     Notice(CaptureNotice),
+    /// What the backend's watch on the audio server saw.
+    Device(DeviceChange),
     Fail(CaptureError),
     /// Moves the session clock on.
     Advance(Duration),
@@ -112,6 +114,7 @@ impl CaptureBackend for Synthetic {
                         feeder_events.audio_captured(&s, stamp, delay);
                     }
                     Step::Notice(n) => feeder_events.notice(n),
+                    Step::Device(c) => feeder_events.device(c),
                     Step::Fail(e) => feeder_events.failed(e),
                     Step::Advance(by) => clock.advance(by),
                     Step::Suspend(by) => clock.suspend(by),
@@ -610,7 +613,7 @@ fn a_channel_with_no_senders_reads_as_stopped() {
         failed: Arc::new(AtomicBool::new(false)),
         lost: Arc::new(AtomicBool::new(false)),
         began: Arc::new(AtomicBool::new(false)),
-        rerouted: Arc::new(AtomicBool::new(false)),
+        reroutes: Arc::default(),
         asleep: Arc::new(AtomicU64::new(0)),
         rate: rate(),
     };
@@ -916,6 +919,178 @@ fn a_route_change_opens_an_epoch_at_the_next_audio() {
     assert_eq!(journal_epochs(&fs, &journals), [(0, 0, 100), (1, 100, 300)]);
 }
 
+/// A new device only the watch saw (the stream's own report of it
+/// missing) opens an epoch at the next audio too, and the audio sent before
+/// the change stays in the old epoch.
+#[test]
+fn a_change_only_the_watch_saw_opens_an_epoch_at_the_next_audio() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let script = vec![
+        Step::Audio(samples(0, 100)),
+        Step::Advance(secs(1)),
+        Step::Audio(samples(100, 100)),
+        Step::Device(DeviceChange::Changed("Headphones".into())),
+        Step::Advance(secs(2)),
+        Step::Audio(samples(200, 100)),
+        Step::Audio(samples(300, 100)),
+    ];
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    let reopened = SessionTime::from_nanos(2_900_000_000);
+    assert_eq!(reopenings(&run.reported), [("epoch", 1, reopened, 200)]);
+    let gaps: Vec<_> = run.timeline.gaps().map(|g| (g.from(), g.to())).collect();
+    assert_eq!(gaps, [(SessionTime::from_nanos(200_000_000), reopened)]);
+    let journals = all_journals(run.writer, &run.reported);
+    assert_eq!(journal_epochs(&fs, &journals), [(0, 0, 200), (1, 200, 400)]);
+}
+
+/// A change the stream and the watch both report opens one epoch, in
+/// either order, and however late the second report comes; the next
+/// change opens the next.
+#[test]
+fn a_change_both_report_opens_one_epoch() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let script = vec![
+        Step::Audio(samples(0, 100)),
+        Step::Advance(secs(1)),
+        Step::Notice(CaptureNotice::RouteChanged),
+        Step::Device(DeviceChange::Changed("B".into())),
+        Step::Advance(secs(1)),
+        Step::Audio(samples(100, 100)),
+        Step::Advance(secs(1)),
+        Step::Audio(samples(200, 100)),
+        // The second change: the watch's poll saw it first.
+        Step::Device(DeviceChange::Changed("A".into())),
+        Step::Advance(secs(1)),
+        Step::Audio(samples(300, 100)),
+        Step::Notice(CaptureNotice::RouteChanged),
+        Step::Advance(secs(1)),
+        Step::Audio(samples(400, 100)),
+    ];
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    let starts: Vec<_> = run
+        .timeline
+        .epochs()
+        .iter()
+        .map(|e| (e.id().get(), e.start(), e.first_sample().get()))
+        .collect();
+    assert_eq!(
+        starts,
+        [
+            (0, SessionTime::ZERO, 0),
+            (1, SessionTime::from_nanos(1_900_000_000), 100),
+            (2, SessionTime::from_nanos(3_900_000_000), 300),
+        ]
+    );
+}
+
+/// Changes each reported by one source alone, the stream's first and then
+/// the watch's, each open an epoch; so do two quick changes both report.
+#[test]
+fn changes_one_source_alone_reports_open_an_epoch_each() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let script = vec![
+        Step::Audio(samples(0, 100)),
+        Step::Advance(secs(1)),
+        Step::Notice(CaptureNotice::RouteChanged),
+        Step::Advance(secs(1)),
+        Step::Audio(samples(100, 100)),
+        // Past the window: a change of its own, not the one before.
+        Step::Advance(secs(3)),
+        Step::Device(DeviceChange::Changed("C".into())),
+        Step::Advance(secs(1)),
+        Step::Audio(samples(200, 100)),
+        // Two changes half a second apart, each reported by both.
+        Step::Advance(secs(1)),
+        Step::Notice(CaptureNotice::RouteChanged),
+        Step::Device(DeviceChange::Changed("D".into())),
+        Step::Audio(samples(300, 100)),
+        Step::Advance(Duration::from_millis(500)),
+        Step::Device(DeviceChange::Changed("E".into())),
+        Step::Notice(CaptureNotice::RouteChanged),
+        Step::Audio(samples(400, 100)),
+    ];
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    let firsts: Vec<_> = run
+        .timeline
+        .epochs()
+        .iter()
+        .map(|e| e.first_sample().get())
+        .collect();
+    assert_eq!(firsts, [0, 100, 200, 300, 400]);
+}
+
+/// A new device's first buffer stamped before the end of the old audio
+/// placed (as `PipeWire` stamps it after a default switch) opens its epoch
+/// where that audio ends, late by the overlap: no refusal, no gap, and no
+/// second epoch from the buffers after it.
+#[test]
+fn a_reopening_stamped_before_the_old_audio_ends_starts_at_its_end() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let script = vec![
+        Step::TimedAudio(samples(0, 500), Duration::ZERO),
+        Step::Notice(CaptureNotice::RouteChanged),
+        // Stamped 84 ms before the old audio's end at 500 ms.
+        Step::TimedAudio(samples(500, 100), Duration::from_millis(416)),
+        Step::TimedAudio(samples(600, 100), Duration::from_millis(516)),
+    ];
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    assert!(
+        !run.reported
+            .iter()
+            .any(|e| matches!(e, RecorderEvent::EpochRefused(_))),
+        "{:?}",
+        run.reported
+    );
+    let old_end = SessionTime::from_nanos(500_000_000);
+    assert_eq!(
+        reopenings(&run.reported),
+        [
+            ("route", 0, SessionTime::ZERO, 0),
+            ("epoch", 1, old_end, 500)
+        ]
+    );
+    assert_eq!(
+        run.timeline.current().map(Epoch::overrun),
+        Some(Duration::from_millis(84))
+    );
+    assert!(gap_spans(&run.timeline).is_empty());
+    let journals = all_journals(run.writer, &run.reported);
+    assert_eq!(journal_epochs(&fs, &journals), [(0, 0, 500), (1, 500, 700)]);
+}
+
+/// The same from a stream that doesn't stamp its buffers, reopened after
+/// a suspend: audio the clock times before the old audio's end (here the
+/// old audio ran ahead of the clock, which a real stream's does by much
+/// less) starts at that end.
+#[test]
+fn an_unstamped_reopening_before_the_old_audio_ends_starts_at_its_end() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let script = vec![
+        Step::Audio(samples(0, 500)),
+        Step::Suspend(Duration::from_millis(200)),
+        // Timed at 200 ms, less the 100 ms the samples span.
+        Step::Audio(samples(500, 100)),
+    ];
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    let old_end = SessionTime::from_nanos(500_000_000);
+    assert_eq!(
+        reopenings(&run.reported),
+        [
+            ("suspend", 0, SessionTime::ZERO, 0),
+            ("epoch", 1, old_end, 500)
+        ]
+    );
+    assert_eq!(
+        run.timeline.current().map(Epoch::overrun),
+        Some(Duration::from_millis(400))
+    );
+}
+
 /// After a suspend, the first audio opens a new epoch when it was
 /// captured, and the suspend is reported.
 #[test]
@@ -1190,7 +1365,7 @@ fn notices_carry_the_time_they_were_reported() {
         failed: Arc::new(AtomicBool::new(false)),
         lost: Arc::new(AtomicBool::new(false)),
         began: Arc::new(AtomicBool::new(false)),
-        rerouted: Arc::new(AtomicBool::new(false)),
+        reroutes: Arc::default(),
         asleep: Arc::new(AtomicU64::new(0)),
         rate: rate(),
     };
@@ -1915,7 +2090,7 @@ fn a_stamp_the_clock_cant_place_is_sent_unstamped() {
         lost: Arc::new(AtomicBool::new(false)),
         // Begun already, so each call queues only its audio.
         began: Arc::new(AtomicBool::new(true)),
-        rerouted: Arc::new(AtomicBool::new(false)),
+        reroutes: Arc::default(),
         asleep: Arc::new(AtomicU64::new(0)),
         rate: rate(),
     };

@@ -99,7 +99,8 @@ impl Promotion {
 /// that reports which device the source is on as it changes
 /// ([`CaptureSender::device`]): a new default followed, or the device
 /// lost. A route change also opens an epoch, as cpal reports it
-/// ([`CaptureNotice::RouteChanged`]).
+/// ([`CaptureNotice::RouteChanged`]) or the watch does
+/// ([`DeviceChange::Changed`](nota_core::recorder::DeviceChange::Changed)).
 ///
 /// The stream's thread asks for real-time priority on its first buffer:
 /// `SCHED_FIFO` directly where the user's rtprio limit allows it, and rtkit

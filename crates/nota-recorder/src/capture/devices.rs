@@ -25,10 +25,13 @@ pub struct Devices {
     pub outputs: Vec<Device>,
     /// The sources, such as microphones. By description, then name.
     pub inputs: Vec<Device>,
-    /// The name of the default sink, which [`Source::SystemAudio`](super::Source::SystemAudio) follows.
+    /// The name of the default sink, which [`Source::SystemAudio`](super::Source::SystemAudio) follows:
+    /// one of [`Self::outputs`], or `None` while the server names none
+    /// that's listed.
     pub default_output: Option<String>,
     /// The name of the default source, which [`Source::Microphone`](super::Source::Microphone)
-    /// follows.
+    /// follows: one of [`Self::inputs`], or `None` while the server names
+    /// none that's listed.
     pub default_input: Option<String>,
 }
 

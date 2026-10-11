@@ -633,7 +633,7 @@ mod tests {
             failed: Arc::new(AtomicBool::new(false)),
             lost: Arc::new(AtomicBool::new(false)),
             began: Arc::new(AtomicBool::new(false)),
-            rerouted: Arc::new(AtomicBool::new(false)),
+            reroutes: Arc::default(),
             asleep: Arc::new(AtomicU64::new(0)),
             rate: SampleRate::SPEECH,
         };
