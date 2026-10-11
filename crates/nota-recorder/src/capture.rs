@@ -356,7 +356,8 @@ pub enum CaptureNotice {
     /// stream.
     Drifted(Drift),
     /// Changes of the stream's device aren't watched, for this reason: the
-    /// watch couldn't start or lost its connection, or the host has none.
+    /// `PipeWire` watch couldn't start or lost its connection, or the
+    /// `PulseAudio` stream doesn't follow the default.
     /// The stream records on, but a default that changes, or a device that
     /// goes, may pass unannounced.
     Unwatched(String),

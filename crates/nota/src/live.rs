@@ -2,8 +2,8 @@
 //! recorder and the engine report: levels, bytes recorded, the text (each
 //! track's placed in session time through that track's epochs), whether the
 //! transcriber is up and whether speech is with it, and the warnings for
-//! what the detectors noticed, a sleep, a failed stream, a broken journal
-//! and drift.
+//! what the detectors noticed, a sleep, a failed stream, a broken journal,
+//! drift, devices that aren't watched and the capture backend's warnings.
 //!
 //! [`Live`] does no I/O: it says what to send where, and the live thread
 //! (in `record`) sends it. So each track's audio reaches the engine in the
@@ -33,6 +33,27 @@ const LEVEL_EVERY: Duration = Duration::from_millis(100);
 /// speech, and the mark would flicker on and off with every chunk handed
 /// over and confirmed.
 const TRANSCRIBING_AFTER: Duration = Duration::from_secs(1);
+
+/// How many different capture warnings are kept for each track.
+const WARNINGS_PER_TRACK: usize = 8;
+
+/// The capture warnings reported so far, so a stream that repeats one (a
+/// backend whose error comes back on every pass of its loop) is told once
+/// to the screen, the timeline and the summary, and one that keeps finding
+/// new words is told [`WARNINGS_PER_TRACK`] times.
+#[derive(Debug, Default)]
+pub(crate) struct Reported {
+    seen: BTreeSet<(Option<TrackId>, String)>,
+}
+
+impl Reported {
+    /// Whether `text`, from `track`'s stream, is to be reported: it hasn't
+    /// been, and the track hasn't used up its room.
+    pub(crate) fn is_new(&mut self, track: Option<TrackId>, text: &str) -> bool {
+        let used = self.seen.iter().filter(|(t, _)| *t == track).count();
+        used < WARNINGS_PER_TRACK && self.seen.insert((track, text.to_owned()))
+    }
+}
 
 /// The warning's cause for what a detector noticed.
 const fn cause_of(condition: Condition) -> Cause {
@@ -100,6 +121,8 @@ pub(crate) struct Live {
     engine_online: bool,
     /// Whether the screen was last told speech is with the engine.
     transcribing: bool,
+    /// The capture warnings already sent on.
+    reported: Reported,
 }
 
 impl Live {
@@ -119,6 +142,7 @@ impl Live {
             confirmed: BTreeMap::new(),
             engine_online: false,
             transcribing: false,
+            reported: Reported::default(),
         }
     }
 
@@ -323,10 +347,16 @@ impl Live {
 
     /// The warning that `track`'s stream's `notice` is, if it is one.
     /// Drift is reported once per track, the watch stays gone, and a
-    /// backend's report is news once: none is ever cleared.
-    fn noticed(&self, notice: CaptureNotice, track: TrackId) -> Option<Event> {
+    /// backend's report is news once (a repeat of its words is dropped):
+    /// none is ever cleared.
+    fn noticed(&mut self, notice: CaptureNotice, track: TrackId) -> Option<Event> {
         let cause = match notice {
             CaptureNotice::Drifted(_) => Cause::Drift,
+            CaptureNotice::Unwatched(why) | CaptureNotice::Warning(why)
+                if !self.reported.is_new(Some(track), &why) =>
+            {
+                return None;
+            }
             CaptureNotice::Unwatched(why) => Cause::DevicesUnwatched(why),
             CaptureNotice::Warning(why) => Cause::CaptureWarning(why),
             // A loss, a route change and a suspend show as the epoch

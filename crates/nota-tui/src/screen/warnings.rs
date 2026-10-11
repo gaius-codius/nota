@@ -12,8 +12,8 @@
 //!   behind news.
 //! - **The end:** a full disk stops the recording, and the screen says so.
 //!
-//! The band marks every change (a device lost, back or changed, a fault
-//! starting) at its session time, from [`Warnings::changes`].
+//! The band marks every change (a device lost, back or changed, a device
+//! watch lost, a capture warning, a fault starting) at its session time, from [`Warnings::changes`].
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;

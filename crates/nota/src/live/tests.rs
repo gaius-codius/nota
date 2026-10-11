@@ -451,6 +451,35 @@ fn a_backend_warning_is_a_warning_for_its_track() {
     );
 }
 
+/// A stream that says the same thing again and again is reported once;
+/// a different thing, or another track's, is reported too.
+#[test]
+fn a_repeated_backend_warning_is_reported_once() {
+    let mut live = Live::new(&[opened(MIC, 0), opened(SYSTEM, 0)]);
+    let said = |live: &mut Live, track, text: &str| {
+        let notice = CaptureNotice::Warning(text.into());
+        live.recorder(Some(track), RecorderEvent::Capture(notice))
+            .updates
+            .len()
+    };
+    assert_eq!(said(&mut live, MIC, "hiccup"), 1);
+    assert_eq!(said(&mut live, MIC, "hiccup"), 0);
+    assert_eq!(said(&mut live, MIC, "another hiccup"), 1);
+    assert_eq!(said(&mut live, SYSTEM, "hiccup"), 1);
+}
+
+/// A stream that keeps finding new words has room for only so many.
+#[test]
+fn a_track_has_room_for_only_so_many_different_warnings() {
+    let mut reported = Reported::default();
+    let told = (0..20)
+        .filter(|n| reported.is_new(Some(MIC), &format!("warning {n}")))
+        .count();
+    assert_eq!(told, WARNINGS_PER_TRACK);
+    // Another track has its own room.
+    assert!(reported.is_new(Some(SYSTEM), "warning 0"));
+}
+
 fn online() -> EngineEvent {
     EngineEvent::Status(EngineStatus::Online { pid: 1 })
 }

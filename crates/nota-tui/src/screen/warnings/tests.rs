@@ -427,7 +427,7 @@ fn an_unwatched_device_warns_to_the_end() {
 }
 
 /// A backend's warning shows for ten seconds as news, and the band keeps
-/// it. A device lost is the more severe and keeps the border.
+/// it.
 #[test]
 fn a_capture_warning_shows_for_ten_seconds() {
     let mut warnings = two_tracks();
@@ -443,10 +443,34 @@ fn a_capture_warning_shows_for_ten_seconds() {
     );
     assert_eq!(warnings.top(secs(30)), None);
     assert_eq!(warnings.changes(), [secs(20)]);
-    device(&mut warnings, MIC, DeviceChange::Lost, 31);
+}
+
+/// A device lost while a capture warning still shows keeps the border: a
+/// loss is never hidden behind news. Gold news does show over a gold
+/// condition.
+#[test]
+fn a_capture_warning_gives_way_to_a_loss_but_not_to_a_gold_condition() {
+    let mut warnings = two_tracks();
+    raise(
+        &mut warnings,
+        Cause::DevicesUnwatched("no watch".into()),
+        Some(SYSTEM),
+        1,
+    );
+    raise(
+        &mut warnings,
+        Cause::CaptureWarning("hiccup".into()),
+        Some(MIC),
+        20,
+    );
     assert_eq!(
-        warnings.top(secs(32)),
-        Some(shown("⚠ mic lost", Tone::Accent, 0))
+        warnings.top(secs(21)),
+        Some(shown("⚠ mic: capture warning", Tone::Gold, 1))
+    );
+    device(&mut warnings, MIC, DeviceChange::Lost, 25);
+    assert_eq!(
+        warnings.top(secs(26)),
+        Some(shown("⚠ mic lost", Tone::Accent, 1))
     );
 }
 
