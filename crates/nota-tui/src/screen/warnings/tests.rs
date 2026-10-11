@@ -412,6 +412,89 @@ fn a_full_disk_is_the_end() {
     assert_eq!(warnings.stopped_by_full_disk(), Some(secs(4_368)));
 }
 
+/// A device that isn't watched warns for the rest of the recording, in
+/// gold, and the band marks when it began.
+#[test]
+fn an_unwatched_device_warns_to_the_end() {
+    let mut warnings = two_tracks();
+    let cause = Cause::DevicesUnwatched("device changes aren't watched: no socket".into());
+    raise(&mut warnings, cause, Some(SYSTEM), 3);
+    assert_eq!(
+        warnings.top(secs(4_000)),
+        Some(shown("⚠ system: devices unwatched", Tone::Gold, 0))
+    );
+    assert_eq!(warnings.changes(), [secs(3)]);
+}
+
+/// A backend's warning shows for ten seconds as news, and the band keeps
+/// it.
+#[test]
+fn a_capture_warning_shows_for_ten_seconds() {
+    let mut warnings = two_tracks();
+    raise(
+        &mut warnings,
+        Cause::CaptureWarning("hiccup".into()),
+        Some(MIC),
+        20,
+    );
+    assert_eq!(
+        warnings.top(secs(29)),
+        Some(shown("⚠ mic: capture warning", Tone::Gold, 0))
+    );
+    assert_eq!(warnings.top(secs(30)), None);
+    assert_eq!(warnings.changes(), [secs(20)]);
+}
+
+/// A device lost while a capture warning still shows keeps the border: a
+/// loss is never hidden behind news. Gold news does show over a gold
+/// condition.
+#[test]
+fn a_capture_warning_gives_way_to_a_loss_but_not_to_a_gold_condition() {
+    let mut warnings = two_tracks();
+    raise(
+        &mut warnings,
+        Cause::DevicesUnwatched("no watch".into()),
+        Some(SYSTEM),
+        1,
+    );
+    raise(
+        &mut warnings,
+        Cause::CaptureWarning("hiccup".into()),
+        Some(MIC),
+        20,
+    );
+    assert_eq!(
+        warnings.top(secs(21)),
+        Some(shown("⚠ mic: capture warning", Tone::Gold, 1))
+    );
+    device(&mut warnings, MIC, DeviceChange::Lost, 25);
+    assert_eq!(
+        warnings.top(secs(26)),
+        Some(shown("⚠ mic lost", Tone::Accent, 1))
+    );
+}
+
+/// The recorder never clears these, so a clear that does arrive (from a
+/// timeline read back, say) isn't taken for a raise.
+#[test]
+fn a_cleared_capture_warning_shows_nothing() {
+    let mut warnings = two_tracks();
+    clear(
+        &mut warnings,
+        Cause::DevicesUnwatched("no watch".into()),
+        Some(MIC),
+        5,
+    );
+    clear(
+        &mut warnings,
+        Cause::CaptureWarning("hiccup".into()),
+        Some(MIC),
+        6,
+    );
+    assert_eq!(warnings.top(secs(6)), None);
+    assert!(warnings.changes().is_empty());
+}
+
 /// Drift is corrected as it's measured, so the screen says nothing of it.
 #[test]
 fn drift_shows_nothing() {

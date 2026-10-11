@@ -9,8 +9,8 @@ use std::thread::{self, JoinHandle};
 use nota_core::recorder::{self, Cause, Input, Setup, TrackRole, Warning, WarningState};
 use nota_core::{Clock, SessionId, SessionTime, TrackId, wall_now};
 use nota_recorder::capture::{
-    Capture, CaptureBackend, CaptureReceiver, RecordError, RecorderEvent, Source, TrackStarter,
-    prepare_tracks, record_tracks,
+    Capture, CaptureBackend, CaptureNotice, CaptureReceiver, RecordError, RecorderEvent, Source,
+    TrackStarter, prepare_tracks, record_tracks,
 };
 use nota_recorder::detect::Thresholds;
 use nota_recorder::disk::{
@@ -36,7 +36,7 @@ use crate::latency::{DrawEnds, LatencyLog};
 use crate::library::{
     Library, NewSessionRows, Salvaged, SessionPaths, discard_empty, startup_watch,
 };
-use crate::live::Live;
+use crate::live::{Live, Reported};
 use crate::terminal::Screen;
 
 /// What the screen needs: the terminal, the channel its events come
@@ -86,14 +86,19 @@ pub(super) struct Started<B: CaptureBackend> {
     pub(super) recorder: JoinHandle<Recorded>,
 }
 
-/// The recorder thread's result: the writer, how recording ended, how
-/// many journal failures it reported, and the streams that failed.
-pub(super) type Recorded = (
-    SessionWriter<RecordFs>,
-    Result<(), RecordError>,
-    usize,
-    Vec<String>,
-);
+/// The recorder thread's result.
+pub(super) struct Recorded {
+    /// The session's writer, handed back for the stop.
+    pub(super) writer: SessionWriter<RecordFs>,
+    /// How recording ended.
+    pub(super) how_it_ended: Result<(), RecordError>,
+    /// How many journal failures it reported.
+    pub(super) journal_failures: usize,
+    /// The streams that failed, each with its track and why.
+    pub(super) failed_streams: Vec<String>,
+    /// What the streams warned of without stopping, each with its track.
+    pub(super) warned: Vec<String>,
+}
 
 /// Starts everything a recording needs, in order: the signals and the
 /// terminal first (without one there's nothing to record into), then,
@@ -841,6 +846,8 @@ fn spawn_recorder(
         .spawn(move || -> Recorded {
             let mut failures = 0;
             let mut lost = Vec::new();
+            let mut warned = Vec::new();
+            let mut reported = Reported::default();
             // Every track joins as its stream starts.
             let result = record_tracks(&mut writer, &mut [], &events, &mut |track, e| {
                 match e {
@@ -854,6 +861,12 @@ fn spawn_recorder(
                             RecorderEvent::CaptureFailed(error) => {
                                 lost.push(format!("{}: {error}", track_name(track)));
                             }
+                            RecorderEvent::Capture(notice) => {
+                                warned.extend(
+                                    capture_warning(track, notice)
+                                        .filter(|note| reported.is_new(track, note)),
+                                );
+                            }
                             _ => {}
                         }
                         let _ = live_inputs.send(LiveInput::Recorder(track, e));
@@ -863,8 +876,35 @@ fn spawn_recorder(
             // Every stream has ended, or recording failed: the screen has
             // nothing more to show, so close it and stop.
             let _ = ui.send(Event::Recorder(recorder::Event::Stopping));
-            (writer, result, failures, lost)
+            Recorded {
+                writer,
+                how_it_ended: result,
+                journal_failures: failures,
+                failed_streams: lost,
+                warned,
+            }
         })
+}
+
+/// What the summary says of a notice from `track`'s stream, if it's a
+/// warning: the unwatched device's text says what it is, and a backend's
+/// is given its place. The audio server's words are written to the
+/// terminal, so their control characters are left out; the timeline keeps
+/// them as they came.
+fn capture_warning(track: Option<TrackId>, notice: &CaptureNotice) -> Option<String> {
+    let plain = |why: &str| why.chars().filter(|c| !c.is_control()).collect::<String>();
+    match notice {
+        CaptureNotice::Unwatched(why) => Some(format!("{}: {}", track_name(track), plain(why))),
+        CaptureNotice::Warning(why) => Some(format!(
+            "{}: capture warning: {}",
+            track_name(track),
+            plain(why)
+        )),
+        CaptureNotice::Overrun
+        | CaptureNotice::RouteChanged
+        | CaptureNotice::Suspended
+        | CaptureNotice::Drifted(_) => None,
+    }
 }
 
 /// What the summary says of one salvaged session.
@@ -2235,5 +2275,46 @@ mod space_tests {
             "denied",
         ));
         assert_eq!(error.to_string(), "denied");
+    }
+}
+
+#[cfg(test)]
+mod capture_warning_tests {
+    use super::*;
+
+    /// A watch that can't run and a backend's warning are named with their
+    /// track; the notices that open an epoch, or keep time, aren't.
+    #[test]
+    fn warning_notices_are_named_with_their_track() {
+        let unwatched = CaptureNotice::Unwatched("device changes aren't watched: no socket".into());
+        assert_eq!(
+            capture_warning(Some(MIC), &unwatched).as_deref(),
+            Some("the mic: device changes aren't watched: no socket")
+        );
+        let backend = CaptureNotice::Warning("stream hiccup".into());
+        assert_eq!(
+            capture_warning(Some(SYSTEM), &backend).as_deref(),
+            Some("the system audio: capture warning: stream hiccup")
+        );
+        // A control sequence from the audio server doesn't reach the
+        // terminal the summary is written to.
+        let clearing = CaptureNotice::Warning("gone\x1b[2J\n".into());
+        assert_eq!(
+            capture_warning(Some(MIC), &clearing).as_deref(),
+            Some("the mic: capture warning: gone[2J")
+        );
+        let lost = CaptureNotice::Unwatched("no longer watched: \x1b[2Jgone".into());
+        assert_eq!(
+            capture_warning(Some(MIC), &lost).as_deref(),
+            Some("the mic: no longer watched: [2Jgone")
+        );
+        for notice in [
+            CaptureNotice::Overrun,
+            CaptureNotice::RouteChanged,
+            CaptureNotice::Suspended,
+            CaptureNotice::Drifted(nota_core::Drift::from_ppb(900_000).unwrap()),
+        ] {
+            assert_eq!(capture_warning(Some(MIC), &notice), None);
+        }
     }
 }

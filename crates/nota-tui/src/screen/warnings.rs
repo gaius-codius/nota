@@ -6,13 +6,14 @@
 //!   (lost, not recording, not responding, muted) warn per track; quiet
 //!   and nothing-playing warn only while every track is silent, since a
 //!   quiet mic while the system audio carries the lecture is normal.
-//! - **Events** happen once (a route change, a device back, a sleep) and
-//!   show for [`EVENT_SHOWN`]. They give way to a condition in the accent
-//!   colour, so audio being lost is never hidden behind news.
+//! - **Events** happen once (a route change, a device back, a sleep, a
+//!   capture warning) and show for [`EVENT_SHOWN`]. They give way to a
+//!   condition in the accent colour, so audio being lost is never hidden
+//!   behind news.
 //! - **The end:** a full disk stops the recording, and the screen says so.
 //!
-//! The band marks every change (a device lost, back or changed, a fault
-//! starting) at its session time, from [`Warnings::changes`].
+//! The band marks every change (a device lost, back or changed, a device
+//! watch lost, a capture warning, a fault starting) at its session time, from [`Warnings::changes`].
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -54,6 +55,9 @@ pub(crate) enum Condition {
     Quiet,
     /// Under an hour of disk left.
     DiskLow,
+    /// Changes of the track's device aren't watched, so the track may
+    /// record a device it should have left.
+    Unwatched(TrackId),
     /// The library database can't be written.
     LibraryOffline,
     /// The transcriber is offline.
@@ -80,6 +84,9 @@ pub(crate) enum Happening {
     Route(TrackId, String),
     /// A lost track's device is back.
     Back(TrackId),
+    /// The track's capture backend reported something that doesn't stop
+    /// it. The backend's words go to the timeline, not the screen.
+    Warned(TrackId),
     /// The machine slept, for as long as the gap after it, once one comes.
     Slept {
         /// When it woke: the warning's time.
@@ -128,6 +135,9 @@ struct TrackState {
     /// When its journal last broke, by the screen's clock.
     journal_broke: Option<SessionTime>,
     stalled: bool,
+    /// Since when changes of its device haven't been watched; that doesn't
+    /// clear.
+    unwatched: Option<SessionTime>,
     /// Since when it has had only exact zeros.
     zeros: Option<SessionTime>,
     /// Since when it has been below its noise floor.
@@ -242,6 +252,14 @@ impl Warnings {
             // Broken on the regular fsync, with no track to name: a change
             // on the band, but no track to say isn't recording.
             (Cause::JournalFailed(_), None) if raised => self.changes_at(warning.at),
+            (Cause::DevicesUnwatched(_), Some(track)) if raised => {
+                self.track(track).unwatched = Some(warning.at);
+                self.changes_at(warning.at);
+            }
+            (Cause::CaptureWarning(_), Some(track)) if raised => {
+                self.happening = Some((Happening::Warned(track), now));
+                self.changes_at(warning.at);
+            }
             (Cause::DiskLow, _) => self.disk_low = raised,
             (Cause::DiskFull, _) if raised => self.disk_full = Some(warning.at),
             (Cause::SleepNotHeld, _) => self.stand(Condition::MaySleep, raised),
@@ -378,6 +396,9 @@ impl Warnings {
             if track.stalled {
                 held.push(Condition::NotResponding(id));
             }
+            if track.unwatched.is_some() {
+                held.push(Condition::Unwatched(id));
+            }
             match track.zeros {
                 Some(_) if !track.is_system() => held.push(Condition::Muted(id)),
                 Some(_) if all_silent => held.push(Condition::NothingPlaying(id)),
@@ -412,6 +433,7 @@ impl Warnings {
             },
             Condition::Muted(id) => format!("{} muted", self.name(id)),
             Condition::NothingPlaying(id) => format!("{}: nothing playing", self.name(id)),
+            Condition::Unwatched(id) => format!("{}: devices unwatched", self.name(id)),
             Condition::Quiet => format!("quiet {}", minutes_seconds(self.silent_for(now))),
             Condition::LibraryOffline => "library offline".to_owned(),
             Condition::LiveTextOff => "live text off".to_owned(),
@@ -425,6 +447,7 @@ impl Warnings {
         match happening {
             Happening::Route(id, name) => (format!("↪ {}: {name}", self.name(*id)), Tone::Plain),
             Happening::Back(id) => (format!("✓ {} back", self.name(*id)), Tone::Good),
+            Happening::Warned(id) => (format!("⚠ {}: capture warning", self.name(*id)), Tone::Gold),
             Happening::Slept {
                 lasted: Some(lasted),
                 ..

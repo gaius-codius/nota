@@ -1287,6 +1287,33 @@ fn when_every_stream_fails_the_recording_stops_by_itself() {
     assert_saved(&tmp.0, 1, &[0, 1], 450);
 }
 
+/// A stream that warns, over and over, is in the summary once for each
+/// thing it said (GAI-461).
+#[test]
+fn a_stream_that_warns_is_in_the_summary_once_for_each_warning() {
+    let tmp = TestDir::new("warns");
+    let mut nota = Running::start_with(&tmp.0, &["--mic", "warns"]);
+    assert!(nota.shows_after(0, "s stop"), "{}", nota.output());
+    // The tone sends its warnings as it starts; give them time to arrive.
+    pause(Duration::from_millis(1_500));
+    nota.signal(Signal::TERM);
+    let status = nota.exits().expect("nota didn't stop");
+    assert!(status.success(), "{status:?}: {}", nota.output());
+    let said = visible(&nota.output.lock().unwrap());
+    assert_eq!(
+        said.matches("the mic: capture warning: the tone hiccuped")
+            .count(),
+        1,
+        "{said}"
+    );
+    assert_eq!(
+        said.matches("the mic: device changes aren't watched: the tone has no watch")
+            .count(),
+        1,
+        "{said}"
+    );
+}
+
 /// A rejected start reports each input failure once.
 #[test]
 fn a_start_with_no_inputs_reports_each_failure_once() {
