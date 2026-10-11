@@ -1152,6 +1152,15 @@ fn a_lock_the_watch_let_go_is_no_longer_its_own() {
     assert!(Ballast::find(&fs, &p("/data"), 100).unwrap().is_some());
 }
 
+/// A lock that fails for a reason other than being held is an error, not
+/// a ballast being written elsewhere: its leftovers are not claimed away.
+#[test]
+fn an_unfinished_ballast_cleanup_whose_lock_fails_is_an_error() {
+    let fs = BadLocks(FakeFs::with_dirs(["/data"]));
+    let err = Ballast::remove_unfinished(&fs, &p("/data")).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+}
+
 /// A ballast cut short by a crash leaves its temp file, which would take a
 /// recording's room: only the temp files go, and not the whole ballast.
 #[test]

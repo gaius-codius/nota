@@ -158,4 +158,18 @@ mod tests {
         assert_eq!(noted, None);
         assert!(fs.paths().is_empty(), "{:?}", fs.paths());
     }
+
+    /// A signal sets the flag the ballast's writing watches: SIGTERM raised
+    /// at this process is caught, not fatal, and the flag is set.
+    #[test]
+    fn a_signal_asks_the_ballast_to_stop() {
+        let asked = Arc::new(AtomicBool::new(false));
+        let registered = ask_on_signals(&asked);
+        assert_eq!(registered.len(), 3);
+        signal_hook::low_level::raise(signal_hook::consts::SIGTERM).unwrap();
+        assert!(asked.load(Ordering::SeqCst));
+        for id in registered {
+            signal_hook::low_level::unregister(id);
+        }
+    }
 }
