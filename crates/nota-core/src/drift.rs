@@ -20,10 +20,8 @@
 //!   mapping is more than [`RETIME_AFTER`] off it asks for a new epoch
 //!   ([`Reading::Retime`]) that follows straight on from the old one: for
 //!   [`SLEW`] at a rate that closes the difference, then at the measured
-//!   rate. A correction that strays [`RETIME_AFTER`] from closing it, on
-//!   an early estimate jitter has put out, is replaced the same way. No
-//!   two samples share a moment, and none of the audio is shown as a gap
-//!   it wasn't.
+//!   rate. No two samples share a moment, and none of the audio is shown
+//!   as a gap it wasn't.
 //!
 //! An epoch's drift never changes once it's opened, so a time handed out
 //! for a sample stays that sample's. Correcting drift costs an epoch, and
@@ -171,8 +169,8 @@ pub const LOSS_MIN: Duration = Duration::from_millis(4);
 /// mapping that drift correction can't keep up with. It leaves room for
 /// [`RETIME_AFTER`], a millisecond of jitter either side, and a first
 /// correction made on a [`MIN_WINDOW`] estimate that jitter has put 150 ppm
-/// out, until it strays [`RETIME_AFTER`] from its path; measured, a
-/// settled stream's cycles move by under a millisecond more.
+/// out for a whole [`SLEW`]; measured, a settled stream's cycles move by
+/// under a millisecond more.
 pub const LOSS_BUILT_UP: Duration = Duration::from_millis(15);
 
 /// How far an epoch's mapping may stray from the stream's timestamps
@@ -272,9 +270,9 @@ pub struct DriftMeter {
     measured_over: Duration,
     /// Whether `measured` comes from the current run.
     from_this_run: bool,
-    /// The correction under way, while a correcting epoch closes its
-    /// difference.
-    slew: Option<Slew>,
+    /// While a correcting epoch closes its difference: the sample at which
+    /// it has, when the measured drift takes over.
+    slewing_until: Option<SampleIndex>,
     /// Whether the drift measured over a trusted window is past
     /// [`DRIFT_LIMIT`]; `reported` once [`Self::past_limit`] has said so.
     beyond: bool,
@@ -304,31 +302,6 @@ struct Run {
     base: i128,
     /// Whether the run is settling, settled or lost.
     phase: Phase,
-}
-
-/// A correcting epoch closing the difference it was opened for, in a
-/// straight line over [`SLEW`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Slew {
-    /// The sample it opened at.
-    from: SampleIndex,
-    /// The sample at which it has closed the difference, when the measured
-    /// drift takes over.
-    until: SampleIndex,
-    /// How much later than the mapping, beyond the run's base, the buffer
-    /// it opened at came.
-    off: i128,
-}
-
-impl Slew {
-    /// How much later than the mapping, beyond the run's base, the slew
-    /// expects the buffer from `first` to come: its difference, closed in
-    /// proportion to how far through it `first` is.
-    fn planned(self, first: SampleIndex) -> i128 {
-        let length = i128::from(self.until.saturating_count_since(self.from).get());
-        let left = i128::from(self.until.saturating_count_since(first).get());
-        (self.off * left).checked_div(length).unwrap_or(0)
-    }
 }
 
 /// Where a run is: settling, settled, or lost.
@@ -369,7 +342,7 @@ impl DriftMeter {
             measured: None,
             measured_over: Duration::ZERO,
             from_this_run: false,
-            slew: None,
+            slewing_until: None,
             beyond: false,
             reported: false,
         }
@@ -387,7 +360,7 @@ impl DriftMeter {
     /// correction under way ends with the epoch it ran in.
     pub fn restart(&mut self) {
         self.run = None;
-        self.slew = None;
+        self.slewing_until = None;
         self.from_this_run = false;
     }
 
@@ -440,32 +413,22 @@ impl DriftMeter {
     /// What a settled run's buffer from `first`, `off` nanoseconds later
     /// than the mapping beyond the run's settled difference, calls for:
     /// the measured drift once a correction has run its course, or a
-    /// correcting epoch if the mapping has strayed past [`RETIME_AFTER`],
-    /// or during a correction, that far from where it should be by then. A
-    /// correction is opened on the drift measured so far, which jitter can
-    /// put out by more than it closes; the one that replaces it has a
-    /// longer window.
+    /// correcting epoch if the mapping has strayed past [`RETIME_AFTER`].
     fn correct(&mut self, first: SampleIndex, off: i128, rate: SampleRate) -> Reading {
-        let planned = match self.slew {
-            Some(slew) if first >= slew.until => {
-                self.slew = None;
-                return self.measured.map_or(Reading::Steady, Reading::Retime);
+        if let Some(until) = self.slewing_until {
+            if first < until {
+                return Reading::Steady;
             }
-            Some(slew) => slew.planned(first),
-            None => 0,
-        };
+            self.slewing_until = None;
+            return self.measured.map_or(Reading::Steady, Reading::Retime);
+        }
         match self.measured {
             Some(measured)
-                if (off - planned).abs() > nanos(RETIME_AFTER)
+                if off.abs() > nanos(RETIME_AFTER)
                     && measured.0.unsigned_abs() < Drift::MAX_PPB.unsigned_abs() =>
             {
-                self.slew = SampleCount::started_within(SLEW, rate)
-                    .and_then(|n| first.checked_add(n))
-                    .map(|until| Slew {
-                        from: first,
-                        until,
-                        off,
-                    });
+                self.slewing_until =
+                    SampleCount::started_within(SLEW, rate).and_then(|n| first.checked_add(n));
                 // Behind the stream (`off` positive), the mapping must give
                 // each sample more time: a lower rate, so less drift.
                 let closing = off * PPB / nanos(SLEW);
