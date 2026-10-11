@@ -116,8 +116,9 @@ usage() { sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; }
 while [[ $# -gt 0 ]]; do
   case $1 in
     --only | --step | --from | --to | --scratch)
-      # An option where the value should be is a missing value, not the value.
-      [[ $# -ge 2 && $2 != --* ]] || { echo "$1 needs a value" >&2; usage >&2; exit 2; }
+      # An option where the value should be (--keep, -h) is a missing value, not
+      # the value.
+      [[ $# -ge 2 && $2 != -* ]] || { echo "$1 needs a value" >&2; usage >&2; exit 2; }
       case $1 in
         --only) ONLY=$2 ;;
         --step) STEP=$2 ;;

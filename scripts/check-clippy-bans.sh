@@ -8,8 +8,9 @@
 # package in the lock files counts as a dependency.
 #
 # Also fails when the lock files move a classified crate past the semver line
-# it was reviewed at (`jiff@0.2`: 0.3 fails, 0.2.9 passes), since the version
-# that can add a clock read or a file write is the one that can add API. And
+# it was reviewed at (`jiff@0.2`: 0.3 fails, 0.2.9 passes): an upgrade to a
+# new line can change the crate's API as it likes, so it's reviewed again. A
+# bump within the line isn't, though it can add a function too. And
 # on a map entry for a crate no longer in the tree, a crate listed twice or
 # under contradictory sections, and an [indirect] crate that a nota crate now
 # depends on directly. clippy-crates.txt explains the sections.
@@ -192,7 +193,7 @@ END {
   for (k in tree_ver) {
     split(k, kl, SUBSEP)
     c = kl[1]
-    if (!(c in line_at) || (k in has_line)) continue
+    if (!(c in line_at) || lines_of[c] == "" || (k in has_line)) continue
     problem(map ":" line_at[c] ": " in_tree[c] " " tree_ver[k] " is past line " lines_of[c] ", where it was reviewed; look for what the new version adds that reads the clock or writes files, as for a new crate, then record line " kl[2])
   }
   for (k in has_line) {

@@ -319,9 +319,11 @@ for option in --only --step --from --to --scratch; do
 done
 # An option where the value should be isn't taken as the value.
 for option in --only --step --from --to --scratch; do
-  run option-as-value "$option" --keep
-  expect option-as-value 2 "$option needs a value"
-  [[ ! -e $FAKE_STATE/cargo.args ]] || fail "$option --keep: built before refusing"
+  for next in --keep -h; do
+    run option-as-value "$option" "$next"
+    expect option-as-value 2 "$option needs a value"
+    [[ ! -e $FAKE_STATE/cargo.args ]] || fail "$option $next: built before refusing"
+  done
 done
 run bad-step --step 0 --scratch "$scratch"
 expect bad-step 2 "lazyfs-crash: --step needs a positive number"

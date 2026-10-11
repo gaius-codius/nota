@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Tests check-test-targets.sh on small fixtures: a workspace whose every
 # target is listed passes, and one with a target left out (an example, a test
-# behind a feature) fails and names it.
+# behind a feature) fails and names it; and a gate command that drops the
+# gate's arguments fails.
 #
 # Requires: bash, jq.
 set -euo pipefail
@@ -105,6 +106,27 @@ expect fail no-feature "tool-kit's test faked isn't in the test gate" -- \
 listed wrong-package.json "$app lib app" "$app bin app" "$app example bench_tool" \
   "$kit lib tool_kit" "$app test faked"
 expect fail wrong-package "tool-kit's test faked" -- "$dir/metadata.json" "$dir/wrong-package.json"
+
+# The gate's own commands: each nextest run passes the gate's arguments.
+cat >"$dir/gate.yml" <<'EOF2'
+test:
+  run: cargo nextest run --workspace --all-targets --locked --no-tests=fail
+coverage:
+  run: cargo llvm-cov nextest --workspace --all-targets --locked --lcov
+EOF2
+expect pass gates 'every test run passes' -- --gates "$dir/gate.yml"
+sed 's/nextest run --workspace --all-targets/nextest run --workspace/' "$dir/gate.yml" >"$dir/no-all.yml"
+expect fail gate-without-all-targets 'no-all.yml:2: the tests don'"'"'t run with --workspace --all-targets' -- \
+  --gates "$dir/gate.yml" "$dir/no-all.yml"
+sed 's/llvm-cov nextest --workspace --all-targets/llvm-cov nextest --workspace/' "$dir/gate.yml" >"$dir/no-all-cov.yml"
+expect fail coverage-without-all-targets 'no-all-cov.yml:4' -- --gates "$dir/no-all-cov.yml"
+echo 'run: cargo test --workspace' >"$dir/no-nextest.yml"
+expect fail gate-gone 'no-nextest.yml runs no tests with cargo nextest' -- --gates "$dir/no-nextest.yml"
+expect usage gates-no-files 'usage: check-test-targets.sh --gates' -- --gates
+expect usage gates-missing-file "can't read $dir/none.yml" -- --gates "$dir/none.yml"
+# The repo's own gates.
+root=$(cd "$(dirname "$check")/.." && pwd)
+expect pass repo-gates -- --gates "$root/lefthook.yml" "$root/.github/workflows/ci.yml"
 
 # Bad arguments and input.
 expect usage one-argument 'usage: check-test-targets.sh' -- "$dir/metadata.json"

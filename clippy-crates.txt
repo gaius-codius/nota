@@ -31,10 +31,12 @@
 # line it was reviewed at: `toml@1` covers 1.x, `jiff@0.2` covers 0.2.x, and
 # `rand@0.8,0.9` covers two versions in the tree at once. The line goes after
 # a name under [allow] or [none], or under [reviewed]. The check fails when the
-# lock files move a crate to another line, since that's the bump that can add
-# API: look for new clock reads and file writes as you would in a new crate,
-# then record the new line. A bump within the line passes unchecked. Changes
-# here count as check changes (scripts/check-weakened.sh).
+# lock files move a crate to another line, an upgrade someone chose that can
+# change the crate's API as it likes: look for new clock reads and file writes
+# as you would in a new crate, then record the new line. A bump within the line
+# passes unchecked, though a minor release can add a function too; that gap is
+# accepted so `cargo update` stays quiet (GAI-366). Changes here count as check
+# changes (scripts/check-weakened.sh).
 
 [ban]
 # cpal's stream clock, which nota reads through the session clock instead.
