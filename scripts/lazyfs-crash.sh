@@ -3,7 +3,8 @@
 # (https://github.com/dsrhaslab/lazyfs), a FUSE filesystem that keeps
 # unsynced file data in its own cache and can drop it on command.
 #
-# Not run in CI: it needs FUSE, a LazyFS build and a few minutes. Run it by
+# Not run in CI: it needs FUSE, a LazyFS build and a few minutes (CI runs
+# scripts/lazyfs-crash.test.sh, its smoke tests against stand-ins). Run it by
 # hand after changing the write path, journal, salvage or the store.
 #
 # It runs six kinds of crash point, numbered in this order:
@@ -115,7 +116,8 @@ usage() { sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; }
 while [[ $# -gt 0 ]]; do
   case $1 in
     --only | --step | --from | --to | --scratch)
-      [[ $# -ge 2 ]] || { echo "$1 needs a value" >&2; usage >&2; exit 2; }
+      # An option where the value should be is a missing value, not the value.
+      [[ $# -ge 2 && $2 != --* ]] || { echo "$1 needs a value" >&2; usage >&2; exit 2; }
       case $1 in
         --only) ONLY=$2 ;;
         --step) STEP=$2 ;;

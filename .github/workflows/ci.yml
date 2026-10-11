@@ -37,6 +37,10 @@ jobs:
       - run: scripts/check-files.test.sh
       - run: scripts/check-clippy-bans.test.sh
       - run: scripts/check-test-targets.test.sh
+      # The crash runner's prerequisites, fault accounting and clean-up,
+      # against stand-ins for LazyFS and the recorder; the real sweep is run
+      # by hand (see the script).
+      - run: scripts/lazyfs-crash.test.sh
       # Every crate in the lock files is classified in clippy-crates.txt, and
       # what it bans is in clippy.toml.
       - run: scripts/check-clippy-bans.sh

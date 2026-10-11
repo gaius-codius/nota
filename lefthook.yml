@@ -40,6 +40,10 @@ pre-push:
     test-targets:
       # Every workspace target is in the test above; the arguments must match.
       run: scripts/check-test-targets.sh
+    script-tests:
+      # The check scripts' own tests, and the crash runner's against stand-ins
+      # (no FUSE or LazyFS; the real sweep stays a manual gate).
+      run: scripts/check-clippy-bans.test.sh && scripts/check-test-targets.test.sh && scripts/lazyfs-crash.test.sh
     doctest:
       run: cargo test --workspace --locked --doc
     deny:
