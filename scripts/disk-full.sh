@@ -15,7 +15,10 @@
 # Then the app itself: `nota record --tone yes` on a 4 MiB tmpfs, under a
 # pseudo-terminal (`script`), fills it in about half a minute. It must stop
 # by itself, say in its summary that the disk is full, and leave no
-# journal: its last segments were finished in the ballast's room.
+# journal: its last segments were finished in the ballast's room. nota makes
+# its ballast when a recording ends, so the first recording in a data
+# directory has none: this run starts with the 1 MiB one (a tone
+# recording's) that an earlier recording would have left.
 #
 # With --ext4, the same runs are made on a small ext4 image mounted with
 # fuse2fs (no root needed; the binary is $FUSE2FS, default `fuse2fs` on the
@@ -123,6 +126,7 @@ if [[ $APP -eq 1 ]]; then
   if [[ $EXT4 -eq 1 ]]; then
     # 8 MiB: ext4's journal and tables take part of what tmpfs gives whole.
     app_on_ext4() {
+      head -c 1048576 /dev/urandom > "$1/ballast-1048576"
       script -qec "$target/debug/nota record --tone yes --title Full --data $1" /dev/null > "$log" 2>&1
       echo "journals left: $(find "$1" -name "journal-*" | wc -l)" >> "$log"
     }
@@ -130,6 +134,7 @@ if [[ $APP -eq 1 ]]; then
   else
     unshare --user --map-root-user --mount sh -c '
       mount -t tmpfs -o size=4m tmpfs "$1" &&
+      head -c 1048576 /dev/urandom > "$1/ballast-1048576" &&
       script -qec "$2 record --tone yes --title Full --data $1" /dev/null > "$3" 2>&1
       echo "journals left: $(find "$1" -name "journal-*" | wc -l)" >> "$3"' \
       sh "$dir" "$target/debug/nota" "$log" || echo "(the namespace or nota failed: $?)" >> "$log"
