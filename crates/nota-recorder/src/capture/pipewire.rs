@@ -24,21 +24,20 @@
 //! callback's time less the buffer's length when the driver hasn't started.
 //! Each buffer is sent with its stamp and that delay, the cycle's time
 //! less the stamp ([`CaptureSender::audio_captured`]), so the recorder
-//! times losses and drift by them. A stream's first buffers carry no delay,
-//! as `PipeWire` hasn't measured one yet, and cpal's stamp is then the
-//! cycle's time, when their audio ended: they're sent as captured their
-//! length before it ([`stamped`]), so a track's first epoch doesn't start
-//! a buffer late. The delay steps when the graph's
-//! quantum changes, and cpal holds the stamp back rather than let it go
-//! back; the cycle's time steps only when the graph does.
+//! times losses and drift by them. A stream's first buffers carry no
+//! delay, as `PipeWire` hasn't measured one yet, so their stamps are when
+//! their audio ended: they're held back until a buffer's delay settles,
+//! and dated back from it ([`settle`]), so a track's first epoch starts
+//! when its audio did. The delay steps when the graph's quantum changes;
+//! the cycle's time steps only when the graph does.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, DeviceId, ErrorKind, HostId, StreamConfig};
-use nota_core::{SampleCount, SampleRate};
+use nota_core::SampleRate;
 use thread_priority::{
     RealtimeThreadSchedulePolicy, ThreadPriority, ThreadPriorityValue, ThreadSchedulePolicy,
     set_thread_priority_and_policy, thread_native_id,
@@ -46,7 +45,10 @@ use thread_priority::{
 
 use super::{CaptureBackend, CaptureError, CaptureNotice, CaptureSender, Devices, Source};
 
+mod settle;
 mod watch;
+
+use settle::{Settling, Stamp, Timed};
 
 /// The `SCHED_FIFO` priority the callback's thread asks for: `PipeWire`'s
 /// default for client threads, below its own (88).
@@ -113,11 +115,22 @@ impl Promotion {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PipeWireBackend;
 
-/// A running `PipeWire` stream. Capture stops when it's dropped, and then
-/// the watch on its device.
+/// A running `PipeWire` stream. Capture stops when it's dropped, then the
+/// buffers it held back are sent, and then the watch on its device stops.
 pub struct PipeWireStream {
-    _stream: cpal::Stream,
+    stream: Option<cpal::Stream>,
+    settling: Arc<Mutex<Settling>>,
+    events: CaptureSender,
     _watch: watch::Watch,
+}
+
+impl Drop for PipeWireStream {
+    fn drop(&mut self) {
+        // cpal's stream joins its thread as it goes, so no buffer comes
+        // after these.
+        drop(self.stream.take());
+        release(&self.settling, &self.events);
+    }
 }
 
 impl std::fmt::Debug for PipeWireStream {
@@ -159,12 +172,17 @@ impl CaptureBackend for PipeWireBackend {
         let errors = events.clone();
         let watched = events.clone();
         let failed_source = source.clone();
+        let settling = Arc::new(Mutex::new(Settling::new(rate)));
+        let failing = Arc::clone(&settling);
+        let held = Arc::clone(&settling);
+        let sender = events.clone();
         let mut promotion = Promotion::new();
         let promoted = Arc::clone(&promotion.promoted);
         let stream = device
             .build_input_stream::<i16, _, _>(
                 config,
-                // Only a copy into the channel, in a buffer it already has:
+                // Only a copy into the channel, in a buffer it already has,
+                // or for a stream's first buffers into room made for them:
                 // no I/O, no waiting on the recorder, and in the steady
                 // state no allocation. The first buffer also asks for
                 // real-time priority, a few system calls.
@@ -178,13 +196,15 @@ impl CaptureBackend for PipeWireBackend {
                             .ok()
                             .map(Duration::from_nanos)
                     };
-                    let timed = monotonic(stamp.callback)
+                    let stamp = monotonic(stamp.callback)
                         .zip(monotonic(stamp.capture))
-                        .and_then(|(cycle, capture)| stamped(cycle, capture, samples.len(), rate));
-                    match timed {
-                        Some((captured, delay)) => events.audio_captured(samples, captured, delay),
-                        None => events.audio(samples),
-                    }
+                        .map(|(cycle, capture)| Stamp { cycle, capture });
+                    // Otherwise only a failure and the stream's end take
+                    // the lock.
+                    settling
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .buffer(samples, stamp, &mut send(&events));
                 },
                 move |error: cpal::Error| match stream_error(
                     &failed_source,
@@ -192,7 +212,11 @@ impl CaptureBackend for PipeWireBackend {
                     promoted.load(Ordering::SeqCst),
                 ) {
                     Some(Ok(notice)) => errors.notice(notice),
-                    Some(Err(failure)) => errors.failed(failure),
+                    Some(Err(failure)) => {
+                        // The audio held was the track's before it failed.
+                        release(&failing, &errors);
+                        errors.failed(failure);
+                    }
                     None => {}
                 },
                 None,
@@ -200,31 +224,28 @@ impl CaptureBackend for PipeWireBackend {
             .map_err(|e| start_error(source, &e))?;
         stream.play().map_err(|e| start_error(source, &e))?;
         Ok(PipeWireStream {
-            _stream: stream,
+            stream: Some(stream),
+            settling: held,
+            events: sender,
             _watch: watch::watch(followed(source), watched),
         })
     }
 }
 
-/// When the first of `len` samples, delivered at the cycle `cycle` and
-/// stamped `capture` by cpal, was captured, and how long before the cycle
-/// that was: as cpal stamps it, unless its delay is none. A capture
-/// stream's audio comes before the cycle that delivers it, so a delay of
-/// none is one `PipeWire` hasn't measured yet, as for a stream's first
-/// buffers; the buffer is then taken as ending at the cycle, captured its
-/// length before. `None` if the cycle comes before that length.
-fn stamped(
-    cycle: Duration,
-    capture: Duration,
-    len: usize,
-    rate: SampleRate,
-) -> Option<(Duration, Duration)> {
-    let delay = cycle.saturating_sub(capture);
-    if !delay.is_zero() {
-        return Some((capture, delay));
+/// Sends a buffer to `events`, stamped if it's timed.
+fn send(events: &CaptureSender) -> impl FnMut(&[i16], Timed) + '_ {
+    |samples, timed| match timed {
+        Some((captured, delay)) => events.audio_captured(samples, captured, delay),
+        None => events.audio(samples),
     }
-    let length = SampleCount::new(u64::try_from(len).ok()?).duration_at(rate)?;
-    Some((cycle.checked_sub(length)?, length))
+}
+
+/// Sends what `settling` holds to `events`, as the stream ends or fails.
+fn release(settling: &Mutex<Settling>, events: &CaptureSender) {
+    settling
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .release(&mut send(events));
 }
 
 /// `source` as the watch follows it: cpal's own names for the defaults,
@@ -294,76 +315,6 @@ mod tests {
 
     fn error(kind: ErrorKind) -> cpal::Error {
         cpal::Error::with_message(kind, "detail")
-    }
-
-    /// Nanoseconds on `CLOCK_MONOTONIC`.
-    fn at(nanos: u64) -> Duration {
-        Duration::from_nanos(nanos)
-    }
-
-    /// A stream's first three buffers as `PipeWire` delivered them in a
-    /// real capture of a sink's monitor at 16 kHz: (cycle, cpal's capture
-    /// stamp, length). The first two carry no delay; the third, the first
-    /// at a new quantum, does.
-    const FIRST_BUFFERS: [(u64, u64, usize); 3] = [
-        (300_783_705_840_030, 300_783_705_840_030, 314),
-        (300_783_727_173_363, 300_783_727_173_363, 341),
-        (300_783_748_506_696, 300_783_727_173_363, 683),
-    ];
-
-    /// The first buffer, stamped with its cycle's time, is sent as
-    /// captured its length before, so none of its audio is after the
-    /// cycle that delivered it.
-    #[test]
-    fn a_first_buffer_with_no_delay_ends_at_its_cycle() {
-        let (cycle, capture, len) = FIRST_BUFFERS[0];
-        let stamp = stamped(at(cycle), at(capture), len, SampleRate::SPEECH);
-        // 314 samples at 16 kHz: 19.625 ms.
-        assert_eq!(stamp, Some((at(cycle - 19_625_000), at(19_625_000))));
-    }
-
-    /// Taken that way, the buffers before `PipeWire` measures a delay
-    /// follow on from each other, and on to the first it stamps itself:
-    /// each starts where the one before ended, to within a sample.
-    #[test]
-    fn the_first_buffers_follow_on_to_the_first_with_a_delay() {
-        let sample = Duration::from_nanos(62_500);
-        let mut end = None;
-        for (cycle, capture, len) in FIRST_BUFFERS {
-            let (start, delay) = stamped(at(cycle), at(capture), len, SampleRate::SPEECH).unwrap();
-            assert_eq!(start + delay, at(cycle));
-            if let Some(end) = end {
-                assert!(start.abs_diff(end) <= sample, "{start:?} after {end:?}");
-            }
-            end = SampleCount::new(len as u64)
-                .duration_at(SampleRate::SPEECH)
-                .map(|length| start + length);
-        }
-    }
-
-    /// A buffer with a delay, `PipeWire`'s or cpal's own (the callback's
-    /// time less the buffer's length, before the driver starts), keeps
-    /// its stamp, shorter than the buffer or not.
-    #[test]
-    fn a_buffer_with_a_delay_keeps_its_stamp() {
-        let (cycle, capture, len) = FIRST_BUFFERS[2];
-        assert_eq!(
-            stamped(at(cycle), at(capture), len, SampleRate::SPEECH),
-            Some((at(capture), at(cycle - capture)))
-        );
-        let length = Duration::from_millis(20);
-        assert_eq!(
-            stamped(at(1_000_000_000), at(980_000_000), 320, SampleRate::SPEECH),
-            Some((at(980_000_000), length))
-        );
-    }
-
-    /// A cycle that comes before its buffer's length can't be placed, and
-    /// the buffer is sent unstamped.
-    #[test]
-    fn a_cycle_earlier_than_its_buffer_is_unstamped() {
-        let ms = Duration::from_millis(10);
-        assert_eq!(stamped(ms, ms, 320, SampleRate::SPEECH), None);
     }
 
     /// A server that answers lists its devices, and one that can't be

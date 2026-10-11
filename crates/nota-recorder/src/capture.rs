@@ -78,7 +78,10 @@
 //! don't carry on from the old one's, and may put that audio before the
 //! old audio's end (on `PipeWire`, tens of milliseconds before, after a
 //! default switch): the epoch then starts where the old audio ends, late
-//! by the overlap ([`TrackTimeline::reopen`]). The stream's sender
+//! by the overlap ([`TrackTimeline::reopen`]). A `PipeWire` stream whose
+//! delay goes back to none as it moves has its first buffers there held
+//! and dated as a stream's first are ([`PipeWireBackend`]), so the
+//! reopening is timed from when that audio began. The stream's sender
 //! notices a suspend by the session clock's count of time spent suspended
 //! ([`Clock::suspended`]), read on each buffer, and reports it as a
 //! [`CaptureNotice::Suspended`].
