@@ -303,6 +303,10 @@ pub struct DriftMeter {
     measured_over: Duration,
     /// Whether `measured` comes from the current run.
     from_this_run: bool,
+    /// Whether `measured` was measured before the stream reopened, on what
+    /// may be another device's clock: it still times new epochs, but
+    /// starts no correction, until a run measures its own.
+    before_reopening: bool,
     /// While a correcting epoch closes its difference: the sample at which
     /// it has, when the measured drift takes over.
     slewing_until: Option<SampleIndex>,
@@ -382,6 +386,7 @@ impl DriftMeter {
             measured: None,
             measured_over: Duration::ZERO,
             from_this_run: false,
+            before_reopening: false,
             slewing_until: None,
             beyond: false,
             reported: false,
@@ -406,12 +411,15 @@ impl DriftMeter {
 
     /// [`Self::restart`], for a stream that reopened, on a new device after
     /// a route change or after a suspend: its clock may not be the one
-    /// measured. The drift measured so far stays the best estimate until
-    /// the new run has its own, which takes over once the run has settled
-    /// and reached [`MIN_WINDOW`], however long the earlier run was.
+    /// measured. The drift measured so far stays the best estimate for new
+    /// epochs until the new run has its own, which takes over once the run
+    /// has settled and reached [`MIN_WINDOW`], however long the earlier run
+    /// was. Until then no correction starts: one made by the old clock's
+    /// rate would run its [`SLEW`] at that rate, past the new estimate.
     pub fn reopened(&mut self) {
         self.restart();
         self.measured_over = Duration::ZERO;
+        self.before_reopening = true;
     }
 
     /// The measured drift, once, the first time a trusted window's is past
@@ -463,7 +471,8 @@ impl DriftMeter {
     /// What a settled run's buffer from `first`, `off` nanoseconds later
     /// than the mapping beyond the run's settled difference, calls for:
     /// the measured drift once a correction has run its course, or a
-    /// correcting epoch if the mapping has strayed past [`RETIME_AFTER`].
+    /// correcting epoch if the mapping has strayed past [`RETIME_AFTER`]
+    /// and the drift was measured since the stream last reopened.
     fn correct(&mut self, first: SampleIndex, off: i128, rate: SampleRate) -> Reading {
         if let Some(until) = self.slewing_until {
             if first < until {
@@ -474,7 +483,8 @@ impl DriftMeter {
         }
         match self.measured {
             Some(measured)
-                if off.abs() > nanos(RETIME_AFTER)
+                if !self.before_reopening
+                    && off.abs() > nanos(RETIME_AFTER)
                     && measured.0.unsigned_abs() < Drift::MAX_PPB.unsigned_abs() =>
             {
                 self.slewing_until =
@@ -505,6 +515,7 @@ impl DriftMeter {
             self.measured = Some(drift);
             self.measured_over = elapsed;
             self.from_this_run = true;
+            self.before_reopening = false;
             if elapsed >= TRUSTED_WINDOW {
                 self.beyond = drift.0.unsigned_abs() > DRIFT_LIMIT.0.unsigned_abs();
             }

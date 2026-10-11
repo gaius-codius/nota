@@ -717,6 +717,49 @@ fn a_reopened_run_takes_over_at_the_minimum_window() {
     assert_eq!(meter.measured(), Some(Drift(-99_991)));
 }
 
+/// A device 400 ppm fast for two minutes, then, after a reopening, one
+/// 400 ppm slow: no correction starts by the old rate, which would run a
+/// whole [`SLEW`] past the new estimate until the mapping read as lost.
+/// The new device's rate is learned and corrected to, with no loss read,
+/// within 20 ms throughout.
+#[test]
+fn a_reopening_onto_an_opposite_device_corrects_by_its_own_rate() {
+    let mut timeline = epoch_at(Drift::ZERO);
+    let mut meter = DriftMeter::new();
+    let mut worst = 0u64;
+    let mut feed = |meter: &mut DriftMeter, timeline: &mut TrackTimeline, n: u64, at: u64| {
+        match read(meter, timeline, n, at) {
+            Reading::Lost { hole } => panic!("{hole:?} lost at {n}"),
+            Reading::Retime(drift) => {
+                timeline.retime(s(n), drift).unwrap();
+            }
+            Reading::Steady => {}
+        }
+        worst = worst.max(timeline.time_of(s(n)).unwrap().as_nanos().abs_diff(at));
+    };
+    let reopened_at = 1_920_000;
+    for n in (0..reopened_at).step_by(320) {
+        feed(&mut meter, &mut timeline, n, true_ns(n, 400_000));
+    }
+    assert!(
+        meter
+            .measured()
+            .is_some_and(|d| (d.ppb() - 400_000).abs() < 2_000)
+    );
+    meter.reopened();
+    let from = true_ns(reopened_at, 400_000) + 500_000_000;
+    timeline
+        .reopen(t(from), s(reopened_at), SPEECH, meter.measured().unwrap())
+        .unwrap();
+    for k in (0..1_440_000).step_by(320) {
+        let n = reopened_at + k;
+        feed(&mut meter, &mut timeline, n, from + true_ns(k, -400_000));
+    }
+    let landed = timeline.current().unwrap().drift().ppb();
+    assert!((landed + 400_000).abs() < 2_000, "{landed}"); // check-bound
+    assert!(worst < 20_000_000, "{worst}"); // check-bound
+}
+
 /// A drift at the limit means bad stamps, not a device: the meter doesn't
 /// correct by it, however far the mapping strays.
 #[test]
