@@ -39,12 +39,9 @@ impl BallastPlan {
     /// no room, or when it was given up (the next recording to end makes
     /// it).
     pub(super) fn make(&self, full: bool) -> Option<String> {
-        if full {
-            return None;
-        }
         let asked = Arc::new(AtomicBool::new(false));
         let registered = ask_on_signals(&asked);
-        let noted = self.make_unless(&StdFs, &asked);
+        let noted = self.make_on(&StdFs, &asked, full);
         for id in registered {
             signal_hook::low_level::unregister(id);
         }
@@ -52,7 +49,7 @@ impl BallastPlan {
     }
 
     /// [`BallastPlan::make`] on `fs`, given up when `asked` is set.
-    fn make_unless<S: Fs>(&self, fs: &S, asked: &AtomicBool) -> Option<String> {
+    fn make_on<S: Fs>(&self, fs: &S, asked: &AtomicBool, full: bool) -> Option<String> {
         let looks = AtomicUsize::new(0);
         let give_up = || {
             asked.load(Ordering::SeqCst)
@@ -61,8 +58,9 @@ impl BallastPlan {
                     .is_multiple_of(LOOK_EVERY)
                     && startup_in_use(fs, &self.data, &[]).unwrap_or(true)
         };
-        // Not even started while another recording is live.
-        if give_up() {
+        // Not even started on a full disk, or while another recording is
+        // live.
+        if full || give_up() {
             return None;
         }
         match Ballast::keep(fs, &self.data, self.len, give_up) {
@@ -108,7 +106,7 @@ mod tests {
     #[test]
     fn the_ballast_is_made_when_nothing_is_in_the_way() {
         let fs = data();
-        let noted = plan().make_unless(&fs, &AtomicBool::new(false));
+        let noted = plan().make_on(&fs, &AtomicBool::new(false), false);
         assert_eq!(noted, None);
         assert_eq!(fs.paths(), [PathBuf::from("/data/ballast-4096")]);
     }
@@ -117,7 +115,7 @@ mod tests {
     #[test]
     fn a_signal_before_it_starts_makes_none() {
         let fs = data();
-        let noted = plan().make_unless(&fs, &AtomicBool::new(true));
+        let noted = plan().make_on(&fs, &AtomicBool::new(true), false);
         assert_eq!(noted, None);
         assert!(fs.paths().is_empty(), "{:?}", fs.paths());
     }
@@ -130,7 +128,7 @@ mod tests {
         fs.create_dir(Path::new("/data/sessions/2")).unwrap();
         fs.create_dir(Path::new("/data/sessions/2/audio")).unwrap();
         let _live = fs.lock_dir(Path::new("/data/sessions/2/audio")).unwrap();
-        let noted = plan().make_unless(&fs, &AtomicBool::new(false));
+        let noted = plan().make_on(&fs, &AtomicBool::new(false), false);
         assert_eq!(noted, None);
         assert!(fs.paths().iter().all(|p| !p.starts_with("/data/ballast")));
     }
@@ -145,53 +143,19 @@ mod tests {
             Fault::Create,
             io::ErrorKind::PermissionDenied,
         );
-        let noted = plan().make_unless(&fs, &AtomicBool::new(false)).unwrap();
+        let noted = plan().make_on(&fs, &AtomicBool::new(false), false).unwrap();
         assert!(
             noted.starts_with("the space nota keeps for a full disk couldn't be set aside: "),
             "{noted}"
         );
     }
 
-    /// A fresh directory under the system temp dir, removed when dropped.
-    struct TestDir(PathBuf);
-
-    impl TestDir {
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "test scaffolding outside the recorder's write path"
-        )]
-        fn new(name: &str) -> Self {
-            let dir =
-                std::env::temp_dir().join(format!("nota-ballast-{name}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            Self(dir)
-        }
-    }
-
-    impl Drop for TestDir {
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "test scaffolding outside the recorder's write path"
-        )]
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    /// A full disk makes none; the same directory, with room, makes one.
+    /// A full disk makes none, however clear the way is.
     #[test]
     fn a_full_disk_makes_none() {
-        let tmp = TestDir::new("full");
-        StdFs.create_dir(&tmp.0.join("sessions")).unwrap();
-        let plan = BallastPlan {
-            data: tmp.0.clone(),
-            len: 4_096,
-        };
-        let ballast = tmp.0.join("ballast-4096");
-        assert_eq!(plan.make(true), None);
-        assert!(!StdFs.list(&tmp.0).unwrap().contains(&ballast));
-        assert_eq!(plan.make(false), None);
-        assert!(StdFs.list(&tmp.0).unwrap().contains(&ballast));
+        let fs = data();
+        let noted = plan().make_on(&fs, &AtomicBool::new(false), true);
+        assert_eq!(noted, None);
+        assert!(fs.paths().is_empty(), "{:?}", fs.paths());
     }
 }
