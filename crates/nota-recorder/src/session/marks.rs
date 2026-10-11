@@ -14,8 +14,11 @@
 //!   rate, start and drift), durable as the writer moves to it, before any
 //!   journal in it. So it's kept even if no audio follows, as when a track
 //!   ends just after a loss: that epoch exists only here, since the
-//!   library's epoch rows are copied from published audio, and its gap
-//!   reaches the library on the session's timeline instead. A resumed
+//!   library's epoch rows are copied from published audio. Its gap reaches
+//!   the library on the session's timeline instead, as recording reports
+//!   it, so a crash before that's saved leaves the library's copy of the
+//!   track ending at its last audio; the epoch here still keeps a resumed
+//!   recording from numbering it again or starting inside its gap. A resumed
 //!   session times its tracks on from that anchor, and resumes its clock
 //!   after the audio it times, or the epoch's start if that's later.
 //!

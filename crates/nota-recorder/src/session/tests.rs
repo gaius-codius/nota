@@ -891,6 +891,73 @@ fn a_new_epoch_whose_marks_cant_be_written_still_moves_and_tries_again() {
     assert_eq!(w.next_sample(MIC), Some(SampleIndex::new(110)));
 }
 
+/// Moving to an epoch writes the marks once, reserving the next journal's
+/// ids with it: its first journal doesn't write them again, as when a
+/// track started early moves to the epoch its first audio was captured in.
+#[test]
+fn a_new_epoch_and_its_first_journal_write_the_marks_once() {
+    let fs = FakeFs::with_dirs([dir(), PathBuf::from("/db")]);
+    let (_, mut w) = manual_writer(&fs);
+    let before = fs.ops().len();
+    w.new_epoch(MIC, &w.test_epoch(MIC, EpochId::new(1), SampleIndex::ZERO))
+        .unwrap();
+    w.append(MIC, &samples(0, 10)).unwrap();
+    let marks_writes = fs.ops()[before..]
+        .iter()
+        .filter(|op| matches!(op, Op::Create(p) if p.ends_with("session-marks.tmp")))
+        .count();
+    assert_eq!(marks_writes, 1);
+    assert_eq!(journal_range(&fs, 0), (0, 10, 1));
+}
+
+/// Records 100 samples in epoch 0, then moves to epoch 1 with no audio
+/// after it, failing the operation `fail` after the move begins, if
+/// given, and finishes. What the move returned, and the operations made
+/// from its start.
+fn move_with_no_audio_after(
+    fs: &FakeFs,
+    fail: Option<usize>,
+) -> (Result<(), SessionError>, Vec<Op>) {
+    let (_, mut w) = manual_writer(fs);
+    w.append(MIC, &samples(0, 100)).unwrap();
+    let before = fs.ops().len();
+    if let Some(ops) = fail {
+        fs.fail_after(ops, io::ErrorKind::Other);
+    }
+    let moved = w.new_epoch(
+        MIC,
+        &w.test_epoch(MIC, EpochId::new(1), SampleIndex::new(100)),
+    );
+    w.finish().unwrap();
+    (moved, fs.ops().split_off(before))
+}
+
+/// A marks write that fails as the writer moves to an epoch no audio
+/// follows is tried again as the writer finishes, so the epoch is still
+/// kept: no journal of it would try.
+#[test]
+fn an_epoch_no_audio_follows_is_marked_at_finish_if_its_move_failed() {
+    let probe = FakeFs::with_dirs([dir(), PathBuf::from("/db")]);
+    let (moved, ops) = move_with_no_audio_after(&probe, None);
+    moved.unwrap();
+    let marks_at = ops
+        .iter()
+        .position(|op| matches!(op, Op::Create(p) if p.ends_with("session-marks.tmp")))
+        .unwrap();
+
+    let fs = FakeFs::with_dirs([dir(), PathBuf::from("/db")]);
+    let (moved, _) = move_with_no_audio_after(&fs, Some(marks_at));
+    assert!(matches!(moved, Err(SessionError::Marks(_))));
+    let resumed = SessionWriter::open(
+        &session_dir(&fs).lock().unwrap(),
+        rate(),
+        length(),
+        clock().1,
+    )
+    .unwrap();
+    assert_eq!(resumed.highest_epoch(MIC), Some(EpochId::new(1)));
+}
+
 #[test]
 fn a_replacement_of_a_whole_budget_leaves_its_fsync_to_the_sync_thread() {
     let fs = FakeFs::with_dirs([dir(), PathBuf::from("/db")]);

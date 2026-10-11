@@ -177,9 +177,11 @@ pub enum SessionError {
     Journal(JournalError),
     /// Reading the session directory failed.
     Io(std::io::Error),
-    /// Writing the session's marks failed, so a journal couldn't start: like
-    /// [`Self::Journal`], the samples it would have held are a gap, and the
-    /// next call tries again.
+    /// Writing the session's marks failed. From starting a journal, the
+    /// journal couldn't start: like [`Self::Journal`], the samples it would
+    /// have held are a gap, and the next call tries again. From
+    /// [`SessionWriter::new_epoch`], nothing was lost: the epoch isn't kept
+    /// yet, and its first journal, or [`SessionWriter::finish`], tries again.
     Marks(std::io::Error),
     /// The session's owner is already using it: salvaging it, or recording
     /// it with another writer.
@@ -237,7 +239,7 @@ impl fmt::Display for SessionError {
             Self::InUse(Use::Salvaging) => f.write_str("the session is being salvaged"),
             Self::InUse(Use::Publishing) => f.write_str("the session is being published"),
             Self::InUse(Use::Recording) => f.write_str("the session is already being recorded"),
-            Self::Marks(e) => write!(f, "reserving the next journal's ids failed: {e}"),
+            Self::Marks(e) => write!(f, "writing the session's marks failed: {e}"),
             Self::UnknownTrack(t) => write!(f, "track {} wasn't started", t.get()),
             Self::TrackExists(t) => write!(f, "track {} was already started", t.get()),
             Self::EpochUsed { track, epoch } => write!(
@@ -710,7 +712,8 @@ impl<S: Fs> SessionWriter<S> {
     /// fsync.
     ///
     /// The epoch is then marked durably, with its anchor (see the `marks`
-    /// module): the one marks write its first journal would otherwise make.
+    /// module), and the next journal's ids reserved: the one marks write its
+    /// first journal would otherwise make.
     /// So an epoch no audio follows, as when a track ends just after a
     /// loss, is still never used again by a resumed session, whose clock
     /// resumes no earlier than its start.
@@ -744,7 +747,9 @@ impl<S: Fs> SessionWriter<S> {
             .get_mut(&track)
             .ok_or(SessionError::UnknownTrack(track))?;
         state.epoch = *epoch;
-        let marked = self.mark(None, track, epoch.anchor());
+        // Reserving the next journal's ids in the same write, so the
+        // epoch's first journal needn't write the marks again.
+        let marked = self.mark(self.next_id, track, epoch.anchor());
         drained.and(ended).and(marked)
     }
 
@@ -848,12 +853,15 @@ impl<S: Fs> SessionWriter<S> {
 
     /// Ends every track's journal (a last fsync each), waits for every
     /// fsync to complete, and returns every journal finished and not yet
-    /// taken.
+    /// taken. Each track's current epoch is marked too, if it isn't yet: one
+    /// no audio followed, whose marks write failed as the writer moved to it
+    /// ([`Self::new_epoch`]).
     ///
     /// # Errors
     ///
-    /// The first [`SessionError::Journal`], with every finished journal
-    /// still, for publishing; the other tracks are still ended.
+    /// The first [`SessionError::Journal`] or [`SessionError::Marks`], with
+    /// every finished journal still, for publishing; the other tracks are
+    /// still ended.
     pub fn finish(mut self) -> Result<Vec<FinishedJournal>, FinishError> {
         let tracks: Vec<TrackId> = self.tracks.keys().copied().collect();
         let mut first_error = None;
@@ -862,6 +870,7 @@ impl<S: Fs> SessionWriter<S> {
                 self.drain(track),
                 self.end_journal(track),
                 self.settle_ended(track),
+                self.mark_current(track),
             ];
             if let Some(e) = results.into_iter().find_map(Result::err) {
                 first_error.get_or_insert(e);
@@ -1248,6 +1257,17 @@ impl<S: Fs> SessionWriter<S> {
             state.journal = Some(open);
         }
         Ok(())
+    }
+
+    /// Makes sure the marks on disk cover `track`'s current epoch: nothing
+    /// to write once they do.
+    fn mark_current(&mut self, track: TrackId) -> Result<(), SessionError> {
+        let state = self
+            .tracks
+            .get(&track)
+            .ok_or(SessionError::UnknownTrack(track))?;
+        let epoch = state.epoch.anchor();
+        self.mark(None, track, epoch)
     }
 
     /// Makes sure the marks on disk cover journal `id`, if one is about to
