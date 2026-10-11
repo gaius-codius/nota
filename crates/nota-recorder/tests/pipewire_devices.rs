@@ -1,9 +1,12 @@
 //! The recorder's device events against real `PipeWire`, in the private
 //! instance `scripts/pipewire-devices.sh` starts: a followed default output
-//! switched is `Changed`, a pinned sink removed is `Lost` and ends its
-//! track, within 2 s each, and the switch's epoch holds only the new
-//! sink's audio. Skips (and says so) unless the script runs it: switching
-//! a default anywhere else would change the user's (AGENTS.md section 8).
+//! switched is `Changed` and opens an epoch that starts with the new
+//! sink's audio, a pinned sink removed is `Lost` and ends its track, within
+//! 2 s each. And the device snapshot, which Setup lists, names the
+//! instance's sinks and sources, and its defaults, as they come and go.
+//! Skips (and says so) unless the script runs it: switching a default
+//! anywhere else would change the user's (AGENTS.md section 8). The script
+//! runs the tests one at a time, since each sets the defaults.
 
 // Test code throughout: clippy allows unwraps and panics in it.
 #![cfg(test)]
@@ -22,7 +25,8 @@ mod linux {
         Clock, Epoch, EpochError, SampleRate, SessionId, SessionTime, SystemClock, TrackId,
     };
     use nota_recorder::capture::{
-        CaptureError, PipeWireBackend, RecorderEvent, Source, prepare_tracks, record_tracks,
+        CaptureBackend as _, CaptureError, Device, Devices, PipeWireBackend, RecorderEvent, Source,
+        prepare_tracks, record_tracks,
     };
     use nota_recorder::fs::StdFs;
     use nota_recorder::segment::SegmentLength;
@@ -35,9 +39,22 @@ mod linux {
     /// The time a device change has to show in (development plan, T4).
     const SHOWN_WITHIN: Duration = Duration::from_secs(2); // check-bound
 
-    /// A sample at least this loud is the test's tone (its peak is 8 000),
-    /// never a null sink's silence.
+    /// A sample at least this loud is the test's tone on sink B (its peak
+    /// is 8 000), never sink A's quiet one or a null sink's silence.
     const TONE_ONSET: u16 = 4_000;
+
+    /// The peaks of the tones played on sinks B and A.
+    const LOUD: f64 = 8_000.0;
+    const QUIET: f64 = 1_000.0;
+
+    /// How many samples before B's tone reaches [`TONE_ONSET`] it may ring
+    /// in by, through the resampler: about 25 measured.
+    const ONSET_RING: u64 = 64; // check-bound
+
+    /// The most a switch's epoch may start late by: the new sink's first
+    /// buffer is stamped tens of milliseconds before the old sink's audio
+    /// ends (40–90 ms measured on `PipeWire` 1.6).
+    const MOST_LATE: Duration = Duration::from_millis(250); // check-bound
 
     /// The longest the test waits for anything before failing.
     const PATIENCE: Duration = Duration::from_secs(10);
@@ -123,8 +140,9 @@ mod linux {
             self.modules.retain(|m| m != module);
         }
 
-        /// Plays a tone into the sink `name`, for as long as the test runs.
-        fn play_tone(&mut self, name: &str) {
+        /// Plays a tone peaking at `peak` into the sink `name`, for as long
+        /// as the test runs.
+        fn play_tone(&mut self, name: &str, peak: f64) {
             let mut player = Command::new("pw-play")
                 .args(["--target", name, "-"])
                 .stdin(Stdio::piped())
@@ -135,7 +153,7 @@ mod linux {
             let mut stdin = player.stdin.take().unwrap();
             // Written as it plays; ends when the player is killed.
             thread::spawn(move || {
-                let _ = stdin.write_all(&tone_wav(120));
+                let _ = stdin.write_all(&tone_wav(120, peak));
             });
             self.players.push(player);
         }
@@ -155,8 +173,9 @@ mod linux {
         }
     }
 
-    /// A WAV file of `seconds` of a 440 Hz tone at -12 dBFS, 16 kHz mono.
-    fn tone_wav(seconds: u32) -> Vec<u8> {
+    /// A WAV file of `seconds` of a 440 Hz tone peaking at `peak`, 16 kHz
+    /// mono.
+    fn tone_wav(seconds: u32, peak: f64) -> Vec<u8> {
         let samples = 16_000 * seconds;
         let mut wav = Vec::new();
         wav.extend(b"RIFF");
@@ -173,8 +192,8 @@ mod linux {
         wav.extend((samples * 2).to_le_bytes());
         for i in 0..samples {
             let phase = 2.0 * std::f64::consts::PI * 440.0 * f64::from(i) / 16_000.0;
-            #[expect(clippy::cast_possible_truncation, reason = "within i16 at -12 dBFS")]
-            let value = (phase.sin() * 8_000.0) as i16;
+            #[expect(clippy::cast_possible_truncation, reason = "within i16 at either peak")]
+            let value = (phase.sin() * peak) as i16;
             wav.extend(value.to_le_bytes());
         }
         wav
@@ -284,19 +303,18 @@ mod linux {
             }
         }
 
-        /// What the first route change `track` reported after `after` did to
-        /// its epochs.
-        fn reopening(&self, track: TrackId, after: SessionTime) -> Option<Reopening> {
+        /// The epochs `track` opened after `after`, in order, and what
+        /// refused any.
+        fn reopenings(&self, track: TrackId, after: SessionTime) -> Vec<Result<Epoch, EpochError>> {
             self.seen
                 .iter()
                 .filter(|(at, t, _)| *t == Some(track) && *at >= after)
-                .find_map(|(_, _, e)| match e {
-                    RecorderEvent::Epoch(epoch) => Some(Reopening::Opened(*epoch)),
-                    RecorderEvent::EpochRefused(EpochError::ImplausibleOverrun { .. }) => {
-                        Some(Reopening::Refused)
-                    }
+                .filter_map(|(_, _, e)| match e {
+                    RecorderEvent::Epoch(epoch) => Some(Ok(*epoch)),
+                    RecorderEvent::EpochRefused(refused) => Some(Err(*refused)),
                     _ => None,
                 })
+                .collect()
         }
 
         /// Where `track`'s audio received before `at` ends.
@@ -343,34 +361,37 @@ mod linux {
         }
     }
 
-    /// What a route change did to a track's epochs.
-    enum Reopening {
-        /// It moved to this epoch.
-        Opened(Epoch),
-        /// The timeline refused one: the new device's first stamp was
-        /// before the end of the audio already placed.
-        Refused,
-    }
-
-    /// The switch's epoch, if the timeline opened one, starts with B's
-    /// tone: no buffer of A's silence took it, which would put a buffer's
-    /// worth of zeros first. The timeline may refuse the epoch instead, when
-    /// B's first stamp is earlier than the end of A's audio already placed:
-    /// the track then carries on in its epoch, with no gap (filed as a
-    /// follow-up).
-    fn check_reopening(heard: &Heard, switched: SessionTime) {
-        match heard.reopening(SYSTEM, switched) {
-            Some(Reopening::Opened(epoch)) => {
-                let opening = heard.audio_from(SYSTEM, epoch.first_sample().get(), 160);
-                assert_eq!(opening.len(), 160, "10 ms recorded in the epoch");
-                assert!(
-                    opening.iter().any(|&s| s != 0),
-                    "A's silence began the switch's epoch"
-                );
-            }
-            Some(Reopening::Refused) => {}
-            None => panic!("the switch neither opened nor refused an epoch"),
-        }
+    /// The switch opened an epoch, late by no more than [`MOST_LATE`], that
+    /// starts with B's audio: silence (the new link's first buffer is) up
+    /// to B's tone, which follows within 100 ms, never A's quiet tone. A's
+    /// last audio stays in the epoch before. The switch opens that one
+    /// epoch, though the stream and the watch both report it.
+    fn check_reopening(heard: &mut Heard, switched: SessionTime) {
+        let epoch = match heard.reopenings(SYSTEM, switched).as_slice() {
+            [Ok(epoch)] => *epoch,
+            other => panic!("the switch opened not one epoch but {other:?}"),
+        };
+        assert!(epoch.overrun() <= MOST_LATE, "{:?} late", epoch.overrun());
+        let first = epoch.first_sample().get();
+        let tone = heard.wait_for_tone(SYSTEM, first);
+        assert!(
+            tone - first <= 1_600,
+            "B's tone began {} samples in",
+            tone - first
+        );
+        // Up to B's tone, only silence, but for the few samples its onset
+        // rings in by: no buffer of A's, which holds hundreds of samples.
+        let silent = (tone - first).saturating_sub(ONSET_RING);
+        let opening = heard.audio_from(SYSTEM, first, silent);
+        assert!(
+            opening.iter().all(|&s| s == 0),
+            "A's tone began the switch's epoch: {opening:?}"
+        );
+        let before = heard.audio_from(SYSTEM, first - 160, 160);
+        assert!(
+            before.iter().any(|&s| s != 0) && before.iter().all(|s| s.unsigned_abs() < TONE_ONSET),
+            "A's tone didn't end the epoch before: {before:?}"
+        );
     }
 
     /// The only microphone removed: the session manager clears the default
@@ -414,10 +435,10 @@ mod linux {
 
     /// A followed default switched and a pinned sink removed, on the
     /// private instance: each shows within 2 s, the pinned track ends with
-    /// nothing recorded after, and the capture moves to the new sink, its
-    /// epoch (if one opens) starting with the new sink's audio, not the
-    /// old's. With no microphone left, the followed microphone is lost but
-    /// follows the next default.
+    /// nothing recorded after, and the capture moves to the new sink in an
+    /// epoch that starts with the new sink's audio, not the old's. With no
+    /// microphone left, the followed microphone is lost but follows the
+    /// next default.
     #[test]
     fn device_changes_show_on_real_pipewire() {
         let Some(_private) = private_instance() else {
@@ -429,11 +450,12 @@ mod linux {
         let mic = fixtures.source(MIC_1, SINK_A.0);
         pactl(&["set-default-sink", SINK_A.0]);
         pactl(&["set-default-source", MIC_1.0]);
-        // B plays a tone; A plays nothing, so its monitor is exact zeros:
-        // which sink a buffer came from shows in the buffer. The player
-        // stays on B whatever the default, so the tone moves only if the
-        // capture does.
-        fixtures.play_tone(SINK_B.0);
+        // B plays a loud tone, A a quiet one: which sink a buffer came
+        // from shows in the buffer, and silence is neither's. The players
+        // stay on their sinks whatever the default, so the tones move only
+        // if the capture does.
+        fixtures.play_tone(SINK_B.0, LOUD);
+        fixtures.play_tone(SINK_A.0, QUIET);
 
         let scratch = Scratch::new();
         let rate = SampleRate::SPEECH;
@@ -483,17 +505,20 @@ mod linux {
             is_device(e, &DeviceChange::Changed(SINK_B.1.into()))
         });
         assert!(changed.checked_duration_since(switched).unwrap() <= SHOWN_WITHIN);
-        // The stream followed: A's silence, then B's tone.
+        // The stream followed: A's quiet tone, then B's.
         let switch_sample = heard.audio_end_before(SYSTEM, switched);
         let before = heard.audio_from(SYSTEM, switch_sample - 1_600, 1_600);
-        assert!(before.iter().all(|&s| s == 0), "A's silence before");
+        assert!(
+            before.iter().any(|&s| s != 0) && before.iter().all(|s| s.unsigned_abs() < TONE_ONSET),
+            "A's tone before"
+        );
         let tone_from = heard.wait_for_tone(SYSTEM, switch_sample);
         assert!(
             tone_from - switch_sample <= 32_000,
             "B's tone began 2 s after"
         );
         heard.listen(Duration::from_millis(500));
-        check_reopening(&heard, switched);
+        check_reopening(&mut heard, switched);
 
         // The pinned sink, now also the default, removed.
         let removed = clock.now();
@@ -522,5 +547,110 @@ mod linux {
         drop(streams);
         let outcome = recorder.join().unwrap();
         assert!(outcome.is_ok(), "{outcome:?}");
+    }
+
+    /// The snapshot's sinks and sources: two sinks and a source the test
+    /// makes, with names of their own.
+    const SNAP_SINK_A: (&str, &str) = ("nota_snap_a", "NotaSnapA");
+    const SNAP_SINK_B: (&str, &str) = ("nota_snap_b", "NotaSnapB");
+    const SNAP_MIC: (&str, &str) = ("nota_snap_mic", "NotaSnapMic");
+
+    /// The device `(name, description)` names.
+    fn device((name, description): (&str, &str)) -> Device {
+        Device {
+            name: name.into(),
+            description: description.into(),
+        }
+    }
+
+    /// Takes snapshots until one satisfies `wanted`, and returns it: the
+    /// session manager names a default a moment after `pactl` asks. Fails
+    /// the test with the last one after [`PATIENCE`].
+    fn snapshot_until(
+        clock: &SystemClock,
+        what: &str,
+        wanted: impl Fn(&Devices) -> bool,
+    ) -> Devices {
+        let until = clock.now().checked_add(PATIENCE).unwrap();
+        loop {
+            let devices = PipeWireBackend.devices().unwrap();
+            if wanted(&devices) {
+                return devices;
+            }
+            // Each snapshot waits on the server's round trip, which paces
+            // the loop.
+            assert!(clock.now() < until, "{what}: {devices:#?}");
+        }
+    }
+
+    /// The device snapshot (`PipeWireBackend::devices`, which Setup lists)
+    /// on the private instance: each null sink made is an output and the
+    /// source an input, under their descriptions, with the defaults as
+    /// named; a node removed is gone from the next snapshot, and so is
+    /// the default it was. Only the defaults are waited for: the session
+    /// manager names them a moment after `pactl` asks, while `pactl` adds
+    /// and removes a node before it returns.
+    #[test]
+    fn the_snapshot_lists_what_the_instance_has() {
+        let Some(_private) = private_instance() else {
+            return;
+        };
+        let clock = SystemClock::start().unwrap();
+        let mut fixtures = Fixtures::default();
+        fixtures.sink(SNAP_SINK_A);
+        let b = fixtures.sink(SNAP_SINK_B);
+        let mic = fixtures.source(SNAP_MIC, SNAP_SINK_A.0);
+        pactl(&["set-default-sink", SNAP_SINK_B.0]);
+        pactl(&["set-default-source", SNAP_MIC.0]);
+
+        let named = snapshot_until(&clock, "the defaults as named", |d| {
+            d.default_output.as_deref() == Some(SNAP_SINK_B.0)
+                && d.default_input.as_deref() == Some(SNAP_MIC.0)
+        });
+        for sink in [SNAP_SINK_A, SNAP_SINK_B] {
+            assert!(
+                named.outputs.contains(&device(sink)),
+                "{sink:?}: {named:#?}"
+            );
+            assert!(
+                !named.inputs.contains(&device(sink)),
+                "{sink:?}: {named:#?}"
+            );
+        }
+        assert!(named.inputs.contains(&device(SNAP_MIC)), "{named:#?}");
+        assert!(!named.outputs.contains(&device(SNAP_MIC)), "{named:#?}");
+
+        // The default sink removed: gone from the next snapshot, and the
+        // default, if any, one that's listed.
+        fixtures.remove(&b);
+        let gone = PipeWireBackend.devices().unwrap();
+        assert!(
+            !gone.outputs.iter().any(|o| o.name == SNAP_SINK_B.0),
+            "{gone:#?}"
+        );
+        assert!(
+            listed_default(&gone.outputs, gone.default_output.as_deref()),
+            "{gone:#?}"
+        );
+        assert!(gone.outputs.contains(&device(SNAP_SINK_A)), "{gone:#?}");
+        assert!(gone.inputs.contains(&device(SNAP_MIC)), "{gone:#?}");
+
+        // The default source removed: the same.
+        fixtures.remove(&mic);
+        let gone = PipeWireBackend.devices().unwrap();
+        assert!(
+            !gone.inputs.iter().any(|i| i.name == SNAP_MIC.0),
+            "{gone:#?}"
+        );
+        assert!(
+            listed_default(&gone.inputs, gone.default_input.as_deref()),
+            "{gone:#?}"
+        );
+        assert!(gone.outputs.contains(&device(SNAP_SINK_A)), "{gone:#?}");
+    }
+
+    /// Whether `default` is none, or one of `devices`.
+    fn listed_default(devices: &[Device], default: Option<&str>) -> bool {
+        default.is_none_or(|name| devices.iter().any(|d| d.name == name))
     }
 }

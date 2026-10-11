@@ -137,7 +137,9 @@ impl Graph {
 
     /// The sinks and sources the graph holds, and its defaults, as Setup
     /// lists them. Other audio nodes ([`Class::Other`]) aren't offered:
-    /// nothing says which way they'd record.
+    /// nothing says which way they'd record. A default is named only while
+    /// it's listed: the server removes a node a moment before the session
+    /// manager names another default, or none.
     pub(super) fn devices(&self) -> Devices {
         let of = |class| {
             let mut list: Vec<Device> = self
@@ -155,8 +157,8 @@ impl Graph {
         Devices {
             outputs: of(Class::Sink),
             inputs: of(Class::Source),
-            default_output: self.default_sink.clone(),
-            default_input: self.default_source.clone(),
+            default_output: self.device(&Source::SystemAudio).map(|n| n.name.clone()),
+            default_input: self.device(&Source::Microphone).map(|n| n.name.clone()),
         }
     }
 }

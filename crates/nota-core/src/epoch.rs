@@ -203,6 +203,17 @@ fn max_overrun(length: Duration) -> Duration {
     (length / 1_000).saturating_add(Duration::from_nanos(MIN_OVERRUN_ALLOWED_NANOS))
 }
 
+/// How far a new epoch's audio may overlap the previous epoch's before
+/// it's refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Overlap {
+    /// As far as the previous epoch's drift could explain
+    /// ([`max_overrun`]).
+    DriftOnly,
+    /// Any amount: a stream reopened, whose stamps don't follow on.
+    Any,
+}
+
 /// A newly opened epoch, as [`TrackTimeline::open_epoch`] placed it. The
 /// epoch keeps its overrun too ([`Epoch::overrun`]), so ignoring this loses
 /// nothing.
@@ -462,6 +473,45 @@ impl TrackTimeline {
         rate: SampleRate,
         drift: Drift,
     ) -> Result<OpenedEpoch, EpochError> {
+        self.open(start, (first_sample, rate, drift), Overlap::DriftOnly)
+    }
+
+    /// Records that the stream reopened, on a new device or after a
+    /// suspend, at `start`, as [`Self::open_epoch_drifting`] does, except
+    /// that the new audio may overlap the old by any amount: the epoch
+    /// then starts where the old audio ends, and is late by the overlap,
+    /// which is reported as its overrun.
+    ///
+    /// The new device's stamps don't carry on from the old one's: on
+    /// `PipeWire`, the first buffer after a default switch is stamped tens
+    /// of milliseconds before the end of the old device's audio, far past
+    /// any drift. Refusing the epoch would leave the audio in the old one,
+    /// timed from the same moment, so starting at the old audio's end
+    /// places it no later than a refusal would, and gives it an epoch of
+    /// its own.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::open_epoch`], except that no overlap is refused.
+    pub fn reopen(
+        &mut self,
+        start: SessionTime,
+        first_sample: SampleIndex,
+        rate: SampleRate,
+        drift: Drift,
+    ) -> Result<OpenedEpoch, EpochError> {
+        self.open(start, (first_sample, rate, drift), Overlap::Any)
+    }
+
+    /// Opens an epoch at `start` from `first_sample`, at `rate` under
+    /// `drift`, moved to the end of the previous epoch's audio if that
+    /// runs past `start`, as far as `overlap` allows.
+    fn open(
+        &mut self,
+        start: SessionTime,
+        (first_sample, rate, drift): (SampleIndex, SampleRate, Drift),
+        overlap: Overlap,
+    ) -> Result<OpenedEpoch, EpochError> {
         let id = self.next_id()?;
         let mut opened = OpenedEpoch {
             id,
@@ -484,7 +534,7 @@ impl TrackTimeline {
                 let length = previous_end
                     .checked_duration_since(previous.start)
                     .unwrap_or(Duration::ZERO);
-                if overrun > max_overrun(length) {
+                if overlap == Overlap::DriftOnly && overrun > max_overrun(length) {
                     return Err(EpochError::ImplausibleOverrun {
                         previous_end,
                         start,
@@ -866,6 +916,77 @@ mod tests {
             Err(EpochError::ImplausibleOverrun {
                 previous_end: t(end),
                 start: refused
+            })
+        );
+        assert_eq!(timeline, before);
+    }
+
+    /// A reopening stamped well before the old audio's end, as `PipeWire`
+    /// stamps a new device's first buffer, starts at that end, late by the
+    /// overlap, with no gap; where `open_epoch` refuses it.
+    #[test]
+    fn a_reopening_that_overlaps_starts_where_the_old_audio_ends() {
+        let mut timeline = TrackTimeline::new(TrackId::new(0));
+        timeline.open_epoch(t(0), s(0), SPEECH).unwrap();
+        let overlapping = t(1_000_000_000 - 84_000_000);
+        assert!(matches!(
+            timeline.clone().open_epoch(overlapping, s(16_000), SPEECH),
+            Err(EpochError::ImplausibleOverrun { .. })
+        ));
+        let opened = timeline
+            .reopen(overlapping, s(16_000), SPEECH, Drift::ZERO)
+            .unwrap();
+        assert_eq!(
+            opened,
+            OpenedEpoch {
+                id: EpochId::new(1),
+                start: t(1_000_000_000),
+                overrun: Duration::from_millis(84),
+            }
+        );
+        assert_eq!(
+            timeline.current().map(Epoch::overrun),
+            opened.overrun.into()
+        );
+        assert_eq!(timeline.time_of(s(16_000)), Some(t(1_000_000_000)));
+        assert_eq!(timeline.time_of(s(15_999)), Some(t(999_937_500)));
+        assert_eq!(timeline.gaps().count(), 0);
+    }
+
+    /// A reopening after a real gap starts where it was asked to, and the
+    /// gap stays; it keeps the drift and rate it's given.
+    #[test]
+    fn a_reopening_after_a_gap_starts_when_asked() {
+        let mut timeline = TrackTimeline::new(TrackId::new(0));
+        timeline.open_epoch(t(0), s(0), SPEECH).unwrap();
+        let drift = Drift::from_ppb(-50_000).unwrap();
+        let rate = SampleRate::new(48_000).unwrap();
+        let opened = timeline
+            .reopen(t(1_500_000_000), s(16_000), rate, drift)
+            .unwrap();
+        assert_eq!(opened.start, t(1_500_000_000));
+        assert_eq!(opened.overrun, Duration::ZERO);
+        let epoch = timeline.current().copied().unwrap();
+        assert_eq!((epoch.rate(), epoch.drift()), (rate, drift));
+        let gaps: Vec<Gap> = timeline.gaps().collect();
+        assert_eq!(
+            gaps.iter().map(|g| (g.from(), g.to())).collect::<Vec<_>>(),
+            [(t(1_000_000_000), t(1_500_000_000))]
+        );
+    }
+
+    /// A reopening still refuses a sample count that went back, leaving
+    /// the timeline as it was.
+    #[test]
+    fn a_reopening_refuses_a_sample_that_went_back() {
+        let mut timeline = TrackTimeline::new(TrackId::new(0));
+        timeline.open_epoch(t(0), s(100), SPEECH).unwrap();
+        let before = timeline.clone();
+        assert_eq!(
+            timeline.reopen(t(5), s(99), SPEECH, Drift::ZERO),
+            Err(EpochError::SampleWentBack {
+                previous: s(100),
+                first_sample: s(99),
             })
         );
         assert_eq!(timeline, before);
@@ -1300,6 +1421,39 @@ mod tests {
     }
 
     proptest! {
+        /// A reopening is never refused for its start, never puts two
+        /// samples at one moment, starts at the later of its start and the
+        /// old audio's end, and is timed the same by a timeline that
+        /// follows it or is rebuilt from its anchors.
+        #[test]
+        fn a_reopening_follows_the_old_audio_wherever_it_was_stamped(
+            first_start in 0_u64..1_000_000_000_000,
+            samples in 0_u64..100_000_000,
+            ppb in -1_000_000_i32..=1_000_000,
+            reopened_at in 0_u64..2_000_000_000_000,
+        ) {
+            let drift = Drift::from_ppb(ppb).unwrap();
+            let mut timeline = TrackTimeline::new(TrackId::new(0));
+            timeline.open_epoch_drifting(t(first_start), s(0), SPEECH, drift).unwrap();
+            let first = timeline.current().copied().unwrap();
+            let old_end = first.time_of(s(samples)).unwrap();
+            let opened = timeline.reopen(t(reopened_at), s(samples), SPEECH, drift).unwrap();
+            prop_assert_eq!(opened.start, t(reopened_at).max(old_end));
+            prop_assert_eq!(
+                opened.overrun,
+                old_end.checked_duration_since(t(reopened_at)).unwrap_or_default()
+            );
+            if samples > 0 {
+                let last_old = timeline.time_of(s(samples - 1)).unwrap();
+                prop_assert!(last_old < opened.start);
+            }
+            let mut follower = TrackTimeline::following(TrackId::new(0), &first);
+            prop_assert_eq!(follower.follow(timeline.current().unwrap()), Ok(()));
+            let anchors = timeline.epochs().iter().map(Epoch::anchor);
+            let rebuilt = TrackTimeline::rebuild(TrackId::new(0), anchors).unwrap();
+            prop_assert_eq!(rebuilt.time_of(s(samples)), Some(opened.start));
+        }
+
         /// Within an epoch, sample → session time → sample is exact.
         #[test]
         fn round_trips_within_every_epoch(
