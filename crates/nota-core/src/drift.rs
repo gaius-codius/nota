@@ -301,12 +301,8 @@ pub struct DriftMeter {
     measured: Option<Drift>,
     /// How long a run `measured` was measured over.
     measured_over: Duration,
-    /// Whether `measured` comes from the current run.
-    from_this_run: bool,
-    /// Whether `measured` was measured before the stream reopened, on what
-    /// may be another device's clock: it still times new epochs, but
-    /// starts no correction, until a run measures its own.
-    before_reopening: bool,
+    /// Which run `measured` comes from.
+    measured_in: MeasuredIn,
     /// While a correcting epoch closes its difference: the sample at which
     /// it has, when the measured drift takes over.
     slewing_until: Option<SampleIndex>,
@@ -314,6 +310,21 @@ pub struct DriftMeter {
     /// [`DRIFT_LIMIT`]; `reported` once [`Self::past_limit`] has said so.
     beyond: bool,
     reported: bool,
+}
+
+/// Which run a meter's measured drift comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum MeasuredIn {
+    /// The current run.
+    ThisRun,
+    /// An earlier run of the same stream, or none yet: a new run takes
+    /// over once it's as long, or reaches [`TRUSTED_WINDOW`].
+    #[default]
+    EarlierRun,
+    /// A run before the stream reopened, on what may be another device's
+    /// clock: it still times new epochs, but starts no correction, and a
+    /// new run takes over once it reaches [`MIN_WINDOW`].
+    BeforeReopening,
 }
 
 /// One run of unbroken audio, as the meter reads it. Times are the
@@ -385,8 +396,7 @@ impl DriftMeter {
             run: None,
             measured: None,
             measured_over: Duration::ZERO,
-            from_this_run: false,
-            before_reopening: false,
+            measured_in: MeasuredIn::EarlierRun,
             slewing_until: None,
             beyond: false,
             reported: false,
@@ -406,7 +416,9 @@ impl DriftMeter {
     pub fn restart(&mut self) {
         self.run = None;
         self.slewing_until = None;
-        self.from_this_run = false;
+        if self.measured_in == MeasuredIn::ThisRun {
+            self.measured_in = MeasuredIn::EarlierRun;
+        }
     }
 
     /// [`Self::restart`], for a stream that reopened, on a new device after
@@ -418,8 +430,7 @@ impl DriftMeter {
     /// rate would run its [`SLEW`] at that rate, past the new estimate.
     pub fn reopened(&mut self) {
         self.restart();
-        self.measured_over = Duration::ZERO;
-        self.before_reopening = true;
+        self.measured_in = MeasuredIn::BeforeReopening;
     }
 
     /// The measured drift, once, the first time a trusted window's is past
@@ -483,7 +494,7 @@ impl DriftMeter {
         }
         match self.measured {
             Some(measured)
-                if !self.before_reopening
+                if self.measured_in != MeasuredIn::BeforeReopening
                     && off.abs() > nanos(RETIME_AFTER)
                     && measured.0.unsigned_abs() < Drift::MAX_PPB.unsigned_abs() =>
             {
@@ -502,20 +513,22 @@ impl DriftMeter {
     /// nanoseconds of the settled run, if that's long enough:
     /// [`MIN_WINDOW`], and after a restart, as long as the run measured
     /// before or [`TRUSTED_WINDOW`], whichever is shorter (after a
-    /// reopening, [`MIN_WINDOW`] alone: its `measured_over` is zero).
+    /// reopening, [`MIN_WINDOW`] alone).
     fn learn(&mut self, samples: SampleCount, elapsed: i128, rate: SampleRate) {
         let Some(elapsed) = u64::try_from(elapsed).ok().map(Duration::from_nanos) else {
             return;
         };
-        let enough = self.from_this_run || elapsed >= self.measured_over.min(TRUSTED_WINDOW);
+        let enough = match self.measured_in {
+            MeasuredIn::ThisRun | MeasuredIn::BeforeReopening => true,
+            MeasuredIn::EarlierRun => elapsed >= self.measured_over.min(TRUSTED_WINDOW),
+        };
         if elapsed < MIN_WINDOW || !enough {
             return;
         }
         if let Some(drift) = Drift::measured(samples, elapsed, rate) {
             self.measured = Some(drift);
             self.measured_over = elapsed;
-            self.from_this_run = true;
-            self.before_reopening = false;
+            self.measured_in = MeasuredIn::ThisRun;
             if elapsed >= TRUSTED_WINDOW {
                 self.beyond = drift.0.unsigned_abs() > DRIFT_LIMIT.0.unsigned_abs();
             }

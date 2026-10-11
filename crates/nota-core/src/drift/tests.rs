@@ -451,7 +451,7 @@ fn nothing_is_measured_while_a_run_settles() {
         assert_eq!(reading, Reading::Steady, "{n}");
     }
     assert_eq!(meter.measured(), Some(Drift::ZERO));
-    assert!(!meter.from_this_run);
+    assert_eq!(meter.measured_in, MeasuredIn::EarlierRun);
 }
 
 /// The meter doesn't correct a mapping before it has watched
