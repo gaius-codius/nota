@@ -310,6 +310,25 @@ impl Drop for Running {
     }
 }
 
+/// A recording makes no ballast while it runs and leaves one when it ends:
+/// written during a recording, it holds the journals' fsyncs behind it on
+/// a slow disk. A tone recording's ballast is 1 MiB.
+#[test]
+fn the_ballast_is_made_when_the_recording_ends_not_while_it_runs() {
+    let tmp = TestDir::new("ballast-at-stop");
+    let ballast = tmp.0.join(nota_recorder::disk::ballast_file_name(1 << 20));
+    let mut nota = recording(&tmp.0);
+    // The recording has run for a second and a half: the monitor made its
+    // ballast within milliseconds, before the move.
+    assert!(!ballast.exists(), "made while recording");
+    nota.press("s");
+    pause(Duration::from_millis(600));
+    nota.press("y");
+    let status = nota.exits().expect("nota didn't stop");
+    assert!(status.success(), "{status:?}: {}", nota.output());
+    assert_eq!(std::fs::metadata(&ballast).unwrap().len(), 1 << 20);
+}
+
 /// Starts recording, and waits until the screen is up and both tracks
 /// have recorded a while.
 fn recording(data: &Path) -> Running {

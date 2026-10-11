@@ -73,8 +73,8 @@ pub(super) struct Started<B: CaptureBackend> {
     /// Keeps the machine from sleeping, if logind gave the lock; dropped
     /// once recording has ended.
     pub(super) sleep: Sleep,
-    /// Checks the disk and keeps the ballast; stopped after publishing, so
-    /// a full disk then is still in the summary.
+    /// Checks the disk; stopped after publishing, so a full disk then is
+    /// still in the summary, and it makes the ballast as it stops.
     pub(super) disk: DiskMonitor<StdFs>,
     pub(super) publisher: Publisher,
     pub(super) live_inputs: Sender<LiveInput>,

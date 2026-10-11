@@ -16,9 +16,10 @@
 //! - **Live:** feeds the engine, flushes it at each new epoch, and turns
 //!   levels and text into screen updates (see [`crate::live`]).
 //! - **Engine events:** passes the supervisor's events to the live thread.
-//! - **Disk:** checks the free space at once and every few seconds, keeps
-//!   the ballast, and sends the screen the space left, the low-disk
-//!   warning, and a full disk (see [`nota_recorder::disk`]).
+//! - **Disk:** checks the free space at once and every few seconds, and
+//!   sends the screen the space left, the low-disk warning, and a full
+//!   disk. It makes the ballast when the recording ends, not before (see
+//!   [`nota_recorder::disk`]).
 //! - **Saver:** stores the live text, marks and notes in the library
 //!   database as they come (see `record/save.rs`). Nothing waits on it.
 //! - **Marks:** passes the screen's marks and notes to the saver as
@@ -74,7 +75,10 @@
 //! journal it broke is replaced without losing audio, and the recording
 //! stops: the warning and `Stopping` go to the screen, the last segments
 //! are published into the ballast's room, and the summary says the
-//! recording stopped early. A low disk never stops a start: nota records
+//! recording stopped early. The ballast is made as a recording ends, after
+//! its last segments are published, never while it runs (writing it then
+//! holds the journals' fsyncs back on a slow disk), so the first recording
+//! in a data directory has none to free. A low disk never stops a start: nota records
 //! what fits, sending the low-disk warning from the start (the screen
 //! doesn't show warnings yet; the summary says the disk ran low).
 //!

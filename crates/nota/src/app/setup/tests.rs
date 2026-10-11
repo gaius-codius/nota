@@ -6,6 +6,7 @@ use std::time::Duration;
 use nota_core::recorder::Level;
 use nota_core::{FakeClock, SessionTime};
 use nota_recorder::capture::{CaptureError, CaptureSender, Device};
+use nota_recorder::disk::BALLAST_LEN;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -463,21 +464,25 @@ fn r_repeats_the_choice_made_in_this_run_over_a_stale_file() {
     );
 }
 
-/// The space shown leaves out the ballast a recording lays first, unless
-/// it's laid already: with one there, the same disk has room for more.
+/// The space shown is all the disk has free: a recording makes its ballast
+/// when it ends, so it doesn't take the room first. With a disk that has
+/// room for a ballast twice over, the old figure, less the ballast's room,
+/// is a good deal lower.
 #[test]
-fn the_space_leaves_out_the_ballast_not_yet_laid() {
+fn the_space_shown_is_all_the_free_space() {
     let tmp = TestDir::new("space-ballast");
-    let free = StdFs.free_space(&tmp.0).unwrap();
-    // The ballast is laid only where there's room for it twice over.
-    if free < BALLAST_LEN.saturating_mul(2) {
-        return;
+    let before = StdFs.free_space(&tmp.0).unwrap();
+    let shown = room(&tmp.0, 2).unwrap();
+    let after = StdFs.free_space(&tmp.0).unwrap();
+    let usage = Usage::new(2, RATE, segment_length());
+    // Other programs write meanwhile: the shown figure is between the two.
+    let (least, most) = (before.min(after), before.max(after));
+    assert!(
+        (usage.time_left(least)..=usage.time_left(most)).contains(&shown),
+        "{shown:?} for {least} to {most} bytes free"
+    );
+    // The same disk less a ballast would show less.
+    if least >= BALLAST_LEN.saturating_mul(2) {
+        assert!(usage.time_left(least - BALLAST_LEN) < shown);
     }
-    let without = room(&tmp.0, 2).unwrap();
-    let ballast = tmp
-        .0
-        .join(nota_recorder::disk::ballast_file_name(BALLAST_LEN));
-    StdFs.create(&ballast).unwrap();
-    let with = room(&tmp.0, 2).unwrap();
-    assert!(with > without, "{with:?} should be more than {without:?}");
 }

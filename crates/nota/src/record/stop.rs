@@ -71,7 +71,9 @@ pub(super) fn stop<B: CaptureBackend>(started: Started<B>, shown: Shown) -> Outc
     if let Some(e) = stopped.finishing {
         outcome.notes.push(format!("finishing the recording: {e}"));
     }
-    // The disk's notes even if publishing went wrong.
+    // The disk's notes even if publishing went wrong. Stopping the monitor
+    // makes the ballast, which takes seconds on a slow disk, and so comes
+    // after everything the recording needs the disk for.
     let disk = disk.stop();
     // The session's jobs wait for space if the disk filled at any point.
     let full = full_while_recording || disk.as_ref().is_ok_and(|d| d.full.is_some());

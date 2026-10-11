@@ -14,8 +14,9 @@
 //!   several tracks, the first one's fsyncs move from inline to a thread
 //!   when the second joins. With `--ballast`,
 //!   `A` seconds in (default 2) a thread makes a ballast of `BYTES` in
-//!   `<dir>`, as the disk monitor's thread does, so the recording's fsyncs
-//!   run while it's written; its start and end are logged, and `check`
+//!   `<dir>`, as the disk monitor's thread did before the ballast moved to
+//!   after the stop (a measurement of what that cost), so the recording's
+//!   fsyncs run while it's written; its start and end are logged, and `check`
 //!   reports the lag at the fsyncs that overlapped it (GAI-357). Keep it
 //!   out of the crash runs, which count operations. Every recorder
 //!   operation that changes the disk, and every row commit, is counted.
@@ -943,8 +944,8 @@ mod linux {
     }
 
     /// Makes a ballast of `len` bytes in `dir` after `after`, as the disk
-    /// monitor's thread does (fsynced every 8 MiB, on this thread), and
-    /// logs when it began and ended. Not through `fs`: its operations
+    /// monitor's thread did before it moved to after the stop (fsynced
+    /// every 8 MiB, on this thread), and logs when it began and ended. Not through `fs`: its operations
     /// aren't counted.
     fn make_ballast(
         fs: &TapFs,
