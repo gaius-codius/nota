@@ -42,9 +42,7 @@ impl BallastPlan {
         let asked = Arc::new(AtomicBool::new(false));
         let registered = ask_on_signals(&asked);
         let noted = self.make_on(&StdFs, &asked, full);
-        for id in registered {
-            signal_hook::low_level::unregister(id);
-        }
+        stop_asking(registered);
         noted
     }
 
@@ -74,6 +72,7 @@ impl BallastPlan {
 
 /// Sets `asked` on SIGHUP, SIGTERM and SIGINT, which the recording's own
 /// listener no longer handles by now; the ids to unregister.
+#[cfg(unix)]
 fn ask_on_signals(asked: &Arc<AtomicBool>) -> Vec<signal_hook::SigId> {
     use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
     [SIGHUP, SIGTERM, SIGINT]
@@ -81,6 +80,25 @@ fn ask_on_signals(asked: &Arc<AtomicBool>) -> Vec<signal_hook::SigId> {
         .filter_map(|signal| signal_hook::flag::register(signal, Arc::clone(asked)).ok())
         .collect()
 }
+
+/// Stops [`ask_on_signals`]'s handlers asking.
+#[cfg(unix)]
+fn stop_asking(registered: Vec<signal_hook::SigId>) {
+    for id in registered {
+        signal_hook::low_level::unregister(id);
+    }
+}
+
+/// Recording works on Linux only for now, and signals are Unix's: there's
+/// nothing to ask on the other platforms.
+#[cfg(not(unix))]
+fn ask_on_signals(_asked: &Arc<AtomicBool>) -> Vec<()> {
+    Vec::new()
+}
+
+/// Nothing was registered.
+#[cfg(not(unix))]
+fn stop_asking(_registered: Vec<()>) {}
 
 #[cfg(test)]
 mod tests {
@@ -161,6 +179,7 @@ mod tests {
 
     /// A signal sets the flag the ballast's writing watches: SIGTERM raised
     /// at this process is caught, not fatal, and the flag is set.
+    #[cfg(unix)]
     #[test]
     fn a_signal_asks_the_ballast_to_stop() {
         let asked = Arc::new(AtomicBool::new(false));
@@ -168,8 +187,6 @@ mod tests {
         assert_eq!(registered.len(), 3);
         signal_hook::low_level::raise(signal_hook::consts::SIGTERM).unwrap();
         assert!(asked.load(Ordering::SeqCst));
-        for id in registered {
-            signal_hook::low_level::unregister(id);
-        }
+        stop_asking(registered);
     }
 }

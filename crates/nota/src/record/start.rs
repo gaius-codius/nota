@@ -220,9 +220,12 @@ fn start_with_notes<B: CaptureBackend>(
         open_streams(ready, starter, backend, &sources, (&ui, &ui_events), notes)?;
     let save = ready.saver.sender();
     let asleep = sleep.report(clock.as_ref(), notes);
-    warn_of_start(&streams.failed, asleep, (&ui, &save), clock.as_ref());
     unmade.keep();
+    // Before the first warning reaches the saver: the saver adds the
+    // session's row when it first writes, with the tracks as they are then,
+    // and a track that didn't start would be in it.
     keep_started(&rows, &watch, &session, &asked, &streams.captures, notes);
+    warn_of_start(&streams.failed, asleep, (&ui, &save), clock.as_ref());
     let Ready {
         recorder,
         publisher,
