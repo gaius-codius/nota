@@ -19,7 +19,7 @@ use std::time::Duration;
 use nota_core::recorder::{Input, Setup};
 use nota_core::{Clock, SessionTime};
 use nota_recorder::capture::{CaptureBackend, Devices, Preview, PreviewEvent, Source as Capture};
-use nota_recorder::disk::{BALLAST_LEN, Ballast, CHECK_INTERVAL, Usage};
+use nota_recorder::disk::{CHECK_INTERVAL, Usage};
 use nota_recorder::fs::{Fs, StdFs};
 use nota_tui::{Choice, InputThread, RunError, SetupAction, Theme};
 
@@ -328,19 +328,11 @@ fn meter_of(track: nota_core::TrackId) -> Option<usize> {
 }
 
 /// How much recording `tracks` tracks would fit in what the disk has left,
-/// or nothing if it can't say. A recording lays its ballast first when
-/// there is none and the disk has room for it twice over, and that room
-/// isn't the recording's.
+/// or nothing if it can't say. A recording makes no ballast while it runs
+/// (it makes one when it ends), so all the free space is the recording's.
 fn room(data: &std::path::Path, tracks: usize) -> Option<Duration> {
     let free = StdFs.free_space(data).ok()?;
-    let ballast = match Ballast::find(&StdFs, data, BALLAST_LEN) {
-        Ok(Some(_)) => 0,
-        // Without one, or if the directory can't be listed, a recording
-        // makes it when there's room.
-        _ if free >= BALLAST_LEN.saturating_mul(2) => BALLAST_LEN,
-        _ => 0,
-    };
-    Some(Usage::new(tracks, RATE, segment_length()).time_left(free.saturating_sub(ballast)))
+    Some(Usage::new(tracks, RATE, segment_length()).time_left(free))
 }
 
 /// Gives `setup` what the preview reported.
