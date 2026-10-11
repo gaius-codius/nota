@@ -46,13 +46,18 @@
 //!   no other opens: the audio after a second loss is timed early by it
 //!   until the window has passed, and the first buffer after that opens
 //!   one epoch for all of them. A burst of overruns within the window so
-//!   opens two epochs, and two journals.
+//!   opens two epochs, and two journals. A track that ends inside the
+//!   window, or a recording that stops there, opens that epoch at its
+//!   end, where the stamps put it, so the losses still show as a gap.
 //! - Otherwise the stamps measure the device's drift, and the meter
 //!   retimes the track when its mapping strays (see [`nota_core::drift`]),
 //!   so a loss still shows as a gap however long the track has drifted.
 //!   For [`SETTLE`](nota_core::drift::SETTLE) after a track's first buffer,
 //!   and after each epoch opened for a loss or a reopening, the stamps
-//!   settle, and the meter only watches for a loss.
+//!   settle, and the meter only watches for a loss. After a reopening the
+//!   stream may be on another device, so the drift its new run measures
+//!   takes over as soon as it can
+//!   ([`DriftMeter::reopened`](nota_core::drift::DriftMeter::reopened)).
 //!
 //! A stream that doesn't stamp its buffers opens an epoch at each overrun,
 //! at the session time the overrun was reported on the stream's thread. It
@@ -1307,7 +1312,15 @@ pub fn record_tracks<S: Fs>(
                 detectors.check_stalls(events, &live, report);
                 continue;
             }
-            Received::Closed => return Ok(()),
+            Received::Closed => {
+                // Every stream has gone: a loss held back in a burst still
+                // shows.
+                for track in live {
+                    let flushed = open_for_held(writer, &mut timelines, track, report);
+                    settle(writer, flushed.map_err(|e| (track, e)), report)?;
+                }
+                return Ok(());
+            }
         };
         // Before `admit`, which swallows a joining track's `Started`.
         detectors.note(track, &event);
@@ -1344,9 +1357,11 @@ pub fn record_tracks<S: Fs>(
                     Handled::Ended => {
                         let next = writer.next_sample(track);
                         let timeline = timelines.get_mut(track).map(|(timeline, _)| &*timeline);
+                        // First, so what they raised ends where the audio
+                        // did, not after a held loss's gap.
                         detectors.end(track, next, timeline, report);
                         live.remove(&track);
-                        Ok(())
+                        open_for_held(writer, &mut timelines, track, report).map_err(|e| (track, e))
                     }
                 };
             settle(writer, outcome, report)?;
@@ -1395,6 +1410,10 @@ struct Stamps {
     meter: DriftMeter,
     /// When the last epoch opened for a loss starts, for [`BURST_WINDOW`].
     last_loss: Option<SessionTime>,
+    /// The hole of the last loss read within a burst's window, which the
+    /// next epoch opened for a loss will show: how much later than the
+    /// current epoch puts it its buffer came, and so the track's end.
+    held: Option<Duration>,
     /// Whether the stream has stamped a buffer: if so, its overrun reports
     /// open nothing themselves, and its buffers say what was lost.
     stamped: bool,
@@ -1572,8 +1591,11 @@ fn handle<S: Fs>(
         }
         CaptureEvent::Reopened { at } => match timelines.get_mut(track) {
             Some((timeline, stamps)) => {
-                // The audio no longer follows on from the run before.
-                stamps.meter.restart();
+                // The audio no longer follows on from the run before, and
+                // may be on another device. The reopening's epoch makes
+                // any loss held back a gap with the rest.
+                stamps.meter.reopened();
+                stamps.held = None;
                 if opened_since(writer, timeline, at) {
                     // An epoch with no audio yet, opened no earlier (an
                     // overrun's, just before), already makes the stretch a
@@ -1692,8 +1714,11 @@ fn time_buffer<S: Fs>(
     let moved = match stamps.meter.observe(&epoch, first, stamp) {
         Reading::Steady => Ok(()),
         // Within a burst, the next window's first buffer opens one epoch
-        // for every loss.
-        Reading::Lost { .. } if stamps.in_burst(at) => Ok(()),
+        // for every loss, or the track's end does.
+        Reading::Lost { hole } if stamps.in_burst(at) => {
+            stamps.held = Some(hole);
+            Ok(())
+        }
         Reading::Lost { hole } => {
             // Where the stream's cycles put the buffer, not its capture
             // stamp: a step in the delay moves the stamp, not the audio.
@@ -1786,10 +1811,41 @@ fn open_at_capture<S: Fs>(
     let drift = stamps.drift_for(timeline);
     let moved = open_epoch_after_loss(writer, timeline, at, drift, report);
     stamps.meter.restart();
+    stamps.held = None;
     if let Some(epoch) = timeline.current() {
         stamps.meter.observe(epoch, first, stamp);
     }
     moved
+}
+
+/// If `track` has a loss held back in a burst ([`Stamps::held`]), opens
+/// the epoch for it at the track's end, as it stops: where the stamps put
+/// its next sample, so the audio lost since the burst's first epoch shows
+/// as a gap before it. Errors as [`open_epoch_after_loss`].
+fn open_for_held<S: Fs>(
+    writer: &mut SessionWriter<S>,
+    timelines: &mut Timelines<'_>,
+    track: TrackId,
+    report: &mut dyn FnMut(Option<TrackId>, RecorderEvent),
+) -> Result<(), SessionError> {
+    let Some((timeline, stamps)) = timelines.get_mut(track) else {
+        return Ok(());
+    };
+    // A hole of none would open an epoch with no gap to show.
+    let Some(hole) = stamps.held.take().filter(|hole| !hole.is_zero()) else {
+        return Ok(());
+    };
+    let resumed = writer
+        .next_sample(track)
+        .and_then(|next| timeline.time_of(next))
+        .and_then(|end| end.checked_add(hole));
+    let Some(resumed) = resumed else {
+        return Ok(());
+    };
+    let drift = stamps.drift_for(timeline);
+    open_epoch_after_loss(writer, timeline, resumed, drift, &mut |e| {
+        report(Some(track), e);
+    })
 }
 
 /// Moves `timeline`'s track to a new epoch starting at `at`, under

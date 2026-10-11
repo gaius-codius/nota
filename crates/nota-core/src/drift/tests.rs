@@ -208,15 +208,173 @@ fn a_loss_reads_until_the_run_restarts() {
 }
 
 /// Stamps that slide away from the samples a millisecond a buffer, past
-/// [`LOSS_MIN`] but never by that much at once, aren't a loss.
+/// [`LOSS_MIN`] but never by that much at once, aren't a loss while they
+/// stay short of [`SETTLING_BUILT_UP`].
 #[test]
 fn a_slide_past_the_loss_minimum_is_not_a_loss() {
     let timeline = epoch_at(Drift::ZERO);
     let mut meter = DriftMeter::new();
-    for n in 0..30 {
+    for n in 0..25 {
         let at = n * 101_000_000;
         assert_eq!(read(&mut meter, &timeline, n * 1_600, at), Reading::Steady);
     }
+}
+
+/// While a run settles, small steps that lift it [`SETTLING_BUILT_UP`]
+/// above the lowest it has been are a loss, however small each one; a
+/// nanosecond less is not. Measured from its lowest, not its first
+/// buffer: these stamps first settle 11 ms early.
+#[test]
+fn small_losses_built_up_while_settling_are_a_loss() {
+    let timeline = epoch_at(Drift::ZERO);
+    let mut meter = DriftMeter::new();
+    read(&mut meter, &timeline, 0, 0);
+    // Sample 16,000 plays at 1 s; its stamp settles 11 ms early.
+    read(&mut meter, &timeline, 16_000, 989_000_000);
+    // Then 2.5 ms lost each 100 ms, under the loss minimum each.
+    let step = 2_500_000;
+    let at = |n: u64| 989_000_000 + n * (100_000_000 + step);
+    for n in 1..10 {
+        let reading = read(&mut meter, &timeline, 16_000 + n * 1_600, at(n));
+        assert_eq!(reading, Reading::Steady, "{n}");
+    }
+    let mut short = meter.clone();
+    assert_eq!(
+        read(&mut short, &timeline, 32_000, at(10) - 1),
+        Reading::Steady
+    );
+    // 25 ms above the lowest, though only 14 ms later than the first
+    // buffer: the hole is all that built up, as a single jump's would be.
+    assert_eq!(
+        read(&mut meter, &timeline, 32_000, at(10)),
+        Reading::Lost {
+            hole: Duration::from_millis(25)
+        }
+    );
+}
+
+/// The hardware's settling, a millisecond of jitter either side and
+/// 500 ppm of drift either way, all at once, stay short of
+/// [`SETTLING_BUILT_UP`]: no loss is read ([`record`] fails on one), and
+/// the recording stays within 20 ms.
+#[test]
+fn the_worst_settling_allowed_is_not_a_loss() {
+    for shape in [&MIC_SETTLING[..], &MONITOR_SETTLING[..]] {
+        for drift in [ANY_STEADY_DRIFT, -ANY_STEADY_DRIFT] {
+            let wobble = jitter(1_000_000);
+            let run = record(drift, Duration::from_secs(30), 320, |n, true_ns| {
+                let off = settling(shape, true_ns) + wobble(n);
+                stamped(true_ns.saturating_add_signed(off))
+            });
+            assert!(run.worst < WITHIN, "{drift}: {:?}", run.worst);
+        }
+    }
+}
+
+/// Twelve 2.7 ms losses in a run's first 10 s, a quantum of 128 frames
+/// each, read as lost before the run settles, whichever way its stamps
+/// settle as they're lost: the settled base doesn't take them in.
+#[test]
+fn small_losses_while_settling_as_measured_read_as_lost() {
+    for shape in [&MIC_SETTLING[..], &MONITOR_SETTLING[..]] {
+        let timeline = epoch_at(Drift::ZERO);
+        let mut meter = DriftMeter::new();
+        let found = (0..500u64).find_map(|n| {
+            let true_ns = n * 20_000_000;
+            // One lost each 800 ms from 500 ms in, twelve in all.
+            let lost = (true_ns + 300_000_000) / 800_000_000;
+            let at = true_ns
+                .saturating_add_signed(settling(shape, true_ns))
+                .saturating_add(lost.min(12) * 2_700_000);
+            match read(&mut meter, &timeline, n * 320, at) {
+                Reading::Lost { hole } => Some((true_ns, hole)),
+                _ => None,
+            }
+        });
+        let (when, hole) = found.unwrap_or_else(|| panic!("{shape:?}: no loss read"));
+        assert!(when < SETTLED_AT, "{shape:?}: {when}");
+        // At least what lifted it above its lowest.
+        assert!(hole >= SETTLING_BUILT_UP, "{shape:?}: {hole:?}");
+    }
+}
+
+/// How early [`settle_early`] settles a run's stamps, in nanoseconds: as
+/// early as a monitor's settled.
+const EARLY: u64 = 10_800_000;
+
+/// The sample [`settle_early`] settles a run at: 11 s in.
+const EARLY_SETTLED: u64 = 176_000;
+
+/// Starts a run on `meter` at sample zero and time zero, and settles it at
+/// [`EARLY_SETTLED`], stamped [`EARLY`] before it plays.
+fn settle_early(meter: &mut DriftMeter, timeline: &TrackTimeline) {
+    read(meter, timeline, 0, 0);
+    read(meter, timeline, SETTLED, SETTLED_AT - EARLY);
+    read(meter, timeline, EARLY_SETTLED, 11_000_000_000 - EARLY);
+    assert_eq!(meter.run.map(|run| run.base), Some(-i128::from(EARLY)));
+}
+
+/// A run that settled with its stamps early, as a monitor's settled 10.8 ms
+/// early, that then loses 5.3 ms in one jump without a restart, has a hole
+/// of the jump, not none: the hole is measured from where it settled.
+#[test]
+fn a_loss_after_settling_early_is_at_least_its_jump() {
+    let timeline = epoch_at(Drift::ZERO);
+    let mut meter = DriftMeter::new();
+    settle_early(&mut meter, &timeline);
+    // Sample 177,600 plays at 11.1 s.
+    assert_eq!(
+        read(&mut meter, &timeline, EARLY_SETTLED + 1_600, 11_094_500_000),
+        Reading::Lost {
+            hole: Duration::from_micros(5_300)
+        }
+    );
+}
+
+/// So does one whose small losses build up behind where it settled early:
+/// the hole is all they built up, not just what passes its first buffer.
+#[test]
+fn small_losses_after_settling_early_are_all_of_the_hole() {
+    let timeline = epoch_at(Drift::ZERO);
+    let mut meter = DriftMeter::new();
+    settle_early(&mut meter, &timeline);
+    let quantum = 2_700_000;
+    let readings: Vec<Reading> = (1..=6)
+        .map(|n| {
+            let at = 11_000_000_000 - EARLY + n * (100_000_000 + quantum);
+            read(&mut meter, &timeline, EARLY_SETTLED + n * 1_600, at)
+        })
+        .collect();
+    assert_eq!(
+        readings[5],
+        Reading::Lost {
+            hole: Duration::from_nanos(6 * quantum)
+        }
+    );
+}
+
+/// A run whose stamps have slid early while it settles, then jump 5 ms,
+/// has a hole of the jump, not of what's left after the slide.
+#[test]
+fn a_jump_while_settling_early_is_at_least_the_jump() {
+    let timeline = epoch_at(Drift::ZERO);
+    let mut meter = DriftMeter::new();
+    read(&mut meter, &timeline, 0, 0);
+    // 11 ms early at 2 s, reached a fraction of a millisecond a buffer.
+    for n in 1..=20 {
+        read(
+            &mut meter,
+            &timeline,
+            n * 1_600,
+            n * 100_000_000 - n * 550_000,
+        );
+    }
+    assert_eq!(
+        read(&mut meter, &timeline, 33_600, 2_100_000_000 - 6_000_000),
+        Reading::Lost {
+            hole: Duration::from_millis(5)
+        }
+    );
 }
 
 /// Once a run has settled, small steps that build up [`LOSS_BUILT_UP`]
@@ -293,7 +451,7 @@ fn nothing_is_measured_while_a_run_settles() {
         assert_eq!(reading, Reading::Steady, "{n}");
     }
     assert_eq!(meter.measured(), Some(Drift::ZERO));
-    assert!(!meter.from_this_run);
+    assert_eq!(meter.measured_in, MeasuredIn::EarlierRun);
 }
 
 /// The meter doesn't correct a mapping before it has watched
@@ -527,6 +685,79 @@ fn a_new_run_takes_over_only_once_it_is_long_enough() {
     // A minute of it: it takes over.
     read(&mut meter, &timeline, 59_120_000, settled + 60_000_000_000);
     assert_eq!(meter.measured(), Some(Drift::ZERO));
+}
+
+/// After a reopening, the new run's drift takes over once it has settled
+/// and reached [`MIN_WINDOW`], however long the earlier run was: the
+/// stream may be on another device, whose clock the old drift isn't.
+#[test]
+fn a_reopened_run_takes_over_at_the_minimum_window() {
+    let timeline = epoch_at(Drift::ZERO);
+    let mut meter = DriftMeter::new();
+    settle_run(&mut meter, &timeline);
+    read(
+        &mut meter,
+        &timeline,
+        SETTLED + 57_605_760,
+        SETTLED_AT + 3_600_000_000_000,
+    );
+    assert_eq!(meter.measured(), Some(ppm(100)));
+    meter.reopened();
+    let from = 3_625_000_000_000;
+    // Its first buffer only starts it, and the old drift stays meanwhile.
+    assert_eq!(
+        read(&mut meter, &timeline, 58_000_000, from),
+        Reading::Steady
+    );
+    read(&mut meter, &timeline, 58_160_000, from + SETTLED_AT);
+    assert_eq!(meter.measured(), Some(ppm(100)));
+    // 10 s of the settled run, 1 ms out: about -100 ppm, and it takes over.
+    let settled = from + SETTLED_AT;
+    read(&mut meter, &timeline, 58_320_000, settled + 10_001_000_000);
+    assert_eq!(meter.measured(), Some(Drift(-99_991)));
+}
+
+/// A device 400 ppm fast for two minutes, then, after a reopening, one
+/// 400 ppm slow: no correction starts by the old rate, which would run a
+/// whole [`SLEW`] past the new estimate until the mapping read as lost.
+/// The new device's rate is learned and corrected to, with no loss read,
+/// within 20 ms throughout.
+#[test]
+fn a_reopening_onto_an_opposite_device_corrects_by_its_own_rate() {
+    let mut timeline = epoch_at(Drift::ZERO);
+    let mut meter = DriftMeter::new();
+    let mut worst = 0u64;
+    let mut feed = |meter: &mut DriftMeter, timeline: &mut TrackTimeline, n: u64, at: u64| {
+        match read(meter, timeline, n, at) {
+            Reading::Lost { hole } => panic!("{hole:?} lost at {n}"),
+            Reading::Retime(drift) => {
+                timeline.retime(s(n), drift).unwrap();
+            }
+            Reading::Steady => {}
+        }
+        worst = worst.max(timeline.time_of(s(n)).unwrap().as_nanos().abs_diff(at));
+    };
+    let reopened_at = 1_920_000;
+    for n in (0..reopened_at).step_by(320) {
+        feed(&mut meter, &mut timeline, n, true_ns(n, 400_000));
+    }
+    assert!(
+        meter
+            .measured()
+            .is_some_and(|d| (d.ppb() - 400_000).abs() < 2_000)
+    );
+    meter.reopened();
+    let from = true_ns(reopened_at, 400_000) + 500_000_000;
+    timeline
+        .reopen(t(from), s(reopened_at), SPEECH, meter.measured().unwrap())
+        .unwrap();
+    for k in (0..1_440_000).step_by(320) {
+        let n = reopened_at + k;
+        feed(&mut meter, &mut timeline, n, from + true_ns(k, -400_000));
+    }
+    let landed = timeline.current().unwrap().drift().ppb();
+    assert!((landed + 400_000).abs() < 2_000, "{landed}"); // check-bound
+    assert!(worst < 20_000_000, "{worst}"); // check-bound
 }
 
 /// A drift at the limit means bad stamps, not a device: the meter doesn't

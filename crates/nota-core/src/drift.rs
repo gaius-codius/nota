@@ -14,7 +14,7 @@
 //!   is a hole: audio was lost before it ([`Reading::Lost`]), and the
 //!   caller opens a new epoch where the buffer came, so the loss shows as
 //!   a gap. So is a run that has built up [`LOSS_BUILT_UP`] behind once
-//!   it has settled.
+//!   it has settled, or [`SETTLING_BUILT_UP`] while it settles.
 //! - Otherwise the difference is drift. Once the meter has watched
 //!   [`MIN_WINDOW`] of audio it knows the device's rate, and when the
 //!   mapping is more than [`RETIME_AFTER`] off it asks for a new epoch
@@ -50,6 +50,9 @@
 //!   timeline so stays on the samples rather than the stamps through the
 //!   settling, and keeps the difference: up to about 14 ms either way, and
 //!   any drift built up over a first run's settling (1 ms at 100 ppm).
+//!   Losses too small to jump [`LOSS_MIN`] each still read as lost while a
+//!   run settles once they lift it [`SETTLING_BUILT_UP`] above the lowest
+//!   it has been; under that, the settled base takes them in.
 //!
 //! On that hardware each quantum change also lost 20 to 105 ms of audio, a
 //! jump between one buffer and the next, which reads as a loss as it
@@ -176,6 +179,25 @@ pub const LOSS_MIN: Duration = Duration::from_millis(4);
 /// under a millisecond more.
 pub const LOSS_BUILT_UP: Duration = Duration::from_millis(15);
 
+/// How far above the lowest it has been, against the mapping, a settling
+/// run may rise before the meter takes what built up for audio lost: 25 ms.
+/// Losses smaller than [`LOSS_MIN`] each that add up to less, while a run
+/// settles, are taken into its settled base and timed into the audio, not
+/// shown as a gap: a settling run can't tell them from the stamps
+/// settling. It leaves room for the 14 ms a stream's cycles were measured
+/// to rise as it settled (see the module docs), a millisecond of jitter
+/// either side, and the 5 ms that 500 ppm of drift still uncorrected
+/// builds up over [`SETTLE`]: a device's own drift on a first run, or after
+/// a reopening, how far the new device's is from the old one's. Two
+/// devices past [`DRIFT_LIMIT`] the opposite way can pass it, and read a
+/// loss where there was none. Measured from the lowest point rather than
+/// the first buffer, so a stream whose stamps settle early, as a USB DAC's
+/// monitor's did by 11 ms, needs no more built up than the limit itself,
+/// not the limit plus how early it settled. One whose stamps rise as they
+/// settle, as a microphone's did by 14 ms, shows a loss sooner, the rise
+/// counting toward the limit.
+pub const SETTLING_BUILT_UP: Duration = Duration::from_millis(25);
+
 /// How far an epoch's mapping may stray from the stream's timestamps
 /// before the meter asks for a new epoch to correct it: 4 ms.
 pub const RETIME_AFTER: Duration = Duration::from_millis(4);
@@ -196,7 +218,8 @@ pub const MIN_WINDOW: Duration = Duration::from_secs(10);
 pub const SETTLE: Duration = Duration::from_secs(10);
 
 /// How long a run must be before its measured drift is trusted over a
-/// longer earlier run's, or is judged against [`DRIFT_LIMIT`]: 60 s. A
+/// longer earlier run's (unless the stream reopened since:
+/// [`DriftMeter::reopened`]), or is judged against [`DRIFT_LIMIT`]: 60 s. A
 /// quantum lost unseen, or a stamp a few milliseconds off, then moves the
 /// estimate by under about 100 ppm.
 pub const TRUSTED_WINDOW: Duration = Duration::from_secs(60);
@@ -236,16 +259,22 @@ pub enum Reading {
     /// The buffer is where the epoch's mapping says, near enough.
     Steady,
     /// The buffer came at least [`LOSS_MIN`] later than the one before it
-    /// puts it, or a settled run fell [`LOSS_BUILT_UP`] behind: audio was
-    /// lost before it. The meter didn't learn from it, and reads every
-    /// buffer after it as lost too until [`DriftMeter::restart`]. A new
+    /// puts it, or a settled run fell [`LOSS_BUILT_UP`] behind, or a
+    /// settling one rose [`SETTLING_BUILT_UP`]: audio was lost before it.
+    /// The meter didn't learn from it, and reads every buffer after it as
+    /// lost too until [`DriftMeter::restart`]. A new
     /// epoch `hole` after where the mapping puts the buffer makes the loss
     /// a gap; then call [`DriftMeter::restart`].
     Lost {
         /// How much audio was lost, as the run reads it: how much later
         /// than the mapping the buffer came, by the stream's cycle times,
-        /// beyond where the run's first buffer came. Zero if that isn't
-        /// later.
+        /// beyond the earliest of where the run's first buffer came, where
+        /// it settled, and for a loss shown by a jump, where the buffer
+        /// before it came, or for one built up while settling, the lowest
+        /// the run came. So at least the jump, and at least what built up,
+        /// but measured from the first buffer when that's earlier, as for
+        /// a graph restart that wins back buffering as it loses audio.
+        /// Zero if the buffer is earlier than all of them.
         hole: Duration,
     },
     /// The mapping has strayed by more than [`RETIME_AFTER`] (or a
@@ -267,12 +296,13 @@ pub struct DriftMeter {
     run: Option<Run>,
     /// The drift measured over the current run, once it reached
     /// [`MIN_WINDOW`]; or after a restart, the earlier run's, until the new
-    /// one is as long or reaches [`TRUSTED_WINDOW`].
+    /// one is as long or reaches [`TRUSTED_WINDOW`] (after a reopening,
+    /// until the new one reaches [`MIN_WINDOW`]).
     measured: Option<Drift>,
     /// How long a run `measured` was measured over.
     measured_over: Duration,
-    /// Whether `measured` comes from the current run.
-    from_this_run: bool,
+    /// Which run `measured` comes from.
+    measured_in: MeasuredIn,
     /// While a correcting epoch closes its difference: the sample at which
     /// it has, when the measured drift takes over.
     slewing_until: Option<SampleIndex>,
@@ -280,6 +310,21 @@ pub struct DriftMeter {
     /// [`DRIFT_LIMIT`]; `reported` once [`Self::past_limit`] has said so.
     beyond: bool,
     reported: bool,
+}
+
+/// Which run a meter's measured drift comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum MeasuredIn {
+    /// The current run.
+    ThisRun,
+    /// An earlier run of the same stream, or none yet: a new run takes
+    /// over once it's as long, or reaches [`TRUSTED_WINDOW`].
+    #[default]
+    EarlierRun,
+    /// A run before the stream reopened, on what may be another device's
+    /// clock: it still times new epochs, but starts no correction, and a
+    /// new run takes over once it reaches [`MIN_WINDOW`].
+    BeforeReopening,
 }
 
 /// One run of unbroken audio, as the meter reads it. Times are the
@@ -303,6 +348,8 @@ struct Run {
     /// first buffer's difference, then once it has settled, the difference
     /// reached as it did.
     base: i128,
+    /// The least difference a buffer of the run came at while it settled.
+    low: i128,
     /// Whether the run is settling, settled or lost.
     phase: Phase,
 }
@@ -317,7 +364,11 @@ enum Phase {
     /// mapping a buffer comes, beyond the run's base.
     Settled,
     /// A buffer read as lost: every buffer does until the meter restarts.
-    Lost,
+    Lost {
+        /// How much later than the mapping the run's holes are measured
+        /// from (see [`Reading::Lost`]), as the first lost buffer found.
+        from: i128,
+    },
 }
 
 impl Run {
@@ -331,6 +382,7 @@ impl Run {
             last_off: off,
             origin: off,
             base: off,
+            low: off,
             phase: Phase::Settling,
         }
     }
@@ -344,7 +396,7 @@ impl DriftMeter {
             run: None,
             measured: None,
             measured_over: Duration::ZERO,
-            from_this_run: false,
+            measured_in: MeasuredIn::EarlierRun,
             slewing_until: None,
             beyond: false,
             reported: false,
@@ -364,7 +416,21 @@ impl DriftMeter {
     pub fn restart(&mut self) {
         self.run = None;
         self.slewing_until = None;
-        self.from_this_run = false;
+        if self.measured_in == MeasuredIn::ThisRun {
+            self.measured_in = MeasuredIn::EarlierRun;
+        }
+    }
+
+    /// [`Self::restart`], for a stream that reopened, on a new device after
+    /// a route change or after a suspend: its clock may not be the one
+    /// measured. The drift measured so far stays the best estimate for new
+    /// epochs until the new run has its own, which takes over once the run
+    /// has settled and reached [`MIN_WINDOW`], however long the earlier run
+    /// was. Until then no correction starts: one made by the old clock's
+    /// rate would run its [`SLEW`] at that rate, past the new estimate.
+    pub fn reopened(&mut self) {
+        self.restart();
+        self.measured_in = MeasuredIn::BeforeReopening;
     }
 
     /// The measured drift, once, the first time a trusted window's is past
@@ -390,13 +456,13 @@ impl DriftMeter {
             return Reading::Steady;
         };
         let off = stamp.cycle() - run.delay - mapped;
-        let jump = off - run.last_off;
+        let before = run.last_off;
         run.last_off = off;
-        if let Some(hole) = lost(&run, jump, off) {
-            run.phase = Phase::Lost;
+        if let Some(from) = lost(&run, before, off) {
+            run.phase = Phase::Lost { from };
             self.run = Some(run);
             return Reading::Lost {
-                hole: Duration::from_nanos(u64::try_from(hole).unwrap_or(0)),
+                hole: Duration::from_nanos(u64::try_from(off - from).unwrap_or(0)),
             };
         }
         let settled = settle(&mut run, first, stamp.cycle(), off);
@@ -416,7 +482,8 @@ impl DriftMeter {
     /// What a settled run's buffer from `first`, `off` nanoseconds later
     /// than the mapping beyond the run's settled difference, calls for:
     /// the measured drift once a correction has run its course, or a
-    /// correcting epoch if the mapping has strayed past [`RETIME_AFTER`].
+    /// correcting epoch if the mapping has strayed past [`RETIME_AFTER`]
+    /// and the drift was measured since the stream last reopened.
     fn correct(&mut self, first: SampleIndex, off: i128, rate: SampleRate) -> Reading {
         if let Some(until) = self.slewing_until {
             if first < until {
@@ -427,7 +494,8 @@ impl DriftMeter {
         }
         match self.measured {
             Some(measured)
-                if off.abs() > nanos(RETIME_AFTER)
+                if self.measured_in != MeasuredIn::BeforeReopening
+                    && off.abs() > nanos(RETIME_AFTER)
                     && measured.0.unsigned_abs() < Drift::MAX_PPB.unsigned_abs() =>
             {
                 self.slewing_until =
@@ -444,19 +512,23 @@ impl DriftMeter {
     /// Updates the measured drift from `samples` delivered in `elapsed`
     /// nanoseconds of the settled run, if that's long enough:
     /// [`MIN_WINDOW`], and after a restart, as long as the run measured
-    /// before or [`TRUSTED_WINDOW`], whichever is shorter.
+    /// before or [`TRUSTED_WINDOW`], whichever is shorter (after a
+    /// reopening, [`MIN_WINDOW`] alone).
     fn learn(&mut self, samples: SampleCount, elapsed: i128, rate: SampleRate) {
         let Some(elapsed) = u64::try_from(elapsed).ok().map(Duration::from_nanos) else {
             return;
         };
-        let enough = self.from_this_run || elapsed >= self.measured_over.min(TRUSTED_WINDOW);
+        let enough = match self.measured_in {
+            MeasuredIn::ThisRun | MeasuredIn::BeforeReopening => true,
+            MeasuredIn::EarlierRun => elapsed >= self.measured_over.min(TRUSTED_WINDOW),
+        };
         if elapsed < MIN_WINDOW || !enough {
             return;
         }
         if let Some(drift) = Drift::measured(samples, elapsed, rate) {
             self.measured = Some(drift);
             self.measured_over = elapsed;
-            self.from_this_run = true;
+            self.measured_in = MeasuredIn::ThisRun;
             if elapsed >= TRUSTED_WINDOW {
                 self.beyond = drift.0.unsigned_abs() > DRIFT_LIMIT.0.unsigned_abs();
             }
@@ -464,29 +536,37 @@ impl DriftMeter {
     }
 }
 
-/// How much audio was lost before a buffer of `run` that came `jump`
-/// nanoseconds later than the buffer before it puts it, and `off` later
-/// than the mapping: how much later than the run's first buffer puts it it
-/// came, none if it didn't; or `None` if nothing was lost. Lost if the run
-/// already is, so every loss of a burst counts; if the buffer jumped
-/// [`LOSS_MIN`] or more; or, once the run has settled, if it has built up
-/// [`LOSS_BUILT_UP`] behind its base.
-fn lost(run: &Run, jump: i128, off: i128) -> Option<i128> {
-    let is_lost = match run.phase {
-        Phase::Lost => true,
-        Phase::Settled => jump >= nanos(LOSS_MIN) || off - run.base >= nanos(LOSS_BUILT_UP),
-        Phase::Settling => jump >= nanos(LOSS_MIN),
+/// Whether audio was lost before a buffer of `run` that came `off`
+/// nanoseconds later than the mapping, the buffer before it having come
+/// `before` later; if so, how much later than the mapping its hole is
+/// measured from (see [`Reading::Lost`]). Lost if the run already is, so
+/// every loss of a burst counts, measured from where the first was; if the
+/// buffer jumped [`LOSS_MIN`] or more; once the run has settled, if it has
+/// built up [`LOSS_BUILT_UP`] behind its base; and while it settles, if it
+/// has risen [`SETTLING_BUILT_UP`] above its lowest, measured from there.
+fn lost(run: &Run, before: i128, off: i128) -> Option<i128> {
+    let anchor = run.origin.min(run.base);
+    let from = match run.phase {
+        Phase::Lost { from } => from,
+        _ if off - before >= nanos(LOSS_MIN) => anchor.min(before),
+        Phase::Settled if off - run.base >= nanos(LOSS_BUILT_UP) => anchor,
+        Phase::Settling if off - run.low >= nanos(SETTLING_BUILT_UP) => anchor.min(run.low),
+        Phase::Settled | Phase::Settling => return None,
     };
-    is_lost.then_some((off - run.origin).max(0))
+    Some(from)
 }
 
 /// Moves `run` to settled at its buffer from sample `first`, at cycle time
 /// `cycle` and `off` nanoseconds later than the mapping, if it's still
 /// settling and [`SETTLE`] has passed since its first buffer: it measures
-/// from that buffer on, and takes `off` as its base. The run's phase as it
-/// reads this buffer: still settling at the buffer that settles it.
+/// from that buffer on, and takes `off` as its base. Until then, keeps the
+/// lowest `off` it has read. The run's phase as it reads this buffer:
+/// still settling at the buffer that settles it.
 fn settle(run: &mut Run, first: SampleIndex, cycle: i128, off: i128) -> Phase {
     let phase = run.phase;
+    if phase == Phase::Settling {
+        run.low = run.low.min(off);
+    }
     if phase == Phase::Settling && cycle - run.from.1 >= nanos(SETTLE) {
         run.phase = Phase::Settled;
         run.base = off;
