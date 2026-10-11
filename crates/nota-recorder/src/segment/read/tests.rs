@@ -51,6 +51,44 @@ fn a_segment_reads_back_as_it_was_published() {
     );
 }
 
+/// A row salvage proves by its audio digest, whose file another encoder
+/// wrote, reads back as salvage proves it, rather than being skipped by
+/// the final pass for good; only the row's exact audio does.
+#[test]
+fn a_re_encoded_segment_reads_back_by_its_audio_digest() {
+    let fs = FakeFs::new();
+    let dir = dir(&fs);
+    let audio = samples(5_000);
+    let published = publish(&fs, dir, 0, &audio, SampleRate::SPEECH);
+    let digest = flac::audio_digest(SampleRate::SPEECH, TRACK, published.range(), &[&audio]);
+    let row = published.with_audio(digest);
+    let path = dir.join(segment_file_name(TRACK, row.range()));
+    let replant = |samples: &[i16]| {
+        fs.remove(&path).unwrap();
+        let other = flac::encode_otherwise(SampleRate::SPEECH, samples, 256);
+        assert_ne!(Sha256::digest(&other).as_slice(), row.sha256().as_bytes());
+        fs.create(&path).unwrap().write_all(&other).unwrap();
+    };
+    replant(&audio);
+    assert_eq!(
+        read_segment(&fs, dir, &row, SampleRate::SPEECH).unwrap(),
+        audio
+    );
+    // Without an audio digest, only the bytes prove a row.
+    assert!(matches!(
+        read_segment(&fs, dir, &published, SampleRate::SPEECH),
+        Err(ReadSegmentError::Hash)
+    ));
+    // Other audio in the file isn't the row's.
+    let mut changed = audio;
+    changed[0] = changed[0].wrapping_add(1);
+    replant(&changed);
+    assert!(matches!(
+        read_segment(&fs, dir, &row, SampleRate::SPEECH),
+        Err(ReadSegmentError::Hash)
+    ));
+}
+
 #[test]
 fn a_segment_that_isnt_what_its_row_says_gives_no_audio() {
     let fs = FakeFs::new();

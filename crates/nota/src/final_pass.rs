@@ -1,7 +1,7 @@
 //! The final pass: the first job after a stop.
 //!
-//! The session's published segments are read back (each checked against
-//! its row's hash), cut by the engine's voice activity detector at pauses
+//! The session's published segments are read back (each proven against
+//! its row, as salvage proves it), cut by the engine's voice activity detector at pauses
 //! with a 25 s cap (`nota engine asr --pass final`), and transcribed by the
 //! engine child under the supervisor, so each request has its timeout and
 //! a hung engine is restarted, as on the live path (see

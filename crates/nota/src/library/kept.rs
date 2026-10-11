@@ -59,19 +59,32 @@ pub(crate) fn write<F: Fs>(fs: &F, dir: &Path, session: &NewSession) -> io::Resu
 const MAX_LEN: usize = 64 * 1024;
 
 /// The row kept in `dir` on `fs`, the directory of session `id`. `Ok(None)`
-/// if there's none, as for a session from before nota kept one, or if it
-/// doesn't parse or is longer than any row nota writes: it never will.
+/// if there's none, as for a session from before nota kept one, or if
+/// what's under the name can never be read as one: it doesn't parse, it's
+/// longer than any row nota writes, or it isn't a regular file.
 ///
 /// # Errors
 ///
-/// If the file is there but can't be read, which may pass.
+/// If the file is there but can't be read, which may pass (a permission,
+/// a failing disk).
 pub(crate) fn read<F: Fs>(fs: &F, dir: &Path, id: SessionId) -> io::Result<Option<NewSession>> {
     match fs.read(&dir.join(KEPT)) {
         Ok(bytes) if bytes.len() > MAX_LEN => Ok(None),
         Ok(bytes) => Ok(decode(id, &bytes).ok()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) if e.kind() == io::ErrorKind::NotFound || never_read(&e) => Ok(None),
         Err(e) => Err(e),
     }
+}
+
+/// Whether `e`, from [`Fs::read`], says what's under the name will never
+/// be read: a directory, a FIFO or other file that isn't regular, or a
+/// file too long. Holding the session back for these would
+/// keep its journals from salvage at every start.
+fn never_read(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::IsADirectory | io::ErrorKind::InvalidInput | io::ErrorKind::FileTooLarge
+    )
 }
 
 /// `session` as the file holds it. Its number isn't written: the

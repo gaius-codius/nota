@@ -165,8 +165,11 @@ pub const LOSS_MIN: Duration = Duration::from_millis(4);
 /// How far behind the mapping, beyond where it settled, a settled run may
 /// fall before the meter takes what built up for audio lost rather than
 /// drift: 15 ms. Losses smaller than [`LOSS_MIN`] each, a quantum of 64 or
-/// 128 frames, then still show as a gap once they add up, as does a
-/// mapping that drift correction can't keep up with. It leaves room for
+/// 128 frames, then still show as a gap once they add up faster than
+/// correction closes them, as does a mapping that drift correction can't
+/// keep up with. Sparser ones (one every minute or so) look like drift:
+/// each correcting epoch takes in what they put the mapping behind, so
+/// they're timed into the audio, not shown as a gap. It leaves room for
 /// [`RETIME_AFTER`], a millisecond of jitter either side, and a first
 /// correction made on a [`MIN_WINDOW`] estimate that jitter has put 150 ppm
 /// out for a whole [`SLEW`]; measured, a settled stream's cycles move by

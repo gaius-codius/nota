@@ -1108,14 +1108,17 @@ mod tests {
     }
 
     /// Every event the recorder sends reaches the screen through the loop.
-    /// Those it shows change what's drawn; the rest, not shown yet, leave
-    /// the screen open and taking keys.
+    /// The warnings and changes it draws on the top border and the band are
+    /// the same as the events give the screen's warnings directly; the
+    /// rest change what's drawn, or leave the screen open and taking keys.
     #[test]
     fn every_recorder_event_reaches_the_screen() {
         use nota_core::recorder::{
             Cause, DeviceChange, Disk, EngineState, Level, Warning, WarningState,
         };
         use nota_core::{EpochId, SampleIndex, SampleRate, TrackId, TrackTimeline};
+
+        use crate::screen::Warnings;
 
         let track = TrackId::new(1);
         let mut timeline = TrackTimeline::new(track);
@@ -1129,7 +1132,7 @@ mod tests {
         let epoch = *timeline.epochs().last().unwrap();
         assert_eq!(epoch.id(), EpochId::new(1));
         let gap = timeline.gaps().next().unwrap();
-        let unshown = [
+        let warned = [
             recorder::Event::Engine(EngineState::Offline("exited".into())),
             recorder::Event::Engine(EngineState::Online),
             recorder::Event::Warning(Warning {
@@ -1169,7 +1172,13 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(62, 20)).unwrap();
         let (event_tx, event_rx) = mpsc::channel();
         let (command_tx, command_rx) = mpsc::channel();
-        for event in unshown.into_iter().chain(shown) {
+        // What the loop should leave in the warnings: the same events,
+        // given to them directly.
+        let mut direct = Warnings::default();
+        for event in &warned {
+            direct.update(event, secs(4));
+        }
+        for event in warned.into_iter().chain(shown) {
             event_tx.send(Event::Recorder(event)).unwrap();
         }
         event_tx.send(key('m')).unwrap();
@@ -1192,6 +1201,15 @@ mod tests {
             .flatten()
             .collect();
         assert_eq!(levels, [Level::FULL_SCALE]);
+        // Not vacuous: the stall and the lost device hold, and the device
+        // loss, the epoch and the gap are changes on the band.
+        assert_eq!(
+            screen.warnings.conditions(secs(4)),
+            direct.conditions(secs(4))
+        );
+        assert_eq!(screen.warnings.changes(), direct.changes());
+        assert_eq!(direct.conditions(secs(4)).len(), 2);
+        assert!(!direct.changes().is_empty());
     }
 
     /// Terminal events in two lots: those already waiting when the input

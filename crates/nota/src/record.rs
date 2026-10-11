@@ -76,7 +76,7 @@
 //! are published into the ballast's room, and the summary says the
 //! recording stopped early. A low disk never stops a start: nota records
 //! what fits, sending the low-disk warning from the start (the screen
-//! doesn't show warnings yet; the summary says the disk ran low).
+//! shows it, and the summary says the disk ran low).
 //!
 //! # Sleep
 //!
@@ -88,7 +88,7 @@
 //! anyway, the capture opens a new epoch at the resume, and the live
 //! thread tells the screen (a warning, the epoch and its gap) and the
 //! summary says when and for how long (see `crate::inhibit` and
-//! `crate::live`). The screen doesn't show these warnings yet.
+//! `crate::live`).
 //!
 //! # SIGXCPU
 //!
