@@ -15,7 +15,7 @@
 //! a default missing for longer than its grace into a loss.
 //!
 //! A watch that can't connect, or whose connection fails, says so once as a
-//! [`CaptureNotice::Warning`]; the stream records on without it, and the
+//! [`CaptureNotice::Unwatched`]; the stream records on without it, and the
 //! stalled detector still notices a stream that stops.
 
 use std::cell::RefCell;
@@ -114,7 +114,7 @@ pub(super) fn watch(source: Source, events: CaptureSender) -> Watch {
 
 /// The warning for a watch that couldn't run, for `error`.
 fn unwatched(error: &dyn std::fmt::Display) -> CaptureNotice {
-    CaptureNotice::Warning(format!("device changes aren't watched: {error}"))
+    CaptureNotice::Unwatched(format!("device changes aren't watched: {error}"))
 }
 
 /// Runs the watch until `quit` says to stop, or its connection fails.
@@ -154,7 +154,7 @@ fn run(
             move |id, _seq, _res, message| {
                 // Only the connection's own errors end the watch.
                 if id == PW_ID_CORE {
-                    events.notice(CaptureNotice::Warning(format!(
+                    events.notice(CaptureNotice::Unwatched(format!(
                         "device changes are no longer watched: {message}"
                     )));
                     mainloop.quit();
@@ -688,7 +688,7 @@ mod tests {
     fn a_watch_that_cant_run_says_why() {
         assert_eq!(
             unwatched(&"no socket"),
-            CaptureNotice::Warning("device changes aren't watched: no socket".into())
+            CaptureNotice::Unwatched("device changes aren't watched: no socket".into())
         );
     }
 

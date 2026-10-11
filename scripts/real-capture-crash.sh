@@ -49,7 +49,8 @@
 # long that fsync and the track's one before it took, without failing on
 # them. Every other check still holds. Not on tmpfs.
 #
-# --ballast makes nota's 256 MB ballast (as the disk monitor's thread does)
+# --ballast makes nota's 256 MB ballast (as the disk monitor's thread did,
+# before the ballast moved to after the stop; this measures what that cost)
 # a few seconds into a --measure-only run, so the journal fsyncs run while
 # it's written, and reports the worst lag behind the audio delivered and the
 # slowest fsync among the fsyncs that overlapped it against the 2 s bound

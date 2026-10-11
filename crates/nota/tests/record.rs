@@ -310,6 +310,40 @@ impl Drop for Running {
     }
 }
 
+/// A recording makes no ballast while it runs and leaves one when it ends:
+/// written during a recording, it holds the journals' fsyncs behind it on
+/// a slow disk. A tone recording's ballast is 1 MiB.
+#[test]
+fn the_ballast_is_made_when_the_recording_ends_not_while_it_runs() {
+    let tmp = TestDir::new("ballast-at-stop");
+    let ballast = tmp.0.join(nota_recorder::disk::ballast_file_name(1 << 20));
+    let mut nota = recording(&tmp.0);
+    // The recording has run for a second and a half: the monitor made its
+    // ballast within milliseconds, before the move.
+    assert!(!ballast.exists(), "made while recording");
+    nota.press("s");
+    pause(Duration::from_millis(600));
+    nota.press("y");
+    let status = nota.exits().expect("nota didn't stop");
+    assert!(status.success(), "{status:?}: {}", nota.output());
+    assert_eq!(std::fs::metadata(&ballast).unwrap().len(), 1 << 20);
+}
+
+/// A temp ballast left by a crash at an earlier stop is removed when the
+/// next recording starts, not left to take that recording's room.
+#[test]
+fn an_unfinished_ballast_is_removed_when_the_next_recording_starts() {
+    let tmp = TestDir::new("ballast-leftover");
+    let leftover = tmp.0.join("ballast-1048576.tmp");
+    StdFs.create(&leftover).unwrap();
+    let mut nota = recording(&tmp.0);
+    assert!(!leftover.exists(), "left through the recording");
+    nota.press("s");
+    pause(Duration::from_millis(600));
+    nota.press("y");
+    nota.exits().expect("nota didn't stop");
+}
+
 /// Starts recording, and waits until the screen is up and both tracks
 /// have recorded a while.
 fn recording(data: &Path) -> Running {
@@ -1251,6 +1285,33 @@ fn when_every_stream_fails_the_recording_stops_by_itself() {
         "{said}"
     );
     assert_saved(&tmp.0, 1, &[0, 1], 450);
+}
+
+/// A stream that warns, over and over, is in the summary once for each
+/// thing it said (GAI-461).
+#[test]
+fn a_stream_that_warns_is_in_the_summary_once_for_each_warning() {
+    let tmp = TestDir::new("warns");
+    let mut nota = Running::start_with(&tmp.0, &["--mic", "warns"]);
+    assert!(nota.shows_after(0, "s stop"), "{}", nota.output());
+    // The tone sends its warnings as it starts; give them time to arrive.
+    pause(Duration::from_millis(1_500));
+    nota.signal(Signal::TERM);
+    let status = nota.exits().expect("nota didn't stop");
+    assert!(status.success(), "{status:?}: {}", nota.output());
+    let said = visible(&nota.output.lock().unwrap());
+    assert_eq!(
+        said.matches("the mic: capture warning: the tone hiccuped")
+            .count(),
+        1,
+        "{said}"
+    );
+    assert_eq!(
+        said.matches("the mic: device changes aren't watched: the tone has no watch")
+            .count(),
+        1,
+        "{said}"
+    );
 }
 
 /// A rejected start reports each input failure once.

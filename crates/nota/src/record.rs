@@ -16,9 +16,9 @@
 //! - **Live:** feeds the engine, flushes it at each new epoch, and turns
 //!   levels and text into screen updates (see [`crate::live`]).
 //! - **Engine events:** passes the supervisor's events to the live thread.
-//! - **Disk:** checks the free space at once and every few seconds, keeps
-//!   the ballast, and sends the screen the space left, the low-disk
-//!   warning, and a full disk (see [`nota_recorder::disk`]).
+//! - **Disk:** checks the free space at once and every few seconds, and
+//!   sends the screen the space left, the low-disk warning, and a full
+//!   disk (see [`nota_recorder::disk`]).
 //! - **Saver:** stores the live text, marks and notes in the library
 //!   database as they come (see `record/save.rs`). Nothing waits on it.
 //! - **Marks:** passes the screen's marks and notes to the saver as
@@ -63,7 +63,9 @@
 //! they wait for space. The app runs them (see `jobs`). Further signals
 //! are ignored meanwhile: the default action would kill the process before
 //! the last segments are published. (The app listens for them too, for its
-//! whole life, and closes once the recording has stopped.) Anything left
+//! whole life, and closes once the recording has stopped.) Last, once all
+//! that is saved, the ballast is made if there's none: seconds on a slow
+//! disk, so a signal or another recording starting ends it early. Anything left
 //! unpublished (a disk error, say) is salvaged at the next start.
 //!
 //! # A full disk
@@ -74,7 +76,11 @@
 //! journal it broke is replaced without losing audio, and the recording
 //! stops: the warning and `Stopping` go to the screen, the last segments
 //! are published into the ballast's room, and the summary says the
-//! recording stopped early. A low disk never stops a start: nota records
+//! recording stopped early. The ballast is made as a recording ends, after
+//! its session is marked stopped (see `ballast.rs`), never while it runs:
+//! written then, it holds the journals' fsyncs back on a slow disk. So the
+//! first recording in a data directory has none to free, nor has one after
+//! a crash. A low disk never stops a start: nota records
 //! what fits, sending the low-disk warning from the start (the screen
 //! shows it, and the summary says the disk ran low).
 //!
@@ -120,6 +126,7 @@ use nota_recorder::segment::SegmentLength;
 use nota_store::HeardBy;
 use nota_tui::Recording;
 
+mod ballast;
 mod health;
 mod live;
 mod save;

@@ -30,6 +30,8 @@ fn every_kind() -> Vec<TimelineEvent> {
         Cause::Drift,
         Cause::StreamFailed("the device went away".to_owned()),
         Cause::JournalFailed("no space left".to_owned()),
+        Cause::DevicesUnwatched("device changes aren't watched: no socket".to_owned()),
+        Cause::CaptureWarning("real-time priority refused".to_owned()),
         Cause::DiskLow,
         Cause::DiskFull,
         Cause::SleepNotHeld,

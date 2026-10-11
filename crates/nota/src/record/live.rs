@@ -195,26 +195,31 @@ mod tests {
     use std::sync::mpsc;
 
     use nota_core::{FakeClock, SampleRate, TrackTimeline};
-    use nota_recorder::capture::{CaptureBackend, CaptureError, CaptureSender, Source};
+    use nota_recorder::capture::{
+        CaptureBackend, CaptureError, CaptureNotice, CaptureSender, Source,
+    };
     use nota_store::{Happened, TimelineEvent};
 
     use super::super::{MIC, RATE, SYSTEM};
     use super::*;
 
-    /// A suspend, run through the real recorder into the live thread. In a
-    /// module of its own, so its helpers count as test code to clippy.
+    /// A suspend or a capture notice, run through the real recorder into
+    /// the live thread. In a module of its own, so its helpers count as
+    /// test code to clippy.
     #[cfg(test)]
-    mod suspend {
+    mod scripted {
         use super::*;
 
         /// What the scripted microphone's clock does between its two seconds of
         /// audio.
-        #[derive(Clone, Copy)]
+        #[derive(Clone)]
         enum Between {
             /// The machine suspends: session time and the suspended clock move.
             Suspend,
             /// Only session time moves, as a stall would.
             Stall,
+            /// The stream reports this, and nothing else happens.
+            Notice(CaptureNotice),
         }
 
         /// A microphone that captures a second of audio, goes quiet for four
@@ -235,8 +240,11 @@ mod tests {
                 _: SampleRate,
                 events: CaptureSender,
             ) -> Result<(), CaptureError> {
-                let (between, clock, sent) =
-                    (self.between, Arc::clone(&self.clock), self.sent.clone());
+                let (between, clock, sent) = (
+                    self.between.clone(),
+                    Arc::clone(&self.clock),
+                    self.sent.clone(),
+                );
                 thread::spawn(move || {
                     let second = Duration::from_secs(1);
                     // A window of 1,000 samples is a second at 1 kHz.
@@ -245,6 +253,7 @@ mod tests {
                     match between {
                         Between::Suspend => clock.suspend(Duration::from_secs(4)),
                         Between::Stall => clock.advance(Duration::from_secs(4)),
+                        Between::Notice(notice) => events.notice(notice),
                     }
                     events.audio(&[100; 1_000]);
                     clock.advance(second);
@@ -419,6 +428,58 @@ mod tests {
             assert_eq!(
                 run.end.slept[0].note(),
                 "the machine slept at 0:00:01 for 3s; nothing was recorded then"
+            );
+        }
+
+        /// What a notice that keeps the stream going gives the screen and
+        /// the timeline: the track's warning, raised at where its audio
+        /// had reached, and no epoch or gap.
+        fn warned_by(notice: CaptureNotice, cause: recorder::Cause) {
+            use nota_core::SessionTime;
+            use nota_core::recorder::{Warning, WarningState};
+
+            let run = record_script(Between::Notice(notice));
+            let at = SessionTime::from_nanos(1_000_000_000);
+            let warning = recorder::Event::Warning(Warning {
+                cause: cause.clone(),
+                track: Some(MIC),
+                at,
+                state: WarningState::Raised,
+            });
+            assert_eq!(run.screen, [warning]);
+            assert_eq!(
+                run.timeline_events,
+                [TimelineEvent {
+                    at,
+                    track: Some(MIC),
+                    happened: Happened::Raised(cause),
+                }]
+            );
+            assert!(run.timeline.gaps().next().is_none());
+        }
+
+        /// A watch that can't run reaches the screen and the timeline as
+        /// the devices being unwatched, with the reason.
+        #[test]
+        fn an_unwatched_device_reaches_the_screen_and_the_timeline() {
+            use nota_core::recorder::Cause;
+
+            let why = "device changes aren't watched: no socket";
+            warned_by(
+                CaptureNotice::Unwatched(why.into()),
+                Cause::DevicesUnwatched(why.into()),
+            );
+        }
+
+        /// A stream error the backend turns into a warning reaches the
+        /// screen and the timeline as a capture warning, with its text.
+        #[test]
+        fn a_backend_warning_reaches_the_screen_and_the_timeline() {
+            use nota_core::recorder::Cause;
+
+            warned_by(
+                CaptureNotice::Warning("stream hiccup".into()),
+                Cause::CaptureWarning("stream hiccup".into()),
             );
         }
 

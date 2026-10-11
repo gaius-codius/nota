@@ -9,7 +9,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use nota_core::{Clock, SampleCount, SampleRate};
-use nota_recorder::capture::{CaptureBackend, CaptureError, CaptureSender, Source};
+use nota_recorder::capture::{CaptureBackend, CaptureError, CaptureNotice, CaptureSender, Source};
 
 use crate::inhibit::{Logind, SleepLock, SleepNotHeld};
 
@@ -17,8 +17,9 @@ use crate::inhibit::{Logind, SleepLock, SleepNotHeld};
 const PERIOD: Duration = Duration::from_millis(20);
 
 /// Each source plays a square wave of its own pitch, timed by the session
-/// clock. Two device names act out failures: `missing` can't be opened,
-/// and `fails` stops with an error after half a second. Each source's
+/// clock. Three device names act out failures: `missing` can't be opened,
+/// `fails` stops with an error after half a second, and `warns` says its
+/// device changes aren't watched and then repeats a warning. Each source's
 /// count of samples sent is kept, for the summary ([`Tone::report`]), so
 /// the tests can check that everything sent was saved. With
 /// `NOTA_TONE_STOP_DELAY_MS` set, stopping a tone takes that long, which
@@ -164,6 +165,7 @@ impl CaptureBackend for Tone {
             return Err(CaptureError::DeviceNotAvailable(source.clone()));
         }
         let fails = *source == Source::Device("fails".into());
+        let warns = *source == Source::Device("warns".into());
         let half_period: u64 = match source {
             Source::SystemAudio => 20,
             _ => 30,
@@ -179,6 +181,15 @@ impl CaptureBackend for Tone {
             .spawn(move || {
                 let started = clock.now();
                 let mut sent = 0_u64;
+                if warns {
+                    events.notice(CaptureNotice::Unwatched(
+                        "device changes aren't watched: the tone has no watch".into(),
+                    ));
+                    // A backend whose error comes back on every pass.
+                    for _ in 0..50 {
+                        events.notice(CaptureNotice::Warning("the tone hiccuped".into()));
+                    }
+                }
                 loop {
                     // Stopping, it still sends what's due, as a stream's
                     // last callback does.
