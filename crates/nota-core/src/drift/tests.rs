@@ -775,6 +775,102 @@ fn jittered_timestamps_stay_within_20_ms() {
     }
 }
 
+/// Past [`ANY_STEADY_DRIFT`], the bound isn't kept: 751.6 ppm with up to
+/// 0.97 ms of jitter reaches just over 20 ms. The meter runs uncorrected
+/// for [`SETTLE`] and [`MIN_WINDOW`], 15 ms at that drift, and the jitter
+/// put the first estimate 177 ppm low for the [`SLEW`] it runs unchecked.
+/// Correcting again during the slew keeps it within 20 ms, but also
+/// re-closes small losses as they build up, so they show as drift rather
+/// than a gap ([`small_losses_under_a_correction_still_read_as_lost`]).
+#[test]
+fn a_drift_past_any_steady_drift_can_pass_20_ms() {
+    let run = simulate(751_569, Duration::from_secs(3_600), 1_600, jitter(967_846));
+    assert!(run.worst < Duration::from_millis(21), "{:?}", run.worst); // check-bound
+    assert_eq!(run.measured, Some(Drift(751_605)));
+}
+
+/// Whether a device off by `drift_ppb`, losing `step_ns` of audio every
+/// `every` from `from` on, `steps` times, reads as lost within `length`:
+/// the stamps of each buffer after a loss come that much later.
+fn small_losses_read_as_lost(
+    drift_ppb: i64,
+    from: Duration,
+    every: Duration,
+    steps: u64,
+    step_ns: u64,
+) -> bool {
+    let mut timeline = epoch_at(Drift::ZERO);
+    let mut meter = DriftMeter::new();
+    let (from, every) = (from.as_nanos(), every.as_nanos());
+    let mut first = 0u64;
+    loop {
+        let true_ns = true_ns(first, i128::from(drift_ppb));
+        if true_ns >= 1_200_000_000_000 {
+            return false;
+        }
+        let past = u128::from(true_ns).saturating_sub(from);
+        let lost = if u128::from(true_ns) < from {
+            0
+        } else {
+            (u64::try_from(past / every).unwrap() + 1).min(steps)
+        };
+        match read(&mut meter, &timeline, first, true_ns + lost * step_ns) {
+            Reading::Lost { .. } => return true,
+            Reading::Retime(drift) => {
+                timeline.retime(s(first), drift).unwrap();
+            }
+            Reading::Steady => {}
+        }
+        first += 320;
+    }
+}
+
+/// Losses under [`LOSS_MIN`] each still read as lost once they build up
+/// [`LOSS_BUILT_UP`], though corrections are under way: eight of 3 ms, a
+/// quantum of 128 frames, 10 s apart, at 0 and ±300 ppm.
+#[test]
+fn small_losses_under_a_correction_still_read_as_lost() {
+    let ten = Duration::from_secs(10);
+    let five = Duration::from_secs(5);
+    assert!(small_losses_read_as_lost(
+        0,
+        Duration::from_secs(200),
+        ten,
+        8,
+        3_000_000
+    ));
+    assert!(small_losses_read_as_lost(
+        0,
+        Duration::from_secs(200),
+        five,
+        6,
+        3_000_000
+    ));
+    assert!(small_losses_read_as_lost(
+        300_000,
+        Duration::from_secs(25),
+        ten,
+        12,
+        3_000_000
+    ));
+    assert!(small_losses_read_as_lost(
+        -300_000,
+        Duration::from_secs(25),
+        five,
+        12,
+        3_000_000
+    ));
+}
+
+/// The most drift either way, in parts per billion, that a recording is
+/// held to 20 ms at: 500 ppm, five times a poor USB device's and past
+/// [`DRIFT_LIMIT`], where the device is reported as suspect. With a
+/// millisecond of jitter, 20,000 random one-hour runs within it reached at
+/// most 12.8 ms.
+/// Beyond about 750 ppm, jitter at a first estimate's end stamps can take
+/// one past 20 ms ([`a_drift_past_any_steady_drift_can_pass_20_ms`]).
+const ANY_STEADY_DRIFT: i64 = 500_000; // check-bound
+
 fn any_rate() -> impl Strategy<Value = SampleRate> {
     prop_oneof![
         4 => Just(SPEECH),
@@ -822,11 +918,11 @@ proptest! {
         prop_assert!(next.unwrap() > d);
     }
 
-    /// A recording at any steady drift within 800 ppm, with up to a
-    /// millisecond of jitter, maps within 20 ms over an hour.
+    /// A recording at any steady drift within [`ANY_STEADY_DRIFT`], with up
+    /// to a millisecond of jitter, maps within 20 ms over an hour.
     #[test]
     fn any_steady_drift_stays_within_20_ms(
-        drift in -800_000i64..=800_000,
+        drift in -ANY_STEADY_DRIFT..=ANY_STEADY_DRIFT,
         max_jitter in prop_oneof![Just(0i64), 0..=1_000_000i64],
     ) {
         let run = simulate(drift, Duration::from_secs(3_600), 1_600, jitter(max_jitter));
