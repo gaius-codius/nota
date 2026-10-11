@@ -308,9 +308,39 @@ jobs:
         run: scripts/sherpa-onnx.sh
       - run: cargo build --workspace --all-targets --locked
 
+  coverage-scope:
+    # Coverage runs on every push to main, and on a pull request only when
+    # it changes how coverage runs, so a broken coverage command fails
+    # before it merges rather than on main.
+    name: Coverage scope
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # A pull request's checkout is its merge into the base branch, so
+          # the first parent is the base.
+          fetch-depth: 2
+          persist-credentials: false
+      - id: diff
+        shell: bash
+        run: |
+          if git diff --quiet HEAD^1 HEAD -- .github/workflows/ci.yml .config/nextest.toml rust-toolchain.toml; then
+            echo changed=false >>"$GITHUB_OUTPUT"
+          else
+            echo changed=true >>"$GITHUB_OUTPUT"
+          fi
+
   coverage:
     name: Coverage (report only)
-    if: github.event_name == 'push'
+    needs: coverage-scope
+    # The scope job is skipped on push, so this states its own condition.
+    if: >-
+      !cancelled() &&
+      (github.event_name == 'push' || needs.coverage-scope.outputs.changed == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -330,7 +360,16 @@ jobs:
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: cargo-llvm-cov,cargo-nextest
-      - run: cargo llvm-cov nextest --workspace --all-targets --locked --no-tests=fail --lcov --output-path lcov.info
+      # A process killed while it writes its profile at exit (the tests kill
+      # engines and re-run test binaries as children) leaves a truncated
+      # .profraw, and llvm-profdata's default then refuses to merge any.
+      # --failure-mode all skips the bad file, still fails when no profile
+      # merges, and each skipped file is shown as a warning.
+      - name: Run the tests with coverage
+        shell: bash
+        run: |
+          cargo llvm-cov nextest --workspace --all-targets --locked --no-tests=fail --failure-mode all --lcov --output-path lcov.info 2>&1 | tee "$RUNNER_TEMP/coverage.log"
+          grep -E '^warning: .*\.profraw: ' "$RUNNER_TEMP/coverage.log" | sed 's/^warning: /::warning title=Coverage profile skipped::/' || true
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage
