@@ -1829,6 +1829,51 @@ mod salvage_note_tests {
         assert!(note.contains("all its audio is published"), "{note}");
         assert!(note.contains("seg-t1-000000000000.flac: the segment file doesn't match its stored audio; couldn't repair it (permission denied); its journals are still to publish"), "{note}");
     }
+
+    /// Startup names each file salvage holds once, with its cause, however
+    /// the failures combine; the published journal is never called
+    /// unpublished.
+    #[test]
+    fn startup_names_each_held_file_once_across_combined_failures() {
+        use crate::library::held::{Beside, Held};
+        for beside in Beside::ALL {
+            let note = salvage_note(&Held::new(beside).salvaged());
+            // The whole note: a lost or changed cause, or a file named
+            // twice, fails it.
+            let expected = format!("salvaged session 1: {}", beside.held_at_start().join("; "));
+            assert_eq!(note, expected, "{beside:?}");
+        }
+    }
+
+    /// A start that fails after recovery still shows every recovery note,
+    /// each once, beside each input's failure, each once.
+    #[test]
+    fn a_failed_start_shows_combined_recovery_notes_and_each_input_once() {
+        use crate::library::held::{Beside, Held};
+        let recovered: Vec<String> = Beside::ALL
+            .iter()
+            .map(|&beside| salvage_note(&Held::new(beside).salvaged()))
+            .collect();
+        let inputs = [
+            "not recording device mic-gone: the device is missing",
+            "not recording device speakers-gone: the device is missing",
+        ];
+        let mut notes = recovered.clone();
+        notes.extend(inputs.map(str::to_owned));
+        // Recovery ran, then no input started: the start fails.
+        let failure = startup_failure("nothing to record".into(), notes).to_string();
+        assert_eq!(
+            failure,
+            format!(
+                "nothing to record; {}; {}",
+                recovered.join("; "),
+                inputs.join("; ")
+            )
+        );
+        for note in recovered.iter().map(String::as_str).chain(inputs) {
+            assert_eq!(failure.matches(note).count(), 1, "{note:?} in {failure}");
+        }
+    }
 }
 
 #[cfg(test)]

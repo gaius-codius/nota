@@ -214,6 +214,29 @@ fn home_names_an_undeletable_published_journal() {
     );
 }
 
+/// Home names each file salvage holds once, with its cause, however the
+/// failures combine, and the session needs the user.
+#[test]
+fn home_names_each_held_file_once_across_combined_failures() {
+    use crate::library::held::{Beside, Held};
+    for beside in Beside::ALL {
+        // The listing sees journals left; salvage at start says why.
+        let listed = Listed {
+            id: SessionId::new(1),
+            title: None,
+            started_at: None,
+            recorded: None,
+            needs: Needs::Attention("audio still to save · nota tries again when it starts".into()),
+        };
+        let shown = session(listed, &[Held::new(beside).salvaged()], &dates());
+        assert_eq!(
+            (shown.status, shown.detail),
+            (Status::NeedsYou, Some(beside.held_at_start().join("; "))),
+            "{beside:?}"
+        );
+    }
+}
+
 #[test]
 fn each_session_shows_what_salvage_found() {
     let listed = |needs| Listed {
