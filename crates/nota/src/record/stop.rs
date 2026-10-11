@@ -127,7 +127,7 @@ fn recorded(
     joined: std::thread::Result<Recorded>,
     outcome: &mut Outcome,
 ) -> Option<SessionWriter<RecordFs>> {
-    let Ok((writer, how_it_ended, failures, failed_streams)) = joined else {
+    let Ok((writer, how_it_ended, failures, failed_streams, warned)) = joined else {
         outcome.notes.push(
             "the recorder stopped unexpectedly; the next start publishes what it recorded"
                 .to_owned(),
@@ -140,6 +140,7 @@ fn recorded(
     for stream in failed_streams {
         outcome.notes.push(format!("stopped recording {stream}"));
     }
+    outcome.notes.extend(warned);
     if failures > 0 {
         outcome.notes.push(format!(
             "{failures} journal failures; the audio around them may have gaps"

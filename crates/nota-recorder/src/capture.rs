@@ -193,14 +193,14 @@
 //! On `PulseAudio` and ALSA a stream stays on the device it started on
 //! ([`PulseBackend`], [`AlsaBackend`]), unless the server moves it;
 //! `PulseAudio`'s says so at a start on a followed source, as a
-//! [`CaptureNotice::Warning`]. Where overruns
-//! are reported, a loss is timed at the overrun, as for any stream that
-//! doesn't stamp its buffers; on `PulseAudio` a loss isn't noticed. The
-//! zeros, quiet and stalled detectors read the samples and the delivered
-//! count, so they work on all three. On ALSA the system audio fails to
-//! start, with [`CaptureError::NoSystemAudio`], and the microphone records
-//! on. What a plain `PulseAudio` or ALSA-only system really does is
-//! measured on the other-distro machines (GAI-207).
+//! [`CaptureNotice::Unwatched`]. Where overruns are reported, a loss is
+//! timed at the overrun, as for any stream that doesn't stamp its
+//! buffers; on `PulseAudio` a loss isn't noticed. The zeros, quiet and
+//! stalled detectors read the samples and the delivered count, so they
+//! work on all three. On ALSA the system audio fails to start, with
+//! [`CaptureError::NoSystemAudio`], and the microphone records on. What a
+//! plain `PulseAudio` or ALSA-only system really does is measured on the
+//! other-distro machines (GAI-207).
 //!
 //! # Platform
 //!
@@ -355,9 +355,13 @@ pub enum CaptureNotice {
     /// measured. Reported once per track, by the recorder rather than the
     /// stream.
     Drifted(Drift),
+    /// Changes of the stream's device aren't watched, for this reason: the
+    /// watch couldn't start or lost its connection, or the host has none.
+    /// The stream records on, but a default that changes, or a device that
+    /// goes, may pass unannounced.
+    Unwatched(String),
     /// Anything else the backend reported without stopping the stream,
-    /// such as real-time priority refused, or default-device changes no
-    /// longer watched.
+    /// such as real-time priority refused.
     Warning(String),
 }
 

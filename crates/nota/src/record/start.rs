@@ -9,8 +9,8 @@ use std::thread::{self, JoinHandle};
 use nota_core::recorder::{self, Cause, Input, Setup, TrackRole, Warning, WarningState};
 use nota_core::{Clock, SessionId, SessionTime, TrackId, wall_now};
 use nota_recorder::capture::{
-    Capture, CaptureBackend, CaptureReceiver, RecordError, RecorderEvent, Source, TrackStarter,
-    prepare_tracks, record_tracks,
+    Capture, CaptureBackend, CaptureNotice, CaptureReceiver, RecordError, RecorderEvent, Source,
+    TrackStarter, prepare_tracks, record_tracks,
 };
 use nota_recorder::detect::Thresholds;
 use nota_recorder::disk::{
@@ -84,11 +84,13 @@ pub(super) struct Started<B: CaptureBackend> {
 }
 
 /// The recorder thread's result: the writer, how recording ended, how
-/// many journal failures it reported, and the streams that failed.
+/// many journal failures it reported, the streams that failed, and what
+/// the streams warned of without stopping.
 pub(super) type Recorded = (
     SessionWriter<RecordFs>,
     Result<(), RecordError>,
     usize,
+    Vec<String>,
     Vec<String>,
 );
 
@@ -829,6 +831,7 @@ fn spawn_recorder(
         .spawn(move || -> Recorded {
             let mut failures = 0;
             let mut lost = Vec::new();
+            let mut warned = Vec::new();
             // Every track joins as its stream starts.
             let result = record_tracks(&mut writer, &mut [], &events, &mut |track, e| {
                 match e {
@@ -842,6 +845,9 @@ fn spawn_recorder(
                             RecorderEvent::CaptureFailed(error) => {
                                 lost.push(format!("{}: {error}", track_name(track)));
                             }
+                            RecorderEvent::Capture(notice) => {
+                                warned.extend(capture_warning(track, notice));
+                            }
                             _ => {}
                         }
                         let _ = live_inputs.send(LiveInput::Recorder(track, e));
@@ -851,8 +857,24 @@ fn spawn_recorder(
             // Every stream has ended, or recording failed: the screen has
             // nothing more to show, so close it and stop.
             let _ = ui.send(Event::Recorder(recorder::Event::Stopping));
-            (writer, result, failures, lost)
+            (writer, result, failures, lost, warned)
         })
+}
+
+/// What the summary says of a notice from `track`'s stream, if it's a
+/// warning: the unwatched device's text says what it is, and a backend's
+/// is given its place.
+fn capture_warning(track: Option<TrackId>, notice: &CaptureNotice) -> Option<String> {
+    match notice {
+        CaptureNotice::Unwatched(why) => Some(format!("{}: {why}", track_name(track))),
+        CaptureNotice::Warning(why) => {
+            Some(format!("{}: capture warning: {why}", track_name(track)))
+        }
+        CaptureNotice::Overrun
+        | CaptureNotice::RouteChanged
+        | CaptureNotice::Suspended
+        | CaptureNotice::Drifted(_) => None,
+    }
 }
 
 /// What the summary says of one salvaged session.
@@ -2223,5 +2245,33 @@ mod space_tests {
             "denied",
         ));
         assert_eq!(error.to_string(), "denied");
+    }
+}
+
+#[cfg(test)]
+mod capture_warning_tests {
+    use super::*;
+
+    /// A watch that can't run and a backend's warning are in the summary,
+    /// each with its track; the notices that open an epoch aren't.
+    #[test]
+    fn unwatched_devices_and_backend_warnings_are_in_the_summary() {
+        let unwatched = CaptureNotice::Unwatched("device changes aren't watched: no socket".into());
+        assert_eq!(
+            capture_warning(Some(MIC), &unwatched).as_deref(),
+            Some("the mic: device changes aren't watched: no socket")
+        );
+        let backend = CaptureNotice::Warning("stream hiccup".into());
+        assert_eq!(
+            capture_warning(Some(SYSTEM), &backend).as_deref(),
+            Some("the system audio: capture warning: stream hiccup")
+        );
+        for notice in [
+            CaptureNotice::Overrun,
+            CaptureNotice::RouteChanged,
+            CaptureNotice::Suspended,
+        ] {
+            assert_eq!(capture_warning(Some(MIC), &notice), None);
+        }
     }
 }

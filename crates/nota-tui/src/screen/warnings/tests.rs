@@ -412,6 +412,44 @@ fn a_full_disk_is_the_end() {
     assert_eq!(warnings.stopped_by_full_disk(), Some(secs(4_368)));
 }
 
+/// A device that isn't watched warns for the rest of the recording, in
+/// gold, and the band marks when it began.
+#[test]
+fn an_unwatched_device_warns_to_the_end() {
+    let mut warnings = two_tracks();
+    let cause = Cause::DevicesUnwatched("device changes aren't watched: no socket".into());
+    raise(&mut warnings, cause, Some(SYSTEM), 3);
+    assert_eq!(
+        warnings.top(secs(4_000)),
+        Some(shown("⚠ system: devices unwatched", Tone::Gold, 0))
+    );
+    assert_eq!(warnings.changes(), [secs(3)]);
+}
+
+/// A backend's warning shows for ten seconds as news, and the band keeps
+/// it. A device lost is the more severe and keeps the border.
+#[test]
+fn a_capture_warning_shows_for_ten_seconds() {
+    let mut warnings = two_tracks();
+    raise(
+        &mut warnings,
+        Cause::CaptureWarning("hiccup".into()),
+        Some(MIC),
+        20,
+    );
+    assert_eq!(
+        warnings.top(secs(29)),
+        Some(shown("⚠ mic: capture warning", Tone::Gold, 0))
+    );
+    assert_eq!(warnings.top(secs(30)), None);
+    assert_eq!(warnings.changes(), [secs(20)]);
+    device(&mut warnings, MIC, DeviceChange::Lost, 31);
+    assert_eq!(
+        warnings.top(secs(32)),
+        Some(shown("⚠ mic lost", Tone::Accent, 0))
+    );
+}
+
 /// Drift is corrected as it's measured, so the screen says nothing of it.
 #[test]
 fn drift_shows_nothing() {

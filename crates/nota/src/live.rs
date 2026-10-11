@@ -220,9 +220,8 @@ impl Live {
                     state: WarningState::Raised,
                 }));
             }
-            // Reported once per track and never cleared.
-            (Some(track), RecorderEvent::Capture(CaptureNotice::Drifted(_))) => {
-                actions.updates.push(self.raised(Cause::Drift, track));
+            (Some(track), RecorderEvent::Capture(notice)) => {
+                actions.updates.extend(self.noticed(notice, track));
             }
             (
                 Some(track),
@@ -320,6 +319,23 @@ impl Live {
         if let Some((_, end)) = end {
             self.heard_to.insert(track, end);
         }
+    }
+
+    /// The warning that `track`'s stream's `notice` is, if it is one.
+    /// Drift is reported once per track, the watch stays gone, and a
+    /// backend's report is news once: none is ever cleared.
+    fn noticed(&self, notice: CaptureNotice, track: TrackId) -> Option<Event> {
+        let cause = match notice {
+            CaptureNotice::Drifted(_) => Cause::Drift,
+            CaptureNotice::Unwatched(why) => Cause::DevicesUnwatched(why),
+            CaptureNotice::Warning(why) => Cause::CaptureWarning(why),
+            // A loss, a route change and a suspend show as the epoch
+            // they open, and the gap.
+            CaptureNotice::Overrun | CaptureNotice::RouteChanged | CaptureNotice::Suspended => {
+                return None;
+            }
+        };
+        Some(self.raised(cause, track))
     }
 
     /// The warning that `cause` has been raised for `track`, for the

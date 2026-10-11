@@ -405,6 +405,52 @@ fn drift_is_a_warning_for_its_track() {
     );
 }
 
+/// A watch that can't run is a warning for its track, which the screen
+/// shows and the timeline keeps with the reason.
+#[test]
+fn an_unwatched_device_is_a_warning_for_its_track() {
+    let mut live = Live::new(&[opened(MIC, 0)]);
+    live.recorder(Some(MIC), RecorderEvent::Audio(chunk(MIC, 0, vec![1; 20])));
+    let why = "device changes aren't watched: no socket";
+    let actions = live.recorder(
+        Some(MIC),
+        RecorderEvent::Capture(CaptureNotice::Unwatched(why.into())),
+    );
+    assert_eq!(
+        actions,
+        Actions {
+            updates: vec![raised(Cause::DevicesUnwatched(why.into()), MIC, ms(20))],
+            ..Actions::default()
+        }
+    );
+}
+
+/// A report from the backend that doesn't stop the stream is a different
+/// warning from a lost watch: the screen words them differently.
+#[test]
+fn a_backend_warning_is_a_warning_for_its_track() {
+    let mut live = Live::new(&[opened(MIC, 0), opened(SYSTEM, 0)]);
+    live.recorder(
+        Some(SYSTEM),
+        RecorderEvent::Audio(chunk(SYSTEM, 0, vec![1; 30])),
+    );
+    let actions = live.recorder(
+        Some(SYSTEM),
+        RecorderEvent::Capture(CaptureNotice::Warning("stream hiccup".into())),
+    );
+    assert_eq!(
+        actions,
+        Actions {
+            updates: vec![raised(
+                Cause::CaptureWarning("stream hiccup".into()),
+                SYSTEM,
+                ms(30)
+            )],
+            ..Actions::default()
+        }
+    );
+}
+
 fn online() -> EngineEvent {
     EngineEvent::Status(EngineStatus::Online { pid: 1 })
 }
