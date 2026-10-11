@@ -55,6 +55,20 @@ if PR_BODY=nothing "$script" main topic >/dev/null 2>&1; then
   fail "passed an unexplained deleted test"
 fi
 
+# A check script's tests, and the crash runner they test, are check config.
+git checkout -q -b scripts-case main
+mkdir -p scripts
+echo x >scripts/lazyfs-crash.test.sh
+echo x >scripts/lazyfs-crash.sh
+echo x >scripts/live-latency.sh
+git add scripts
+git commit -qm scripts
+out=$("$script" main scripts-case 2>&1) || true
+for f in scripts/lazyfs-crash.test.sh scripts/lazyfs-crash.sh; do
+  grep -qx "  - check config changed: $f" <<<"$out" || fail "missed a change to $f: $out"
+done
+grep -q 'live-latency' <<<"$out" && fail "reported a measurement script as check config: $out"
+
 # Bounds tagged `// check-bound`.
 git checkout -q main
 printf 'fn d() {}\nconst LIMIT: u64 = 850; // check-bound\nconst OTHER: u64 = 1; // check-bound\n' >bound.rs

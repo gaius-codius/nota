@@ -89,8 +89,11 @@ cat >"$dir/map.txt" <<'EOF'
 [ban]
 clockwork::Clock::now
 
+[reviewed]
+clockwork@1
+
 [none: pure data]
-tidy
+tidy@1
 
 [indirect: under tidy]
 deep
@@ -137,13 +140,13 @@ expect fail indirect-now-direct 'deep is under [indirect]' -- "$dir/map.txt" "$d
 expect fail path-dependency 'vendored-clock: not in' -- "$dir/map.txt" "$dir/clippy.toml" "$dir/path-dep.lock"
 
 # A crate the tree no longer has.
-printf '[none: gone]\nvanished\n' | cat "$dir/map.txt" - >"$dir/stale.txt"
+printf '[none: gone]\nvanished@1\n' | cat "$dir/map.txt" - >"$dir/stale.txt"
 expect fail stale 'no crate vanished' -- "$dir/stale.txt" "${base[@]}"
 printf '[allow: gone]\nvanished::f\n' | cat "$dir/map.txt" - >"$dir/stale-path.txt"
 expect fail stale-path 'no crate vanished' -- "$dir/stale-path.txt" "${base[@]}"
 
 # Listed twice, or under [none] with functions listed too.
-printf '[none: again]\ntidy\n' | cat "$dir/map.txt" - >"$dir/twice.txt"
+printf '[none: again]\ntidy@1\n' | cat "$dir/map.txt" - >"$dir/twice.txt"
 expect fail twice 'tidy is already listed' -- "$dir/twice.txt" "${base[@]}"
 printf '[allow: it does]\ntidy::write\n' | cat "$dir/map.txt" - >"$dir/contradiction.txt"
 expect fail contradiction 'tidy is under [none] but has functions listed' -- "$dir/contradiction.txt" "${base[@]}"
@@ -161,7 +164,7 @@ sed 's/^\[ban\]$/[bans]/' "$dir/map.txt" >"$dir/unknown.txt"
 expect fail unknown-section 'unknown section [bans]' -- "$dir/unknown.txt" "${base[@]}"
 printf 'stray\n' | cat - "$dir/map.txt" >"$dir/stray.txt"
 expect fail before-section 'entry before any section' -- "$dir/stray.txt" "${base[@]}"
-sed 's/^tidy$/tidy::write/' "$dir/map.txt" >"$dir/path-in-none.txt"
+sed 's/^tidy@1$/tidy::write/' "$dir/map.txt" >"$dir/path-in-none.txt"
 expect fail path-in-none 'a path under [none]' -- "$dir/path-in-none.txt" "${base[@]}"
 printf '[ban]\ntidy\n' | cat "$dir/map.txt" - >"$dir/name-in-ban.txt"
 expect fail name-in-ban '[ban] takes paths' -- "$dir/name-in-ban.txt" "${base[@]}"
@@ -173,8 +176,88 @@ printf '[ban]\nclockwork::Clock-now\n' | cat "$dir/map.txt" - >"$dir/bad-path.tx
 expect fail bad-path 'not a path: clockwork::Clock-now' -- "$dir/bad-path.txt" "${base[@]}"
 printf '[allow: again]\nclockwork::Clock::now\n' | cat "$dir/map.txt" - >"$dir/path-twice.txt"
 expect fail path-twice 'clockwork::Clock::now is already listed' -- "$dir/path-twice.txt" "${base[@]}"
-sed 's/^tidy$/tidy!/' "$dir/map.txt" >"$dir/bad-name.txt"
-expect fail bad-name 'not a crate name: tidy!' -- "$dir/bad-name.txt" "${base[@]}"
+sed 's/^tidy@1$/tidy!@1/' "$dir/map.txt" >"$dir/bad-name.txt"
+expect fail bad-name 'not a crate name: tidy!@1' -- "$dir/bad-name.txt" "${base[@]}"
+
+# The semver line each crate was reviewed at. `moved FILE NAME VERSION`
+# writes the fixture lock with NAME at VERSION.
+moved() {
+  awk -v name="$2" -v v="$3" '
+    /^name = / { cur = $0; sub(/^name = "/, "", cur); sub(/"$/, "", cur) }
+    /^version = / && cur == name { $0 = "version = \"" v "\"" }
+    { print }' "$dir/Cargo.lock" >"$1"
+}
+moved "$dir/tidy-patch.lock" tidy 1.4.2
+expect pass within-line -- "$dir/map.txt" "$dir/clippy.toml" "$dir/tidy-patch.lock"
+moved "$dir/tidy-major.lock" tidy 2.0.0
+expect fail past-line 'tidy 2.0.0 in' 'is past line 1' 'record line 2' -- "$dir/map.txt" "$dir/clippy.toml" "$dir/tidy-major.lock"
+moved "$dir/clock-major.lock" clockwork 2.0.0-rc.1
+expect fail path-crate-past-line 'clockwork 2.0.0-rc.1 in' -- "$dir/map.txt" "$dir/clippy.toml" "$dir/clock-major.lock"
+# Below 1.0, the minor version is the line; below 0.1, the patch.
+moved "$dir/tidy-04.lock" tidy 0.4.1
+sed 's/^tidy@1$/tidy@0.4/' "$dir/map.txt" >"$dir/map-04.txt"
+expect pass zero-minor-line -- "$dir/map-04.txt" "$dir/clippy.toml" "$dir/tidy-04.lock"
+moved "$dir/tidy-049.lock" tidy 0.4.9+build.7
+expect pass zero-minor-patch -- "$dir/map-04.txt" "$dir/clippy.toml" "$dir/tidy-049.lock"
+moved "$dir/tidy-05.lock" tidy 0.5.0
+expect fail zero-minor-past 'tidy 0.5.0 in' 'record line 0.5' -- "$dir/map-04.txt" "$dir/clippy.toml" "$dir/tidy-05.lock"
+moved "$dir/tidy-003.lock" tidy 0.0.3
+sed 's/^tidy@1$/tidy@0.0.3/' "$dir/map.txt" >"$dir/map-003.txt"
+expect pass zero-zero-line -- "$dir/map-003.txt" "$dir/clippy.toml" "$dir/tidy-003.lock"
+moved "$dir/tidy-004.lock" tidy 0.0.4
+expect fail zero-zero-past 'tidy 0.0.4 in' -- "$dir/map-003.txt" "$dir/clippy.toml" "$dir/tidy-004.lock"
+# Two versions in the tree at once need both lines; a line the tree no longer
+# has is stale.
+{ cat "$dir/Cargo.lock"; package tidy | sed 's/^version = "1.0.0"$/version = "2.1.0"/'; } >"$dir/two.lock"
+expect fail two-versions-one-line 'tidy 2.1.0 in' -- "$dir/map.txt" "$dir/clippy.toml" "$dir/two.lock"
+sed 's/^tidy@1$/tidy@1,2/' "$dir/map.txt" >"$dir/map-two.txt"
+expect pass two-versions-two-lines -- "$dir/map-two.txt" "$dir/clippy.toml" "$dir/two.lock"
+expect fail stale-line 'tidy was reviewed at line 2, which the lock files no longer have' -- "$dir/map-two.txt" "${base[@]}"
+sed 's/^tidy@1$/tidy@1,1/' "$dir/map.txt" >"$dir/line-twice.txt"
+expect fail line-twice 'line 1 twice: tidy@1,1' -- "$dir/line-twice.txt" "${base[@]}"
+# Malformed or missing lines.
+sed 's/^tidy@1$/tidy/' "$dir/map.txt" >"$dir/no-line.txt"
+expect fail no-line 'tidy needs the semver line it was reviewed at' -- "$dir/no-line.txt" "${base[@]}"
+for bad in 1.2 01 0 0.0 0.4.1 x ''; do
+  sed "s/^tidy@1\$/tidy@$bad/" "$dir/map.txt" >"$dir/bad-line.txt"
+  expect fail "bad-line '$bad'" "tidy@$bad" -- "$dir/bad-line.txt" "${base[@]}"
+done
+grep -v '^clockwork@1$' "$dir/map.txt" >"$dir/no-reviewed.txt"
+expect fail path-crate-no-line 'clockwork: no reviewed line' -- "$dir/no-reviewed.txt" "${base[@]}"
+sed 's/^deep$/deep@1/' "$dir/map.txt" >"$dir/indirect-line.txt"
+expect fail indirect-line '[indirect] takes no line' -- "$dir/indirect-line.txt" "${base[@]}"
+printf '[reviewed]
+clockwork
+' | cat "$dir/map.txt" - >"$dir/reviewed-no-line.txt"
+expect fail reviewed-no-line 'clockwork needs the semver line' -- "$dir/reviewed-no-line.txt" "${base[@]}"
+printf '[reviewed]
+clockwork@1
+' | cat "$dir/map.txt" - >"$dir/reviewed-twice.txt"
+expect fail reviewed-twice 'clockwork@1 already has its reviewed line on line' -- "$dir/reviewed-twice.txt" "${base[@]}"
+sed 's/^tidy@1$/tidy/' "$dir/map.txt" | { cat; printf '[reviewed]
+tidy@1
+'; } >"$dir/reviewed-named.txt"
+expect fail reviewed-named 'tidy is under [none] on line' -- "$dir/reviewed-named.txt" "${base[@]}"
+{ cat "$dir/map.txt"; printf '[reviewed]
+vanished@1
+'; } >"$dir/reviewed-stale.txt"
+expect fail reviewed-stale 'no crate vanished' -- "$dir/reviewed-stale.txt" "${base[@]}"
+{ cat "$dir/Cargo.lock"; package plain; } >"$dir/plain.lock"
+{ cat "$dir/map.txt"; printf '[reviewed]
+plain@1
+'; } >"$dir/reviewed-no-paths.txt"
+expect fail reviewed-no-paths 'plain is under [reviewed] but has no functions listed' -- "$dir/reviewed-no-paths.txt" "$dir/clippy.toml" "$dir/plain.lock"
+sed 's/^\[reviewed\]$/[reviewed: why]/' "$dir/map.txt" >"$dir/reviewed-reason.txt"
+expect fail reviewed-reason '[reviewed] takes no reason' -- "$dir/reviewed-reason.txt" "${base[@]}"
+sed 's/^clockwork::Clock::now$/clockwork::Clock::now@1/' "$dir/map.txt" >"$dir/path-line.txt"
+expect fail path-line 'a path takes no line' -- "$dir/path-line.txt" "${base[@]}"
+
+# The repo's lock with jiff moved to its next line, and with a patch release.
+sed '/^name = "jiff"$/{n;s/^version = .*/version = "0.3.0"/;}' "$root/Cargo.lock" >"$dir/jiff-next.lock"
+expect fail repo-jiff-past-line 'jiff 0.3.0 in' 'is past line 0.2' -- \
+  "$root/clippy-crates.txt" "$root/clippy.toml" "$dir/jiff-next.lock" "$root/fuzz/Cargo.lock"
+sed '/^name = "jiff"$/{n;s/^version = .*/version = "0.2.999"/;}' "$root/Cargo.lock" >"$dir/jiff-patch.lock"
+expect pass repo-jiff-patch -- "$root/clippy-crates.txt" "$root/clippy.toml" "$dir/jiff-patch.lock" "$root/fuzz/Cargo.lock"
 
 # Arguments.
 expect fail missing-file "can't read" -- "$dir/map.txt" "$dir/clippy.toml" "$dir/none.lock"

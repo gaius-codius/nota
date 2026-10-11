@@ -225,9 +225,13 @@ impl Marks {
         let temp = dir.join(TEMP_NAME);
         let mut file = match fs.create(&temp) {
             Ok(file) => file,
-            // Left by a crash or a failed write: never the only copy.
+            // Left by a crash or a failed write: never the only copy. Its
+            // removal is synced before the name is used again, so a crash
+            // can't keep the rename below but not the unlink, and move the
+            // old, torn temp over the marks.
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                 fs.remove(&temp)?;
+                fs.sync_dir(dir)?;
                 fs.create(&temp)?
             }
             Err(e) => return Err(e),
@@ -439,6 +443,54 @@ mod tests {
         stale.write_all(b"half").unwrap();
         marks(64, &[]).write(&fs, &dir()).unwrap();
         assert_eq!(Marks::read(&fs, &dir()).unwrap(), marks(64, &[]));
+    }
+
+    /// A torn temp a crash left is durably gone before its name is used
+    /// again: otherwise a later crash can keep the rename but not the
+    /// unlink, and move the torn temp over the marks, which then refuse
+    /// to open the session.
+    #[test]
+    fn a_crash_after_a_torn_temp_leaves_the_old_marks_or_the_new() {
+        let old = marks(64, &[(0, 1)]);
+        let new = marks(128, &[(0, 2)]);
+        let setup = || {
+            let fs = FakeFs::with_dirs([dir()]);
+            old.write(&fs, &dir()).unwrap();
+            let mut stale = fs.create(&dir().join(TEMP_NAME)).unwrap();
+            stale
+                .write_all(b"nota session marks 1\njournals-bel")
+                .unwrap();
+            stale.sync().unwrap();
+            fs.sync_dir(&dir()).unwrap();
+            fs
+        };
+        let total = {
+            let fs = setup();
+            let before = fs.attempted();
+            new.write(&fs, &dir()).unwrap();
+            fs.attempted() - before
+        };
+        let outcomes: Vec<_> = (0..64)
+            .map(|seed| CrashOutcome::Partial { seed })
+            .chain([CrashOutcome::LoseUnsynced, CrashOutcome::KeepAll])
+            .collect();
+        let mut sweep = Sweep::with_outcomes();
+        for n in 0..=total {
+            for &outcome in &outcomes {
+                let fs = setup();
+                fs.crash_after(n);
+                let _ = new.write(&fs, &dir());
+                sweep.crash_point(&fs);
+                let got = Marks::read(&fs.crash(outcome), &dir());
+                let got = got.unwrap_or_else(|e| panic!("{n} {outcome:?}: {e}"));
+                assert!(got == old || got == new, "{n} {outcome:?}: {got:?}");
+                sweep.saw(got == new);
+            }
+        }
+        // Not vacuous: the crash cut the write short at every point but the
+        // last, and left the old marks and the new.
+        sweep.interrupted_at_least(total * outcomes.len()); // check-bound
+        sweep.saw_each([false, true]); // check-bound
     }
 
     #[test]

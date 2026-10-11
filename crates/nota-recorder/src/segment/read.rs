@@ -3,7 +3,10 @@
 //! A row says its file is durable, and its SHA-256 says what the file
 //! holds: the file is read whole, checked against the row's hash, and
 //! decoded, and the samples must be exactly the row's, at the rate the
-//! caller expects. A file that fails any check gives no audio.
+//! caller expects. A row with an audio digest is also proven, as salvage
+//! proves it, by a file whose bytes differ but which decodes to exactly
+//! that audio (a file re-encoded, or rebuilt by repair with another
+//! encoder). A file that fails every check gives no audio.
 
 use std::fmt;
 use std::io;
@@ -21,7 +24,8 @@ use crate::fs::Fs;
 pub enum ReadSegmentError {
     /// The file couldn't be read.
     Io(io::Error),
-    /// The file isn't what its row says was published: its hash differs.
+    /// The file isn't what its row says was published: its hash differs,
+    /// and it doesn't decode to the row's audio digest, if it has one.
     Hash,
     /// The file doesn't decode as mono 16-bit FLAC (why).
     Flac(String),
@@ -74,8 +78,7 @@ pub fn read_segment<S: Fs>(
 ) -> Result<Vec<i16>, ReadSegmentError> {
     let path = dir.join(segment_file_name(row.track(), row.range()));
     let bytes = fs.read(&path).map_err(ReadSegmentError::Io)?;
-    let digest: [u8; 32] = Sha256::digest(&bytes).into();
-    if &digest != row.sha256().as_bytes() {
+    if !proves(&bytes, row) {
         return Err(ReadSegmentError::Hash);
     }
     let (found_rate, samples) = flac::decode(&bytes).map_err(ReadSegmentError::Flac)?;
@@ -88,6 +91,16 @@ pub fn read_segment<S: Fs>(
         return Err(ReadSegmentError::Length { expected, found });
     }
     Ok(samples)
+}
+
+/// Whether the file `bytes` is `row`'s: its SHA-256 is the row's, or the
+/// row has an audio digest and the file decodes to exactly that audio.
+fn proves(bytes: &[u8], row: &SegmentRow) -> bool {
+    let digest: [u8; 32] = Sha256::digest(bytes).into();
+    &digest == row.sha256().as_bytes()
+        || row.audio().is_some_and(|audio| {
+            flac::decoded_audio_digest(bytes, row.track(), row.range()) == Some(audio)
+        })
 }
 
 #[cfg(test)]

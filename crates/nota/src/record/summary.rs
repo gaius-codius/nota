@@ -199,10 +199,10 @@ pub(super) fn note_published(outcome: &mut Outcome, report: &PublishReport) {
     outcome.segments = report.rows().len();
     outcome.complete = report.is_complete();
     if !report.left().is_empty() {
-        let mut note = format!(
-            "{} journals weren't published; the next start salvages them",
-            report.left().len()
-        );
+        let mut note = match report.left().len() {
+            1 => "1 journal wasn't published; the next start salvages it".to_owned(),
+            n => format!("{n} journals weren't published; the next start salvages them"),
+        };
         if let Some(e) = report.errors().last() {
             let _ = write!(note, " (last error: {e})");
         }
@@ -223,19 +223,29 @@ pub(super) fn note_published(outcome: &mut Outcome, report: &PublishReport) {
     }
 }
 
-/// Names the files a publish or salvage run couldn't use or clean up.
+/// Names the files a publish or salvage run couldn't use or clean up, each
+/// once.
 pub(crate) fn held_notes(held: &nota_recorder::segment::Published) -> Vec<String> {
     let mut notes = Vec::new();
     for (path, kind) in held.blocked() {
-        notes.push(format!(
-            "{}: {}; its audio is still to publish",
-            file_name(path),
+        // A temp file salvage couldn't remove, for the same reason, is
+        // also what blocks its segment: one file, one note, saying both.
+        let cause = if held.temps_kept().contains(&(path.clone(), *kind)) {
+            format!("couldn't remove the temporary file ({})", file_cause(*kind))
+        } else {
             file_cause(*kind)
+        };
+        notes.push(format!(
+            "{}: {cause}; its audio is still to publish",
+            file_name(path)
         ));
     }
     notes.extend(cleanup_notes(held));
     notes.extend(finding_notes(held));
     for (path, kind) in held.temps_kept() {
+        if held.blocked().contains(&(path.clone(), *kind)) {
+            continue;
+        }
         notes.push(format!(
             "{}: couldn't remove the temporary file ({})",
             file_name(path),
@@ -243,8 +253,9 @@ pub(crate) fn held_notes(held: &nota_recorder::segment::Published) -> Vec<String
         ));
     }
     for (journal, kind) in held.unread() {
+        // What it holds isn't known, so it's neither published nor lost.
         notes.push(format!(
-            "{}: couldn't read it ({})",
+            "{}: couldn't read it ({}); it's kept, and nota tries again when it starts",
             journal.id().file_name(),
             file_cause(*kind)
         ));
@@ -776,6 +787,51 @@ pub(super) mod tests {
             .write_all(b"changed segment")
             .unwrap();
         fs.fail_on(&path, Fault::Rename, io::ErrorKind::PermissionDenied);
+    }
+
+    /// The summary names each file the publisher holds once, with its
+    /// cause, however the failures combine. Only the system track's journal
+    /// is counted unpublished, and only while its audio is held back: the
+    /// mic's is saved, only not deleted.
+    #[test]
+    fn the_summary_names_each_held_file_once_across_combined_failures() {
+        use crate::library::held::{Beside, Held};
+        let mic = "journal-000000: couldn't delete it (permission denied); \
+                   all its audio is published";
+        let left = "1 journal wasn't published; the next start salvages it";
+        for beside in Beside::ALL {
+            let report = Held::new(beside).published();
+            let mut outcome = Outcome::new(SessionId::new(1), PathBuf::new());
+            note_published(&mut outcome, &report);
+            let unpublished: Vec<_> = report.left().iter().map(|j| j.id().file_name()).collect();
+            // Only salvage reports the temp files it couldn't remove: live
+            // publishing reports one in its way as a blocked name, and
+            // never looks at one no segment uses.
+            let expected: Vec<&str> = match beside {
+                Beside::Blocked => vec![
+                    left,
+                    "seg-t1-000000000000.flac: a directory is in the way; \
+                     its audio is still to publish",
+                    mic,
+                ],
+                Beside::TempKept => vec![
+                    left,
+                    "seg-t1-000000000000.flac.tmp: permission denied; \
+                     its audio is still to publish",
+                    mic,
+                ],
+                Beside::StrayTemp => vec![mic],
+                Beside::Unread | Beside::Unrepaired => {
+                    let [first, second] = beside.held_at_start();
+                    vec![left, first, second]
+                }
+            };
+            let held_back = beside != Beside::StrayTemp;
+            let expected_left: &[&str] = if held_back { &["journal-000001"] } else { &[] };
+            assert_eq!(unpublished, expected_left, "{beside:?}");
+            assert_eq!(outcome.notes, expected, "{beside:?}");
+            assert_eq!(outcome.complete, !held_back, "{beside:?}");
+        }
     }
 
     /// Cleanup of one journal must not hide another journal's pending repair.
