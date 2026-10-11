@@ -16,13 +16,16 @@
 //!   every segment boundary.
 //! - [`segment`]: finished journals published as FLAC segments with their
 //!   rows, and salvage after a crash.
+//! - [`playback`]: playing a moment, about five seconds of a track's saved
+//!   audio around a session time, on the default output.
 //!
 //! # Native libraries
 //!
 //! On Linux, capture goes through cpal, which links `libpipewire-0.3`,
 //! `libasound` and `libdbus-1` (to ask rtkit for real-time priority)
 //! dynamically, and thread-priority, which sets the stream thread's
-//! scheduling through libc. Building needs their headers, `pkg-config` and
+//! scheduling through libc. Playback goes through the same cpal build.
+//! Building needs their headers, `pkg-config` and
 //! libclang (for bindgen); [`capture`] lists the packages. Elsewhere the
 //! crate builds without them and records nothing yet. `SQLite` comes bundled
 //! through `nota-store`.
@@ -37,6 +40,7 @@ pub mod disk;
 pub mod engine;
 pub mod fs;
 pub mod journal;
+pub mod playback;
 pub mod segment;
 pub mod session;
 
