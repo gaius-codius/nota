@@ -14,7 +14,7 @@ use nota_core::{
 
 use super::*;
 use crate::fs::Fs;
-use crate::fs::fake::{CrashOutcome, FakeFile, FakeFs, FakeLock, Op};
+use crate::fs::fake::{CrashOutcome, FakeFile, FakeFs, FakeLock, Fault, Op};
 use crate::fs::sweep::Sweep;
 use crate::journal::read_journal;
 use crate::segment::{FakeStore, SegmentLength, SegmentStore, salvage, segment_file_name};
@@ -857,6 +857,38 @@ fn a_new_epoch_writes_audio_held_back_in_the_old_epoch_without_waiting() {
         joined(&salvaged(&fs.crash(CrashOutcome::LoseUnsynced))),
         [(0, 910)]
     );
+}
+
+/// A marks write that fails as the writer moves to a new epoch is
+/// reported, with the track moved all the same, and tried again before
+/// the epoch's first journal, which isn't started unmarked.
+#[test]
+fn a_new_epoch_whose_marks_cant_be_written_still_moves_and_tries_again() {
+    let fs = FakeFs::with_dirs([dir(), PathBuf::from("/db")]);
+    let (_, mut w) = manual_writer(&fs);
+    w.append(MIC, &samples(0, 100)).unwrap();
+    fs.fail_on(
+        &dir().join("session-marks.tmp"),
+        Fault::Create,
+        io::ErrorKind::Other,
+    );
+    let epoch = w.test_epoch(MIC, EpochId::new(1), SampleIndex::new(100));
+    assert!(matches!(
+        w.new_epoch(MIC, &epoch),
+        Err(SessionError::Marks(_))
+    ));
+    assert_eq!(w.epoch(MIC), Some(epoch));
+    // The epoch's first audio tries the marks again, and starts no journal
+    // while they fail.
+    assert!(matches!(
+        w.append(MIC, &samples(100, 10)),
+        Err(SessionError::Marks(_))
+    ));
+    assert!(
+        !fs.paths()
+            .contains(&dir().join(JournalId::new(1).file_name()))
+    );
+    assert_eq!(w.next_sample(MIC), Some(SampleIndex::new(110)));
 }
 
 #[test]

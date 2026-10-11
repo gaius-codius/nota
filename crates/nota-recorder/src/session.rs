@@ -82,8 +82,8 @@
 //!   covered sample numbers would plan no segment, and its journal would be
 //!   deleted.
 //! - **Epoch ids:** each track's epochs must be higher than any it has
-//!   journaled ([`SessionWriter::highest_epoch`]), so two recordings never
-//!   share one.
+//!   journaled or moved to ([`SessionWriter::highest_epoch`]), so two
+//!   recordings never share one.
 //! - **Session time:** a track's first epoch must start no earlier than
 //!   its earlier audio ends ([`SessionWriter::earlier_end`]), so the new
 //!   recording comes after the old one. Start the session's clock at
@@ -94,9 +94,10 @@
 //! # Epoch anchors
 //!
 //! Every journal's header holds its epoch's anchor, and the marks hold each
-//! track's newest, both written before the epoch's first sample. Salvage
-//! times any journal it finds by its header; a resumed session times its
-//! tracks on from the marks.
+//! track's newest, written as the writer moves to it: both before the
+//! epoch's first sample, and the marks even for an epoch no audio follows.
+//! Salvage times any journal it finds by its header; a resumed session
+//! times its tracks on from the marks.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
@@ -396,7 +397,8 @@ pub struct SessionWriter<S: Fs> {
 struct Earlier {
     /// The first sample after every journal and published segment.
     end: Option<SampleIndex>,
-    /// The highest epoch journaled, with its anchor if one was kept.
+    /// The highest epoch journaled or marked, with its anchor if one was
+    /// kept.
     epoch: Option<MarkedEpoch>,
 }
 
@@ -704,16 +706,25 @@ impl<S: Fs> SessionWriter<S> {
     /// track's next sample: its journal ends, and the next sample starts a
     /// new one. Audio still waiting for an fsync is written first, in the
     /// old epoch: a journal full while its fsync runs is ended, and the
-    /// rest goes to another journal, so this never waits on an fsync.
+    /// rest goes to another journal, so this never waits on a journal's
+    /// fsync.
+    ///
+    /// The epoch is then marked durably, with its anchor (see the `marks`
+    /// module): the one marks write its first journal would otherwise make.
+    /// So an epoch no audio follows, as when a track ends just after a
+    /// loss, is still never used again by a resumed session, whose clock
+    /// resumes no earlier than its start.
     ///
     /// # Errors
     ///
     /// With nothing changed: [`SessionError::UnknownTrack`];
     /// [`SessionError::EpochUsed`] unless `epoch` is above the track's
     /// current one; [`SessionError::EpochMisplaced`] unless it starts at
-    /// [`Self::next_sample`], at the writer's rate. Otherwise
-    /// [`SessionError::Journal`] if the ending journal's last fsync failed
-    /// and its replacement failed too.
+    /// [`Self::next_sample`], at the writer's rate. Otherwise, with the
+    /// track moved all the same: [`SessionError::Journal`] if the ending
+    /// journal's last fsync failed and its replacement failed too;
+    /// [`SessionError::Marks`] if the marks couldn't be written, which
+    /// the epoch's first journal tries again.
     pub fn new_epoch(&mut self, track: TrackId, epoch: &Epoch) -> Result<(), SessionError> {
         let state = self
             .tracks
@@ -733,7 +744,8 @@ impl<S: Fs> SessionWriter<S> {
             .get_mut(&track)
             .ok_or(SessionError::UnknownTrack(track))?;
         state.epoch = *epoch;
-        drained.and(ended)
+        let marked = self.mark(None, track, epoch.anchor());
+        drained.and(ended).and(marked)
     }
 
     /// The epoch `track` is recording in, or `None` if the track wasn't
@@ -1195,7 +1207,7 @@ impl<S: Fs> SessionWriter<S> {
         held: &mut Vec<FinishedJournal>,
     ) -> Result<JournalWriter<S::File>, SessionError> {
         let id = self.next_id.ok_or(SessionError::Overflow)?;
-        self.mark(id, track, epoch)?;
+        self.mark(Some(id), track, epoch)?;
         self.next_id = id.next();
         let header = JournalHeader::new(id, track, epoch);
         let mut writer =
@@ -1238,17 +1250,19 @@ impl<S: Fs> SessionWriter<S> {
         Ok(())
     }
 
-    /// Makes sure the marks on disk cover journal `id` and `track`'s
-    /// `epoch`, with its anchor, before a journal uses them, reserving a
-    /// block of ids at a time.
+    /// Makes sure the marks on disk cover journal `id`, if one is about to
+    /// be used, and `track`'s `epoch`, with its anchor, reserving a block of
+    /// journal ids at a time.
     fn mark(
         &mut self,
-        id: JournalId,
+        id: Option<JournalId>,
         track: TrackId,
         epoch: EpochAnchor,
     ) -> Result<(), SessionError> {
         let mut wanted = self.marks.clone();
-        if id >= wanted.journals_below {
+        if let Some(id) = id
+            && id >= wanted.journals_below
+        {
             // The last id is never used, so every used id is below the mark.
             let after = id.next().ok_or(SessionError::Overflow)?;
             let block = JournalId::new(id.get().saturating_add(ID_BLOCK));
