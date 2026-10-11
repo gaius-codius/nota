@@ -20,7 +20,7 @@
 //! # Never while a recording runs
 //!
 //! Playing takes the session's [`SessionLock`] and keeps it until the
-//! [`Playback`] is stopped or dropped. A recording holds that lock, so
+//! [`Playback`] is dropped. A recording holds that lock, so
 //! playing the session being recorded is refused with
 //! [`PlaybackError::Busy`], in this process or another; and a recording or
 //! a repair can't start under a moment that is playing. The lock is the
@@ -183,12 +183,13 @@ pub trait OutputStream {
     /// turns true once the device has asked for more audio after the last
     /// of it, so the device's own delay (tens of milliseconds) is over or
     /// nearly. A stream that stalls without an error never turns true, so
-    /// the caller must stop it when it closes.
+    /// the caller must drop it when its card closes.
     fn finished(&self) -> bool;
 }
 
-/// A moment playing. Holds the session's lock until it is stopped or
-/// dropped, so nothing records or repairs the session meanwhile.
+/// A moment playing. Dropping it stops the sound and lets the session go;
+/// until then it holds the session's lock, so nothing records or repairs
+/// the session meanwhile.
 #[derive(Debug)]
 pub struct Playback<S: Fs, T> {
     /// Dropped first, so the sound stops before the lock is let go.
@@ -208,11 +209,6 @@ impl<S: Fs, T: OutputStream> Playback<S, T> {
     #[must_use]
     pub fn finished(&self) -> bool {
         self.stream.finished()
-    }
-
-    /// Stops the sound and lets the session go.
-    pub fn stop(self) {
-        drop(self);
     }
 }
 

@@ -207,6 +207,14 @@ mod tests {
         assert_eq!(resample(&[1; 100], 16_000, 48_000).len(), 300);
     }
 
+    /// Tripling the rate puts two new samples, a third and two thirds of
+    /// the way, between each pair.
+    #[test]
+    fn resampling_to_three_times_the_rate_interpolates_thirds() {
+        let out = resample(&[0, 3_072, 6_144], 16_000, 48_000);
+        assert_eq!(out[..4], [0.0, 0.031_25, 0.062_5, 0.093_75]);
+    }
+
     /// Going down takes every other sample at half the rate.
     #[test]
     fn resampling_down_keeps_the_samples_that_line_up() {

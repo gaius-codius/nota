@@ -117,9 +117,24 @@ impl Scene {
 
     /// The samples a play at `at` seconds of `track` hands the output.
     fn heard(&self, track: TrackId, at: u64) -> Vec<i16> {
+        self.heard_at(track, secs(at))
+    }
+
+    /// The samples a play at the session time `at` of `track` hands the
+    /// output.
+    fn heard_at(&self, track: TrackId, at: SessionTime) -> Vec<i16> {
         let output = FakeOutput::default();
-        self.play(&output, track, at).unwrap().stop();
+        drop(play_moment(&self.session, &self.store, track, at, &output).unwrap());
         output.played()
+    }
+
+    /// Deletes the file of the segment of `track` holding samples
+    /// `from..to`, leaving its row.
+    fn remove_segment(&self, track: TrackId, from: u64, to: u64) {
+        let range = SampleRange::new(SampleIndex::new(from), SampleIndex::new(to)).unwrap();
+        self.fs
+            .remove(&Path::new("/s").join(segment_file_name(track, range)))
+            .unwrap();
     }
 }
 
@@ -268,12 +283,8 @@ fn a_moment_inside_a_gap_plays_what_surrounds_the_gap() {
     let mut expected = values(MIC, 2_000, 4_000);
     expected.extend([0; 1_000]);
     expected.extend(values(MIC, 4_000, 6_000));
-    let output = FakeOutput::default();
     let at = SessionTime::from_nanos(4_500_000_000);
-    play_moment(&scene.session, &scene.store, MIC, at, &output)
-        .unwrap()
-        .stop();
-    assert_eq!(output.played(), expected);
+    assert_eq!(scene.heard_at(MIC, at), expected);
 }
 
 /// Near the start the window is clamped to the recording, not shifted.
@@ -387,7 +398,7 @@ fn a_playing_moment_holds_the_session_until_it_stops() {
     );
     assert!(!output.stopped.load(Ordering::Acquire));
 
-    playing.stop();
+    drop(playing);
 
     assert!(output.stopped.load(Ordering::Acquire));
     assert!(scene.session.lock().is_ok());
@@ -698,4 +709,54 @@ fn errors_keep_their_cause() {
     assert!(has_source(PlaybackError::Output(OutputError::NoDevice)));
     assert!(!has_source(PlaybackError::Busy));
     assert!(!has_source(PlaybackError::NotTimed));
+}
+
+/// A time exactly at the recording's first sample plays from it.
+#[test]
+fn a_moment_at_the_very_start_plays() {
+    let mut scene = Scene::new("at-start");
+    scene.epoch(MIC, &anchor(0, 0, 0));
+    scene.segment(MIC, 0, 0, 10_000);
+
+    assert_eq!(scene.heard(MIC, 0), values(MIC, 0, 2_500));
+}
+
+/// A time exactly at the recording's end plays the 2.5 s before it.
+#[test]
+fn a_moment_at_the_very_end_plays() {
+    let mut scene = Scene::new("at-end");
+    scene.epoch(MIC, &anchor(0, 0, 0));
+    scene.segment(MIC, 0, 0, 10_000);
+
+    assert_eq!(scene.heard(MIC, 10), values(MIC, 7_500, 10_000));
+}
+
+/// A segment that ends where the window starts holds none of its audio, so
+/// it isn't even opened: its file may be gone.
+#[test]
+fn a_segment_ending_where_the_window_starts_is_not_read() {
+    let mut scene = Scene::new("touching-before");
+    scene.epoch(MIC, &anchor(0, 0, 0));
+    scene.segment(MIC, 0, 0, 3_000);
+    scene.segment(MIC, 0, 3_000, 9_000);
+    scene.remove_segment(MIC, 0, 3_000);
+
+    // At 5.5 s the window is 3,000..8,000.
+    let at = SessionTime::from_nanos(5_500_000_000);
+    assert_eq!(scene.heard_at(MIC, at), values(MIC, 3_000, 8_000));
+}
+
+/// A segment that starts where the window ends holds none of its audio
+/// either.
+#[test]
+fn a_segment_starting_where_the_window_ends_is_not_read() {
+    let mut scene = Scene::new("touching-after");
+    scene.epoch(MIC, &anchor(0, 0, 0));
+    scene.segment(MIC, 0, 0, 5_000);
+    scene.segment(MIC, 0, 5_000, 9_000);
+    scene.remove_segment(MIC, 5_000, 9_000);
+
+    // At 2.5 s the window is 0..5,000.
+    let at = SessionTime::from_nanos(2_500_000_000);
+    assert_eq!(scene.heard_at(MIC, at), values(MIC, 0, 5_000));
 }
