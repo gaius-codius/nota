@@ -2040,7 +2040,7 @@ fn a_stop_inside_a_burst_still_shows_its_losses() {
 fn a_channel_closed_inside_a_burst_still_shows_its_losses() {
     let fs = FakeFs::with_dirs([dir()]);
     let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
-    let session = SessionDir::new(SESSION, fs.clone(), &dir()).lock().unwrap();
+    let session = SessionDir::new(SESSION, fs, &dir()).lock().unwrap();
     let length = SegmentLength::new(SampleCount::new(1_000)).unwrap();
     let mut writer = SessionWriter::open(&session, rate(), length, clock).unwrap();
     let mut timeline = epoch_zero();
