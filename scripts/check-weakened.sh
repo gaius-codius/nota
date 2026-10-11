@@ -31,7 +31,7 @@ while IFS= read -r f; do
 done < <(git diff --name-only "$mb" "$head" -- \
   rust-toolchain.toml rustfmt.toml clippy.toml clippy-crates.txt typos.toml deny.toml \
   .config/nextest.toml .cargo/config.toml .cargo/mutants.toml lefthook.yml \
-  .github/workflows 'scripts/check-*' \
+  .github/workflows 'scripts/check-*' 'scripts/*.test.sh' scripts/lazyfs-crash.sh \
   | sort -u)
 
 # Lint table edits in any Cargo.toml.

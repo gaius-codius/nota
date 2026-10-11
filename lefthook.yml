@@ -1,7 +1,7 @@
 # Git hooks for nota. Install once per clone: `lefthook install`.
 # CI runs the same checks, so skipping a hook only delays the failure, and
 # skipping one on purpose (--no-verify) is against the "Code quality" rules in AGENTS.md.
-# Needs on PATH: cargo, typos, gitleaks; uvx and actionlint for workflow edits.
+# Needs on PATH: cargo, typos, gitleaks, jq; uvx and actionlint for workflow edits.
 # A lefthook-local.yml next to this file, if present, adds hooks for one machine.
 
 pre-commit:
@@ -34,7 +34,17 @@ pre-push:
     doc:
       run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items --workspace --all-features --locked
     test:
-      run: cargo nextest run --workspace --locked --no-tests=fail
+      # --all-targets: examples' unit tests too, run by the test harness, so
+      # no example's main runs.
+      run: cargo nextest run --workspace --all-targets --locked --no-tests=fail
+    test-targets:
+      # Every workspace target is in the test above; the arguments must match.
+      run: scripts/check-test-targets.sh
+    script-tests:
+      # check-clippy-bans.sh's and check-test-targets.sh's tests, and the crash
+      # runner's against stand-ins (no FUSE or LazyFS; the real sweep stays a manual gate). CI
+      # runs these and the other scripts' tests in its lint job.
+      run: scripts/check-clippy-bans.test.sh && scripts/check-test-targets.test.sh && scripts/lazyfs-crash.test.sh
     doctest:
       run: cargo test --workspace --locked --doc
     deny:
