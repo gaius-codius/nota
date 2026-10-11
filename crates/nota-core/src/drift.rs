@@ -254,8 +254,9 @@ pub enum Reading {
     Steady,
     /// The buffer came at least [`LOSS_MIN`] later than the one before it
     /// puts it, or a settled run fell [`LOSS_BUILT_UP`] behind, or a
-    /// settling one rose [`SETTLING_BUILT_UP`]: audio was lost before it. The meter didn't learn from it, and reads every
-    /// buffer after it as lost too until [`DriftMeter::restart`]. A new
+    /// settling one rose [`SETTLING_BUILT_UP`]: audio was lost before it.
+    /// The meter didn't learn from it, and reads every buffer after it as
+    /// lost too until [`DriftMeter::restart`]. A new
     /// epoch `hole` after where the mapping puts the buffer makes the loss
     /// a gap; then call [`DriftMeter::restart`].
     Lost {

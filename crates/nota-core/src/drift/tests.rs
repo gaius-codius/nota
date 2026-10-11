@@ -256,16 +256,18 @@ fn small_losses_built_up_while_settling_are_a_loss() {
 
 /// The hardware's settling, a millisecond of jitter either side and
 /// 500 ppm of drift either way, all at once, stay short of
-/// [`SETTLING_BUILT_UP`]: no loss is read.
+/// [`SETTLING_BUILT_UP`]: no loss is read ([`record`] fails on one), and
+/// the recording stays within 20 ms.
 #[test]
-fn settling_jitter_and_drift_together_are_not_a_loss() {
+fn the_worst_settling_allowed_is_not_a_loss() {
     for shape in [&MIC_SETTLING[..], &MONITOR_SETTLING[..]] {
         for drift in [ANY_STEADY_DRIFT, -ANY_STEADY_DRIFT] {
             let wobble = jitter(1_000_000);
-            record(drift, Duration::from_secs(30), 320, |n, true_ns| {
+            let run = record(drift, Duration::from_secs(30), 320, |n, true_ns| {
                 let off = settling(shape, true_ns) + wobble(n);
                 stamped(true_ns.saturating_add_signed(off))
             });
+            assert!(run.worst < WITHIN, "{drift}: {:?}", run.worst);
         }
     }
 }
