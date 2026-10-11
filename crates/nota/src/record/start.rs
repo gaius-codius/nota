@@ -380,7 +380,7 @@ fn open_streams<B: CaptureBackend>(
     let streams = start_streams(starter, backend, sources, notes);
     if streams.captures.is_empty() {
         ready.abandon();
-        return Err("nothing to record".into());
+        return Err(NOTHING_TO_RECORD.into());
     }
     Ok((streams, ready))
 }
@@ -499,6 +499,9 @@ fn start_live(
 
 /// What opening the streams came to, and what started before them.
 type Opened<S> = (Streams<S>, Ready);
+
+/// What a start says when no stream started.
+const NOTHING_TO_RECORD: &str = "nothing to record";
 
 /// What a start that fails before any stream opens says.
 const STOPPED_BEFORE: &str = "stopped before recording started; no session was made";
@@ -1845,23 +1848,47 @@ mod salvage_note_tests {
         }
     }
 
-    /// A start that fails after recovery still shows every recovery note,
-    /// each once, beside each input's failure, each once.
+    /// A backend whose every stream fails to start, as when no input is
+    /// there.
+    struct RefusesAll;
+
+    impl CaptureBackend for RefusesAll {
+        type Stream = ();
+
+        fn start(
+            &self,
+            source: &Source,
+            _: nota_core::SampleRate,
+            _: nota_recorder::capture::CaptureSender,
+        ) -> Result<(), nota_recorder::capture::CaptureError> {
+            Err(nota_recorder::capture::CaptureError::DeviceNotAvailable(
+                source.clone(),
+            ))
+        }
+    }
+
+    /// A start that fails after recovery, because no input started, still
+    /// shows every recovery note and each input's failure, each once.
     #[test]
-    fn a_failed_start_shows_combined_recovery_notes_and_each_input_once() {
+    fn a_failed_start_keeps_combined_recovery_notes_beside_its_input_failures() {
         use crate::library::held::{Beside, Held};
         let recovered: Vec<String> = Beside::ALL
             .iter()
             .map(|&beside| salvage_note(&Held::new(beside).salvaged()))
             .collect();
-        let inputs = [
-            "not recording device mic-gone: the device is missing",
-            "not recording device speakers-gone: the device is missing",
-        ];
+        // The streams start after recovery has noted what it found.
         let mut notes = recovered.clone();
-        notes.extend(inputs.map(str::to_owned));
-        // Recovery ran, then no input started: the start fails.
-        let failure = startup_failure("nothing to record".into(), notes).to_string();
+        let clock: Arc<dyn Clock> = Arc::new(nota_core::FakeClock::new(SessionTime::ZERO));
+        let sources = [(MIC, Source::Microphone), (SYSTEM, Source::SystemAudio)];
+        let (starter, events) = prepare_tracks(&sources, RATE, &clock);
+        let streams = start_streams(starter, &RefusesAll, &sources, &mut notes);
+        drop(events);
+        assert!(streams.captures.is_empty());
+        let failure = startup_failure(NOTHING_TO_RECORD.into(), notes).to_string();
+        let inputs = sources.map(|(_, source)| {
+            let why = nota_recorder::capture::CaptureError::DeviceNotAvailable(source.clone());
+            format!("not recording {source}: {why}")
+        });
         assert_eq!(
             failure,
             format!(
@@ -1870,9 +1897,7 @@ mod salvage_note_tests {
                 inputs.join("; ")
             )
         );
-        for note in recovered.iter().map(String::as_str).chain(inputs) {
-            assert_eq!(failure.matches(note).count(), 1, "{note:?} in {failure}");
-        }
+        assert_eq!(failure.matches("not recording ").count(), 2, "{failure}");
     }
 }
 

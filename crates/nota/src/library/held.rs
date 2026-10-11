@@ -1,14 +1,15 @@
 //! Sessions that hold files for two reasons at once, made by real
-//! recording, publishing and salvage over the fake filesystem. The tests of
-//! each report that names held files (the summary, the startup note, Home)
-//! take their sessions from here, so they all judge the same failures.
+//! recording, publishing and salvage over the fake filesystem. The
+//! combined-failure tests of each report that names held files (the
+//! summary, the startup note, Home) take their sessions from here, so they
+//! all judge the same failures.
 //!
 //! Each session records the mic and the system audio, one short journal
 //! each. The mic's journal is fully published but can't be deleted; the
 //! system track's audio is held back as [`Beside`] says.
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use nota_core::{
@@ -23,7 +24,7 @@ use nota_recorder::segment::{
 };
 use nota_recorder::session::{FinishedJournal, SessionDir, SessionStore, SessionWriter};
 
-use super::{Salvaged, salvage_result};
+use super::{Needs, Salvaged, SessionPaths, needs, salvage_result};
 
 /// The session every scenario records into.
 pub(crate) const SESSION: SessionId = SessionId::new(1);
@@ -41,6 +42,9 @@ pub(crate) enum Beside {
     /// A file under the system track's segment temp name can't be removed,
     /// so the segment can't be written.
     TempKept,
+    /// A temp file no planned segment uses can't be removed; the system
+    /// track's audio publishes.
+    StrayTemp,
     /// The system track's journal can't be read.
     Unread,
     /// The system track's segment was published, then changed, and the
@@ -66,6 +70,11 @@ impl Beside {
                  (permission denied); its audio is still to publish",
                 mic,
             ],
+            Self::StrayTemp => [
+                mic,
+                "seg-t5-000000000000.flac.tmp: couldn't remove the temporary file \
+                 (permission denied)",
+            ],
             Self::Unread => [
                 mic,
                 "journal-000001: couldn't read it (permission denied); \
@@ -81,9 +90,10 @@ impl Beside {
     }
 
     /// Every scenario, so a test covers them all.
-    pub(crate) const ALL: [Self; 4] = [
+    pub(crate) const ALL: [Self; 5] = [
         Self::Blocked,
         Self::TempKept,
+        Self::StrayTemp,
         Self::Unread,
         Self::Unrepaired,
     ];
@@ -113,19 +123,33 @@ impl Held {
         let system = audio().join(held.journals[1].id().file_name());
         match beside {
             Beside::Blocked => held.fs.create_dir(&system_segment()).unwrap(),
-            Beside::TempKept => {
-                let temp = system_temp();
-                held.fs
-                    .create(&temp)
-                    .unwrap()
-                    .write_all(b"a crashed run's temp")
-                    .unwrap();
-                held.fs.fail_on(&temp, Fault::Remove, REFUSED);
-            }
+            Beside::TempKept => held.plant_stuck_temp(&system_temp()),
+            Beside::StrayTemp => held.plant_stuck_temp(&stray_temp()),
             Beside::Unread => held.fs.fail_on(&system, Fault::Read, REFUSED),
             Beside::Unrepaired => held.break_system_segment(),
         }
         held
+    }
+
+    /// Leaves a temp file at `temp`, as a crashed run would, that can't be
+    /// removed.
+    fn plant_stuck_temp(&self, temp: &Path) {
+        self.fs
+            .create(temp)
+            .unwrap()
+            .write_all(b"a crashed run's temp")
+            .unwrap();
+        self.fs.fail_on(temp, Fault::Remove, REFUSED);
+    }
+
+    /// What Home's listing says the session needs, read from the fake disk
+    /// as it is now.
+    pub(crate) fn needs(&self) -> Needs {
+        let session = SessionPaths {
+            id: SESSION,
+            dir: PathBuf::from("/data/sessions/1"),
+        };
+        needs(&self.fs, &session)
     }
 
     /// What startup salvage made of the session, as the library reports
@@ -203,6 +227,11 @@ pub(super) fn system_temp() -> PathBuf {
     let mut temp = system_segment().into_os_string();
     temp.push(".tmp");
     PathBuf::from(temp)
+}
+
+/// A temp name no planned segment uses: track 5 records nothing.
+pub(super) fn stray_temp() -> PathBuf {
+    audio().join("seg-t5-000000000000.flac.tmp")
 }
 
 /// Records 50 samples on each track and finishes the journals, mic first.

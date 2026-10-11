@@ -220,15 +220,17 @@ fn home_names_an_undeletable_published_journal() {
 fn home_names_each_held_file_once_across_combined_failures() {
     use crate::library::held::{Beside, Held};
     for beside in Beside::ALL {
-        // The listing sees journals left; salvage at start says why.
+        let held = Held::new(beside);
+        let salvaged = held.salvaged();
+        // The listing reads the disk as salvage left it.
         let listed = Listed {
             id: SessionId::new(1),
             title: None,
             started_at: None,
             recorded: None,
-            needs: Needs::Attention("audio still to save · nota tries again when it starts".into()),
+            needs: held.needs(),
         };
-        let shown = session(listed, &[Held::new(beside).salvaged()], &dates());
+        let shown = session(listed, &[salvaged], &dates());
         assert_eq!(
             (shown.status, shown.detail),
             (Status::NeedsYou, Some(beside.held_at_start().join("; "))),

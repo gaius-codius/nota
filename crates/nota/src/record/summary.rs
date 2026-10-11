@@ -228,9 +228,9 @@ pub(super) fn note_published(outcome: &mut Outcome, report: &PublishReport) {
 pub(crate) fn held_notes(held: &nota_recorder::segment::Published) -> Vec<String> {
     let mut notes = Vec::new();
     for (path, kind) in held.blocked() {
-        // A temp file salvage couldn't remove is also what blocks its
-        // segment: one file, one note, saying both.
-        let cause = if held.temps_kept().iter().any(|(kept, _)| kept == path) {
+        // A temp file salvage couldn't remove, for the same reason, is
+        // also what blocks its segment: one file, one note, saying both.
+        let cause = if held.temps_kept().contains(&(path.clone(), *kind)) {
             format!("couldn't remove the temporary file ({})", file_cause(*kind))
         } else {
             file_cause(*kind)
@@ -243,7 +243,7 @@ pub(crate) fn held_notes(held: &nota_recorder::segment::Published) -> Vec<String
     notes.extend(cleanup_notes(held));
     notes.extend(finding_notes(held));
     for (path, kind) in held.temps_kept() {
-        if held.blocked().iter().any(|(blocked, _)| blocked == path) {
+        if held.blocked().contains(&(path.clone(), *kind)) {
             continue;
         }
         notes.push(format!(
@@ -791,7 +791,8 @@ pub(super) mod tests {
 
     /// The summary names each file the publisher holds once, with its
     /// cause, however the failures combine. Only the system track's journal
-    /// is counted unpublished: the mic's is saved, only not deleted.
+    /// is counted unpublished, and only while its audio is held back: the
+    /// mic's is saved, only not deleted.
     #[test]
     fn the_summary_names_each_held_file_once_across_combined_failures() {
         use crate::library::held::{Beside, Held};
@@ -803,29 +804,33 @@ pub(super) mod tests {
             let mut outcome = Outcome::new(SessionId::new(1), PathBuf::new());
             note_published(&mut outcome, &report);
             let unpublished: Vec<_> = report.left().iter().map(|j| j.id().file_name()).collect();
-            assert_eq!(unpublished, ["journal-000001"], "{beside:?}");
-            // Live publishing never removes a temp file, so a temp in the
-            // way is only a blocked name here.
-            let expected = match beside {
-                Beside::Blocked => [
+            // Only salvage reports the temp files it couldn't remove: live
+            // publishing reports one in its way as a blocked name, and
+            // never looks at one no segment uses.
+            let expected: Vec<&str> = match beside {
+                Beside::Blocked => vec![
                     left,
                     "seg-t1-000000000000.flac: a directory is in the way; \
                      its audio is still to publish",
                     mic,
                 ],
-                Beside::TempKept => [
+                Beside::TempKept => vec![
                     left,
                     "seg-t1-000000000000.flac.tmp: permission denied; \
                      its audio is still to publish",
                     mic,
                 ],
+                Beside::StrayTemp => vec![mic],
                 Beside::Unread | Beside::Unrepaired => {
                     let [first, second] = beside.held_at_start();
-                    [left, first, second]
+                    vec![left, first, second]
                 }
             };
+            let held_back = beside != Beside::StrayTemp;
+            let expected_left: &[&str] = if held_back { &["journal-000001"] } else { &[] };
+            assert_eq!(unpublished, expected_left, "{beside:?}");
             assert_eq!(outcome.notes, expected, "{beside:?}");
-            assert!(!outcome.complete, "{beside:?}");
+            assert_eq!(outcome.complete, !held_back, "{beside:?}");
         }
     }
 

@@ -436,7 +436,7 @@ impl Library {
             if is_empty(session) && !listed.contains_key(&session.id.get()) {
                 continue;
             }
-            let needs = match (&db_error, needs(session)) {
+            let needs = match (&db_error, needs(&StdFs, session)) {
                 (_, needs @ (Needs::InUse | Needs::Attention(_))) => needs,
                 (Some(e), Needs::Nothing) => Needs::Attention(e.clone()),
                 (None, Needs::Nothing) => Needs::Nothing,
@@ -600,12 +600,12 @@ pub(crate) fn discard_empty<S: Fs>(fs: &S, paths: &SessionPaths) {
     }
 }
 
-/// Whether `session`'s directory shows it needs the user: rows whose files
-/// didn't prove them (or that didn't parse) when they were last checked,
-/// still unresolved, or journals left unpublished. Journals another nota is
-/// still writing are a recording, not a problem.
-fn needs(session: &SessionPaths) -> Needs {
-    let dir = SessionDir::new(session.id, StdFs, &session.audio());
+/// Whether `session`'s directory on `fs` shows it needs the user: rows
+/// whose files didn't prove them (or that didn't parse) when they were last
+/// checked, still unresolved, or journals left unpublished. Journals another
+/// nota is still writing are a recording, not a problem.
+fn needs<S: Fs + Clone>(fs: &S, session: &SessionPaths) -> Needs {
+    let dir = SessionDir::new(session.id, fs.clone(), &session.audio());
     match read_findings(&dir).map(|f| f.unresolved()) {
         Ok(0) => {}
         Ok(n) => {
@@ -624,7 +624,7 @@ fn needs(session: &SessionPaths) -> Needs {
         }
         Err(e) => return Needs::Attention(e.to_string()),
     }
-    match set_aside(&session.audio()) {
+    match set_aside(fs, &session.audio()) {
         Ok(0) => {}
         Ok(n) => {
             let journals = if n == 1 { "journal" } else { "journals" };
@@ -646,11 +646,11 @@ fn needs(session: &SessionPaths) -> Needs {
     }
 }
 
-/// How many journals salvage has set aside in `audio` as damaged: renamed
+/// How many journals salvage has set aside in `audio` on `fs` as damaged: renamed
 /// to a journal's name with `.unreadable` after it. What salvage could
 /// read of them is published; the rest may hold audio it couldn't.
-fn set_aside(audio: &Path) -> io::Result<usize> {
-    Ok(StdFs
+fn set_aside<S: Fs>(fs: &S, audio: &Path) -> io::Result<usize> {
+    Ok(fs
         .list(audio)?
         .iter()
         .filter_map(|path| path.file_name()?.to_str()?.strip_suffix(".unreadable"))
