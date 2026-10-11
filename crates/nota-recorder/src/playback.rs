@@ -21,15 +21,26 @@
 //!
 //! Playing takes the session's [`SessionLock`] and keeps it until the
 //! [`Playback`] is stopped or dropped. A recording holds that lock, so
-//! playing is refused with [`PlaybackError::Busy`] while one runs, in this
-//! process or another; and a recording or a repair can't start under a
-//! moment that is playing.
+//! playing the session being recorded is refused with
+//! [`PlaybackError::Busy`], in this process or another; and a recording or
+//! a repair can't start under a moment that is playing. The lock is the
+//! session's, so it doesn't see a recording of *another* session: whoever
+//! plays (the card) must not offer it while nota itself is recording.
 //!
 //! # What isn't covered
 //!
 //! Audio that isn't published yet (a journal still waiting for salvage)
-//! isn't played: a moment whose samples aren't all in a published segment is
-//! refused with [`PlaybackError::Missing`], not played with a hole in it.
+//! isn't played. A hole between published segments inside the window is
+//! refused with [`PlaybackError::Missing`], not played as if it were
+//! silence; the window stops at the last published sample, and a time after
+//! it is [`PlaybackError::OutsideRecording`].
+//!
+//! # Threads
+//!
+//! [`play_moment`] reads, hashes and decodes whole segments (up to five
+//! minutes of audio each), and opening the device can wait on the audio
+//! server, so call it off the thread that draws the screen. The sound plays
+//! on cpal's own thread.
 
 use std::fmt;
 use std::io;
@@ -61,8 +72,8 @@ use plan::{Piece, Plan, silent_samples};
 /// Why a moment couldn't be played. The messages are for the card to show.
 #[derive(Debug)]
 pub enum PlaybackError {
-    /// The session is in use: it is being recorded, or repaired, or another
-    /// moment of it is playing. Nothing was read or played.
+    /// The session is in use: it is being recorded or repaired, or a moment
+    /// of it is already playing. Nothing was read or played.
     Busy,
     /// The session's directory couldn't be locked.
     Session(io::Error),
@@ -98,18 +109,16 @@ pub enum PlaybackError {
 impl fmt::Display for PlaybackError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Busy => f.write_str("can't play while the session is being recorded or repaired"),
+            Self::Busy => f.write_str(
+                "can't play now: the session is being recorded or repaired, or already playing",
+            ),
             Self::Session(e) => write!(f, "couldn't open the session to play it: {e}"),
             Self::Store(e) => write!(f, "couldn't read the session from the library: {e}"),
             Self::Timeline(e) => write!(f, "the session's timing is not usable: {e}"),
             Self::NoAudio(track) => write!(f, "track {} has no saved audio", track.get()),
             Self::NotTimed => f.write_str("the session has no timing for this track's audio"),
-            Self::OutsideRecording { at } => {
-                write!(f, "{} ns is outside the recording", at.as_nanos())
-            }
-            Self::Missing { from } => {
-                write!(f, "the audio from sample {} isn't saved yet", from.get())
-            }
+            Self::OutsideRecording { .. } => f.write_str("that time is outside the recording"),
+            Self::Missing { .. } => f.write_str("part of that moment's audio isn't saved"),
             Self::RateChanged => f.write_str("the moment spans audio at different rates"),
             Self::TimeOverflow => f.write_str("the moment's time is out of range"),
             Self::Segment(e) => write!(f, "a saved segment can't be played: {e}"),
@@ -136,7 +145,7 @@ impl std::error::Error for PlaybackError {
 pub enum OutputError {
     /// There is no default output device.
     NoDevice,
-    /// The device's format isn't one the output plays (which).
+    /// The device refused the format the output asks for (why).
     Unsupported(String),
     /// The audio system refused (why).
     Backend(String),
@@ -146,9 +155,7 @@ impl fmt::Display for OutputError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoDevice => f.write_str("there is no output device"),
-            Self::Unsupported(format) => {
-                write!(f, "the output device wants {format}, not supported")
-            }
+            Self::Unsupported(why) => write!(f, "the output device refused the format: {why}"),
             Self::Backend(why) => write!(f, "the audio system refused: {why}"),
         }
     }
@@ -172,8 +179,11 @@ pub trait Output {
 
 /// One moment playing on an [`Output`]; dropping it stops it.
 pub trait OutputStream {
-    /// Whether every sample has been handed to the device, or the device
-    /// has failed: either way, nothing more will be heard.
+    /// Whether the moment has played out, or the device has failed. It
+    /// turns true once the device has asked for more audio after the last
+    /// of it, so the device's own delay (tens of milliseconds) is over or
+    /// nearly. A stream that stalls without an error never turns true, so
+    /// the caller must stop it when it closes.
     fn finished(&self) -> bool;
 }
 
@@ -234,14 +244,15 @@ where
     let timeline = timeline_of(store, session, track)?;
     let plan = plan::plan(&timeline, recorded(&rows, track)?, at)?;
     let samples = assemble(session.fs(), session.dir(), &rows, &plan)?;
+    let length = SampleCount::new(samples.len() as u64)
+        .duration_at(plan.rate)
+        .ok_or(PlaybackError::TimeOverflow)?;
     let stream = output
         .start(&samples, plan.rate)
         .map_err(PlaybackError::Output)?;
     Ok(Playback {
         stream,
-        length: SampleCount::new(samples.len() as u64)
-            .duration_at(plan.rate)
-            .ok_or(PlaybackError::TimeOverflow)?,
+        length,
         _session: lock,
     })
 }

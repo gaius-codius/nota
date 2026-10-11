@@ -40,7 +40,8 @@ pub(super) struct Plan {
 ///
 /// # Errors
 ///
-/// [`PlaybackError::NotTimed`] if the timeline has no epochs;
+/// [`PlaybackError::NotTimed`] if no sample of `recorded` is after the
+/// timeline's first epoch begins;
 /// [`PlaybackError::OutsideRecording`] if `at` isn't within `recorded`;
 /// [`PlaybackError::RateChanged`] if the window meets epochs at different
 /// rates; [`PlaybackError::TimeOverflow`] if a time doesn't fit.
@@ -50,6 +51,11 @@ pub(super) fn plan(
     at: SessionTime,
 ) -> Result<Plan, PlaybackError> {
     let first = timeline.epochs().first().ok_or(PlaybackError::NotTimed)?;
+    // Audio from before the first epoch (journals kept before epochs were)
+    // has no time; the timed part can still be played.
+    let recorded = SampleRange::new(recorded.start().max(first.first_sample()), recorded.end())
+        .filter(|timed| !timed.is_empty())
+        .ok_or(PlaybackError::NotTimed)?;
     let (begins, ends) = timeline
         .span_of(recorded)
         .ok_or(PlaybackError::TimeOverflow)?;

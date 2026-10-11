@@ -12,8 +12,8 @@ use flacenc::component::BitRepr;
 use flacenc::config::Encoder;
 use flacenc::error::Verify;
 use nota_core::{
-    Drift, EpochAnchor, EpochId, SampleIndex, SampleRange, SampleRate, SessionId, SessionTime,
-    TrackId, TrackTimeline,
+    Drift, EpochAnchor, EpochError, EpochId, FakeClock, SampleIndex, SampleRange, SampleRate,
+    SessionId, SessionTime, TrackId, TrackTimeline,
 };
 use nota_store::{NewSession, Sha256Digest};
 use sha2::{Digest, Sha256};
@@ -22,7 +22,8 @@ use super::plan::{Piece, plan};
 use super::*;
 use crate::fs::fake::FakeFs;
 use crate::fs::{Fs, FsFile};
-use crate::segment::segment_file_name;
+use crate::segment::{SegmentLength, segment_file_name};
+use crate::session::SessionWriter;
 use crate::test_dir::TestDir;
 
 const MIC: TrackId = TrackId::new(0);
@@ -146,6 +147,8 @@ struct FakeOutput {
     started: Mutex<Vec<(Vec<i16>, SampleRate)>>,
     /// Set when a stream it made is dropped.
     stopped: Arc<AtomicBool>,
+    /// What its streams answer to `finished`; set by a test.
+    finished: Arc<AtomicBool>,
     /// The error to refuse with, if it should refuse.
     refuse: Option<OutputError>,
 }
@@ -165,6 +168,7 @@ impl FakeOutput {
 #[derive(Debug)]
 struct FakeStream {
     stopped: Arc<AtomicBool>,
+    finished: Arc<AtomicBool>,
 }
 
 impl Drop for FakeStream {
@@ -175,7 +179,7 @@ impl Drop for FakeStream {
 
 impl OutputStream for FakeStream {
     fn finished(&self) -> bool {
-        false
+        self.finished.load(Ordering::Acquire)
     }
 }
 
@@ -189,6 +193,7 @@ impl Output for FakeOutput {
         self.started.lock().unwrap().push((samples.to_vec(), rate));
         Ok(FakeStream {
             stopped: Arc::clone(&self.stopped),
+            finished: Arc::clone(&self.finished),
         })
     }
 }
@@ -338,14 +343,22 @@ fn playing_is_refused_while_a_recording_runs() {
     scene.epoch(MIC, &anchor(0, 0, 0));
     scene.segment(MIC, 0, 0, 10_000);
     let output = FakeOutput::default();
-    let recording = scene.session.lock().unwrap();
+    // The lock is let go at once: it's the writer that holds the session.
+    let clock = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let recording = SessionWriter::open(
+        &scene.session.lock().unwrap(),
+        rate(),
+        SegmentLength::default_at(rate()),
+        clock,
+    )
+    .unwrap();
 
     let refused = scene.play(&output, MIC, 5).unwrap_err();
 
     assert!(matches!(refused, PlaybackError::Busy), "{refused}");
     assert_eq!(
         refused.to_string(),
-        "can't play while the session is being recorded or repaired"
+        "can't play now: the session is being recorded or repaired, or already playing"
     );
     assert!(output.started.lock().unwrap().is_empty());
     // Once the recording is over the same call plays.
@@ -547,4 +560,142 @@ fn a_window_inside_a_long_gap_is_all_silence() {
 
     assert_eq!(planned.rate, rate());
     assert_eq!(planned.pieces, [Piece::Silence(Duration::from_secs(5))]);
+}
+
+/// A moment whose audio stops short of the next epoch (its last journal is
+/// unsalvaged) is refused, not played short with the next epoch's audio
+/// early.
+#[test]
+fn a_hole_at_the_end_of_an_epoch_is_refused_not_played() {
+    let mut scene = Scene::new("trailing-hole");
+    scene.epoch(MIC, &anchor(0, 0, 0));
+    scene.epoch(MIC, &anchor(1, 6, 4_000));
+    scene.segment(MIC, 0, 0, 3_000);
+    scene.segment(MIC, 1, 4_000, 9_000);
+    let output = FakeOutput::default();
+
+    let refused = scene.play(&output, MIC, 5).unwrap_err();
+
+    assert!(
+        matches!(refused, PlaybackError::Missing { from } if from == SampleIndex::new(3_000)),
+        "{refused}"
+    );
+    assert!(output.started.lock().unwrap().is_empty());
+}
+
+/// Audio from before the first epoch has no time, but the timed part after
+/// it plays.
+#[test]
+fn audio_before_the_first_epoch_is_left_out_and_the_rest_plays() {
+    let mut scene = Scene::new("untimed-start");
+    // Samples 0..2,000 came from journals kept before epochs were.
+    scene.epoch(MIC, &anchor(0, 0, 2_000));
+    scene.segment(MIC, 0, 0, 2_000);
+    scene.segment(MIC, 0, 2_000, 8_000);
+
+    // Sample 2,000 plays at 0 s, so 3 s is sample 5,000.
+    assert_eq!(scene.heard(MIC, 3), values(MIC, 2_500, 7_500));
+}
+
+/// When every sample is before the first epoch, nothing can be placed.
+#[test]
+fn audio_that_is_all_before_the_first_epoch_cant_be_placed() {
+    let mut scene = Scene::new("all-untimed");
+    scene.epoch(MIC, &anchor(0, 0, 20_000));
+    scene.segment(MIC, 0, 0, 8_000);
+
+    let refused = scene.play(&FakeOutput::default(), MIC, 3).unwrap_err();
+
+    assert!(matches!(refused, PlaybackError::NotTimed), "{refused}");
+}
+
+/// The playback reports what its output stream reports.
+#[test]
+fn a_playback_is_finished_when_its_stream_is() {
+    let mut scene = Scene::new("finished");
+    scene.epoch(MIC, &anchor(0, 0, 0));
+    scene.segment(MIC, 0, 0, 10_000);
+    let output = FakeOutput::default();
+    let playing = scene.play(&output, MIC, 5).unwrap();
+
+    assert!(!playing.finished());
+    output.finished.store(true, Ordering::Release);
+    assert!(playing.finished());
+}
+
+/// The messages the card shows, one for each way playing can fail.
+#[test]
+fn every_failure_has_a_message_for_the_card() {
+    let io = || io::Error::other("disk");
+    let at = SessionTime::ZERO;
+    let from = SampleIndex::ZERO;
+    for (error, message) in [
+        (
+            PlaybackError::Session(io()),
+            "couldn't open the session to play it: disk",
+        ),
+        (
+            PlaybackError::Store(StoreError::OutOfRange),
+            "couldn't read the session from the library: a number does not fit a 64-bit signed integer",
+        ),
+        (
+            PlaybackError::Timeline(EpochError::TooManyEpochs),
+            "the session's timing is not usable: the track has run out of epoch numbers",
+        ),
+        (PlaybackError::NoAudio(MIC), "track 0 has no saved audio"),
+        (
+            PlaybackError::NotTimed,
+            "the session has no timing for this track's audio",
+        ),
+        (
+            PlaybackError::OutsideRecording { at },
+            "that time is outside the recording",
+        ),
+        (
+            PlaybackError::Missing { from },
+            "part of that moment's audio isn't saved",
+        ),
+        (
+            PlaybackError::RateChanged,
+            "the moment spans audio at different rates",
+        ),
+        (
+            PlaybackError::TimeOverflow,
+            "the moment's time is out of range",
+        ),
+        (
+            PlaybackError::Segment(ReadSegmentError::Hash),
+            "a saved segment can't be played: doesn't match its row's SHA-256",
+        ),
+        (
+            PlaybackError::Output(OutputError::NoDevice),
+            "couldn't play it: there is no output device",
+        ),
+    ] {
+        assert_eq!(error.to_string(), message);
+    }
+    assert_eq!(
+        OutputError::Unsupported("f64".into()).to_string(),
+        "the output device refused the format: f64"
+    );
+    assert_eq!(
+        OutputError::Backend("busy".into()).to_string(),
+        "the audio system refused: busy"
+    );
+}
+
+/// An error that wraps another gives it back as its source, so the cause
+/// isn't lost; one that wraps nothing gives none.
+#[test]
+fn errors_keep_their_cause() {
+    let has_source = |error: PlaybackError| std::error::Error::source(&error).is_some();
+    assert!(has_source(PlaybackError::Session(io::Error::other("disk"))));
+    assert!(has_source(PlaybackError::Store(StoreError::OutOfRange)));
+    assert!(has_source(PlaybackError::Timeline(
+        EpochError::TooManyEpochs
+    )));
+    assert!(has_source(PlaybackError::Segment(ReadSegmentError::Hash)));
+    assert!(has_source(PlaybackError::Output(OutputError::NoDevice)));
+    assert!(!has_source(PlaybackError::Busy));
+    assert!(!has_source(PlaybackError::NotTimed));
 }

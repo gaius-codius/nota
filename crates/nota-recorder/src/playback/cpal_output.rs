@@ -1,19 +1,20 @@
 //! Playing through cpal, on the default output device of the host nota
 //! records through.
 //!
-//! The whole moment is turned into the device's rate, as `f32`, before the
-//! stream starts (a few seconds of audio), so the stream's callback only
-//! copies: it fills each frame of every channel with the next sample, and
-//! with silence once they run out. The device's own format is used, as its
-//! default output config gives it; the default device and its volume are
-//! never changed.
+//! The whole moment is turned into the device's default rate, as `f32`,
+//! before the stream starts (a few seconds of audio), so the stream's
+//! callback only copies: it fills each frame of every channel with the next
+//! sample, and with silence once they run out. The stream asks for `f32`
+//! whatever format the device prefers: the audio server (or ALSA's `default`
+//! device) converts. The default device and its volume are never changed.
 
+use std::any::Any;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{ErrorKind, FromSample, HostId, SampleFormat, SizedSample, StreamConfig};
+use cpal::{ErrorKind, HostId, StreamConfig};
 use nota_core::SampleRate;
 
 use super::{Output, OutputError, OutputStream};
@@ -42,17 +43,14 @@ impl CpalOutput {
 }
 
 /// A moment playing on the device. The sound stops when it drops.
+#[derive(Debug)]
 pub struct CpalStream {
-    /// Held so the stream runs until this is dropped.
-    _stream: cpal::Stream,
-    /// Set once the callback has run out of samples, or the device failed.
+    /// The cpal stream, held so it runs until this is dropped. Boxed as
+    /// `Any` because cpal's stream has no `Debug` of its own.
+    _stream: Box<dyn Any>,
+    /// Set once the callback has been asked for audio after the last of
+    /// it, or the device failed.
     finished: Arc<AtomicBool>,
-}
-
-impl std::fmt::Debug for CpalStream {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("CpalStream")
-    }
 }
 
 impl OutputStream for CpalStream {
@@ -67,20 +65,16 @@ impl Output for CpalOutput {
     fn start(&self, samples: &[i16], rate: SampleRate) -> Result<CpalStream, OutputError> {
         let host = cpal::host_from_id(host_id(self.host)).map_err(|e| output_error(&e))?;
         let device = host.default_output_device().ok_or(OutputError::NoDevice)?;
-        let supported = device
+        let config = device
             .default_output_config()
-            .map_err(|e| output_error(&e))?;
-        let config = supported.config();
+            .map_err(|e| output_error(&e))?
+            .config();
         let frames = resample(samples, rate.hz(), config.sample_rate);
         let finished = Arc::new(AtomicBool::new(false));
-        let stream = match supported.sample_format() {
-            SampleFormat::F32 => open::<f32>(&device, config, frames, &finished)?,
-            SampleFormat::I16 => open::<i16>(&device, config, frames, &finished)?,
-            other => return Err(OutputError::Unsupported(other.to_string())),
-        };
+        let stream = open(&device, config, frames, &finished)?;
         stream.play().map_err(|e| output_error(&e))?;
         Ok(CpalStream {
-            _stream: stream,
+            _stream: Box::new(stream),
             finished,
         })
     }
@@ -95,27 +89,24 @@ const fn host_id(host: Host) -> HostId {
     }
 }
 
-/// Builds the stream on `device` that plays `frames` (one `f32` per frame,
+/// Builds the stream on `device` that plays `frames` (one value per frame,
 /// at `config`'s rate) on every channel, then silence, and sets `finished`
-/// when they run out or the device fails.
-fn open<T>(
+/// once a buffer comes with nothing left to play, or the device fails.
+fn open(
     device: &cpal::Device,
     config: StreamConfig,
     frames: Vec<f32>,
     finished: &Arc<AtomicBool>,
-) -> Result<cpal::Stream, OutputError>
-where
-    T: SizedSample + FromSample<f32>,
-{
+) -> Result<cpal::Stream, OutputError> {
     let channels = usize::from(config.channels).max(1);
     let mut frames = frames.into_iter();
     let done = Arc::clone(finished);
     let failed = Arc::clone(finished);
     device
-        .build_output_stream::<T, _, _>(
+        .build_output_stream::<f32, _, _>(
             config,
-            move |out: &mut [T], _: &cpal::OutputCallbackInfo| {
-                if fill(out, channels, &mut frames) {
+            move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                if nothing_left(out, channels, &mut frames) {
                     done.store(true, Ordering::Release);
                 }
             },
@@ -129,19 +120,19 @@ where
         .map_err(|e| output_error(&e))
 }
 
-/// Fills `out`, `channels` samples to a frame, from `frames`, one value to a
-/// frame, and with silence once there are none; true if they ran out.
-fn fill<T>(out: &mut [T], channels: usize, frames: &mut impl Iterator<Item = f32>) -> bool
-where
-    T: SizedSample + FromSample<f32>,
-{
-    let mut ran_out = false;
+/// Fills `out`, `channels` values to a frame, from `frames`, one value to a
+/// frame, and with silence once there are none. True if no frame of this
+/// buffer came from `frames`: the buffers before it have taken everything,
+/// so the sound is on its way out. (Reporting the buffer that takes the
+/// last frame would let a caller cut the end off.)
+fn nothing_left(out: &mut [f32], channels: usize, frames: &mut impl Iterator<Item = f32>) -> bool {
+    let mut played = false;
     for frame in out.chunks_mut(channels) {
         let value = frames.next();
-        ran_out |= value.is_none();
-        frame.fill(T::from_sample(value.unwrap_or(0.0)));
+        played |= value.is_some();
+        frame.fill(value.unwrap_or(0.0));
     }
-    ran_out
+    !played && !out.is_empty()
 }
 
 /// `samples` at `from` Hz as `f32` in -1..1 at `to` Hz, each new sample
@@ -149,10 +140,12 @@ where
 fn resample(samples: &[i16], from: u32, to: u32) -> Vec<f32> {
     let (from, to) = (i64::from(from.max(1)), i64::from(to.max(1)));
     let count = i64::try_from(samples.len()).unwrap_or(i64::MAX);
+    // Past the last sample the last one holds, so the end doesn't fade.
     let pick = |i: i64| {
-        usize::try_from(i)
-            .ok()
-            .and_then(|i| samples.get(i))
+        let at = usize::try_from(i).unwrap_or(usize::MAX);
+        samples
+            .get(at)
+            .or(samples.last())
             .map_or(0, |&s| i64::from(s))
     };
     (0..count * to / from)
@@ -193,11 +186,12 @@ fn output_error(error: &cpal::Error) -> OutputError {
 mod tests {
     use super::*;
 
-    /// Doubling the rate puts the average of two neighbours between them.
+    /// Doubling the rate puts the average of two neighbours between them,
+    /// and the last sample holds.
     #[test]
     fn resampling_up_interpolates_between_neighbours() {
         let out = resample(&[0, 16_384, -16_384], 1, 2);
-        assert_eq!(out, [0.0, 0.25, 0.5, 0.0, -0.5, -0.25]);
+        assert_eq!(out, [0.0, 0.25, 0.5, 0.0, -0.5, -0.5]);
     }
 
     /// The same rate gives the samples back, scaled.
@@ -213,23 +207,41 @@ mod tests {
         assert_eq!(resample(&[1; 100], 16_000, 48_000).len(), 300);
     }
 
-    /// Every channel of a frame gets the same value, and silence follows
-    /// the last one; the ending is reported once the frames ran out.
+    /// Going down takes every other sample at half the rate.
     #[test]
-    fn filling_copies_a_frame_to_every_channel_then_goes_quiet() {
-        let mut out = [9_i16; 8];
-        let mut frames = [0.5_f32, -0.5].into_iter();
-        assert!(fill(&mut out, 2, &mut frames));
-        assert_eq!(out, [16_384, 16_384, -16_384, -16_384, 0, 0, 0, 0]);
+    fn resampling_down_keeps_the_samples_that_line_up() {
+        let out = resample(&[0, 8_192, 16_384, 24_576], 2, 1);
+        assert_eq!(out, [0.0, 0.5]);
     }
 
-    /// A buffer the frames fill exactly hasn't run out yet.
+    /// Every channel of a frame gets the same value, and silence follows
+    /// the last one; a buffer that held a frame isn't the one that reports
+    /// the end.
     #[test]
-    fn filling_a_buffer_exactly_doesnt_report_the_end() {
-        let mut out = [9_i16; 3];
-        let mut frames = [0.25_f32, 0.5, -0.25].into_iter();
-        assert!(!fill(&mut out, 1, &mut frames));
-        assert_eq!(out, [8_192, 16_384, -8_192]);
+    fn filling_copies_a_frame_to_every_channel_then_goes_quiet() {
+        let mut out = [9.0_f32; 8];
+        let mut frames = [0.5_f32, -0.5].into_iter();
+        assert!(!nothing_left(&mut out, 2, &mut frames));
+        assert_eq!(out.to_vec(), [0.5, 0.5, -0.5, -0.5, 0.0, 0.0, 0.0, 0.0]);
+    }
+
+    /// The buffer after the last frame is the one that reports the end, so
+    /// a caller that stops on it doesn't cut the sound off.
+    #[test]
+    fn the_end_is_reported_by_the_buffer_after_the_last_frame() {
+        let mut frames = [0.25_f32, 0.5].into_iter();
+        let mut out = [9.0_f32; 2];
+        assert!(!nothing_left(&mut out, 1, &mut frames));
+        assert_eq!(out.to_vec(), [0.25, 0.5]);
+        assert!(nothing_left(&mut out, 1, &mut frames));
+        assert_eq!(out.to_vec(), [0.0, 0.0]);
+    }
+
+    /// A buffer with no room in it says nothing about the end.
+    #[test]
+    fn an_empty_buffer_doesnt_report_the_end() {
+        let mut frames = std::iter::empty();
+        assert!(!nothing_left(&mut [], 2, &mut frames));
     }
 
     /// The warnings a stream reports while it runs don't end the moment; a
@@ -249,13 +261,39 @@ mod tests {
         assert!(ends_playback(ErrorKind::DeviceNotAvailable));
     }
 
-    /// With a server and a device the moment starts and ends; without one,
-    /// it says why. (CI has none; the development machine has both.)
+    /// Each of nota's hosts is cpal's own.
     #[test]
-    fn the_default_output_plays_or_says_why_not() {
-        match CpalOutput::detect().start(&[0; 160], SampleRate::SPEECH) {
-            Ok(stream) => drop(stream),
-            Err(OutputError::NoDevice | OutputError::Backend(_) | OutputError::Unsupported(_)) => {}
-        }
+    fn every_host_maps_to_its_cpal_host() {
+        assert_eq!(host_id(Host::PipeWire), HostId::PipeWire);
+        assert_eq!(host_id(Host::PulseAudio), HostId::PulseAudio);
+        assert_eq!(host_id(Host::Alsa), HostId::Alsa);
+    }
+
+    /// cpal's errors become the reason a card can show.
+    #[test]
+    fn cpal_errors_become_output_errors() {
+        let error = |kind| output_error(&cpal::Error::with_message(kind, "detail"));
+        assert_eq!(error(ErrorKind::DeviceNotAvailable), OutputError::NoDevice);
+        assert_eq!(
+            error(ErrorKind::UnsupportedConfig),
+            OutputError::Unsupported("detail".into())
+        );
+        assert!(matches!(
+            error(ErrorKind::DeviceBusy),
+            OutputError::Backend(_)
+        ));
+    }
+
+    /// The stream says it has finished once its flag is set.
+    #[test]
+    fn a_stream_reports_the_flag_it_shares_with_its_callback() {
+        let finished = Arc::new(AtomicBool::new(false));
+        let stream = CpalStream {
+            _stream: Box::new(()),
+            finished: Arc::clone(&finished),
+        };
+        assert!(!stream.finished());
+        finished.store(true, Ordering::Release);
+        assert!(stream.finished());
     }
 }

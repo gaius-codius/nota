@@ -24,7 +24,8 @@
 //! On Linux, capture goes through cpal, which links `libpipewire-0.3`,
 //! `libasound` and `libdbus-1` (to ask rtkit for real-time priority)
 //! dynamically, and thread-priority, which sets the stream thread's
-//! scheduling through libc. Playback goes through the same cpal build. Building needs their headers, `pkg-config` and
+//! scheduling through libc. Playback goes through the same cpal build.
+//! Building needs their headers, `pkg-config` and
 //! libclang (for bindgen); [`capture`] lists the packages. Elsewhere the
 //! crate builds without them and records nothing yet. `SQLite` comes bundled
 //! through `nota-store`.
