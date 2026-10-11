@@ -432,6 +432,42 @@ fn a_mapping_behind_slews_then_lands_on_the_measured_drift() {
     assert!(mapped.abs_diff(settled) < 100_000, "{mapped} {settled}");
 }
 
+/// A correction is replaced once the stream strays more than
+/// [`RETIME_AFTER`] from the path it should close along, not left to run
+/// its course on the estimate it was opened with.
+#[test]
+fn a_correction_left_behind_is_replaced() {
+    // The timeline is never retimed, so the mapping keeps the 5 ms it fell
+    // behind while the correction expects it to close.
+    let timeline = epoch_at(Drift::ZERO);
+    let mut meter = DriftMeter::new();
+    settle_run(&mut meter, &timeline);
+    // 2.5 ms behind at 15 s, then 5 ms at 20 s: a slide, not a loss.
+    read(
+        &mut meter,
+        &timeline,
+        SETTLED + 80_000,
+        SETTLED_AT + 5_002_500_000,
+    );
+    let first = SETTLED + 160_000;
+    let opened = read(&mut meter, &timeline, first, SETTLED_AT + 10_005_000_000);
+    assert!(matches!(opened, Reading::Retime(_)), "{opened:?}");
+    // 48 s into the 60 s correction it should have closed 4 ms of the 5:
+    // still 5 ms behind is exactly the limit off its path, and left.
+    let at = |n: u64| n * 62_500 + 5_000_000;
+    let limit = first + 768_000;
+    assert_eq!(
+        read(&mut meter, &timeline, limit, at(limit)),
+        Reading::Steady
+    );
+    // A buffer later it's past the limit: a new correction closes the 5 ms
+    // again, 83,333 ppb over the drift measured by now.
+    let past = limit + 1_600;
+    let reading = read(&mut meter, &timeline, past, at(past));
+    let measured = meter.measured().unwrap().ppb();
+    assert_eq!(reading, Reading::Retime(Drift(measured - 83_333)));
+}
+
 /// A mapping ahead of the stream is slewed the other way.
 #[test]
 fn a_mapping_ahead_slews_at_a_higher_drift() {
@@ -773,6 +809,16 @@ fn jittered_timestamps_stay_within_20_ms() {
         assert!(run.worst < WITHIN, "{drift}: {:?}", run.worst);
         assert!(run.epochs < 20, "{drift}: {} epochs", run.epochs);
     }
+}
+
+/// A correction opened on an estimate jitter has put out by more than it
+/// closes is replaced once the mapping strays from it, rather than left to
+/// run its course: 751.6 ppm with up to 0.97 ms of jitter, whose first
+/// estimate was about 80 ppm low, reached 20 ms over the minute it ran.
+#[test]
+fn a_correction_that_strays_is_corrected() {
+    let run = simulate(751_569, Duration::from_secs(3_600), 1_600, jitter(967_846));
+    assert!(run.worst < Duration::from_millis(18), "{:?}", run.worst); // check-bound
 }
 
 fn any_rate() -> impl Strategy<Value = SampleRate> {
