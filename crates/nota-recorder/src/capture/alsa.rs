@@ -52,6 +52,14 @@ fn input_for(source: &Source) -> Input<'_> {
     }
 }
 
+/// What a stream on `name` says at its start: ALSA never reports changes
+/// of a device, so none is watched.
+fn not_reported(source: &Source, name: &str) -> CaptureNotice {
+    CaptureNotice::NotWatching(format!(
+        "ALSA: {source} records {name}, and device changes aren't reported"
+    ))
+}
+
 impl CaptureBackend for AlsaBackend {
     type Stream = PlainStream;
 
@@ -104,9 +112,7 @@ impl CaptureBackend for AlsaBackend {
         )?;
         // Said once the stream runs: a start that fails says nothing of a
         // watch.
-        told.notice(CaptureNotice::NotWatching(format!(
-            "ALSA: {source} records {name}, and device changes aren't reported"
-        )));
+        told.notice(not_reported(source, name));
         Ok(stream)
     }
 }
@@ -129,6 +135,18 @@ mod tests {
         assert_eq!(
             input_for(&Source::Device("hw:1,0".to_owned())),
             Input::Named("hw:1,0")
+        );
+    }
+
+    /// ALSA says it never watches as a host that never watches, not as a
+    /// watch lost (which would stand for the whole recording).
+    #[test]
+    fn alsa_says_the_host_never_watches() {
+        assert_eq!(
+            not_reported(&Source::Microphone, DEFAULT_INPUT),
+            CaptureNotice::NotWatching(
+                "ALSA: the microphone records default, and device changes aren't reported".into()
+            )
         );
     }
 

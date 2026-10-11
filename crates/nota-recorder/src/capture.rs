@@ -360,10 +360,11 @@ pub enum CaptureNotice {
     /// measured. Reported once per track, by the recorder rather than the
     /// stream.
     Drifted(Drift),
-    /// Changes of the stream's device were being watched, and aren't, for
-    /// this reason: the `PipeWire` watch couldn't start or lost its
-    /// connection. The stream records on, but a default that changes, or a
-    /// device that goes, may pass unannounced.
+    /// nota's watch of the stream's device isn't running, for this reason:
+    /// the `PipeWire` watch couldn't start or lost its connection. It is a
+    /// fault on a host that should watch, so the screen keeps it for the
+    /// rest of the recording. The stream records on, but a default that
+    /// changes, or a device that goes, may pass unannounced.
     Unwatched(String),
     /// This host never watches changes of the stream's device, for this
     /// reason: the `PulseAudio` stream doesn't follow the default, and ALSA

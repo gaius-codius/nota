@@ -442,6 +442,28 @@ fn a_host_that_never_watches_says_so_for_ten_seconds() {
     assert_eq!(warnings.changes(), [secs(1)]);
 }
 
+/// Tracks that start together share the one event, each named, rather than
+/// the last replacing the first; one that says so after the event has gone
+/// has an event of its own.
+#[test]
+fn tracks_that_start_together_share_the_never_watching_event() {
+    let mut warnings = two_tracks();
+    let cause = || Cause::DevicesNotWatched("doesn't follow the default".into());
+    raise(&mut warnings, cause(), Some(MIC), 1);
+    raise(&mut warnings, cause(), Some(SYSTEM), 1);
+    assert_eq!(
+        warnings.top(secs(2)),
+        Some(shown("⚠ mic, system: devices unwatched", Tone::Gold, 0))
+    );
+    assert_eq!(warnings.changes(), [secs(1), secs(1)]);
+    // Long after, the news has gone; a track saying it later starts anew.
+    raise(&mut warnings, cause(), Some(SYSTEM), 600);
+    assert_eq!(
+        warnings.top(secs(601)),
+        Some(shown("⚠ system: devices unwatched", Tone::Gold, 0))
+    );
+}
+
 /// A watch lost after the host said it never watched is still a
 /// condition: it holds for the rest of the recording.
 #[test]

@@ -69,7 +69,7 @@ pub(super) fn open(
             move |samples: &[i16], _: &cpal::InputCallbackInfo| events.audio(samples),
             // No thread of ours to promote here, so rtkit's refusal (which
             // the `PipeWire` stream ignores after a direct promotion) is
-            // always a warning.
+            // always noted.
             move |error: cpal::Error| match stream_error(&failed_source, &error, false) {
                 Some(Ok(notice)) => errors.notice(notice),
                 Some(Err(failure)) => errors.failed(failure),

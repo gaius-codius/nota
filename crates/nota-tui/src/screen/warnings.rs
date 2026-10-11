@@ -89,10 +89,11 @@ pub(crate) enum Happening {
     /// The track's capture backend reported something that doesn't stop
     /// it. The backend's words go to the timeline, not the screen.
     Warned(TrackId),
-    /// The track's host never watches changes of its device, said as the
-    /// recording starts. A watch lost mid-recording is a
-    /// [`Condition::Unwatched`] instead.
-    NotWatching(TrackId),
+    /// The tracks whose host never watches changes of their device, said
+    /// as the recording starts: tracks that start together share one
+    /// event. A watch lost mid-recording is a [`Condition::Unwatched`]
+    /// instead.
+    NotWatching(Vec<TrackId>),
     /// The machine slept, for as long as the gap after it, once one comes.
     Slept {
         /// When it woke: the warning's time.
@@ -263,7 +264,7 @@ impl Warnings {
                 self.changes_at(warning.at);
             }
             (Cause::DevicesNotWatched(_), Some(track)) if raised => {
-                self.happening = Some((Happening::NotWatching(track), now));
+                self.not_watching(track, now);
                 self.changes_at(warning.at);
             }
             (Cause::CaptureWarning(_), Some(track)) if raised => {
@@ -287,6 +288,21 @@ impl Warnings {
             // track's causes without a track, or clears that never come.
             _ => {}
         }
+    }
+
+    /// Shows that `track`'s host never watches its device, got at `now`:
+    /// with the tracks that said so a moment ago, still showing, rather
+    /// than in place of them.
+    fn not_watching(&mut self, track: TrackId, now: SessionTime) {
+        if let Some((Happening::NotWatching(tracks), at)) = &mut self.happening
+            && shows_at(*at, now)
+        {
+            if !tracks.contains(&track) {
+                tracks.push(track);
+            }
+            return;
+        }
+        self.happening = Some((Happening::NotWatching(vec![track]), now));
     }
 
     /// Applies a change to `track`'s device, noticed at `at` and got at
@@ -459,10 +475,13 @@ impl Warnings {
             Happening::Route(id, name) => (format!("↪ {}: {name}", self.name(*id)), Tone::Plain),
             Happening::Back(id) => (format!("✓ {} back", self.name(*id)), Tone::Good),
             Happening::Warned(id) => (format!("⚠ {}: capture warning", self.name(*id)), Tone::Gold),
-            Happening::NotWatching(id) => (
-                format!("⚠ {}: devices unwatched", self.name(*id)),
-                Tone::Gold,
-            ),
+            Happening::NotWatching(ids) => {
+                let names: Vec<String> = ids.iter().map(|&id| self.name(id)).collect();
+                (
+                    format!("⚠ {}: devices unwatched", names.join(", ")),
+                    Tone::Gold,
+                )
+            }
             Happening::Slept {
                 lasted: Some(lasted),
                 ..

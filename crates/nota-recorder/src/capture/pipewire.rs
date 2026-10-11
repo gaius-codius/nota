@@ -257,7 +257,9 @@ pub(super) fn stream_error(
 /// What cpal's message says when it can't bind `PipeWire`'s metadata for its
 /// own default-device monitor. cpal gives the failure no kind of its own
 /// (it is a [`ErrorKind::BackendError`]), so its words are the only way to
-/// tell it from a backend error that matters.
+/// tell it from a backend error that matters. The words are cpal 0.18.2's
+/// (`host/pipewire/stream.rs`): check them when cpal is updated, or the
+/// failure shows as a capture warning again.
 const MONITOR_FAILURE: &str = "device change notifications may be incomplete";
 
 /// Whether `error` is cpal's own default-device monitor failing to start.

@@ -889,9 +889,10 @@ fn spawn_recorder(
 /// What the summary says of a notice from `track`'s stream, if it's a
 /// warning: the unwatched device's text says what it is, and a backend's
 /// is given its place. A host that never watches and a note the listener
-/// can't act on are here too, since the screen doesn't keep them. The audio server's words are written to the
-/// terminal, so their control characters are left out; the timeline keeps
-/// them as they came.
+/// can't act on are here too, since the screen keeps neither for the rest
+/// of the recording. The audio server's words are written to the terminal,
+/// so their control characters are left out; the timeline keeps them as
+/// they came.
 fn capture_warning(track: Option<TrackId>, notice: &CaptureNotice) -> Option<String> {
     let plain = |why: &str| why.chars().filter(|c| !c.is_control()).collect::<String>();
     match notice {
