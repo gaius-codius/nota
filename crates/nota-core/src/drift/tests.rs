@@ -865,7 +865,8 @@ fn small_losses_under_a_correction_still_read_as_lost() {
 /// The most drift either way, in parts per billion, that a recording is
 /// held to 20 ms at: 500 ppm, five times a poor USB device's and past
 /// [`DRIFT_LIMIT`], where the device is reported as suspect. With a
-/// millisecond of jitter, one-hour runs reach at most 11.1 ms within it.
+/// millisecond of jitter, 20,000 random one-hour runs within it reached at
+/// most 12.8 ms.
 /// Beyond about 750 ppm, jitter at a first estimate's end stamps can take
 /// one past 20 ms ([`a_drift_past_any_steady_drift_can_pass_20_ms`]).
 const ANY_STEADY_DRIFT: i64 = 500_000; // check-bound
