@@ -1694,7 +1694,8 @@ fn record_audio<S: Fs>(
 /// reported, once.
 ///
 /// A [`SessionError::Journal`] or [`SessionError::Marks`] from ending the
-/// old epoch's journal comes back with the track moved all the same.
+/// old epoch's journal, or marking the new one, comes back with the track
+/// moved all the same.
 fn time_buffer<S: Fs>(
     writer: &mut SessionWriter<S>,
     timeline: &mut TrackTimeline,
@@ -1860,7 +1861,8 @@ fn open_for_held<S: Fs>(
 /// with the track left in its epoch.
 ///
 /// A [`SessionError::Journal`] or [`SessionError::Marks`] from ending the
-/// old epoch's journal comes back with the track moved all the same.
+/// old epoch's journal, or marking the new one, comes back with the track
+/// moved all the same.
 fn open_epoch_after_loss<S: Fs>(
     writer: &mut SessionWriter<S>,
     timeline: &mut TrackTimeline,

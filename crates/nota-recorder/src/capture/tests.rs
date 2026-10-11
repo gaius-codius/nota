@@ -2034,6 +2034,74 @@ fn a_stop_inside_a_burst_still_shows_its_losses() {
     assert_eq!(journaled(&fs, &journals), samples(0, 250));
 }
 
+/// `MIC`'s timeline as the session's directory keeps it once `journals`
+/// are finished: each journal's epoch, from its header, and the newest
+/// epoch the marks keep, which a writer reopening the session carries on
+/// from.
+fn timeline_on_disk(fs: &FakeFs, journals: &[FinishedJournal]) -> TrackTimeline {
+    let mut anchors: BTreeMap<EpochId, nota_core::EpochAnchor> = journals
+        .iter()
+        .filter_map(|j| {
+            let bytes = fs.read(&dir().join(j.id().file_name())).unwrap();
+            read_journal(&bytes)
+                .header()
+                .and_then(crate::journal::JournalHeader::anchor)
+        })
+        .map(|anchor| (anchor.id, anchor))
+        .collect();
+    let lock = SessionDir::new(SESSION, fs.clone(), &dir()).lock().unwrap();
+    let length = SegmentLength::new(SampleCount::new(1_000)).unwrap();
+    let writer =
+        SessionWriter::open(&lock, rate(), length, Arc::new(FakeClock::default())).unwrap();
+    for epoch in writer.resumed_timeline(MIC).unwrap().epochs() {
+        anchors.insert(epoch.id(), epoch.anchor());
+    }
+    TrackTimeline::rebuild(MIC, anchors.into_values()).unwrap()
+}
+
+/// The epoch a stop inside a burst opens, with no audio after it, is kept
+/// on disk: the timeline rebuilt from the journals and the marks has it,
+/// and the held losses' gap before it.
+#[test]
+fn a_stop_inside_a_burst_keeps_its_gap_on_disk() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let mut buffers = Buffers::new();
+    buffers.on_time();
+    buffers.on_time();
+    for _ in 0..3 {
+        buffers.lose(30);
+        buffers.on_time();
+    }
+    let run = run(&fs, buffers.script.clone(), Vec::new(), |_| {});
+    run.result.unwrap();
+    let journals = all_journals(run.writer, &run.reported);
+    assert_burst_shows_at_the_end(&timeline_on_disk(&fs, &journals));
+}
+
+/// So is an unstamped stream's overrun epoch just before a stop: the gap
+/// from the end of its audio to the overrun is kept on disk.
+#[test]
+fn an_overrun_just_before_a_stop_keeps_its_gap_on_disk() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let script = vec![
+        Step::Audio(samples(0, 500)),
+        Step::Advance(secs(2)),
+        Step::Notice(CaptureNotice::Overrun),
+    ];
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    let journals = all_journals(run.writer, &run.reported);
+    let on_disk = timeline_on_disk(&fs, &journals);
+    assert_eq!(
+        epoch_starts(&on_disk),
+        [(0, SessionTime::ZERO, 0), (1, at(2), 500)]
+    );
+    assert_eq!(
+        gap_spans(&on_disk),
+        [(SessionTime::from_nanos(500_000_000), at(2))]
+    );
+}
+
 /// So does a channel whose senders all go without the stream's end: the
 /// held losses reach the timeline before recording returns.
 #[test]
