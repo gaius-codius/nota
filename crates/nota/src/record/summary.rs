@@ -11,7 +11,7 @@ use std::thread;
 pub(crate) use nota_core::recorder::Outcome;
 use nota_core::recorder::{Command, Track};
 use nota_core::{Clock, TrackId};
-use nota_recorder::segment::PublishReport;
+use nota_recorder::segment::{PublishReport, PublisherPanicked};
 use nota_store::Annotation;
 use nota_tui::{Ended, Event, InputThread, Recording, RunError, Theme};
 
@@ -221,6 +221,45 @@ pub(super) fn note_published(outcome: &mut Outcome, report: &PublishReport) {
              {names} {are} kept, and what read before the damage was published"
         ));
     }
+}
+
+/// What the stop left for the next start, as short phrases for the stopped
+/// screen to say beside how far the recording is saved; none if
+/// everything was published. `lost_writer` is the recorder having
+/// panicked, which leaves its journals unseen, and `published` is how
+/// publishing went.
+pub(super) fn unfinished(
+    published: &Result<PublishReport, PublisherPanicked>,
+    lost_writer: bool,
+) -> Vec<String> {
+    let mut phrases = Vec::new();
+    match published {
+        Ok(report) => {
+            let left = report.left().len();
+            if lost_writer {
+                phrases.push("the last journals kept for the next start".to_owned());
+            } else if left > 0 {
+                phrases.push(format!(
+                    "{} kept for the next start",
+                    plural(left, "journal", "journals")
+                ));
+            }
+            let damaged = report.set_aside().len();
+            if damaged > 0 {
+                phrases.push(format!(
+                    "{} kept",
+                    plural(damaged, "damaged journal", "damaged journals")
+                ));
+            }
+        }
+        Err(_) => phrases.push("the last journals kept for the next start".to_owned()),
+    }
+    phrases
+}
+
+/// `n` of something: "1 journal", "2 journals".
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 /// Names the files a publish or salvage run couldn't use or clean up, each
@@ -567,6 +606,11 @@ pub(super) mod tests {
 
         let mut outcome = Outcome::new(SessionId::new(1), PathBuf::new());
         note_published(&mut outcome, &report);
+        assert_eq!(
+            unfinished(&Ok(report), false),
+            ["1 damaged journal kept"],
+            "the stopped screen says what the summary does"
+        );
         assert!(!outcome.complete);
         assert_eq!(outcome.segments, 1);
         assert_eq!(
@@ -827,11 +871,31 @@ pub(super) mod tests {
                 }
             };
             let held_back = beside != Beside::StrayTemp;
+            let kept: &[&str] = if held_back {
+                &["1 journal kept for the next start"]
+            } else {
+                &[]
+            };
+            assert_eq!(unfinished(&Ok(report), false), kept, "{beside:?}");
             let expected_left: &[&str] = if held_back { &["journal-000001"] } else { &[] };
             assert_eq!(unpublished, expected_left, "{beside:?}");
             assert_eq!(outcome.notes, expected, "{beside:?}");
             assert_eq!(outcome.complete, !held_back, "{beside:?}");
         }
+    }
+
+    /// A recorder that panicked, or a publisher that did, leaves its last
+    /// journals for the next start without saying how many; a recording
+    /// published whole leaves nothing.
+    #[test]
+    fn a_lost_writer_or_publisher_leaves_the_last_journals() {
+        use crate::library::held::{Beside, Held};
+        let kept = ["the last journals kept for the next start"];
+        assert_eq!(unfinished(&Err(PublisherPanicked), false), kept);
+        let report = Held::new(Beside::Blocked).published();
+        assert_eq!(unfinished(&Ok(report), true), kept);
+        let whole = Held::new(Beside::StrayTemp).published();
+        assert!(unfinished(&Ok(whole), false).is_empty());
     }
 
     /// Cleanup of one journal must not hide another journal's pending repair.

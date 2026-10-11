@@ -812,6 +812,25 @@ fn a_check_that_fails_is_reported_once_and_recording_goes_on() {
     assert_eq!(summary.full, None);
 }
 
+/// The summary says whether the recording started with no ballast: the
+/// one an earlier recording left is found, and none found is said.
+#[test]
+fn the_summary_says_whether_the_recording_started_without_a_ballast() {
+    for (made, without) in [(true, false), (false, true)] {
+        let fs = FakeFs::with_dirs(["/data/s"]);
+        if made {
+            Ballast::keep(&fs, &p("/data"), 100, || false)
+                .unwrap()
+                .unwrap();
+        }
+        let watch = DiskWatch::new(fs);
+        let (monitor, reports) = spawn_monitor(&watch, config(small(1), 100, WAIT));
+        assert_eq!(until_ballast(&reports).1, made);
+        let summary = monitor.stop().unwrap();
+        assert_eq!(summary.started_without_ballast, without);
+    }
+}
+
 #[test]
 fn a_dropped_monitor_stops_its_thread() {
     let fs = FakeFs::with_dirs(["/data/s"]);

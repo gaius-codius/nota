@@ -57,6 +57,9 @@ pub struct Recording {
     /// What the top border warns about, the changes the band marks, and
     /// the sources' names as route changes leave them.
     pub(crate) warnings: Warnings,
+    /// What the stop left unfinished, once it's known: shown on the stopped
+    /// screen in place of "everything is saved".
+    pub(crate) unfinished: Vec<String>,
 }
 
 /// How far stopping has gone.
@@ -104,6 +107,7 @@ impl Recording {
             draft: None,
             stop: Stop::No,
             warnings: Warnings::default(),
+            unfinished: Vec::new(),
         }
     }
 
@@ -347,6 +351,14 @@ impl Recording {
     #[must_use]
     pub const fn stopped_by_full_disk(&self) -> Option<SessionTime> {
         self.warnings.stopped_by_full_disk()
+    }
+
+    /// Tells a stopped screen what the stop left unfinished (journals kept
+    /// for the next start, say), one short phrase each. The screen says so
+    /// beside how far the recording is saved; with none, it says
+    /// everything up to then is.
+    pub fn set_unfinished(&mut self, unfinished: Vec<String>) {
+        self.unfinished = unfinished;
     }
 
     /// Whether a note is being typed.

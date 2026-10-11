@@ -342,7 +342,7 @@ fn record_with<B: CaptureBackend>(
     // `nota record` restores the terminal before stopping (and says in
     // its summary if a full disk stopped it); the app keeps it, and shows
     // that the recording is stopping.
-    let returned = match (screen, stopping) {
+    let mut returned = match (screen, stopping) {
         (Some(mut screen), Some(stopping)) => {
             stopping(&mut screen);
             Some(Returned {
@@ -354,8 +354,23 @@ fn record_with<B: CaptureBackend>(
     };
 
     // Recorded, whatever stopping says: anything that went wrong is a
-    // note on the outcome.
-    Ok((stop::stop(started, shown), returned))
+    // note on the outcome. The stopped screen says what the stop left
+    // unfinished.
+    let (outcome, unfinished) = stop::stop(started, shown);
+    if let Some(returned) = &mut returned {
+        returned.say_unfinished(unfinished);
+    }
+    Ok((outcome, returned))
+}
+
+impl<S> Returned<S> {
+    /// Tells the stopped screen, if there is one, what the stop left
+    /// unfinished.
+    fn say_unfinished(&mut self, unfinished: Vec<String>) {
+        if let Some(stopped) = &mut self.stopped {
+            stopped.set_unfinished(unfinished);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -364,6 +379,52 @@ mod tests {
     use nota_core::recorder::Mark;
 
     use super::*;
+
+    /// The stopped screen is told what the stop left unfinished, and says
+    /// it in place of "everything is saved"; a recording with no stopped
+    /// screen has nobody to tell.
+    #[test]
+    fn the_stopped_screen_is_told_what_the_stop_left() {
+        use nota_core::FakeClock;
+        use nota_core::recorder::{Cause, Event, Warning, WarningState};
+        use nota_tui::{Recording, Theme};
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let at = SessionTime::from_nanos(4_368_000_000_000);
+        let mut screen = Recording::new(
+            "T".into(),
+            "mic".into(),
+            Arc::new(FakeClock::new(at)),
+            Theme::no_color(),
+        );
+        screen.update(Event::Warning(Warning {
+            cause: Cause::DiskFull,
+            track: None,
+            at,
+            state: WarningState::Raised,
+        }));
+        let mut returned = Returned {
+            screen: (),
+            stopped: Some(screen),
+        };
+        returned.say_unfinished(vec!["2 journals kept for the next start".to_owned()]);
+        let mut terminal = Terminal::new(TestBackend::new(70, 20)).unwrap();
+        terminal
+            .draw(|frame| returned.stopped.as_mut().unwrap().draw(frame))
+            .unwrap();
+        let drawn = terminal.backend().to_string();
+        assert!(
+            drawn.contains("Saved up to 01:12:48 · 2 journals kept for the next start."),
+            "{drawn}"
+        );
+        // Nobody to tell: nothing happens.
+        Returned {
+            screen: (),
+            stopped: None,
+        }
+        .say_unfinished(vec!["x".to_owned()]);
+    }
 
     /// The recorder starts on a start command, and on nothing else: the
     /// session isn't made, so the data directory stays empty.

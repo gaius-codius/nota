@@ -329,6 +329,25 @@ fn the_ballast_is_made_when_the_recording_ends_not_while_it_runs() {
     assert_eq!(std::fs::metadata(&ballast).unwrap().len(), 1 << 20);
 }
 
+/// The first recording in a data directory starts with no ballast and says
+/// so in its summary; the next finds the one it left, and says nothing.
+#[test]
+fn a_recording_that_started_without_a_ballast_says_so_in_its_summary() {
+    const SAYS: &str = "started with no space set aside for a full disk";
+    let tmp = TestDir::new("ballast-missing");
+    let mut said = Vec::new();
+    for _ in 0..2 {
+        let mut nota = recording(&tmp.0);
+        nota.press("s");
+        pause(Duration::from_millis(600));
+        nota.press("y");
+        let status = nota.exits().expect("nota didn't stop");
+        assert!(status.success(), "{status:?}: {}", nota.output());
+        said.push(nota.output().contains(SAYS));
+    }
+    assert_eq!(said, [true, false]);
+}
+
 /// A temp ballast left by a crash at an earlier stop is removed when the
 /// next recording starts, not left to take that recording's room.
 #[test]
