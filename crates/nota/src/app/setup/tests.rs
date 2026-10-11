@@ -465,24 +465,24 @@ fn r_repeats_the_choice_made_in_this_run_over_a_stale_file() {
 }
 
 /// The space shown is all the disk has free: a recording makes its ballast
-/// when it ends, so it doesn't take the room first. With a disk that has
-/// room for a ballast twice over, the old figure, less the ballast's room,
-/// is a good deal lower.
+/// when it ends, so it doesn't take the room first. On a disk with room for
+/// a ballast twice over, the figure the old code showed (less the ballast)
+/// is lower, so an exact match fails it.
 #[test]
 fn the_space_shown_is_all_the_free_space() {
     let tmp = TestDir::new("space-ballast");
-    let before = StdFs.free_space(&tmp.0).unwrap();
-    let shown = room(&tmp.0, 2).unwrap();
-    let after = StdFs.free_space(&tmp.0).unwrap();
     let usage = Usage::new(2, RATE, segment_length());
-    // Other programs write meanwhile: the shown figure is between the two.
-    let (least, most) = (before.min(after), before.max(after));
-    assert!(
-        (usage.time_left(least)..=usage.time_left(most)).contains(&shown),
-        "{shown:?} for {least} to {most} bytes free"
-    );
-    // The same disk less a ballast would show less.
-    if least >= BALLAST_LEN.saturating_mul(2) {
-        assert!(usage.time_left(least - BALLAST_LEN) < shown);
+    // Other tests write into the same disk: read the free space either
+    // side of the figure, and judge it only when it didn't move.
+    let steady = (0..50).find_map(|_| {
+        let before = StdFs.free_space(&tmp.0).unwrap();
+        let shown = room(&tmp.0, 2).unwrap();
+        (StdFs.free_space(&tmp.0).unwrap() == before).then_some((before, shown))
+    });
+    let (free, shown) = steady.expect("the disk's free space never held still");
+    assert_eq!(shown, usage.time_left(free));
+    // Only a disk with room for a ballast twice over tells the two apart.
+    if free >= BALLAST_LEN.saturating_mul(2) {
+        assert_ne!(shown, usage.time_left(free - BALLAST_LEN));
     }
 }

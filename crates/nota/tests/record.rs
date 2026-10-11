@@ -329,6 +329,21 @@ fn the_ballast_is_made_when_the_recording_ends_not_while_it_runs() {
     assert_eq!(std::fs::metadata(&ballast).unwrap().len(), 1 << 20);
 }
 
+/// A temp ballast left by a crash at an earlier stop is removed when the
+/// next recording starts, not left to take that recording's room.
+#[test]
+fn an_unfinished_ballast_is_removed_when_the_next_recording_starts() {
+    let tmp = TestDir::new("ballast-leftover");
+    let leftover = tmp.0.join("ballast-1048576.tmp");
+    StdFs.create(&leftover).unwrap();
+    let mut nota = recording(&tmp.0);
+    assert!(!leftover.exists(), "left through the recording");
+    nota.press("s");
+    pause(Duration::from_millis(600));
+    nota.press("y");
+    nota.exits().expect("nota didn't stop");
+}
+
 /// Starts recording, and waits until the screen is up and both tracks
 /// have recorded a while.
 fn recording(data: &Path) -> Running {

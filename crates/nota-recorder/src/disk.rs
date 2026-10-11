@@ -13,15 +13,16 @@
 //!   another size (a test run's) is never taken for it. It's made only
 //!   while there's room for it twice over, by one process at a time (a lock
 //!   on the data directory), fsynced every few megabytes so its write-back
-//!   never holds up the journals' fsyncs for long, and its bytes don't
-//!   compress, so a filesystem that compresses still sets aside all of it.
+//!   doesn't pile up, and its bytes don't compress, so a filesystem that
+//!   compresses still sets aside all of it.
 //!   (On a filesystem with snapshots, removing it frees nothing while a
-//!   snapshot holds it.) It's made when a recording ends, after its last
-//!   segments are published, and never while one runs: on a slow disk,
-//!   ext4 holds each journal fsync behind the ballast's data, and the
-//!   recording falls seconds behind its audio, far past the 2 s bound. So
-//!   the first recording in a data directory has none, and a recording
-//!   that filled the disk leaves none: the next to end with room makes it.
+//!   snapshot holds it.) The monitor never makes it: writing it while a
+//!   recording runs holds the journals' fsyncs behind it on a slow disk,
+//!   and the recording falls seconds behind its audio, far past the 2 s
+//!   bound. `nota record` makes it as a recording ends, after everything
+//!   is saved ([`Ballast::keep`]). So the first recording in a data
+//!   directory has none, and so has one after a crash; a recording that
+//!   filled the disk leaves none, and the next to end with room makes it.
 //! - **The watch** ([`DiskWatch`], through [`WatchedFs`]): every filesystem
 //!   operation the recording makes goes through a [`WatchedFs`]. The first
 //!   to fail for want of space (`ENOSPC`, or `EDQUOT` for a quota) frees the
@@ -41,9 +42,7 @@
 //!   [low-disk warning](LOW_WARNING) and the full disk. Its first check, and
 //!   taking a ballast already there, happen before [`DiskMonitor::spawn`]
 //!   returns, so before the recording writes. A full disk stops the
-//!   recording: its open segments finish into the ballast's room. When it's
-//!   [stopped](DiskMonitor::stop) it makes the ballast, if there's none
-//!   and the disk isn't full.
+//!   recording: its open segments finish into the ballast's room.
 
 use std::fmt;
 use std::io;
@@ -71,8 +70,11 @@ pub fn ballast_file_name(len: u64) -> String {
 /// What a ballast is written under until it's whole: only a whole one,
 /// fsynced, is renamed to its [name](ballast_file_name).
 fn ballast_temp_name(len: u64) -> String {
-    format!("{BALLAST_PREFIX}{len}.tmp")
+    format!("{BALLAST_PREFIX}{len}{BALLAST_TEMP_SUFFIX}")
 }
+
+/// What ends the name of a ballast that isn't whole yet.
+const BALLAST_TEMP_SUFFIX: &str = ".tmp";
 
 /// How much of the ballast is written between its fsyncs: a few
 /// megabytes, so its write-back never stalls the journals' fsyncs on the
@@ -259,6 +261,37 @@ impl Ballast {
         Ok(Some(Self { path }))
     }
 
+    /// Removes the temp files of a ballast whose making was cut short (a
+    /// kill or a power cut), so they don't take a recording's room. Nothing
+    /// is removed while another process holds the data directory's lock:
+    /// it may be writing one.
+    ///
+    /// # Errors
+    ///
+    /// Any I/O error.
+    pub fn remove_unfinished<S: Fs>(fs: &S, dir: &Path) -> io::Result<()> {
+        let _making = match fs.lock_dir(dir) {
+            Ok(lock) => lock,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        let mut removed = false;
+        for file in fs.list(dir)? {
+            let unfinished = file
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(BALLAST_PREFIX) && n.ends_with(BALLAST_TEMP_SUFFIX));
+            if unfinished {
+                fs.remove(&file)?;
+                removed = true;
+            }
+        }
+        if removed {
+            fs.sync_dir(dir)?;
+        }
+        Ok(())
+    }
+
     /// Where it is.
     #[must_use]
     pub fn path(&self) -> &Path {
@@ -346,9 +379,10 @@ pub struct Full {
 pub enum Freed {
     /// It was freed: its room is the recording's.
     Freed,
-    /// None was freed: none was held (the disk hadn't room for one, it
-    /// couldn't be made, or it was still being made), or a live recording
-    /// claimed the one held (see [`DiskWatch::share`]), which kept it.
+    /// None was freed: none was held (the first recording in a data
+    /// directory, one after a crash or a full disk, or a disk without room
+    /// for one), or a live recording claimed the one held (see
+    /// [`DiskWatch::share`]), which kept it.
     None,
     /// Removing it failed, with this kind of error.
     Failed(io::ErrorKind),
@@ -368,28 +402,14 @@ pub struct DiskWatch<S> {
 struct WatchState {
     ballast: Option<Ballast>,
     full: Option<Full>,
-    /// How the monitor was asked to end, if it was.
-    ending: Ending,
+    /// The monitor was asked to stop.
+    stopping: bool,
     /// Asks whether a live recording claims the ballast, while it's
     /// shared ([`DiskWatch::share`]).
     claimed: Option<Claimed>,
     /// The directories locked through [`DiskWatch::fs`] and not yet
     /// unlocked: the watch's own, never a live recording's.
     held: Vec<PathBuf>,
-}
-
-/// How the monitor was asked to end.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-enum Ending {
-    /// It wasn't.
-    #[default]
-    Running,
-    /// It was dropped without [`DiskMonitor::stop`]. Nothing waits for its
-    /// thread, so it makes no ballast on the way out.
-    Dropped,
-    /// [`DiskMonitor::stop`] was called: the recording has ended and the
-    /// caller waits for the ballast.
-    Stopped,
 }
 
 /// Whether a live recording claims a shared ballast now, given the
@@ -507,25 +527,19 @@ impl<S: Fs + Clone> DiskWatch<S> {
         let _woken = self
             .changed
             .wait_timeout_while(state, timeout, |s| {
-                !(s.ending != Ending::Running || until_full && s.full.is_some())
+                !(s.stopping || until_full && s.full.is_some())
             })
             .unwrap_or_else(PoisonError::into_inner);
     }
 
-    /// How the monitor was asked to end.
-    fn ending(&self) -> Ending {
-        self.lock().ending
+    /// Whether the monitor was asked to stop.
+    fn stopping(&self) -> bool {
+        self.lock().stopping
     }
 
-    /// Asks the monitor to end. A watch has one monitor, once; the first
-    /// way it was asked to end stands, so a stopped monitor that is then
-    /// dropped is still a stopped one.
-    fn end_monitor(&self, ending: Ending) {
-        let mut state = self.lock();
-        if state.ending == Ending::Running {
-            state.ending = ending;
-        }
-        drop(state);
+    /// Asks the monitor to stop. A watch has one monitor, once.
+    fn stop_monitor(&self) {
+        self.lock().stopping = true;
         self.changed.notify_all();
     }
 
@@ -733,20 +747,20 @@ pub enum DiskReport {
     /// works again. Recording goes on.
     Unchecked(String),
     /// After the first check: whether a ballast is held, the one already
-    /// in the data directory. The monitor makes none while recording.
+    /// in the data directory. The monitor makes none.
     Ballast(bool),
 }
 
 /// Where the monitor looks, and what it keeps.
 #[derive(Debug, Clone)]
 pub struct MonitorConfig {
-    /// The data directory, where the ballast is kept.
+    /// The data directory, where a ballast already there is found.
     pub data_dir: PathBuf,
     /// The session's audio directory, whose disk is checked.
     pub audio_dir: PathBuf,
     /// The recording's rate of use.
     pub usage: Usage,
-    /// The ballast's size: [`BALLAST_LEN`], or less in tests.
+    /// The size of the ballast to find: [`BALLAST_LEN`], or less in tests.
     pub ballast_len: u64,
     /// How often to check: [`CHECK_INTERVAL`], or less in tests.
     pub interval: Duration,
@@ -758,13 +772,6 @@ pub struct MonitorConfig {
 pub struct DiskSummary {
     /// The disk filled, and how.
     pub full: Option<Full>,
-    /// Why the ballast couldn't be made as the monitor stopped, if it
-    /// couldn't (no room is no error: the ballast is just missing then).
-    pub ballast_error: Option<String>,
-    /// Whether a ballast is held at the end: the one there before the
-    /// recording, or the one made as the monitor stopped. Not if the disk
-    /// filled, which frees it.
-    pub ballast_held: bool,
     /// Whether the low-disk warning was raised at some point.
     pub low: bool,
     /// Why the space couldn't be checked, the first time it couldn't.
@@ -784,7 +791,7 @@ pub struct DiskMonitor<S: Fs + Clone> {
 
 impl<S: Fs + Clone> Drop for DiskMonitor<S> {
     fn drop(&mut self) {
-        self.watch.end_monitor(Ending::Dropped);
+        self.watch.stop_monitor();
     }
 }
 
@@ -806,7 +813,8 @@ impl<S: Fs + Clone + 'static> DiskMonitor<S> {
     /// in the data directory is held, so both come before the recording's
     /// first write. Its thread then checks every
     /// [`MonitorConfig::interval`] until it's stopped, reporting a full
-    /// disk as soon as it's noted.
+    /// disk as soon as it's noted. It makes no ballast (see the module
+    /// docs).
     ///
     /// # Errors
     ///
@@ -838,16 +846,13 @@ impl<S: Fs + Clone + 'static> DiskMonitor<S> {
         self.watch.full()
     }
 
-    /// Stops the monitor and returns how the disk fared. Stopped, it makes
-    /// the ballast if there's none and the disk isn't full, and returns
-    /// once that is written: a quarter of a gigabyte, so seconds on a slow
-    /// disk. Call it after the recording's last segments are published.
+    /// Stops the monitor and returns how the disk fared.
     ///
     /// # Errors
     ///
     /// [`MonitorPanicked`] if its thread panicked.
     pub fn stop(mut self) -> Result<DiskSummary, MonitorPanicked> {
-        self.watch.end_monitor(Ending::Stopped);
+        self.watch.stop_monitor();
         self.thread
             .take()
             .ok_or(MonitorPanicked)?
@@ -875,7 +880,7 @@ fn monitor<S: Fs + Clone>(
         // stop is read after the wait, whyever it returned, so a wait that
         // returns early never keeps a stopped monitor running.
         watch.wait(config.interval, !reported_full);
-        if watch.ending() != Ending::Running {
+        if watch.stopping() {
             break;
         }
         if !reported_full && watch.full().is_some() {
@@ -883,31 +888,10 @@ fn monitor<S: Fs + Clone>(
         }
         checks.run(watch, config, &mut report);
     }
-    summary.ballast_error = keep_ballast(watch, config);
-    summary.ballast_held = watch.holds_ballast();
     summary.full = watch.full();
     summary.low = checks.low.is_some();
     summary.unchecked = checks.first_failure;
     summary
-}
-
-/// Makes the ballast, now that the recording has ended and the monitor was
-/// stopped (not dropped), unless one is held or the disk is full; why it
-/// couldn't be made, if it couldn't. No room for one is no error: there's
-/// just none. A disk that fills meanwhile gives it up.
-fn keep_ballast<S: Fs + Clone>(watch: &DiskWatch<S>, config: &MonitorConfig) -> Option<String> {
-    if watch.ending() != Ending::Stopped || watch.holds_ballast() || watch.full().is_some() {
-        return None;
-    }
-    let give_up = || watch.full().is_some();
-    match Ballast::keep(&watch.fs, &config.data_dir, config.ballast_len, give_up) {
-        Ok(Some(ballast)) => {
-            watch.hold(ballast);
-            None
-        }
-        Ok(None) => None,
-        Err(e) => Some(e.to_string()),
-    }
 }
 
 /// What the checks have found so far, so a warning is raised or cleared

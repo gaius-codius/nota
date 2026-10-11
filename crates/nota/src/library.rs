@@ -557,7 +557,7 @@ pub(crate) fn startup_watch<S: Fs + Clone + 'static>(
 
 /// Checks locks even before a recording has made its first journal,
 /// passing over the audio directories in `own`, which startup holds itself.
-fn startup_in_use<S: Fs>(fs: &S, root: &Path, own: &[PathBuf]) -> io::Result<bool> {
+pub(crate) fn startup_in_use<S: Fs>(fs: &S, root: &Path, own: &[PathBuf]) -> io::Result<bool> {
     for session in fs.list(&root.join(SESSIONS))? {
         let audio = session.join(AUDIO);
         if !own.contains(&audio)

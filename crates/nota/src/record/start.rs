@@ -14,7 +14,7 @@ use nota_recorder::capture::{
 };
 use nota_recorder::detect::Thresholds;
 use nota_recorder::disk::{
-    BALLAST_LEN, CHECK_INTERVAL, DiskMonitor, DiskReport, DiskWatch, MonitorConfig, Usage,
+    BALLAST_LEN, Ballast, CHECK_INTERVAL, DiskMonitor, DiskReport, DiskWatch, MonitorConfig, Usage,
     WatchedFs, WatchedStore,
 };
 use nota_recorder::engine::{EngineCommand, EngineConfig, EngineSupervisor};
@@ -24,6 +24,7 @@ use nota_recorder::session::{SessionDir, SessionLock, SessionStore, SessionWrite
 use nota_store::{Heard, NewSession, Track, TrackKind};
 use nota_tui::Event;
 
+use super::ballast::BallastPlan;
 use super::health::{LibraryHealth, ReportingStore};
 use super::live::{LiveEnd, LiveInput, spawn_live};
 use super::save::{Saver, ToSave, to_screen};
@@ -64,6 +65,8 @@ const TONE_BALLAST_LEN: u64 = 1024 * 1024;
 /// What stopping needs of what was started.
 pub(super) struct Started<B: CaptureBackend> {
     pub(super) outcome: Outcome,
+    /// The ballast to make as the recording ends.
+    pub(super) ballast: BallastPlan,
     pub(super) signals: SignalThread,
     pub(super) draws: Option<DrawEnds>,
     pub(super) library: Library,
@@ -74,7 +77,7 @@ pub(super) struct Started<B: CaptureBackend> {
     /// once recording has ended.
     pub(super) sleep: Sleep,
     /// Checks the disk; stopped after publishing, so a full disk then is
-    /// still in the summary, and it makes the ballast as it stops.
+    /// still in the summary.
     pub(super) disk: DiskMonitor<StdFs>,
     pub(super) publisher: Publisher,
     pub(super) live_inputs: Sender<LiveInput>,
@@ -235,6 +238,7 @@ fn start_with_notes<B: CaptureBackend>(
     let started_save = saver.sender();
     let running = Started {
         outcome,
+        ballast: BallastPlan::new(&args.data, ballast_length(args)),
         signals,
         draws,
         library,
@@ -636,6 +640,11 @@ fn recover(
     notes: &mut Vec<String>,
 ) -> Result<Arc<DiskWatch<StdFs>>, BoxError> {
     let ballast_len = ballast_length(args);
+    // A ballast cut short by a crash at the last stop left its temp file:
+    // it would take this recording's room until the next stop.
+    if let Err(e) = Ballast::remove_unfinished(&StdFs, &args.data) {
+        notes.push(format!("an unfinished ballast couldn't be removed: {e}"));
+    }
     let recovery = startup_watch(&StdFs, &args.data, ballast_len)?;
     for salvaged in library.salvage_watched(segment_length(), &recovery)? {
         notes.push(salvage_note(&salvaged));

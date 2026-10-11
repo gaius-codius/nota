@@ -19,6 +19,7 @@ use crate::inhibit::Slept;
 pub(super) fn stop<B: CaptureBackend>(started: Started<B>, shown: Shown) -> Outcome {
     let Started {
         mut outcome,
+        ballast,
         signals,
         draws,
         library,
@@ -71,9 +72,7 @@ pub(super) fn stop<B: CaptureBackend>(started: Started<B>, shown: Shown) -> Outc
     if let Some(e) = stopped.finishing {
         outcome.notes.push(format!("finishing the recording: {e}"));
     }
-    // The disk's notes even if publishing went wrong. Stopping the monitor
-    // makes the ballast, which takes seconds on a slow disk, and so comes
-    // after everything the recording needs the disk for.
+    // The disk's notes even if publishing went wrong.
     let disk = disk.stop();
     // The session's jobs wait for space if the disk filled at any point.
     let full = full_while_recording || disk.as_ref().is_ok_and(|d| d.full.is_some());
@@ -114,6 +113,10 @@ pub(super) fn stop<B: CaptureBackend>(started: Started<B>, shown: Shown) -> Outc
         );
     }
     drop(lock);
+    // The ballast last: it takes seconds on a slow disk, and nothing the
+    // recording needs waits behind it. A signal ends it (the next recording
+    // to end makes it), as does another recording starting.
+    outcome.notes.extend(ballast.make(full));
 
     if let Some(problem) = shown.problem {
         outcome.notes.push(problem);
@@ -151,8 +154,8 @@ fn recorded(
 }
 
 /// What the summary says of the disk: a full disk (which stopped the
-/// recording if it filled `while_recording`), a low disk, a disk that
-/// couldn't be checked, and a ballast that couldn't be made.
+/// recording if it filled `while_recording`), a low disk, and a disk that
+/// couldn't be checked.
 fn note_disk(
     outcome: &mut Outcome,
     disk: Result<DiskSummary, MonitorPanicked>,
@@ -195,11 +198,6 @@ fn note_disk(
             "the free space couldn't be checked ({e}), so a low disk wasn't warned of"
         ));
     }
-    if let Some(e) = summary.ballast_error {
-        outcome.notes.push(format!(
-            "the space nota keeps for a full disk couldn't be set aside: {e}"
-        ));
-    }
 }
 
 #[cfg(test)]
@@ -223,7 +221,6 @@ mod tests {
                 path: Some(PathBuf::from("/data/sessions/1/audio/journal-000003")),
                 ballast,
             }),
-            ballast_held: true,
             low: true,
             ..DiskSummary::default()
         }
@@ -284,12 +281,11 @@ mod tests {
     }
 
     #[test]
-    fn a_low_disk_an_unchecked_one_and_a_ballast_that_failed_are_noted() {
+    fn a_low_disk_and_an_unchecked_one_are_noted() {
         assert!(noted(Ok(DiskSummary::default()), false).is_empty());
         let summary = DiskSummary {
             low: true,
             unchecked: Some("permission denied".to_owned()),
-            ballast_error: Some("permission denied".to_owned()),
             ..DiskSummary::default()
         };
         assert_eq!(
@@ -298,7 +294,6 @@ mod tests {
                 "the disk ran low: under an hour of recording was left",
                 "the free space couldn't be checked (permission denied), so a low disk \
                  wasn't warned of",
-                "the space nota keeps for a full disk couldn't be set aside: permission denied",
             ]
         );
         assert_eq!(

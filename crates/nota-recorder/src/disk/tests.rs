@@ -605,19 +605,19 @@ fn spawn_monitor(
     (monitor, rx)
 }
 
-/// The monitor checks at once and warns, but makes no ballast while the
-/// recording runs: writing 256 MB then holds the journals' fsyncs behind
-/// it on a slow disk. Stopped, it makes the ballast and holds it.
+/// The monitor checks at once and warns, but makes no ballast, however
+/// long it runs and whether it's stopped or dropped: written during a
+/// recording, 256 MB holds the journals' fsyncs behind it on a slow disk.
 #[test]
-fn the_monitor_checks_at_once_and_makes_the_ballast_only_when_stopped() {
+fn the_monitor_checks_at_once_and_warns_when_low_but_makes_no_ballast() {
     let usage = small(2);
     let fs = FakeFs::with_dirs(["/data/s"]);
     // Room for the ballast twice over, and minutes of recording past the
-    // floor after the ballast: under the warning.
-    let capacity = 2 * 10_000 + FULL_FLOOR + usage.reserve() + 2_084 * 5;
+    // floor: under the warning.
+    let capacity = 2 * 10_000 + FULL_FLOOR + usage.reserve() + 2_084 * 5 + 10_000;
     fs.set_capacity(Some(capacity));
     let watch = DiskWatch::new(fs.clone());
-    let (monitor, reports) = spawn_monitor(&watch, config(usage, 10_000, WAIT));
+    let (monitor, reports) = spawn_monitor(&watch, config(usage, 10_000, Duration::from_millis(1)));
     assert_eq!(
         reports.recv_timeout(WAIT).unwrap(),
         DiskReport::Space(Disk {
@@ -629,18 +629,21 @@ fn the_monitor_checks_at_once_and_makes_the_ballast_only_when_stopped() {
         reports.recv_timeout(WAIT).unwrap(),
         DiskReport::Low(WarningState::Raised)
     );
-    // The ballast report comes after the first check, and no ballast is
-    // there: before the move, the thread had made it by now.
+    // No ballast there, and none made: before it moved out of the monitor,
+    // the thread had made one by the time it said so.
     assert_eq!(until_ballast(&reports), (Vec::new(), false));
-    assert!(fs.paths().is_empty(), "{:?}", fs.paths());
-    assert!(!watch.holds_ballast());
+    // Many checks later, still none.
+    for _ in 0..10 {
+        assert!(matches!(
+            reports.recv_timeout(WAIT).unwrap(),
+            DiskReport::Space(_)
+        ));
+    }
     let summary = monitor.stop().unwrap();
-    assert!(summary.ballast_held);
-    assert_eq!(summary.ballast_error, None);
     assert!(summary.low);
     assert_eq!(summary.full, None);
-    assert_eq!(fs.paths(), [p("/data/ballast-10000")]);
-    assert!(watch.holds_ballast());
+    assert!(fs.paths().is_empty(), "{:?}", fs.paths());
+    assert!(!watch.holds_ballast());
 }
 
 #[test]
@@ -679,10 +682,7 @@ fn the_monitor_clears_the_warning_when_room_comes_back() {
     while seen.last() != Some(&DiskReport::Low(WarningState::Cleared)) {
         seen.push(reports.recv_timeout(WAIT).unwrap());
     }
-    let summary = monitor.stop().unwrap();
-    // No room for a ballast of a gigabyte: none, and no error.
-    assert!(!summary.ballast_held);
-    assert_eq!(summary.ballast_error, None);
+    monitor.stop().unwrap();
     assert_eq!(
         seen.iter()
             .filter(|r| matches!(r, DiskReport::Low(_)))
@@ -715,16 +715,8 @@ fn the_monitor_reports_a_full_disk_at_once() {
     };
     assert_eq!(full.path, Some(p("/data/s/journal")));
     assert_eq!(full.ballast, Freed::Freed);
-    // Freed by the full disk, and not made again: the disk is full.
     let summary = monitor.stop().unwrap();
     assert_eq!(summary.full, Some(full));
-    assert!(!summary.ballast_held);
-    assert_eq!(summary.ballast_error, None);
-    assert!(
-        fs.paths()
-            .iter()
-            .all(|path| !path.starts_with("/data/ballast"))
-    );
 }
 
 #[test]
@@ -755,8 +747,7 @@ fn a_start_with_less_than_the_floor_free_records_on_until_a_write_fails() {
         ));
     }
     assert_eq!(watch.full(), None);
-    let summary = monitor.stop().unwrap();
-    assert!(!summary.ballast_held);
+    monitor.stop().unwrap();
     assert!(fs.paths().is_empty(), "no ballast is made on a low disk");
 }
 
@@ -822,27 +813,9 @@ fn a_check_that_fails_is_reported_once_and_recording_goes_on() {
 }
 
 #[test]
-fn a_ballast_that_cant_be_made_as_the_monitor_stops_is_in_the_summary() {
-    use crate::fs::fake::Fault;
+fn a_dropped_monitor_stops_its_thread() {
     let fs = FakeFs::with_dirs(["/data/s"]);
-    fs.fail_on(
-        &p("/data/ballast-100.tmp"),
-        Fault::Create,
-        io::ErrorKind::PermissionDenied,
-    );
     let watch = DiskWatch::new(fs);
-    let (monitor, reports) = spawn_monitor(&watch, config(small(1), 100, WAIT));
-    // Nothing is tried while recording, so nothing fails yet.
-    assert!(!until_ballast(&reports).1);
-    let summary = monitor.stop().unwrap();
-    assert!(!summary.ballast_held);
-    assert!(summary.ballast_error.is_some());
-}
-
-#[test]
-fn a_dropped_monitor_stops_its_thread_and_makes_no_ballast() {
-    let fs = FakeFs::with_dirs(["/data/s"]);
-    let watch = DiskWatch::new(fs.clone());
     let (monitor, reports) = spawn_monitor(&watch, config(small(1), 100, WAIT));
     drop(monitor);
     // The thread ends, dropping its sender.
@@ -853,10 +826,6 @@ fn a_dropped_monitor_stops_its_thread_and_makes_no_ballast() {
             Err(mpsc::RecvTimeoutError::Timeout) => panic!("the monitor kept running"),
         }
     }
-    // Nothing waits for a dropped monitor's thread, so it writes no ballast
-    // on the way out.
-    assert!(fs.paths().is_empty(), "{:?}", fs.paths());
-    assert!(!watch.holds_ballast());
 }
 
 #[test]
@@ -899,28 +868,6 @@ fn a_panicked_monitor_says_so() {
         MonitorPanicked.to_string(),
         "the disk monitor stopped unexpectedly"
     );
-}
-
-/// The ballast being written as the monitor stops is given up when the
-/// disk fills meanwhile, and its temp file removed.
-#[test]
-fn a_ballast_being_made_as_the_monitor_stops_is_given_up_when_the_disk_fills() {
-    let fs = FakeFs::with_dirs(["/data/s"]);
-    let len = 20 << 20;
-    // Its first fsync, after 8 MiB, waits.
-    let stall = fs.stall_syncs(&p(&format!("/data/ballast-{len}.tmp")));
-    let watch = DiskWatch::new(fs.clone());
-    let (monitor, _reports) = spawn_monitor(&watch, config(small(1), len, WAIT));
-    let stopping = thread::spawn(move || monitor.stop());
-    assert!(stall.wait_for_held(1, WAIT));
-    // Something fills the disk while the ballast is half written.
-    watch.note_full(None);
-    stall.release();
-    let summary = stopping.join().unwrap().unwrap();
-    assert!(!summary.ballast_held);
-    assert_eq!(summary.ballast_error, None);
-    assert!(summary.full.is_some());
-    assert!(fs.paths().is_empty(), "{:?}", fs.paths());
 }
 
 #[test]
@@ -1203,4 +1150,33 @@ fn a_lock_the_watch_let_go_is_no_longer_its_own() {
     watch.note_full(None);
     assert_eq!(watch.full().map(|f| f.ballast), Some(Freed::None));
     assert!(Ballast::find(&fs, &p("/data"), 100).unwrap().is_some());
+}
+
+/// A ballast cut short by a crash leaves its temp file, which would take a
+/// recording's room: only the temp files go, and not the whole ballast.
+#[test]
+fn unfinished_ballasts_are_removed_and_a_whole_one_stays() {
+    let fs = FakeFs::with_dirs(["/data"]);
+    let mut half = fs.create(&p("/data/ballast-100.tmp")).unwrap();
+    half.write_all(&[1; 50]).unwrap();
+    let mut other = fs.create(&p("/data/ballast-7.tmp")).unwrap();
+    other.write_all(&[1; 7]).unwrap();
+    let mut whole = fs.create(&p("/data/ballast-200")).unwrap();
+    whole.write_all(&[1; 200]).unwrap();
+    let mut audio = fs.create(&p("/data/library.db")).unwrap();
+    audio.write_all(b"rows").unwrap();
+    Ballast::remove_unfinished(&fs, &p("/data")).unwrap();
+    assert_eq!(fs.paths(), [p("/data/ballast-200"), p("/data/library.db")]);
+}
+
+/// Another process holding the data directory's lock may be writing a
+/// ballast: its temp file is left alone.
+#[test]
+fn an_unfinished_ballast_is_left_while_another_process_holds_the_lock() {
+    let fs = FakeFs::with_dirs(["/data"]);
+    let mut half = fs.create(&p("/data/ballast-100.tmp")).unwrap();
+    half.write_all(&[1; 50]).unwrap();
+    let _making = fs.lock_dir(&p("/data")).unwrap();
+    Ballast::remove_unfinished(&fs, &p("/data")).unwrap();
+    assert_eq!(fs.paths(), [p("/data/ballast-100.tmp")]);
 }
