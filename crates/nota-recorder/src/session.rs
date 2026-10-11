@@ -344,6 +344,11 @@ impl std::error::Error for FinishError {
 struct Track<F: FsFile> {
     /// The epoch the track records in.
     epoch: Epoch,
+    /// Whether the writer moved the track to `epoch` ([`SessionWriter::new_epoch`])
+    /// rather than starting it there: an epoch moved to is kept in the
+    /// marks even if no audio follows; one started in, only once its first
+    /// journal starts.
+    moved: bool,
     /// The next sample to record.
     next: SampleIndex,
     /// The journal being written.
@@ -663,6 +668,7 @@ impl<S: Fs> SessionWriter<S> {
             track,
             Track {
                 epoch: *epoch,
+                moved: false,
                 next: epoch.first_sample(),
                 journal: None,
                 ending: VecDeque::new(),
@@ -747,6 +753,7 @@ impl<S: Fs> SessionWriter<S> {
             .get_mut(&track)
             .ok_or(SessionError::UnknownTrack(track))?;
         state.epoch = *epoch;
+        state.moved = true;
         // Reserving the next journal's ids in the same write, so the
         // epoch's first journal needn't write the marks again.
         let marked = self.mark(self.next_id, track, epoch.anchor());
@@ -853,9 +860,9 @@ impl<S: Fs> SessionWriter<S> {
 
     /// Ends every track's journal (a last fsync each), waits for every
     /// fsync to complete, and returns every journal finished and not yet
-    /// taken. Each track's current epoch is marked too, if it isn't yet: one
-    /// no audio followed, whose marks write failed as the writer moved to it
-    /// ([`Self::new_epoch`]).
+    /// taken. Each track's current epoch, if the writer moved it there, is
+    /// marked too, if it isn't yet: one no audio followed, whose marks write
+    /// failed as the writer moved to it ([`Self::new_epoch`]).
     ///
     /// # Errors
     ///
@@ -1259,13 +1266,18 @@ impl<S: Fs> SessionWriter<S> {
         Ok(())
     }
 
-    /// Makes sure the marks on disk cover `track`'s current epoch: nothing
-    /// to write once they do.
+    /// Makes sure the marks on disk cover `track`'s current epoch if the
+    /// writer moved it there: nothing to write once they do, nor for an
+    /// epoch it started in, which a track whose stream never started
+    /// leaves unused.
     fn mark_current(&mut self, track: TrackId) -> Result<(), SessionError> {
         let state = self
             .tracks
             .get(&track)
             .ok_or(SessionError::UnknownTrack(track))?;
+        if !state.moved {
+            return Ok(());
+        }
         let epoch = state.epoch.anchor();
         self.mark(None, track, epoch)
     }

@@ -910,6 +910,21 @@ fn a_new_epoch_and_its_first_journal_write_the_marks_once() {
     assert_eq!(journal_range(&fs, 0), (0, 10, 1));
 }
 
+/// A track started and finished with no audio writes no marks: a session
+/// whose streams never started is left as empty as it began, for the
+/// start to remove.
+#[test]
+fn a_track_with_no_audio_and_no_move_writes_no_marks() {
+    let fs = FakeFs::with_dirs([dir(), PathBuf::from("/db")]);
+    let (_, w) = manual_writer(&fs);
+    assert_eq!(w.finish().unwrap(), finished(&[]));
+    assert!(
+        fs.paths().iter().all(|p| !p.starts_with(dir())),
+        "{:?}",
+        fs.paths()
+    );
+}
+
 /// Records 100 samples in epoch 0, then moves to epoch 1 with no audio
 /// after it, failing the operation `fail` after the move begins, if
 /// given, and finishes. What the move returned, and the operations made
