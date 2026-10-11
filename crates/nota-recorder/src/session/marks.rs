@@ -10,10 +10,17 @@
 //! - **Epochs,** per track. Epoch ids come from an in-memory timeline, so a
 //!   resumed session must start each track's timeline above the epochs it
 //!   used, or two recordings would share an epoch. The highest epoch each
-//!   track has journaled is kept here, with its anchor (its first sample,
-//!   rate, start and drift), durable before the first journal in it. A resumed
+//!   track has moved to is kept here, with its anchor (its first sample,
+//!   rate, start and drift), durable as the writer moves to it, before any
+//!   journal in it. So it's kept even if no audio follows, as when a track
+//!   ends just after a loss: that epoch exists only here, since the
+//!   library's epoch rows are copied from published audio. Its gap reaches
+//!   the library on the session's timeline instead, as recording reports
+//!   it, so a crash before that's saved leaves the library's copy of the
+//!   track ending at its last audio; the epoch here still keeps a resumed
+//!   recording from numbering it again or starting inside its gap. A resumed
 //!   session times its tracks on from that anchor, and resumes its clock
-//!   after the audio it times.
+//!   after the audio it times, or the epoch's start if that's later.
 //!
 //! The file is replaced whole: written to a temp file, fsync'd, renamed over
 //! the old one, and its directory fsync'd. A crash leaves the old marks or
@@ -76,11 +83,11 @@ pub(crate) fn is_temp(path: &Path) -> bool {
 pub(crate) struct Marks {
     /// Every journal id used so far is below this one.
     pub(crate) journals_below: JournalId,
-    /// The highest epoch each track has journaled.
+    /// The highest epoch each track has moved to.
     pub(crate) epochs: BTreeMap<TrackId, MarkedEpoch>,
 }
 
-/// The highest epoch a track has journaled, as the marks keep it.
+/// The highest epoch a track has moved to, as the marks keep it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MarkedEpoch {
     /// Marked with its anchor.

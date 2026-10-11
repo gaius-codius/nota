@@ -227,6 +227,52 @@ fn an_epoch_with_no_audio_kept_ends_the_track_at_its_start() {
     assert_eq!(writer.earlier_end(MIC), Some(ms(9_000)));
 }
 
+/// An epoch no audio follows, as one opened for a loss just before a
+/// track ends, is marked as the writer moves to it: a resumed session
+/// carries on above it, from its start, not from the audio before it, and
+/// whether or not the journals were published.
+#[test]
+fn an_epoch_with_no_audio_after_it_is_still_carried_on_from() {
+    for published in [false, true] {
+        let fs = FakeFs::with_dirs([dir(), PathBuf::from("/db")]);
+        let (lock, clock) = writer_at(&fs, SessionTime::ZERO);
+        let mut writer = SessionWriter::open(
+            &lock,
+            rate(),
+            length(),
+            Arc::clone(&clock) as Arc<dyn Clock>,
+        )
+        .unwrap();
+        let (mut timeline, epoch) = writer.open_first_epoch(MIC, clock.now()).unwrap();
+        writer.start_track(MIC, &epoch).unwrap();
+        writer.append(MIC, &[1; 1_500]).unwrap();
+        // Lost from 1.5 s to 1.8 s, then the track ends.
+        timeline.open_epoch(ms(1_800), s(1_500), rate()).unwrap();
+        writer.new_epoch(MIC, timeline.current().unwrap()).unwrap();
+        writer.finish().unwrap();
+        drop(lock);
+        if published {
+            publish_all(&fs);
+        }
+
+        let (lock, _) = writer_at(&fs, SessionTime::ZERO);
+        let writer =
+            SessionWriter::open(&lock, rate(), length(), Arc::new(FakeClock::default())).unwrap();
+        assert_eq!(
+            writer.highest_epoch(MIC),
+            Some(EpochId::new(1)),
+            "{published}"
+        );
+        assert_eq!(writer.first_free_sample(MIC), s(1_500));
+        assert_eq!(writer.earlier_end(MIC), Some(ms(1_800)));
+        assert_eq!(writer.resume_from(), ms(1_800));
+        let resumed = writer.resumed_timeline(MIC).unwrap();
+        assert_eq!(resumed.epochs(), timeline.epochs().get(1..).unwrap());
+        let (_, next) = writer.open_first_epoch(MIC, ms(2_000)).unwrap();
+        assert_eq!(next.id(), EpochId::new(2));
+    }
+}
+
 /// A crash can keep a new epoch's anchor and lose the end of the epoch
 /// before it: the track still resumes, numbered above the anchor's epoch,
 /// from the sample it holds up to, and no earlier than that anchor's start.
