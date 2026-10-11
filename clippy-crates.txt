@@ -20,12 +20,21 @@
 #                         depends on them directly, and no direct dependency
 #                         re-exports them. The check fails if one becomes a
 #                         direct dependency, so it's classified then.
+#   [reviewed]            the line (below) of each crate listed only by its
+#                         paths, under [ban] or [allow].
 #
 # A crate can have [ban] and [allow] paths both, but a crate under [none] or
 # [indirect] has no paths. Names are as Cargo.lock spells them; paths use the
-# crate's name in Rust (`jiff_core`, not `jiff-core`). A new version of a crate
-# already here isn't re-checked: when a bump adds API, review it as you would
-# a new crate. Changes here count as check changes (scripts/check-weakened.sh).
+# crate's name in Rust (`jiff_core`, not `jiff-core`).
+#
+# Every crate nota can name (all but [indirect]) records the semver-compatible
+# line it was reviewed at: `toml@1` covers 1.x, `jiff@0.2` covers 0.2.x, and
+# `rand@0.8,0.9` covers two versions in the tree at once. The line goes after
+# a name under [allow] or [none], or under [reviewed]. The check fails when the
+# lock files move a crate to another line, since that's the bump that can add
+# API: look for new clock reads and file writes as you would in a new crate,
+# then record the new line. A bump within the line passes unchecked. Changes
+# here count as check changes (scripts/check-weakened.sh).
 
 [ban]
 # cpal's stream clock, which nota reads through the session clock instead.
@@ -114,6 +123,10 @@ sherpa_onnx::GeneratedAudio::save
 # `termwiz` feature, off today.
 termwiz::escape::apc::KittyImageData::load_data
 
+[reviewed]
+cpal@0.18 jiff@0.2 pipewire@0.10 ratatui-widgets@0.3 rustix@1 sherpa-onnx@1
+termwiz@0.23
+
 [allow: unsafe functions, and unsafe code is forbidden in nota's crates]
 rustix::mm::msync
 rustix::fs::fcopyfile
@@ -125,38 +138,41 @@ rustix::fs::memfd_create
 rustix::time::timerfd_gettime
 
 [allow: SQL can write files (ATTACH, VACUUM INTO) and read the clock (datetime('now')) through any connection, which no ban on a function can see; nota-store owns the library's SQL, and opening a file is banned above]
-rusqlite
+rusqlite@0.40
 
 [allow: test-only; writes pending snapshots (.snap.new) next to the tests]
-insta
+insta@1
 
 [allow: test-only; writes failing cases to proptest-regressions/ and times cases out on the clock]
-proptest
+proptest@1
 
 [allow: SQLite for wasm32 only, which nota doesn't build for; writes browser storage, not files]
-rsqlite-vfs sqlite-wasm-rs
+rsqlite-vfs@0.1 sqlite-wasm-rs@0.5
 
 [none: FFI declarations; every function is unsafe, and unsafe code is forbidden in nota's crates]
-jni-sys libc libsqlite3-sys linux-raw-sys windows windows-core
-windows-implement windows-interface windows-link windows-result
-windows-strings
+jni-sys@0.3,0.4 libc@0.2 libsqlite3-sys@0.38 linux-raw-sys@0.12 windows@0.62
+windows-core@0.62 windows-implement@0.60 windows-interface@0.59
+windows-link@0.2 windows-result@0.4 windows-strings@0.5
 
 [none: terminal I/O; opens /dev/tty or the console internally, but no function reads the clock or writes files]
-crossterm ratatui ratatui-core ratatui-crossterm ratatui-termina
-ratatui-termwiz termina vtparse wezterm-color-types wezterm-input-types
+crossterm@0.29 ratatui@0.30 ratatui-core@0.1 ratatui-crossterm@0.1
+ratatui-termina@0.1 ratatui-termwiz@0.1 termina@0.3 vtparse@0.6
+wezterm-color-types@0.3 wezterm-input-types@0.1
 
 [none: D-Bus IPC; nota asks logind for a sleep lock over the system bus, and no function reads the clock or writes files]
-dbus
+dbus@0.6
 
 [none: PipeWire's SPA types, re-exported by pipewire as `pipewire::spa`: dictionaries, pods, results and hooks; no safe function reads the clock or writes files]
-libspa
+libspa@0.10
 
 [none: audio, codecs, hashing, parsing, data types and system lookups; no function reads the clock or writes files]
-afl block-buffer claxon crc32fast crypto-common dasp_sample digest
-directories errno fallible-iterator fallible-streaming-iterator flacenc
-generic-array jiff-core jiff-static jni jni-macros rand rand_core serde_core
-serde_spanned sha2 signal-hook signal-hook-registry thread-priority toml
-toml_datetime typenum unicode-segmentation unicode-width
+afl@0.18 block-buffer@0.10 claxon@0.4 crc32fast@1 crypto-common@0.1
+dasp_sample@0.11 digest@0.10 directories@6 errno@0.3 fallible-iterator@0.3
+fallible-streaming-iterator@0.1 flacenc@0.5 generic-array@0.14 jiff-core@0.1
+jiff-static@0.2 jni@0.22 jni-macros@0.22 rand@0.8,0.9 rand_core@0.6,0.9
+serde_core@1 serde_spanned@1 sha2@0.10 signal-hook@0.3 signal-hook-registry@1
+thread-priority@3 toml@1 toml_datetime@1 typenum@1 unicode-segmentation@1
+unicode-width@0.2
 
 [indirect: only a dependency of a dependency, and no direct dependency re-exports it]
 adler2 aes aho-corasick allocator-api2 alsa alsa-sys annotate-snippets
