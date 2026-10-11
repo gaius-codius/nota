@@ -36,6 +36,7 @@ jobs:
       - run: scripts/check-weakened.test.sh
       - run: scripts/check-files.test.sh
       - run: scripts/check-clippy-bans.test.sh
+      - run: scripts/check-test-targets.test.sh
       # Every crate in the lock files is classified in clippy-crates.txt, and
       # what it bans is in clippy.toml.
       - run: scripts/check-clippy-bans.sh
@@ -93,10 +94,14 @@ jobs:
         with:
           tool: cargo-nextest
       # With the variable set, an engine test whose models are missing fails
-      # instead of skipping.
-      - run: cargo nextest run --workspace --locked --profile ci --no-tests=fail
+      # instead of skipping. --all-targets: examples' unit tests too, run by
+      # the test harness, so no example's main runs.
+      - run: cargo nextest run --workspace --all-targets --locked --profile ci --no-tests=fail
         env:
           NOTA_REQUIRE_TEST_MODELS: "1"
+      # Every workspace target was in the run above (cargo skips one whose
+      # required-features are off without a word); the arguments must match.
+      - run: scripts/check-test-targets.sh
       # nextest does not run doctests.
       - run: cargo test --workspace --locked --doc
 
@@ -321,7 +326,7 @@ jobs:
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: cargo-llvm-cov,cargo-nextest
-      - run: cargo llvm-cov nextest --workspace --locked --no-tests=fail --lcov --output-path lcov.info
+      - run: cargo llvm-cov nextest --workspace --all-targets --locked --no-tests=fail --lcov --output-path lcov.info
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage
