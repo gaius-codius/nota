@@ -112,8 +112,9 @@
 //! journal's fsync is checked after every event, whichever track it came
 //! from, after a stream ends, and while no audio arrives.
 //!
-//! Opening a stream can take seconds (cpal waits about 4 s for an audio
-//! server that accepts the connection and doesn't answer), so `nota
+//! Opening a stream can take seconds (on `PipeWire`, cpal waits about 4 s
+//! for an audio server that accepts the connection and doesn't answer; on
+//! `PulseAudio`, [`PulseBackend`] allows 5 s), so `nota
 //! record` starts the recorder first: [`prepare_tracks`] gives the
 //! receiver before any stream opens, [`record_tracks`] runs on it, and
 //! the [`TrackStarter`] then opens the streams one after another. Each
@@ -172,6 +173,37 @@
 //! fsyncs the new file and its directory on the recorder thread, once per
 //! track per segment window (five minutes by default).
 //!
+//! # Hosts
+//!
+//! [`AudioBackend`] is the backend `nota` records with. It picks the host
+//! once, when it's made ([`choose_host`], asking a [`HostProbe`]):
+//! `PipeWire` if its daemon accepts connections, else `PulseAudio` if a
+//! server answers, else ALSA. What each reports, as far as the detectors
+//! and device events go:
+//!
+//! | | `PipeWire` | `PulseAudio` | ALSA |
+//! |---|---|---|---|
+//! | Tracks | system audio, microphone | system audio, microphone | microphone |
+//! | Buffer stamps (drift) | yes | no | no |
+//! | Follows a changed default | yes | no | no |
+//! | Route-change epochs and device events | yes | no | no |
+//! | Overruns (an epoch for the loss) | yes | no | yes |
+//! | Device lost | yes | not reported if the server moves the stream | the stream's failure |
+//!
+//! On `PulseAudio` and ALSA a stream stays on the device it started on
+//! ([`PulseBackend`], [`AlsaBackend`]), unless the server moves it;
+//! `PulseAudio`'s says so at a start on a followed source, as a
+//! [`CaptureNotice::Warning`]. Where overruns
+//! are reported, a loss is timed at the overrun, as for any stream that
+//! doesn't stamp its buffers; on `PulseAudio` a loss isn't noticed. The
+//! zeros, quiet and stalled detectors read the samples and the delivered
+//! count, so they work on all three. On ALSA the system audio fails to
+//! start, with [`CaptureError::NoSystemAudio`], and the microphone records
+//! on. What a plain `PulseAudio` or ALSA-only system really does is
+//! measured on the other-distro machines (GAI-207).
+//!
+//! # Platform
+//!
 //! On Linux, [`PipeWireBackend`] captures through cpal's `PipeWire` host. It
 //! links `libpipewire-0.3`, `libasound` (cpal's ALSA host is always built
 //! on Linux) and `libdbus-1` (to ask rtkit for real-time priority)
@@ -202,13 +234,21 @@ use crate::detect::{Condition, Thresholds};
 use crate::fs::Fs;
 use crate::session::{FinishedJournal, SessionError, SessionWriter};
 
+#[cfg(target_os = "linux")]
+mod alsa;
+#[cfg(target_os = "linux")]
+mod cpal_input;
 #[cfg(test)]
 mod detect_tests;
 mod detectors;
 mod devices;
 #[cfg(target_os = "linux")]
+mod host;
+#[cfg(target_os = "linux")]
 mod pipewire;
 mod preview;
+#[cfg(target_os = "linux")]
+mod pulse;
 mod queue;
 // The route is followed by the PipeWire backend's watch; other platforms
 // have no backend yet, and nothing there would use it.
@@ -221,10 +261,18 @@ mod tests;
 #[cfg(test)]
 mod tracks_tests;
 
+#[cfg(target_os = "linux")]
+pub use alsa::AlsaBackend;
+#[cfg(target_os = "linux")]
+pub use cpal_input::PlainStream;
 pub use devices::{Device, Devices};
+#[cfg(target_os = "linux")]
+pub use host::{AudioBackend, AudioStream, Host, HostProbe, SystemProbe, choose_host};
 #[cfg(target_os = "linux")]
 pub use pipewire::PipeWireBackend;
 pub use preview::{Preview, PreviewEvent};
+#[cfg(target_os = "linux")]
+pub use pulse::PulseBackend;
 pub use queue::{Positions, Progress};
 
 use detectors::Detectors;
@@ -261,6 +309,9 @@ pub enum CaptureError {
     DeviceNotAvailable(Source),
     /// The device can't give mono 16-bit audio at the rate asked for.
     UnsupportedConfig(String),
+    /// The host can't record the system audio: ALSA, with neither
+    /// `PipeWire` nor `PulseAudio` running.
+    NoSystemAudio,
     /// Any other failure the backend reported.
     Backend(String),
 }
@@ -271,6 +322,9 @@ impl fmt::Display for CaptureError {
             Self::HostUnavailable(e) => write!(f, "the audio server isn't available: {e}"),
             Self::DeviceNotAvailable(source) => write!(f, "{source} isn't available"),
             Self::UnsupportedConfig(e) => write!(f, "the device can't capture as asked: {e}"),
+            Self::NoSystemAudio => f.write_str(
+                "system audio needs PipeWire or PulseAudio; only the microphone records on ALSA",
+            ),
             Self::Backend(e) => write!(f, "capture failed: {e}"),
         }
     }

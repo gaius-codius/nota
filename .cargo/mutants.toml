@@ -19,9 +19,21 @@
 # and its Drop are run by scripts/pipewire-devices.sh, on a private instance.
 # What it decides is in capture/route.rs, and what it reads (audio_node,
 # default_event, Pending) has unit tests; those stay mutated.
+#
+# The Pulse and ALSA hosts (capture/pulse.rs, alsa.rs, cpal_input.rs) and
+# the Pulse probe need a live audio server that CI's runners don't have, so
+# these functions are never run there: the two backends' `host` (the
+# connection), `pulse_reachable` (whether the server answers) and
+# PlainStream's Debug impl. Nothing runs them until the real PulseAudio run
+# on M7's VM (GAI-207). What they decide, from the device split and names to
+# the host choice, is in functions with unit tests; those stay mutated.
 exclude_re = [
   "pipewire/watch\\.rs:.*(impl std::fmt::Debug for Watch>|impl Drop for Watch>|replace watch -> | run -> | in run$|Watcher::|Subscription::)",
   "impl .*Debug for PipeWireStream",
+  "alsa\\.rs:.*replace host -> ",
+  "pulse\\.rs:.*replace host -> ",
+  "replace <impl HostProbe for SystemProbe>::pulse_reachable -> bool",
+  "impl .*Debug for PlainStream",
   "replace promote_current_thread -> bool with false",
   "replace <impl Clock for SystemClock>::suspended -> Duration with Default::default\\(\\)",
   "replace asleep_now -> Duration with Default::default\\(\\)",
