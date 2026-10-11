@@ -426,6 +426,57 @@ fn an_unwatched_device_warns_to_the_end() {
     assert_eq!(warnings.changes(), [secs(3)]);
 }
 
+/// A host that never watches says so for ten seconds, in gold, and the
+/// band marks it; it isn't a condition for the rest of the recording.
+#[test]
+fn a_host_that_never_watches_says_so_for_ten_seconds() {
+    let mut warnings = two_tracks();
+    let cause = Cause::DevicesNotWatched("PulseAudio doesn't follow the default".into());
+    raise(&mut warnings, cause, Some(MIC), 1);
+    assert_eq!(
+        warnings.top(secs(10)),
+        Some(shown("⚠ mic: devices unwatched", Tone::Gold, 0))
+    );
+    assert_eq!(warnings.top(secs(11)), None);
+    assert!(warnings.conditions(secs(11)).is_empty());
+    assert_eq!(warnings.changes(), [secs(1)]);
+}
+
+/// A watch lost after the host said it never watched is still a
+/// condition: it holds for the rest of the recording.
+#[test]
+fn a_watch_lost_mid_recording_holds_after_the_start_news_has_gone() {
+    let mut warnings = two_tracks();
+    let start = Cause::DevicesNotWatched("PulseAudio doesn't follow the default".into());
+    raise(&mut warnings, start, Some(MIC), 1);
+    raise(
+        &mut warnings,
+        Cause::DevicesUnwatched("device changes are no longer watched".into()),
+        Some(MIC),
+        600,
+    );
+    assert_eq!(
+        warnings.top(secs(4_000)),
+        Some(shown("⚠ mic: devices unwatched", Tone::Gold, 0))
+    );
+    assert_eq!(warnings.changes(), [secs(1), secs(600)]);
+}
+
+/// A capture note is for the timeline and the summary: the screen says
+/// nothing of it and the band doesn't mark it.
+#[test]
+fn a_capture_note_shows_nothing() {
+    let mut warnings = two_tracks();
+    raise(
+        &mut warnings,
+        Cause::CaptureNote("real-time priority refused".into()),
+        Some(MIC),
+        1,
+    );
+    assert_eq!(warnings.top(secs(2)), None);
+    assert!(warnings.changes().is_empty());
+}
+
 /// A backend's warning shows for ten seconds as news, and the band keeps
 /// it.
 #[test]

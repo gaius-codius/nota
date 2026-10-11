@@ -7,7 +7,7 @@
 //! - **No default-device events.** The stream stays on the device that was
 //!   the default when it started; if the default changes, it goes on
 //!   recording the old one, and says so at the start as a
-//!   [`CaptureNotice::Unwatched`].
+//!   [`CaptureNotice::NotWatching`].
 //! - **No device loss reported.** The host gives a failure only when it
 //!   can't read the stream's timing. A server that moves the stream to
 //!   another source when its device is unplugged (as `PulseAudio` and
@@ -131,7 +131,7 @@ impl CaptureBackend for PulseBackend {
             .device_by_id(&DeviceId::new(HostId::PulseAudio, &name))
             .ok_or_else(|| CaptureError::DeviceNotAvailable(source.clone()))?;
         if follows {
-            events.notice(CaptureNotice::Unwatched(format!(
+            events.notice(CaptureNotice::NotWatching(format!(
                 "PulseAudio: {source} records {name}, and doesn't follow the default if it changes"
             )));
         }

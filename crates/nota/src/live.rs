@@ -352,12 +352,17 @@ impl Live {
     fn noticed(&mut self, notice: CaptureNotice, track: TrackId) -> Option<Event> {
         let cause = match notice {
             CaptureNotice::Drifted(_) => Cause::Drift,
-            CaptureNotice::Unwatched(why) | CaptureNotice::Warning(why)
+            CaptureNotice::Unwatched(why)
+            | CaptureNotice::NotWatching(why)
+            | CaptureNotice::Noted(why)
+            | CaptureNotice::Warning(why)
                 if !self.reported.is_new(Some(track), &why) =>
             {
                 return None;
             }
             CaptureNotice::Unwatched(why) => Cause::DevicesUnwatched(why),
+            CaptureNotice::NotWatching(why) => Cause::DevicesNotWatched(why),
+            CaptureNotice::Noted(why) => Cause::CaptureNote(why),
             CaptureNotice::Warning(why) => Cause::CaptureWarning(why),
             // A loss, a route change and a suspend show as the epoch
             // they open, and the gap.

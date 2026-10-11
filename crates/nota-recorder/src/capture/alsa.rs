@@ -6,14 +6,15 @@
 //! [`CaptureError::NoSystemAudio`], which says so, and the recording goes
 //! on with the other track. Like the `PulseAudio` host
 //! ([`pulse`](super::pulse)), this one stamps nothing, follows no default
-//! and reports no device events but the stream's own failure.
+//! and reports no device events but the stream's own failure. It says so at
+//! the start, as a [`CaptureNotice::NotWatching`].
 
 use cpal::traits::{DeviceTrait, HostTrait};
 use cpal::{BufferSize, DeviceId, HostId};
 use nota_core::SampleRate;
 
 use super::cpal_input::{self, Listed, PlainStream};
-use super::{CaptureBackend, CaptureError, CaptureSender, Devices, Source};
+use super::{CaptureBackend, CaptureError, CaptureNotice, CaptureSender, Devices, Source};
 
 /// ALSA's name for its default capture device, which converts to the
 /// rate and format asked for. cpal builds it itself
@@ -93,13 +94,20 @@ impl CaptureBackend for AlsaBackend {
         };
         let device = device.ok_or_else(|| CaptureError::DeviceNotAvailable(source.clone()))?;
         let pinned = Source::Device(name.to_owned());
-        cpal_input::open(
+        let told = events.clone();
+        let stream = cpal_input::open(
             &device,
             (source, &pinned),
             rate,
             BufferSize::Default,
             events,
-        )
+        )?;
+        // Said once the stream runs: a start that fails says nothing of a
+        // watch.
+        told.notice(CaptureNotice::NotWatching(format!(
+            "ALSA: {source} records {name}, and device changes aren't reported"
+        )));
+        Ok(stream)
     }
 }
 
