@@ -950,6 +950,27 @@ fn a_kept_row_that_cant_be_read_is_left_out() {
     assert_eq!(covered(&segments(&library, session.id)), [(0, 3_000)]);
 }
 
+/// A directory under the kept row's name can never be read as one, so the
+/// session is adopted with its number alone and its audio is salvaged,
+/// rather than held back at every start.
+#[test]
+fn a_directory_under_the_kept_rows_name_doesnt_hold_up_salvage() {
+    let tmp = TestDir::new("kept-dir");
+    let library = Library::open(&tmp.0).unwrap();
+    let session = library.create().unwrap();
+    StdFs.create_dir(&session.dir.join("session.txt")).unwrap();
+    drop(record(&session, 3_000));
+    let done = library.salvage_all(length()).unwrap();
+    assert!(matches!(done[..], [Salvaged::Done(..)]), "{done:?}");
+    let adopted = library
+        .db()
+        .with(|db| db.session(session.id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(adopted.title, None);
+    assert_eq!(covered(&segments(&library, session.id)), [(0, 3_000)]);
+}
+
 /// A kept row that's there but can't be read yet holds the session back
 /// for the next start, rather than adopting it without its title for good.
 #[cfg(unix)]
