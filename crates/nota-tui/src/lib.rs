@@ -52,6 +52,6 @@ pub use processing::{
     Processing, ProcessingAction, ProcessingFailure, ProcessingJob, ProcessingState, ProcessingWait,
 };
 pub use run::{Ended, Event, InputThread, RunError, run, run_home, run_processing, run_setup};
-pub use screen::Recording;
+pub use screen::{Recording, Unfinished};
 pub use setup::{Choice, Device, Devices, Listen, Setup, SetupAction, Source};
 pub use theme::{Theme, ThemeError};

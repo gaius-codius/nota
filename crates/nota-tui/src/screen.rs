@@ -59,7 +59,19 @@ pub struct Recording {
     pub(crate) warnings: Warnings,
     /// What the stop left unfinished, once it's known: shown on the stopped
     /// screen in place of "everything is saved".
-    pub(crate) unfinished: Vec<String>,
+    pub(crate) unfinished: Unfinished,
+}
+
+/// What a stop left unfinished, for the stopped screen to say.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Unfinished {
+    /// Short phrases, one for each thing left, like "2 journals kept for
+    /// the next start".
+    pub phrases: Vec<String>,
+    /// Whether the next start publishes what was kept (journals left on
+    /// disk), which the screen then says in place of sending the listener
+    /// to Home to finish the session.
+    pub next_start_publishes: bool,
 }
 
 /// How far stopping has gone.
@@ -107,7 +119,7 @@ impl Recording {
             draft: None,
             stop: Stop::No,
             warnings: Warnings::default(),
-            unfinished: Vec::new(),
+            unfinished: Unfinished::default(),
         }
     }
 
@@ -354,10 +366,10 @@ impl Recording {
     }
 
     /// Tells a stopped screen what the stop left unfinished (journals kept
-    /// for the next start, say), one short phrase each. The screen says so
-    /// beside how far the recording is saved; with none, it says
-    /// everything up to then is.
-    pub fn set_unfinished(&mut self, unfinished: Vec<String>) {
+    /// for the next start, say). The screen says so beside how far the
+    /// recording is saved; with no phrases, it says everything up to then
+    /// is.
+    pub fn set_unfinished(&mut self, unfinished: Unfinished) {
         self.unfinished = unfinished;
     }
 

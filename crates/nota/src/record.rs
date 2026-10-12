@@ -124,7 +124,7 @@ use nota_recorder::capture::CaptureBackend;
 use nota_recorder::engine::EngineCommand;
 use nota_recorder::segment::SegmentLength;
 use nota_store::HeardBy;
-use nota_tui::Recording;
+use nota_tui::{Recording, Unfinished};
 
 mod ballast;
 mod health;
@@ -367,7 +367,7 @@ fn record_with<B: CaptureBackend>(
 impl<S> Returned<S> {
     /// Tells the stopped screen, if there is one, what the stop left
     /// unfinished.
-    fn say_unfinished(&mut self, unfinished: Vec<String>) {
+    fn say_unfinished(&mut self, unfinished: Unfinished) {
         if let Some(stopped) = &mut self.stopped {
             stopped.set_unfinished(unfinished);
         }
@@ -409,7 +409,10 @@ mod tests {
             screen: (),
             stopped: Some(screen),
         };
-        returned.say_unfinished(vec!["2 journals kept for the next start".to_owned()]);
+        returned.say_unfinished(Unfinished {
+            phrases: vec!["2 journals kept for the next start".to_owned()],
+            next_start_publishes: true,
+        });
         let mut terminal = Terminal::new(TestBackend::new(70, 20)).unwrap();
         terminal
             .draw(|frame| returned.stopped.as_mut().unwrap().draw(frame))
@@ -417,6 +420,10 @@ mod tests {
         let drawn = terminal.backend().to_string();
         assert!(
             drawn.contains("Saved up to 01:12:48 · 2 journals kept for the next start."),
+            "{drawn}"
+        );
+        assert!(
+            drawn.contains("Free some space; the next start publishes the rest."),
             "{drawn}"
         );
     }

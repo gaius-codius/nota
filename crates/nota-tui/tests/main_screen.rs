@@ -19,7 +19,7 @@ use nota_core::{
     Clock, FakeClock, SampleIndex, SampleRange, SampleRate, SessionTime, TrackId, TrackTimeline,
     Utterance,
 };
-use nota_tui::{Recording, Theme};
+use nota_tui::{Recording, Theme, Unfinished};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -568,12 +568,16 @@ fn main_stopped() {
 }
 
 /// A stop that left journals for the next start says so beside how far
-/// the recording is saved, in place of "everything is saved".
+/// the recording is saved, in place of "everything is saved", and ends
+/// with what actually finishes it: the next start, not opening the session.
 #[test]
 fn main_stopped_with_journals_kept() {
     let mut screen = two_track_screen();
     raise(&mut screen, Cause::DiskFull, None, 4_368);
-    screen.set_unfinished(vec!["2 journals kept for the next start".to_owned()]);
+    screen.set_unfinished(Unfinished {
+        phrases: vec!["2 journals kept for the next start".to_owned()],
+        next_start_publishes: true,
+    });
     let terminal = draw(&mut screen, 62, 20);
     let drawn = format!("{}", terminal.backend());
     assert!(
@@ -581,7 +585,54 @@ fn main_stopped_with_journals_kept() {
         "{drawn}"
     );
     assert!(!drawn.contains("Everything up to"), "{drawn}");
+    assert!(
+        drawn.contains("Free some space; the next start publishes the rest."),
+        "{drawn}"
+    );
+    assert!(!drawn.contains("open the session"), "{drawn}");
     insta::assert_snapshot!(terminal.backend());
+}
+
+/// The stopped notice wraps at the width the margin leaves: at 62 columns
+/// that is 56, so a 57-character sentence breaks before its last word.
+#[test]
+fn the_stopped_notice_wraps_at_the_width_the_margin_leaves() {
+    let mut screen = two_track_screen();
+    raise(&mut screen, Cause::DiskFull, None, 4_368);
+    // "Saved up to 01:12:48 · 1 journal kept for the next start." is 57.
+    screen.set_unfinished(Unfinished {
+        phrases: vec!["1 journal kept for the next start".to_owned()],
+        next_start_publishes: true,
+    });
+    let drawn = format!("{}", draw(&mut screen, 62, 20).backend());
+    assert!(
+        drawn.contains("│   Saved up to 01:12:48 · 1 journal kept for the next       │"),
+        "{drawn}"
+    );
+    assert!(
+        drawn.contains("│   start.                                                   │"),
+        "{drawn}"
+    );
+}
+
+/// Something unfinished that the next start won't publish (a damaged
+/// journal) still sends the listener Home, as an unfinished stop did
+/// before.
+#[test]
+fn main_stopped_with_nothing_for_the_next_start_still_sends_home() {
+    let mut screen = two_track_screen();
+    raise(&mut screen, Cause::DiskFull, None, 4_368);
+    screen.set_unfinished(Unfinished {
+        phrases: vec!["part of 1 damaged journal not saved".to_owned()],
+        next_start_publishes: false,
+    });
+    let drawn = format!("{}", draw(&mut screen, 62, 20).backend());
+    assert!(
+        drawn.contains("Saved up to 01:12:48 · part of 1 damaged"),
+        "{drawn}"
+    );
+    assert!(drawn.contains("open the session from Home"), "{drawn}");
+    assert!(!drawn.contains("the next start publishes"), "{drawn}");
 }
 
 /// The top border's cell style at the first cell showing `glyph`.
