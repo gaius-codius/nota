@@ -776,6 +776,9 @@ pub struct DiskSummary {
     pub low: bool,
     /// Why the space couldn't be checked, the first time it couldn't.
     pub unchecked: Option<String>,
+    /// Whether no ballast was found in the data directory when the
+    /// recording started (see the module docs for when one is made).
+    pub started_without_ballast: bool,
 }
 
 /// The disk monitor: a thread that checks the free space every so often,
@@ -869,7 +872,9 @@ fn monitor<S: Fs + Clone>(
     mut report: impl FnMut(DiskReport),
 ) -> DiskSummary {
     let mut summary = DiskSummary::default();
-    report(DiskReport::Ballast(watch.holds_ballast()));
+    let held = watch.holds_ballast();
+    summary.started_without_ballast = !held;
+    report(DiskReport::Ballast(held));
     let mut reported_full = false;
     loop {
         if !reported_full && let Some(full) = watch.full() {

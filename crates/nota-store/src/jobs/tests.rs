@@ -81,6 +81,73 @@ fn a_recording_stopped_by_salvage_gets_its_jobs() {
     assert_eq!(states(&store), [(S1, JobState::Waiting(None))]);
 }
 
+/// A recording the full disk stopped, whose own stop never got to mark it
+/// (the write that would is the one a full disk fails), is stopped by the
+/// next start with its jobs waiting for space: the timeline's full-disk
+/// warning says so. One whose timeline has none, or only another warning,
+/// waits for nothing.
+#[test]
+fn a_stop_by_salvage_infers_the_wait_from_a_full_disk_in_the_timeline() {
+    use crate::timeline::{Happened, TimelineEvent};
+    use nota_core::SessionTime;
+    use nota_core::recorder::Cause;
+
+    let (_dir, mut store) = store("inferred-wait");
+    let full = TimelineEvent {
+        at: SessionTime::from_nanos(4_368_000_000_000),
+        track: None,
+        happened: Happened::Raised(Cause::DiskFull),
+    };
+    store.add_event(S1, &full).unwrap();
+    // Another warning says nothing.
+    let low = TimelineEvent {
+        happened: Happened::Raised(Cause::DiskLow),
+        ..full.clone()
+    };
+    store.add_event(S2, &low).unwrap();
+    assert!(store.stop_recording(S1).unwrap());
+    assert!(store.stop_recording(S2).unwrap());
+    assert_eq!(
+        states(&store),
+        [
+            (S1, JobState::Waiting(Some(Wait::Space))),
+            (S2, JobState::Waiting(None)),
+        ]
+    );
+}
+
+/// A row of the timeline that can't be decoded doesn't keep the session
+/// from stopping, or hide its full disk.
+#[test]
+fn a_stop_by_salvage_with_an_undecodable_timeline_row_still_sees_a_full_disk() {
+    let (_dir, mut store) = store("unreadable-timeline");
+    for (session, kind) in [
+        (1, "raised:sneezed"),
+        (2, "raised:sneezed"),
+        (2, "raised:disk-full"),
+    ] {
+        store
+            .conn
+            .execute(
+                "INSERT INTO event (session_id, track, at_ns, kind, detail) \
+                 VALUES (?1, NULL, 5, ?2, NULL)",
+                rusqlite::params![session, kind],
+            )
+            .unwrap();
+    }
+    assert!(store.timeline(S1).is_err());
+    assert!(store.timeline(S2).is_err());
+    assert!(store.stop_recording(S1).unwrap());
+    assert!(store.stop_recording(S2).unwrap());
+    assert_eq!(
+        states(&store),
+        [
+            (S1, JobState::Waiting(None)),
+            (S2, JobState::Waiting(Some(Wait::Space))),
+        ]
+    );
+}
+
 /// A job runs from waiting, notes its progress, and ends done, failed or
 /// waiting again; only a waiting job can be started.
 #[test]

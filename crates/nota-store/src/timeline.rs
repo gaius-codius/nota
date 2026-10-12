@@ -132,6 +132,23 @@ impl Store {
         Ok(())
     }
 
+    /// Whether `session`'s timeline holds a full disk's warning: the
+    /// recording was stopped by a full disk, or the disk filled as it
+    /// finished. Looks only at those rows, so a row it can't decode
+    /// elsewhere in the timeline doesn't hide it.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] for any SQLite failure.
+    pub fn disk_filled(&self, session: SessionId) -> Result<bool, StoreError> {
+        let (kind, _) = encode(&Happened::Raised(Cause::DiskFull))?;
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM event WHERE session_id = ?1 AND kind = ?2)",
+            params![session_key(session)?, kind],
+            |r| r.get(0),
+        )?)
+    }
+
     /// `session`'s timeline in session order; at one moment, in the order
     /// the events were added.
     ///

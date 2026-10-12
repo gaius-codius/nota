@@ -9,14 +9,16 @@ use nota_recorder::session::SessionWriter;
 
 use super::live::{LiveEnd, LiveInput};
 use super::start::{RecordFs, Recorded, Started};
-use super::summary::{Outcome, Shown, note_published, note_saved};
+use super::summary::{Outcome, Shown, note_published, note_saved, unfinished};
 use crate::inhibit::Slept;
 
 /// Stops what `started` started, in order, and finishes the session.
 /// The session is saved by now, so whatever goes wrong while stopping (the
 /// recorder or the publisher stopping unexpectedly, the screen failing)
-/// is a note on the outcome, which is reported all the same.
-pub(super) fn stop<B: CaptureBackend>(started: Started<B>, shown: Shown) -> Outcome {
+/// is a note on the outcome, which is reported all the same. With it come
+/// the short phrases for what the stop left unfinished, for the stopped
+/// screen.
+pub(super) fn stop<B: CaptureBackend>(started: Started<B>, shown: Shown) -> (Outcome, Vec<String>) {
     let Started {
         mut outcome,
         ballast,
@@ -69,6 +71,7 @@ pub(super) fn stop<B: CaptureBackend>(started: Started<B>, shown: Shown) -> Outc
     if let Some(Err(e)) = log.map(|log| log.write(&draw_ends)) {
         outcome.notes.push(format!("writing the latency log: {e}"));
     }
+    let finishing_failed = stopped.finishing.is_some();
     if let Some(e) = stopped.finishing {
         outcome.notes.push(format!("finishing the recording: {e}"));
     }
@@ -80,6 +83,7 @@ pub(super) fn stop<B: CaptureBackend>(started: Started<B>, shown: Shown) -> Outc
     // Everything the live thread and the screen gave is stored, or given
     // up on, before the session is marked stopped and its jobs queued.
     let saved = saver.finish();
+    let left_over = unfinished(&stopped.published, writer_lost, finishing_failed);
     match &stopped.published {
         // Without the writer, its last journals are left for salvage.
         Ok(report) => {
@@ -122,7 +126,7 @@ pub(super) fn stop<B: CaptureBackend>(started: Started<B>, shown: Shown) -> Outc
         outcome.notes.push(problem);
     }
     note_saved(&mut outcome, &saved, shown.marks);
-    outcome
+    (outcome, left_over)
 }
 
 /// The writer the recorder thread hands back, with how recording went
@@ -200,6 +204,14 @@ fn note_disk(
         outcome
             .notes
             .push("the disk ran low: under an hour of recording was left".to_owned());
+    }
+    // A full disk has said what became of the ballast above.
+    if summary.started_without_ballast && summary.full.is_none() {
+        outcome.notes.push(
+            "the recording started with no space set aside for a full disk (nota sets it \
+             aside as a recording ends, when there's room)"
+                .to_owned(),
+        );
     }
     if let Some(e) = summary.unchecked {
         outcome.notes.push(format!(
@@ -284,6 +296,35 @@ mod tests {
                 "the disk filled while the last segments were published; nota freed the space \
               it keeps for this to finish the last segments. Free some space before \
               recording again"
+            ]
+        );
+    }
+
+    /// GAI-462: a recording that started without the ballast says so, in
+    /// the summary only, and not twice when the disk filled (that note
+    /// says what became of the ballast).
+    #[test]
+    fn a_recording_that_started_without_a_ballast_says_so() {
+        let without = DiskSummary {
+            started_without_ballast: true,
+            ..DiskSummary::default()
+        };
+        assert_eq!(
+            noted(Ok(without), false),
+            [
+                "the recording started with no space set aside for a full disk (nota sets it \
+                 aside as a recording ends, when there's room)"
+            ]
+        );
+        let full_without = DiskSummary {
+            started_without_ballast: true,
+            ..full(Freed::None)
+        };
+        assert_eq!(
+            noted(Ok(full_without), true),
+            [
+                "stopped early: the disk is full; nota had no space set aside for this. \
+                 Free some space before recording again"
             ]
         );
     }

@@ -33,6 +33,10 @@
 //! ╰─ ⏎ home ──────────────────────────────────── 1h 12m saved ─╯
 //! ```
 //!
+//! When the stop left something unfinished, the second sentence says what
+//! in place of "Everything up to 01:12:48 is saved": `Saved up to 01:12:48
+//! · 2 journals kept for the next start.`
+//!
 //! From 100 columns (`MainWide`), the marks-and-notes panel takes the
 //! right 32, after a gap of 2; the main panel keeps its layout in the rest:
 //!
@@ -387,9 +391,18 @@ impl Recording {
     /// `area` for the transcript.
     fn draw_stopped_notice(&self, area: Rect, at: SessionTime, buf: &mut Buffer) -> Rect {
         let text_width = usize::from(area.width.saturating_sub(MARGIN + 1));
+        let saved = if self.unfinished.is_empty() {
+            format!("Everything up to {} is saved.", clock_hms(at))
+        } else {
+            format!(
+                "Saved up to {} · {}.",
+                clock_hms(at),
+                self.unfinished.join(" · ")
+            )
+        };
         let sentences = [
             "The disk is full, so nota stopped the recording.".to_owned(),
-            format!("Everything up to {} is saved.", clock_hms(at)),
+            saved,
             "Free some space, then open the session from Home to finish it.".to_owned(),
         ];
         let lines: Vec<String> = sentences
