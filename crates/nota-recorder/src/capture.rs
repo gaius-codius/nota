@@ -148,9 +148,10 @@
 //!   the stream's [`CaptureEvent::Started`], so a stream still opening
 //!   isn't stalled, and time spent suspended doesn't count.
 //!
-//! A track's detectors end with its stream, clearing what they raised. The
-//! thresholds come from the track's [`Source`] ([`prepare_tracks`]), or
-//! from [`CaptureReceiver::set_thresholds`].
+//! A track's detectors end with its stream, or when it can't join,
+//! clearing what they raised. The thresholds come from the track's
+//! [`Source`] ([`prepare_tracks`]), or from
+//! [`CaptureReceiver::set_thresholds`].
 //!
 //! # The bound
 //!

@@ -285,7 +285,7 @@ fn a_failed_stream_flushes_its_track() {
     assert_eq!(live.recorder(Some(MIC), failed).flush, Some(MIC));
 }
 
-/// The warning `Live` raises for a report that carries no time.
+/// The warning `Live` raises for `cause` on `track`, dated `at`.
 fn raised(cause: Cause, track: TrackId, at: SessionTime) -> Event {
     Event::Warning(Warning {
         cause,

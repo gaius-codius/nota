@@ -267,8 +267,10 @@ struct Counts {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Positions {
     /// The end of the audio the server delivered: what the recorder
-    /// captured, and what waits in the queue for it. Audio the recorder
-    /// dropped unrecorded isn't counted: it was never the track's to lose.
+    /// captured, and what waits in the queue for it. Audio dropped from a
+    /// track that never started or couldn't join, or whose stream had
+    /// ended, isn't counted: it was never the track's to lose. Audio the
+    /// writer refused outright is: the track lost it.
     pub delivered: SampleIndex,
     /// The end of what the recorder has handed the session writer: written
     /// to the track's journals, or held in memory while a full journal's
@@ -306,9 +308,10 @@ impl Progress {
     }
 
     /// The track's positions now. Read while the recorder runs, `delivered`
-    /// counts every buffer sent before the call (one sent during it may or
-    /// may not be in), and may for a moment count a buffer the recorder
-    /// has just appended twice; `durable` is never past `captured`.
+    /// counts every buffer sent before the call and not yet dropped (one
+    /// sent during it may or may not be in), and may for a moment count a
+    /// buffer the recorder has just appended twice, or one it has just
+    /// dropped; `durable` is never past `captured`.
     #[must_use]
     pub fn now(&self) -> Positions {
         // Durable, queued, then captured: the recorder moves captured on
