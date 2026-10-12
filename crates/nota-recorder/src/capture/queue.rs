@@ -17,7 +17,9 @@
 //!
 //! [`Progress`] counts each track's samples sent but not yet appended to
 //! its journal, so loss can be measured from the audio the server
-//! delivered, not only from what the recorder wrote.
+//! delivered, not only from what the recorder wrote. Samples the recorder
+//! drops unrecorded, from a track that never started or couldn't join, or
+//! whose stream had already ended, stop counting as they're dropped.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -252,7 +254,8 @@ pub struct Progress(Arc<Counts>);
 
 #[derive(Debug)]
 struct Counts {
-    /// Samples sent by the stream and not yet appended to a journal.
+    /// Samples sent by the stream, and neither appended to a journal nor
+    /// dropped.
     queued: AtomicU64,
     /// The writer's next sample, once the recorder has appended up to it.
     captured: AtomicU64,
@@ -264,7 +267,8 @@ struct Counts {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Positions {
     /// The end of the audio the server delivered: what the recorder
-    /// captured, and what waits in the queue for it.
+    /// captured, and what waits in the queue for it. Audio the recorder
+    /// dropped unrecorded isn't counted: it was never the track's to lose.
     pub delivered: SampleIndex,
     /// The end of what the recorder has handed the session writer: written
     /// to the track's journals, or held in memory while a full journal's
@@ -329,6 +333,12 @@ impl Progress {
     /// now `captured`.
     pub(super) fn appended(&self, n: usize, captured: SampleIndex) {
         self.0.captured.store(captured.get(), Ordering::SeqCst);
+        self.discarded(n);
+    }
+
+    /// The recorder dropped `n` samples the stream sent, unrecorded: they
+    /// no longer wait, and nothing of them is at risk.
+    pub(super) fn discarded(&self, n: usize) {
         let _ = self
             .0
             .queued

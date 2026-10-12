@@ -1095,7 +1095,7 @@ mod linux {
                     let id = track.map_or_else(|| "none".to_owned(), |t| t.get().to_string());
                     fs.0.note(&format!("capture-failed {id}"))
                 }
-                (_, RecorderEvent::Capture(n)) => {
+                (_, RecorderEvent::Capture { notice: n, .. }) => {
                     let logged = if n == CaptureNotice::Overrun {
                         fs.0.note("overrun")
                     } else {
@@ -2099,7 +2099,10 @@ mod linux {
                 if matches!(
                     e,
                     RecorderEvent::JournalFailed(_)
-                        | RecorderEvent::Capture(CaptureNotice::Overrun)
+                        | RecorderEvent::Capture {
+                            notice: CaptureNotice::Overrun,
+                            ..
+                        }
                 ) {
                     lost += 1;
                 }

@@ -111,7 +111,7 @@ mod linux {
                 RecorderEvent::Finished(j) => journals.extend(j),
                 RecorderEvent::JournalFailed(_) => failures += 1,
                 RecorderEvent::EpochRefused(_) => refused += 1,
-                RecorderEvent::Capture(n) => notices.push(n),
+                RecorderEvent::Capture { notice: n, .. } => notices.push(n),
                 RecorderEvent::Epoch(_)
                 | RecorderEvent::Audio(_)
                 | RecorderEvent::CaptureFailed(_)

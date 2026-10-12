@@ -881,7 +881,7 @@ fn spawn_recorder(
                             RecorderEvent::CaptureFailed(error) => {
                                 lost.push(format!("{}: {error}", track_name(track)));
                             }
-                            RecorderEvent::Capture(notice) => {
+                            RecorderEvent::Capture { notice, .. } => {
                                 warned.extend(
                                     capture_warning(track, notice)
                                         .filter(|note| reported.is_new(track, note)),
@@ -1518,8 +1518,9 @@ mod tests {
         use super::*;
 
         /// Hands the live thread, as the recorder would, a stalled microphone,
-        /// a quiet system track, a lost device and a wake from suspend, and
-        /// waits for it to be done: its changes go to `ui` and `saver`.
+        /// a quiet system track, a lost device, a watch lost while the
+        /// microphone has no audio, and a wake from suspend, and waits for it
+        /// to be done: its changes go to `ui` and `saver`.
         pub(super) fn through_live(saver: &Saver, ui: &Sender<Event>, clock: &Arc<dyn Clock>) {
             use nota_core::messages::AudioChunk;
             use nota_core::recorder::DeviceChange;
@@ -1564,10 +1565,22 @@ mod tests {
                 at: at(3_000),
             };
             inputs.send(LiveInput::Recorder(Some(MIC), lost)).unwrap();
+            // Dated when the stream reported it, not where the microphone's
+            // audio ends: it has none yet.
+            let unwatched = RecorderEvent::Capture {
+                notice: CaptureNotice::Unwatched("watch lost".into()),
+                at: at(3_500),
+            };
+            inputs
+                .send(LiveInput::Recorder(Some(MIC), unwatched))
+                .unwrap();
             inputs
                 .send(LiveInput::Recorder(
                     Some(MIC),
-                    RecorderEvent::Capture(CaptureNotice::Suspended),
+                    RecorderEvent::Capture {
+                        notice: CaptureNotice::Suspended,
+                        at: at(3_000),
+                    },
                 ))
                 .unwrap();
             // The first audio after the suspend, 4 s in, says the sleep ended.
@@ -1588,7 +1601,8 @@ mod tests {
     /// sleep report reaches the session's timeline in the library
     /// database, with its track and its session time, through the real
     /// saver and the tees the sources use. A machine's sleep is the live
-    /// view's, from the audio after a suspend.
+    /// view's, from the audio after a suspend. Acceptance (GAI-471): a
+    /// capture warning's row is at the time the stream reported it.
     #[test]
     #[expect(clippy::disallowed_methods, reason = "test scaffolding")]
     fn changes_from_every_source_reach_the_sessions_timeline() {
@@ -1635,7 +1649,7 @@ mod tests {
 
         drop(ui);
         let report = saver.finish();
-        assert_eq!((report.events, report.lost_events), (6, 0));
+        assert_eq!((report.events, report.lost_events), (7, 0));
         let stored = library.db().with(|db| db.timeline(id)).unwrap();
         let none = |cause, ms| entry(ms, None, Happened::Raised(cause));
         assert_eq!(
@@ -1644,6 +1658,11 @@ mod tests {
                 entry(1_000, Some(MIC), Happened::Raised(Cause::Stalled)),
                 entry(2_000, Some(SYSTEM), Happened::Raised(Cause::Quiet)),
                 entry(3_000, Some(MIC), Happened::Device(DeviceChange::Lost)),
+                entry(
+                    3_500,
+                    Some(MIC),
+                    Happened::Raised(Cause::DevicesUnwatched("watch lost".into()))
+                ),
                 none(Cause::Slept, 4_000),
                 none(Cause::DiskLow, 5_000),
                 none(Cause::SleepNotHeld, 6_000),
@@ -1654,7 +1673,7 @@ mod tests {
             .try_iter()
             .filter(|e| matches!(e, Event::Recorder(recorder::Event::Warning(_))))
             .count();
-        assert_eq!(warned, 5);
+        assert_eq!(warned, 6);
         let _ = std::fs::remove_dir_all(&root);
     }
 

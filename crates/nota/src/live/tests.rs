@@ -385,6 +385,35 @@ fn a_journal_broken_on_the_fsync_is_reported_without_a_track() {
     assert_eq!(actions.updates, [warning]);
 }
 
+/// The stream's `notice`, as the recorder reports it, noted at `at_ms`.
+fn noticed(notice: CaptureNotice, at_ms: u64) -> RecorderEvent {
+    RecorderEvent::Capture {
+        notice,
+        at: ms(at_ms),
+    }
+}
+
+/// Acceptance (GAI-471): a capture warning is dated when the stream
+/// reported it, not where the track's audio so far ends: a stream that
+/// stalled after 60 s and reports at 90 s is warned of at 90 s.
+#[test]
+fn a_capture_warning_is_dated_when_the_stream_reported_it() {
+    let mut live = Live::new(&[opened(MIC, 0)]);
+    live.recorder(
+        Some(MIC),
+        RecorderEvent::Audio(chunk(MIC, 0, vec![1; 60_000])),
+    );
+    let why = "device changes aren't watched: no socket";
+    let actions = live.recorder(
+        Some(MIC),
+        noticed(CaptureNotice::Unwatched(why.into()), 90_000),
+    );
+    assert_eq!(
+        actions.updates,
+        [raised(Cause::DevicesUnwatched(why.into()), MIC, ms(90_000))]
+    );
+}
+
 /// Drift is reported once, as a warning the screen can ignore and the
 /// timeline stores.
 #[test]
@@ -392,10 +421,7 @@ fn drift_is_a_warning_for_its_track() {
     let mut live = Live::new(&[opened(MIC, 0)]);
     live.recorder(Some(MIC), RecorderEvent::Audio(chunk(MIC, 0, vec![1; 20])));
     let drift = Drift::from_ppb(900_000).unwrap();
-    let actions = live.recorder(
-        Some(MIC),
-        RecorderEvent::Capture(CaptureNotice::Drifted(drift)),
-    );
+    let actions = live.recorder(Some(MIC), noticed(CaptureNotice::Drifted(drift), 20));
     assert_eq!(
         actions,
         Actions {
@@ -412,10 +438,7 @@ fn an_unwatched_device_is_a_warning_for_its_track() {
     let mut live = Live::new(&[opened(MIC, 0)]);
     live.recorder(Some(MIC), RecorderEvent::Audio(chunk(MIC, 0, vec![1; 20])));
     let why = "device changes aren't watched: no socket";
-    let actions = live.recorder(
-        Some(MIC),
-        RecorderEvent::Capture(CaptureNotice::Unwatched(why.into())),
-    );
+    let actions = live.recorder(Some(MIC), noticed(CaptureNotice::Unwatched(why.into()), 20));
     assert_eq!(
         actions,
         Actions {
@@ -433,7 +456,7 @@ fn a_host_that_never_watches_is_its_own_warning() {
     let why = "PulseAudio: the mic records alsa_input, and doesn't follow the default";
     let actions = live.recorder(
         Some(MIC),
-        RecorderEvent::Capture(CaptureNotice::NotWatching(why.into())),
+        noticed(CaptureNotice::NotWatching(why.into()), 0),
     );
     assert_eq!(
         actions,
@@ -451,8 +474,7 @@ fn a_noted_report_is_a_capture_note_told_once() {
     let mut live = Live::new(&[opened(MIC, 0)]);
     let noted = |live: &mut Live| {
         let notice = CaptureNotice::Noted("real-time priority refused".into());
-        live.recorder(Some(MIC), RecorderEvent::Capture(notice))
-            .updates
+        live.recorder(Some(MIC), noticed(notice, 0)).updates
     };
     assert_eq!(
         noted(&mut live),
@@ -476,7 +498,7 @@ fn a_backend_warning_is_a_warning_for_its_track() {
     );
     let actions = live.recorder(
         Some(SYSTEM),
-        RecorderEvent::Capture(CaptureNotice::Warning("stream hiccup".into())),
+        noticed(CaptureNotice::Warning("stream hiccup".into()), 30),
     );
     assert_eq!(
         actions,
@@ -498,9 +520,7 @@ fn a_repeated_backend_warning_is_reported_once() {
     let mut live = Live::new(&[opened(MIC, 0), opened(SYSTEM, 0)]);
     let said = |live: &mut Live, track, text: &str| {
         let notice = CaptureNotice::Warning(text.into());
-        live.recorder(Some(track), RecorderEvent::Capture(notice))
-            .updates
-            .len()
+        live.recorder(Some(track), noticed(notice, 0)).updates.len()
     };
     assert_eq!(said(&mut live, MIC, "hiccup"), 1);
     assert_eq!(said(&mut live, MIC, "hiccup"), 0);
@@ -772,7 +792,7 @@ fn reopened_at(resumed: u64, audio: u64) -> TrackTimeline {
 }
 
 fn suspended() -> RecorderEvent {
-    RecorderEvent::Capture(CaptureNotice::Suspended)
+    noticed(CaptureNotice::Suspended, 0)
 }
 
 /// What the screen is told apart from levels and sizes.

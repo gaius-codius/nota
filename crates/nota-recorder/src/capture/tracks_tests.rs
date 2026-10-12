@@ -286,7 +286,14 @@ fn an_overrun_moves_only_its_own_track_to_a_new_epoch() {
         .reported
         .iter()
         .filter(|(t, e)| {
-            *t == Some(MIC) && matches!(e, RecorderEvent::Capture(CaptureNotice::Overrun))
+            *t == Some(MIC)
+                && matches!(
+                    e,
+                    RecorderEvent::Capture {
+                        notice: CaptureNotice::Overrun,
+                        ..
+                    }
+                )
         })
         .count();
     assert_eq!(notices, 1);
@@ -386,6 +393,37 @@ fn a_stream_without_a_timeline_waits_for_its_start() {
     assert!(!reported.contains(&Some(SYSTEM)), "{reported:?}");
     assert_eq!(writer.next_sample(MIC), Some(SampleIndex::new(10)));
     assert_eq!(writer.next_sample(SYSTEM), None);
+}
+
+/// A backend whose stream sends audio and then fails to start, as a
+/// stream that delivers a first buffer before its start is refused.
+struct SendsThenRefuses;
+
+impl CaptureBackend for SendsThenRefuses {
+    type Stream = ();
+
+    fn start(&self, _: &Source, _: SampleRate, events: CaptureSender) -> Result<(), CaptureError> {
+        events.audio(&samples(MIC, 0, 10));
+        Err(CaptureError::Backend("refused".into()))
+    }
+}
+
+/// Acceptance (GAI-479): audio sent by a stream that then didn't start is
+/// dropped unrecorded, and no longer counts as delivered: nothing of the
+/// track is at risk.
+#[test]
+fn audio_dropped_from_a_stream_that_never_started_is_not_at_risk() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let clock = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let (starter, _, recorder, progress) =
+        record_joining(&fs, &clock, &[(MIC, Source::Microphone)]);
+    let captures = starter.start(&SendsThenRefuses);
+    assert!(matches!(captures[..], [Err(_)]), "{captures:?}");
+    let (_, result) = recorder.join().unwrap();
+    result.unwrap();
+    let positions = progress[&MIC].now();
+    assert_eq!(positions.at_risk(), SampleCount::new(0), "{positions:?}");
+    assert_eq!(positions.delivered, SampleIndex::ZERO);
 }
 
 /// A track that can't start on the writer when it joins is reported as
@@ -1071,4 +1109,69 @@ fn the_other_tracks_due_fsync_runs_as_soon_as_a_stream_ends() {
     assert_eq!(system.now().durable, SampleIndex::new(30));
     assert_eq!(writer.durable(SYSTEM).unwrap().end(), SampleIndex::new(30));
     writer.finish().unwrap();
+}
+
+/// A track refused as it joins, whose audio came with its first epoch's
+/// start before its stream's start returned, drops that audio rather than
+/// ending the recording: the track already recording records on.
+#[test]
+fn a_track_refused_with_audio_held_leaves_the_other_recording() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let session = SessionDir::new(SESSION, fs, &dir()).lock().unwrap();
+    let length = SegmentLength::new(SampleCount::new(1_000)).unwrap();
+    let mut writer = SessionWriter::open(&session, rate(), length, clock).unwrap();
+    for track in [MIC, SYSTEM] {
+        writer
+            .start_track(
+                track,
+                &writer.test_epoch(track, EpochId::new(0), SampleIndex::ZERO),
+            )
+            .unwrap();
+    }
+    let mut mic = TrackTimeline::new(MIC);
+    mic.open_epoch(SessionTime::ZERO, SampleIndex::ZERO, rate())
+        .unwrap();
+    let (tx, rx) = test_channel();
+    // Held until the start returns, then handled together: the writer
+    // already has the system track, so its `Began` refuses it, and the
+    // audio after it has no journal to go to.
+    tx.send(
+        SYSTEM,
+        CaptureEvent::Began {
+            at: SessionTime::ZERO,
+        },
+    );
+    tx.send(SYSTEM, CaptureEvent::Audio(samples(SYSTEM, 0, 10)));
+    tx.send(SYSTEM, CaptureEvent::Started);
+    tx.send(MIC, CaptureEvent::Audio(samples(MIC, 0, 10)));
+    tx.send(SYSTEM, CaptureEvent::Stopped);
+    tx.send(MIC, CaptureEvent::Stopped);
+    let events = CaptureReceiver {
+        events: rx,
+        rate: rate(),
+        tracks: test_tracks(&[MIC, SYSTEM]),
+        clock: Arc::new(FakeClock::new(SessionTime::ZERO)),
+        thresholds: BTreeMap::new(),
+    };
+    let mut failed = Vec::new();
+    record_tracks(
+        &mut writer,
+        std::slice::from_mut(&mut mic),
+        &events,
+        &mut |t, e| {
+            if let RecorderEvent::CaptureFailed(e) = e {
+                failed.push((t, e.to_string()));
+            }
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(&failed[..], [(Some(SYSTEM), e)] if e.contains("couldn't record it")),
+        "{failed:?}"
+    );
+    assert_eq!(writer.next_sample(MIC), Some(SampleIndex::new(10)));
+    assert_eq!(writer.next_sample(SYSTEM), Some(SampleIndex::ZERO));
+    // Every buffer goes back to be filled again, the refused track's too.
+    assert_eq!(events.events.spare(), 2);
 }

@@ -387,6 +387,41 @@ fn audio_waiting_in_the_queue_is_not_a_stall() {
     assert_eq!(audio, 4);
 }
 
+/// Acceptance (GAI-479): a track that can't join records nothing, so its
+/// audio is dropped, isn't at risk, and its stream isn't watched for a
+/// stall: once dropped, its audio no longer moves its delivered count.
+#[test]
+fn a_track_that_cant_join_has_nothing_at_risk_and_never_stalls() {
+    let clock = Arc::new(FakeClock::new(SessionTime::from_nanos(10_000_000_000)));
+    let dyn_clock: Arc<dyn Clock> = Arc::<FakeClock>::clone(&clock);
+    let (starter, events) = prepare_tracks(&[(MIC, Source::Microphone)], rate(), &dyn_clock);
+    let progress = events.progress(MIC).unwrap();
+    let backend = Senders::default();
+    let mut captures = Some(starter.start(&backend));
+    backend.first().audio(&tone(100));
+    // The writer already has the track, so it can't join.
+    let mut writer = writer_with(&[MIC]);
+    let mut reported = Vec::new();
+    record_tracks(&mut writer, &mut [], &events, &mut |track, event| {
+        if matches!(event, RecorderEvent::CaptureFailed(_)) {
+            // Long past a stall's threshold with nothing more delivered,
+            // before the stream stops.
+            clock.advance(Duration::from_secs(3));
+            drop(captures.take());
+        }
+        reported.push((track, event));
+    })
+    .unwrap();
+    let failed = reported
+        .iter()
+        .filter(|(_, e)| matches!(e, RecorderEvent::CaptureFailed(_)))
+        .count();
+    assert_eq!(failed, 1, "{reported:?}");
+    assert_eq!(detections(&reported), []);
+    let positions = progress.now();
+    assert_eq!(positions.at_risk(), SampleCount::new(0), "{positions:?}");
+}
+
 /// A stalled track's samples arriving again clear it, at the time they
 /// were seen. The recorder raises it from its idle checks, with no event
 /// to wake it.

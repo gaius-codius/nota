@@ -1193,8 +1193,17 @@ pub enum RecorderEvent {
     /// A journal broke and so did its replacement: the samples since the
     /// last durable position are a gap. Recording goes on in a new journal.
     JournalFailed(SessionError),
-    /// The stream noted something; recording goes on.
-    Capture(CaptureNotice),
+    /// The stream noted something, or the recorder noted it of the
+    /// stream ([`CaptureNotice::Drifted`]); recording goes on.
+    Capture {
+        /// What was noted.
+        notice: CaptureNotice,
+        /// When, by the session clock: when the stream reported it
+        /// ([`CaptureEvent::Notice`]), or, for drift, when the buffer that
+        /// showed it was captured. It may be well after the track's audio
+        /// so far ends, if the stream stalled.
+        at: SessionTime,
+    },
     /// After lost audio, a route change or a suspend, or to correct drift,
     /// the track moved to this epoch, in its timeline and its journals: its
     /// samples from [`Epoch::first_sample`] on play from [`Epoch::start`].
@@ -1438,7 +1447,7 @@ pub fn record_tracks<S: Fs>(
             // So can one whose track has ended: audio its callback sent as
             // the failure was, or a device event after it.
             Received::Event(track, event) if !live.contains(&track) => {
-                events.discard(event);
+                events.discard(track, event);
                 continue;
             }
             Received::Event(track, event) => (track, event),
@@ -1466,18 +1475,21 @@ pub fn record_tracks<S: Fs>(
             settle(writer, Ok(()), report)?;
             note_durable(writer, events);
         }
+        let mut refused = false;
         for event in admitted {
+            // Released with the event that refused the track as it joined:
+            // dropped as its later events are, since it has no journal.
+            let Some(event) = (if refused {
+                of_refused(events, track, event)
+            } else {
+                Some(event)
+            }) else {
+                continue;
+            };
             let outcome =
                 match handle(writer, &mut timelines, &mut detectors, track, event, report)? {
                     Handled::Recorded(outcome, spent) => {
-                        if let Some(buffer) = spent {
-                            // An append refused outright (`Overflow`) recorded
-                            // nothing: those samples still count as queued.
-                            if !matches!(outcome, Err((_, SessionError::Overflow))) {
-                                note_appended(writer, events, track, buffer.len());
-                            }
-                            events.events.recycle(buffer);
-                        }
+                        note_spent(writer, events, track, spent, &outcome);
                         outcome
                     }
                     Handled::Joined => {
@@ -1487,7 +1499,12 @@ pub fn record_tracks<S: Fs>(
                     Handled::Refused(error) => {
                         // Its later events are dropped; its `Stopped` ends it.
                         joining.insert(track, Joining::Refused);
+                        refused = true;
                         report(Some(track), RecorderEvent::CaptureFailed(error));
+                        // Its audio no longer counts as delivered once
+                        // dropped, so a stream still sending would read as
+                        // stalled: it records nothing, so it can't stall.
+                        detectors.end(track, None, None, report);
                         Ok(())
                     }
                     Handled::Ended => {
@@ -1509,10 +1526,14 @@ pub fn record_tracks<S: Fs>(
 }
 
 impl CaptureReceiver {
-    /// Drops `event`, unrecorded; if it's audio, its buffer goes back to be
-    /// filled again.
-    fn discard(&self, event: CaptureEvent) {
+    /// Drops `track`'s `event`, unrecorded; if it's audio, its samples no
+    /// longer count as queued on the track's [`Progress`], and its buffer
+    /// goes back to be filled again.
+    fn discard(&self, track: TrackId, event: CaptureEvent) {
         if let CaptureEvent::Audio(samples) | CaptureEvent::TimedAudio { samples, .. } = event {
+            if let Some((_, progress)) = self.tracks.iter().find(|(t, _)| *t == track) {
+                progress.discarded(samples.len());
+            }
             self.events.recycle(samples);
         }
     }
@@ -1597,15 +1618,7 @@ fn admit(
 ) -> Vec<CaptureEvent> {
     let held = match joining.get_mut(&track) {
         Some(Joining::Unconfirmed(held)) => held,
-        Some(Joining::Refused) => {
-            return match event {
-                CaptureEvent::Stopped | CaptureEvent::Failed(_) => vec![CaptureEvent::Stopped],
-                event => {
-                    events.discard(event);
-                    Vec::new()
-                }
-            };
-        }
+        Some(Joining::Refused) => return of_refused(events, track, event).into_iter().collect(),
         Some(Joining::Confirmed) | None => return vec![event],
     };
     match event {
@@ -1616,7 +1629,7 @@ fn admit(
         }
         CaptureEvent::NotStarted => {
             for dropped in std::mem::take(held) {
-                events.discard(dropped);
+                events.discard(track, dropped);
             }
             joining.insert(track, Joining::Refused);
             vec![CaptureEvent::NotStarted]
@@ -1624,6 +1637,22 @@ fn admit(
         event => {
             held.push(event);
             Vec::new()
+        }
+    }
+}
+
+/// What of refused `track`'s `event` is still handled: only the end of its
+/// stream. Anything else is dropped.
+fn of_refused(
+    events: &CaptureReceiver,
+    track: TrackId,
+    event: CaptureEvent,
+) -> Option<CaptureEvent> {
+    match event {
+        CaptureEvent::Stopped | CaptureEvent::Failed(_) => Some(CaptureEvent::Stopped),
+        event => {
+            events.discard(track, event);
+            None
         }
     }
 }
@@ -1639,6 +1668,26 @@ fn note_started<S: Fs>(writer: &SessionWriter<S>, events: &CaptureReceiver, trac
         if writer.durable(track).is_none() {
             progress.synced(next);
         }
+    }
+}
+
+/// Moves `track`'s progress on by the samples of `spent`, the buffer an
+/// append with this `outcome` took them from, if there was one, and hands
+/// the buffer back to be filled again.
+fn note_spent<S: Fs>(
+    writer: &SessionWriter<S>,
+    events: &CaptureReceiver,
+    track: TrackId,
+    spent: Option<Vec<i16>>,
+    outcome: &Result<(), (TrackId, SessionError)>,
+) {
+    if let Some(buffer) = spent {
+        // An append refused outright (`Overflow`) recorded nothing: those
+        // samples still count as queued.
+        if !matches!(outcome, Err((_, SessionError::Overflow))) {
+            note_appended(writer, events, track, buffer.len());
+        }
+        events.events.recycle(buffer);
     }
 }
 
@@ -1712,7 +1761,7 @@ fn handle<S: Fs>(
         }
         CaptureEvent::Notice { notice, at } => {
             let lost = notice == CaptureNotice::Overrun;
-            report(Some(track), RecorderEvent::Capture(notice));
+            report(Some(track), RecorderEvent::Capture { notice, at });
             match timelines.get_mut(track) {
                 // Before its first audio, a track has no epoch to leave. A
                 // stream that stamps its buffers shows its losses in them.
@@ -1872,7 +1921,10 @@ fn time_buffer<S: Fs>(
         }
     };
     if let Some(drift) = stamps.meter.past_limit() {
-        report(RecorderEvent::Capture(CaptureNotice::Drifted(drift)));
+        report(RecorderEvent::Capture {
+            notice: CaptureNotice::Drifted(drift),
+            at,
+        });
     }
     moved
 }

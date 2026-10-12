@@ -215,7 +215,13 @@ impl Live {
                 }
             }
             // The first audio after it says when the sleep ended.
-            (Some(track), RecorderEvent::Capture(CaptureNotice::Suspended)) => {
+            (
+                Some(track),
+                RecorderEvent::Capture {
+                    notice: CaptureNotice::Suspended,
+                    ..
+                },
+            ) => {
                 self.sleeping.insert(track);
             }
             // The stream stopped: what the engine holds of it won't grow.
@@ -244,8 +250,8 @@ impl Live {
                     state: WarningState::Raised,
                 }));
             }
-            (Some(track), RecorderEvent::Capture(notice)) => {
-                actions.updates.extend(self.noticed(notice, track));
+            (Some(track), RecorderEvent::Capture { notice, at }) => {
+                actions.updates.extend(self.noticed(notice, track, at));
             }
             (
                 Some(track),
@@ -345,11 +351,12 @@ impl Live {
         }
     }
 
-    /// The warning that `track`'s stream's `notice` is, if it is one.
-    /// Drift is reported once per track, the watch stays gone, and a
-    /// backend's report is news once (a repeat of its words is dropped):
-    /// none is ever cleared.
-    fn noticed(&mut self, notice: CaptureNotice, track: TrackId) -> Option<Event> {
+    /// The warning that `track`'s stream's `notice`, noted `at`, is, if it
+    /// is one. It's dated `at`, not where the track's audio so far ends: a
+    /// stream that stalled reports after its last audio. Drift is reported
+    /// once per track, the watch stays gone, and a backend's report is news
+    /// once (a repeat of its words is dropped): none is ever cleared.
+    fn noticed(&mut self, notice: CaptureNotice, track: TrackId, at: SessionTime) -> Option<Event> {
         let cause = match notice {
             CaptureNotice::Drifted(_) => Cause::Drift,
             CaptureNotice::Unwatched(why)
@@ -370,11 +377,16 @@ impl Live {
                 return None;
             }
         };
-        Some(self.raised(cause, track))
+        Some(Event::Warning(Warning {
+            cause,
+            track: Some(track),
+            at,
+            state: WarningState::Raised,
+        }))
     }
 
     /// The warning that `cause` has been raised for `track`, for the
-    /// reports that carry no time.
+    /// reports that carry no time: a failed stream or journal.
     fn raised(&self, cause: Cause, track: TrackId) -> Event {
         Event::Warning(Warning {
             cause,
