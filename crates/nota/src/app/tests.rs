@@ -3,9 +3,9 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use crate::record::last_setup;
-use nota_core::recorder::Input;
+use nota_core::recorder::{Cause, Input};
 use nota_core::{EpochId, FakeClock, SampleIndex, SampleRange, TrackId};
-use nota_store::{NewSession, SegmentRow, Sha256Digest, Track, TrackKind};
+use nota_store::{Happened, NewSession, SegmentRow, Sha256Digest, Track, TrackKind};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};

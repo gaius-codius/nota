@@ -343,6 +343,12 @@ fn a_recording_that_started_without_a_ballast_says_so_in_its_summary() {
         nota.press("y");
         let status = nota.exits().expect("nota didn't stop");
         assert!(status.success(), "{status:?}: {}", nota.output());
+        // The summary has been read before its lines are looked through.
+        assert!(
+            nota.shows_after(0, "nota: recorded to"),
+            "{}",
+            nota.output()
+        );
         said.push(nota.output().contains(SAYS));
     }
     assert_eq!(said, [true, false]);

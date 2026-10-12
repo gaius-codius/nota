@@ -252,7 +252,8 @@ pub(crate) struct Lent<'a> {
 pub(crate) struct Returned<S = Screen> {
     pub(crate) screen: S,
     /// The Recording screen as it closed, if a full disk stopped the
-    /// recording: the app shows it again, stopped, until `⏎`.
+    /// recording, told what the stop left unfinished: the app shows it
+    /// again, stopped, until `⏎`.
     pub(crate) stopped: Option<Recording>,
 }
 
@@ -381,8 +382,8 @@ mod tests {
     use super::*;
 
     /// The stopped screen is told what the stop left unfinished, and says
-    /// it in place of "everything is saved"; a recording with no stopped
-    /// screen has nobody to tell.
+    /// it in place of "everything is saved". (That `record_with` passes
+    /// the stop's phrases on is checked by the stopped screen's run only.)
     #[test]
     fn the_stopped_screen_is_told_what_the_stop_left() {
         use nota_core::FakeClock;
@@ -418,12 +419,6 @@ mod tests {
             drawn.contains("Saved up to 01:12:48 · 2 journals kept for the next start."),
             "{drawn}"
         );
-        // Nobody to tell: nothing happens.
-        Returned {
-            screen: (),
-            stopped: None,
-        }
-        .say_unfinished(vec!["x".to_owned()]);
     }
 
     /// The recorder starts on a start command, and on nothing else: the

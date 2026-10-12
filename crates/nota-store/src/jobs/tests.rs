@@ -116,22 +116,36 @@ fn a_stop_by_salvage_infers_the_wait_from_a_full_disk_in_the_timeline() {
     );
 }
 
-/// A timeline that can't be read doesn't keep the session from stopping:
-/// it stops with no wait, as before.
+/// A row of the timeline that can't be decoded doesn't keep the session
+/// from stopping, or hide its full disk.
 #[test]
-fn a_stop_by_salvage_with_an_unreadable_timeline_waits_for_nothing() {
+fn a_stop_by_salvage_with_an_undecodable_timeline_row_still_sees_a_full_disk() {
     let (_dir, mut store) = store("unreadable-timeline");
-    store
-        .conn
-        .execute(
-            "INSERT INTO event (session_id, track, at_ns, kind, detail) \
-             VALUES (1, NULL, 5, 'raised:sneezed', NULL)",
-            [],
-        )
-        .unwrap();
+    for (session, kind) in [
+        (1, "raised:sneezed"),
+        (2, "raised:sneezed"),
+        (2, "raised:disk-full"),
+    ] {
+        store
+            .conn
+            .execute(
+                "INSERT INTO event (session_id, track, at_ns, kind, detail) \
+                 VALUES (?1, NULL, 5, ?2, NULL)",
+                rusqlite::params![session, kind],
+            )
+            .unwrap();
+    }
     assert!(store.timeline(S1).is_err());
+    assert!(store.timeline(S2).is_err());
     assert!(store.stop_recording(S1).unwrap());
-    assert_eq!(states(&store), [(S1, JobState::Waiting(None))]);
+    assert!(store.stop_recording(S2).unwrap());
+    assert_eq!(
+        states(&store),
+        [
+            (S1, JobState::Waiting(None)),
+            (S2, JobState::Waiting(Some(Wait::Space))),
+        ]
+    );
 }
 
 /// A job runs from waiting, notes its progress, and ends done, failed or

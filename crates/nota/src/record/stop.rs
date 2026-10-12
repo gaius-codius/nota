@@ -71,6 +71,7 @@ pub(super) fn stop<B: CaptureBackend>(started: Started<B>, shown: Shown) -> (Out
     if let Some(Err(e)) = log.map(|log| log.write(&draw_ends)) {
         outcome.notes.push(format!("writing the latency log: {e}"));
     }
+    let finishing_failed = stopped.finishing.is_some();
     if let Some(e) = stopped.finishing {
         outcome.notes.push(format!("finishing the recording: {e}"));
     }
@@ -82,7 +83,7 @@ pub(super) fn stop<B: CaptureBackend>(started: Started<B>, shown: Shown) -> (Out
     // Everything the live thread and the screen gave is stored, or given
     // up on, before the session is marked stopped and its jobs queued.
     let saved = saver.finish();
-    let left_over = unfinished(&stopped.published, writer_lost);
+    let left_over = unfinished(&stopped.published, writer_lost, finishing_failed);
     match &stopped.published {
         // Without the writer, its last journals are left for salvage.
         Ok(report) => {
@@ -207,8 +208,8 @@ fn note_disk(
     // A full disk has said what became of the ballast above.
     if summary.started_without_ballast && summary.full.is_none() {
         outcome.notes.push(
-            "the recording started with no space set aside for a full disk (the first \
-             recording in a data directory, and one after a crash, has none)"
+            "the recording started with no space set aside for a full disk (nota sets it \
+             aside as a recording ends, when there's room)"
                 .to_owned(),
         );
     }
@@ -311,8 +312,8 @@ mod tests {
         assert_eq!(
             noted(Ok(without), false),
             [
-                "the recording started with no space set aside for a full disk (the first \
-                 recording in a data directory, and one after a crash, has none)"
+                "the recording started with no space set aside for a full disk (nota sets it \
+                 aside as a recording ends, when there's room)"
             ]
         );
         let full_without = DiskSummary {

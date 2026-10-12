@@ -776,9 +776,8 @@ pub struct DiskSummary {
     pub low: bool,
     /// Why the space couldn't be checked, the first time it couldn't.
     pub unchecked: Option<String>,
-    /// Whether the recording started with no ballast held: the first
-    /// recording in a data directory, one after a crash, or one that
-    /// found too little room.
+    /// Whether no ballast was found in the data directory when the
+    /// recording started (see the module docs for when one is made).
     pub started_without_ballast: bool,
 }
 

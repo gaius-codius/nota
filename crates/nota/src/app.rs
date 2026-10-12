@@ -36,9 +36,9 @@ use std::time::Duration;
 use jiff::Timestamp;
 use jiff::civil::Date;
 use jiff::tz::TimeZone;
-use nota_core::recorder::{Cause, Command, Setup};
+use nota_core::recorder::{Command, Setup};
 use nota_core::{Clock, SessionId, SessionTime, SystemClock, WallTime, wall_now};
-use nota_store::{Happened, JobState, Wait};
+use nota_store::{JobState, Wait};
 use nota_tui::{Action, Event, Home, InputThread, Recording, RunError, Session, Status, Theme};
 use ratatui::Terminal;
 use ratatui::backend::Backend;
@@ -669,12 +669,8 @@ impl Listing<'_> {
         let stopped = self
             .library
             .db()
-            .with(|db| db.timeline(id))
-            .is_ok_and(|events| {
-                events
-                    .iter()
-                    .any(|event| event.happened == Happened::Raised(Cause::DiskFull))
-            });
+            .with(|db| db.disk_filled(id))
+            .unwrap_or(false);
         Some(if stopped {
             "stopped early: disk full · free space to finish"
         } else {

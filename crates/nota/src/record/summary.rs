@@ -226,11 +226,13 @@ pub(super) fn note_published(outcome: &mut Outcome, report: &PublishReport) {
 /// What the stop left for the next start, as short phrases for the stopped
 /// screen to say beside how far the recording is saved; none if
 /// everything was published. `lost_writer` is the recorder having
-/// panicked, which leaves its journals unseen, and `published` is how
-/// publishing went.
+/// panicked, which leaves its journals unseen, `finishing_failed` is the
+/// writer failing to finish (audio it still held may be missing), and
+/// `published` is how publishing went.
 pub(super) fn unfinished(
     published: &Result<PublishReport, PublisherPanicked>,
     lost_writer: bool,
+    finishing_failed: bool,
 ) -> Vec<String> {
     let mut phrases = Vec::new();
     match published {
@@ -247,12 +249,15 @@ pub(super) fn unfinished(
             let damaged = report.set_aside().len();
             if damaged > 0 {
                 phrases.push(format!(
-                    "{} kept",
+                    "part of {} not saved",
                     plural(damaged, "damaged journal", "damaged journals")
                 ));
             }
         }
         Err(_) => phrases.push("the last journals kept for the next start".to_owned()),
+    }
+    if finishing_failed {
+        phrases.push("the end of the recording may be missing".to_owned());
     }
     phrases
 }
@@ -607,8 +612,8 @@ pub(super) mod tests {
         let mut outcome = Outcome::new(SessionId::new(1), PathBuf::new());
         note_published(&mut outcome, &report);
         assert_eq!(
-            unfinished(&Ok(report), false),
-            ["1 damaged journal kept"],
+            unfinished(&Ok(report), false, false),
+            ["part of 1 damaged journal not saved"],
             "the stopped screen says what the summary does"
         );
         assert!(!outcome.complete);
@@ -876,12 +881,19 @@ pub(super) mod tests {
             } else {
                 &[]
             };
-            assert_eq!(unfinished(&Ok(report), false), kept, "{beside:?}");
+            assert_eq!(unfinished(&Ok(report), false, false), kept, "{beside:?}");
             let expected_left: &[&str] = if held_back { &["journal-000001"] } else { &[] };
             assert_eq!(unpublished, expected_left, "{beside:?}");
             assert_eq!(outcome.notes, expected, "{beside:?}");
             assert_eq!(outcome.complete, !held_back, "{beside:?}");
         }
+    }
+
+    /// Counts say "1 journal" and "2 journals".
+    #[test]
+    fn counts_are_pluralised() {
+        assert_eq!(plural(1, "journal", "journals"), "1 journal");
+        assert_eq!(plural(2, "journal", "journals"), "2 journals");
     }
 
     /// A recorder that panicked, or a publisher that did, leaves its last
@@ -891,11 +903,18 @@ pub(super) mod tests {
     fn a_lost_writer_or_publisher_leaves_the_last_journals() {
         use crate::library::held::{Beside, Held};
         let kept = ["the last journals kept for the next start"];
-        assert_eq!(unfinished(&Err(PublisherPanicked), false), kept);
+        assert_eq!(unfinished(&Err(PublisherPanicked), false, false), kept);
         let report = Held::new(Beside::Blocked).published();
-        assert_eq!(unfinished(&Ok(report), true), kept);
+        assert_eq!(unfinished(&Ok(report), true, false), kept);
         let whole = Held::new(Beside::StrayTemp).published();
-        assert!(unfinished(&Ok(whole), false).is_empty());
+        assert!(unfinished(&Ok(whole), false, false).is_empty());
+        // A writer that couldn't finish may have dropped its tail, though
+        // everything it did finish was published.
+        let whole = Held::new(Beside::StrayTemp).published();
+        assert_eq!(
+            unfinished(&Ok(whole), false, true),
+            ["the end of the recording may be missing"]
+        );
     }
 
     /// Cleanup of one journal must not hide another journal's pending repair.
