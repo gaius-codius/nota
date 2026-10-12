@@ -39,18 +39,29 @@
 #            terminal. The script changes no default, volume or device
 #            except where it says so first and waits for Enter:
 #              - default-output switches the default output (and puts it
-#                back) only with --allow-default-switch and --other-sink;
+#                back) only with --allow-default-switch and --other-sink,
+#                and asks first;
 #              - the USB microphone and the Bluetooth profile are changed
-#                by the user, when asked; the change is timed from the
-#                server's first event for it (`pactl subscribe`);
-#              - pinned-removed uses a null sink the script makes and
-#                removes (no hardware);
+#                by the user: they press Enter, then change it; the
+#                change is timed from the server's first event for that
+#                device (`pactl subscribe`), and the case is not valid if
+#                the device had already gone at Enter;
 #              - a quiet tone plays into the two outputs of default-output
-#                only with --tone.
-#            The defaults (output and input) are read first and put back
-#            on exit, whatever happens; the script says if it had to.
-#            Everything it makes is named ndc_* and removed on exit; a
-#            player or nota is stopped by its PID.
+#                only with --tone, and only after the question that says so.
+#            It also makes null sinks and virtual microphones named
+#            ndc<pid>_* on the user's server for the cases (a quiet one for
+#            the track a case doesn't test, and the pinned device of
+#            pinned-removed); they appear briefly in sound settings and are
+#            removed on exit, by this run's own prefix and no other.
+#            The defaults are read first and put back on exit, whatever
+#            happens: the default output and input in effect, and the
+#            default the user chose (`default.configured.audio.*`, which can
+#            name a device that is away, such as a Bluetooth headset that is
+#            off, and which `pactl set-default-*` overwrites). The script
+#            says so if it had to, and fails if a default could not be put
+#            back. It never changes a Bluetooth profile; the user puts it
+#            back when asked. A run killed with SIGKILL leaves its ndc*
+#            sinks: `pactl list short modules | grep ndc` and unload them.
 #
 # What counts, per case (the report is also written to report.txt):
 #   - the warning is on the screen within 2 s of the change;
@@ -58,6 +69,9 @@
 #   - a lost track has no audio after the loss;
 #   - with tones: the epochs' audio is the devices' tones, in order;
 #   - nota exits 0.
+# The exit status is 0 when every requested case ran and passed, 3 when all
+# that ran passed but some could not run (the report says which), and 1 when
+# a check failed or a default could not be put back.
 #
 # Not run in CI: it needs PipeWire 1.x, WirePlumber 0.5 (private),
 # pipewire-pulse, `pactl`, `pw-play`, `pw-link`, `ffmpeg`, python3 and a
@@ -67,7 +81,7 @@
 # Usage: scripts/device-changes.sh [private|real] [--cases LIST]
 #          [--switches N] [--other-sink NODE] [--usb-mic NODE]
 #          [--bt-sink NODE] [--allow-default-switch] [--tone]
-#          [--keep] [--out DIR]
+#          [--manual-wait S] [--keep] [--out DIR]
 #   --cases LIST    comma-separated cases (default: all that can run)
 #   --switches N    switches in default-output (default 4; even ends where
 #                   it started)
@@ -80,6 +94,7 @@
 #   --allow-default-switch   real: the user's OK to switch the default output
 #   --tone          real: play a quiet tone into both outputs, so the audio
 #                   after each switch can be told apart
+#   --manual-wait   real: seconds to wait for the user's change (default 120)
 #   --keep          keep the work directory (kept anyway if a case failed)
 #   --out DIR       the work directory (default ~/.cache/nota/device-changes/<date>)
 set -euo pipefail
@@ -96,7 +111,7 @@ while [[ $# -gt 0 ]]; do
   case $1 in
     --keep) keep=1; shift ;;
     --out) out=${2:?}; shift 2 ;;
-    --cases | --switches | --other-sink | --usb-mic | --bt-sink)
+    --cases | --switches | --other-sink | --usb-mic | --bt-sink | --manual-wait)
       pyargs+=("$1" "${2:?}"); shift 2 ;;
     --allow-default-switch | --tone) pyargs+=("$1"); shift ;;
     -h | --help) sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
@@ -105,6 +120,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 die() { echo "device-changes: $*" >&2; exit 2; }
+
+# pactl's words are translated; this parses the English ones.
+export LC_ALL=C
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 for c in python3 pactl pw-play pw-link ffmpeg; do
@@ -133,32 +151,73 @@ runtime=
 pids=()
 saved_sink=
 saved_source=
+saved_conf_sink=
+saved_conf_source=
+# Unique to this run: the fixtures' names start with it.
+prefix="ndc$$_"
 finished=0
 
-# Everything the script made on a real server, found by its name: a run
-# killed past Python's own clean-up leaves no sink behind.
+# Everything this run made on a real server, by its own prefix: a run killed
+# past Python's own clean-up leaves no sink behind, and another run's (or the
+# user's own) are never touched.
 unload_fixtures() {
   local idx
   for idx in $(pactl list short modules 2>/dev/null |
-    awk '($2 == "module-null-sink" && $0 ~ /sink_name=ndc_/) || ($2 == "module-remap-source" && $0 ~ /source_name=ndc_/) { print $1 }'); do
+    awk -v p="$prefix" '($2 == "module-null-sink" && index($0, "sink_name=" p)) || ($2 == "module-remap-source" && index($0, "source_name=" p)) { print $1 }'); do
     pactl unload-module "$idx" || true
   done
 }
 
+# WirePlumber keeps the default the user chose (`configured`) apart from the
+# one in effect, which differs while the chosen device is away (a Bluetooth
+# headset that is off). `pactl set-default-*` writes the configured one, so
+# the configured values are saved and put back as they were, or deleted if
+# there were none.
+configured() { pw-metadata -n default 2>/dev/null | sed -n "s/.*key:'$1' value:'\(.*\)' type:'\(.*\)'.*/\1\t\2/p"; }
+
+restore_configured() {
+  local key=$1 saved=$2 now value type
+  now=$(configured "$key")
+  [[ $now == "$saved" ]] && return 0
+  if [[ -z $saved ]]; then
+    pw-metadata -n default -d 0 "$key" >/dev/null || return 1
+  else
+    value=${saved%%$'\t'*}
+    type=${saved#*$'\t'}
+    pw-metadata -n default 0 "$key" "$value" "$type" >/dev/null || return 1
+  fi
+  echo "device-changes: $key was changed; put back" >&2
+}
+
+failed_restore=0
 cleanup() {
+  local rc=$?
   if [[ $mode == real ]]; then
     unload_fixtures
     local sink source
     sink=$(pactl get-default-sink 2>/dev/null || true)
     source=$(pactl get-default-source 2>/dev/null || true)
     if [[ -n $saved_sink && $sink != "$saved_sink" ]]; then
-      pactl set-default-sink "$saved_sink" || true
-      echo "device-changes: the default output was $sink; put back to $saved_sink" >&2
+      if pactl set-default-sink "$saved_sink" 2>/dev/null; then
+        echo "device-changes: the default output was $sink; put back to $saved_sink" >&2
+      else
+        echo "device-changes: the default output is $sink and could NOT be put back to $saved_sink (is it connected?): set it yourself" >&2
+        failed_restore=1
+      fi
     fi
     if [[ -n $saved_source && $source != "$saved_source" ]]; then
-      pactl set-default-source "$saved_source" || true
-      echo "device-changes: the default input was $source; put back to $saved_source" >&2
+      if pactl set-default-source "$saved_source" 2>/dev/null; then
+        echo "device-changes: the default input was $source; put back to $saved_source" >&2
+      else
+        echo "device-changes: the default input is $source and could NOT be put back to $saved_source (is it plugged in?): set it yourself" >&2
+        failed_restore=1
+      fi
     fi
+    # Last, so the configured defaults are what they were whatever the
+    # `set-default` calls above wrote.
+    restore_configured default.configured.audio.sink "$saved_conf_sink" || failed_restore=1
+    restore_configured default.configured.audio.source "$saved_conf_source" || failed_restore=1
+    [[ $failed_restore -eq 0 ]] || echo "device-changes: a default could not be restored" >&2
   fi
   # Written so an empty list is no error under `set -u` in bash 3.2.
   for pid in ${pids[@]+"${pids[@]}"}; do
@@ -173,6 +232,8 @@ cleanup() {
   else
     rm -rf "$work"
   fi
+  # A default that could not be put back fails the run.
+  [[ $failed_restore -eq 0 || $rc -ne 0 ]] || exit 1
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
@@ -239,14 +300,17 @@ else
   [[ -t 0 ]] || die "real mode needs a terminal: it asks the user to act"
   saved_sink=$(pactl get-default-sink)
   saved_source=$(pactl get-default-source)
+  command -v pw-metadata >/dev/null || die "pw-metadata is required in real mode (it keeps the configured defaults)"
+  saved_conf_sink=$(configured default.configured.audio.sink)
+  saved_conf_source=$(configured default.configured.audio.source)
   echo "device-changes: defaults saved: output $saved_sink, input $saved_source"
-  # Left from an earlier run that was killed.
-  unload_fixtures
+  echo "device-changes: configured defaults saved: output ${saved_conf_sink%%$'\t'*}, input ${saved_conf_source%%$'\t'*}"
 fi
 
 status=0
-"$python" -I -B "$repo/scripts/device-changes.py" "$mode" "$work" "$nota" \
+"$python" -I -B "$repo/scripts/device-changes.py" "$mode" "$work" "$nota" --prefix "$prefix" \
   ${pyargs[@]+"${pyargs[@]}"} || status=$?
-# A run that failed keeps its directory, whatever --keep says.
+# A run that failed or was left incomplete keeps its directory, whatever
+# --keep says.
 [[ $status -ne 0 ]] || finished=1
 exit $status

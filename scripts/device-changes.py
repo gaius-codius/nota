@@ -37,6 +37,9 @@ import unicodedata
 import wave
 
 RATE = 16000
+# The names of everything this run makes on the server start with this, which
+# is unique to the run (the shell script passes it and unloads by it).
+PREFIX = "ndc_"
 # The exit criterion: a change shows, and is logged, within this.
 WITHIN_S = 2.0
 # The timeline's clock starts when nota starts; the first draw anchors it.
@@ -50,8 +53,11 @@ WINDOW = 320
 # The part of a window's energy a tone must hold to be named: a stream
 # hearing two devices at once holds half in each.
 TONE_SHARE = 0.7
-# Audio at the start and end of an epoch is not judged for its tone.
+# Audio at the start and end of an epoch is not judged for its tone, and an
+# epoch must be this pure in the rest: a device's audio under another's name
+# shows as the share of windows that aren't the epoch's own tone.
 EDGE_S = 0.3
+PURITY = 0.95
 # The amplitude of the tones played into the user's own outputs: about -35
 # dBFS, before the sink's volume.
 REAL_TONE = 600
@@ -72,6 +78,11 @@ TRACK_OF = {"mic": 0, "system": 1}
 SERVER_CHANGE_RE = re.compile(
     r"Event '(?:remove|new)' on (?:sink|source|card) #|Event 'change' on (?:card|server)"
 )
+
+
+def fixture_name(name):
+    """The server name of the fixture `name`, unique to this run."""
+    return f"{PREFIX}{name}"
 
 
 # ---------------------------------------------------------------- the screen
@@ -225,7 +236,8 @@ def warning(row):
     if m := LOST_RE.search(row):
         return ("lost", m["track"], "")
     if m := CHANGED_RE.search(row):
-        return ("changed", m["track"], m["name"])
+        # The border adds `+N` for the other conditions that hold.
+        return ("changed", m["track"], re.sub(r"\s*\+\d+$", "", m["name"]))
     return None
 
 
@@ -237,7 +249,6 @@ class Nota:
 
     def __init__(self, argv, log, rows=40, cols=120):
         self.screen = Screen(rows, cols)
-        self.top = []  # (time, row 0) at each change of the top border
         self.log = log
         self.started = time.monotonic()
         self.first_draw = None
@@ -273,8 +284,6 @@ class Nota:
             row = self.screen.line(0)
             if self.first_draw is None and row:
                 self.first_draw = now
-            if not self.top or self.top[-1][1] != row:
-                self.top.append((now, row))
             self.tail = (self.tail + data.decode("utf-8", "replace"))[-4000:]
 
     def row0(self):
@@ -314,8 +323,12 @@ class Nota:
 # -------------------------------------------------------------------- server
 
 
+# pactl's words are translated; the parsing here is of the English ones.
+C_LOCALE = {**os.environ, "LC_ALL": "C"}
+
+
 def pactl(*args, check=True):
-    done = subprocess.run(["pactl", *args], capture_output=True, text=True, check=False)
+    done = subprocess.run(["pactl", *args], capture_output=True, text=True, check=False, env=C_LOCALE)
     if check and done.returncode:
         raise SystemExit(f"device-changes: pactl {' '.join(args)}: {done.stderr.strip()}")
     return done.stdout.strip()
@@ -328,7 +341,7 @@ class Server:
     def __init__(self):
         self.events = []
         self.proc = subprocess.Popen(
-            ["pactl", "subscribe"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1
+            ["pactl", "subscribe"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1, env=C_LOCALE
         )
         threading.Thread(target=self.read, daemon=True).start()
 
@@ -336,9 +349,17 @@ class Server:
         for line in self.proc.stdout:
             self.events.append((time.monotonic(), line.strip()))
 
-    def first_change(self, since):
+    def first_change(self, since, watch=None):
+        """The first sign of a change after `since`: with `watch`, a list of
+        `(kind, index)` of the devices that matter, only the coming or going
+        of one of them, a default moving or a card changing."""
+        if watch:
+            devices = "|".join(f"{kind} #{index}" for kind, index in watch)
+            wanted = re.compile(rf"Event '(?:remove|new)' on (?:{devices})$|Event 'change' on (?:card|server)")
+        else:
+            wanted = SERVER_CHANGE_RE
         for t, line in list(self.events):
-            if t >= since and SERVER_CHANGE_RE.search(line):
+            if t >= since and wanted.search(line):
                 return t, line
         return None
 
@@ -362,7 +383,7 @@ class Fixtures:
     def null_sink(self, name):
         props = f"sink_properties=node.description={name} priority.session=1 priority.driver=1"
         self.modules[name] = pactl("load-module", "module-null-sink", f"sink_name={name}", props)
-        wait_for(lambda: name in pactl("list", "short", "sinks"), f"{name} to appear")
+        wait_for(lambda: listed("sinks", name), f"{name} to appear")
 
     def usb_mic(self, name):
         """A microphone (an `Audio/Source`, as a USB one is) that plays what
@@ -373,7 +394,7 @@ class Fixtures:
             "load-module", "module-remap-source", f"master={feed}.monitor", f"source_name={name}",
             f"source_properties=node.description={name}",
         )
-        wait_for(lambda: name in pactl("list", "short", "sources"), f"{name} to appear")
+        wait_for(lambda: listed("sources", name), f"{name} to appear")
 
     def remove(self, name):
         """Takes the device away, and its feed if it has one."""
@@ -413,6 +434,29 @@ class Fixtures:
         self.players = []
         for name in list(self.modules):
             pactl("unload-module", self.modules.pop(name), check=False)
+
+
+def listed(listing, node):
+    """Whether `pactl list short <listing>` has a device named `node`."""
+    return node in device_names(listing)
+
+
+def device_names(listing):
+    return [f[1] for f in (line.split("\t") for line in pactl("list", "short", listing).splitlines()) if len(f) > 1]
+
+
+def device_index(listing, node):
+    """The server's index of the sink or source `node`, or None."""
+    return index_in(pactl("list", "short", listing), node)
+
+
+def index_in(short_listing, node):
+    """The index of the device named exactly `node` in `pactl list short`."""
+    for line in short_listing.splitlines():
+        f = line.split("\t")
+        if len(f) > 1 and f[1] == node:
+            return f[0]
+    return None
 
 
 def wait_for(condition, what, seconds=10):
@@ -460,7 +504,9 @@ def first_mark_ns(db_path):
     """The session time of the first mark, or None."""
     db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
-        row = db.execute("SELECT at_ns FROM mark ORDER BY id LIMIT 1").fetchone()
+        row = db.execute(
+            "SELECT at_ns FROM mark WHERE session_id = (SELECT MAX(id) FROM session) ORDER BY id LIMIT 1"
+        ).fetchone()
         return row[0] if row else None
     finally:
         db.close()
@@ -527,21 +573,25 @@ def classify(window, tones):
 
 
 def epoch_tones(samples, firsts, tones):
-    """Each epoch's dominant tone over its body (its first and last EDGE_S
-    aside), and the classes of its first OPENING_WINDOWS windows."""
+    """Each epoch's tones: `(dominant, opening, length, purity)`. The
+    dominant tone is that of most of its body windows (the first and last
+    EDGE_S aside, unless the epoch is shorter than that); purity is the share
+    of body windows that are the dominant one. `opening` is the classes of
+    its first OPENING_WINDOWS windows."""
     bounds = [*firsts, len(samples)]
     out = []
     edge = int(EDGE_S * RATE)
     for first, end in zip(bounds, bounds[1:]):
-        counts = {}
         lo, hi = first + edge, end - edge
-        for at in range(lo, hi - WINDOW, WINDOW * 5):
-            name = classify(samples[at:at + WINDOW], tones)
-            counts[name] = counts.get(name, 0) + 1
+        if hi - lo < WINDOW:
+            lo, hi = first, end
+        classes = [classify(samples[at:at + WINDOW], tones) for at in range(lo, hi - WINDOW + 1, WINDOW)]
+        counts = {name: classes.count(name) for name in set(classes)}
         dominant = max(counts, key=counts.get) if counts else None
+        purity = counts[dominant] / len(classes) if counts else 0.0
         opening = [classify(samples[first + i * WINDOW:first + (i + 1) * WINDOW], tones)
                    for i in range(OPENING_WINDOWS) if first + (i + 1) * WINDOW <= end]
-        out.append((dominant, opening, end - first))
+        out.append((dominant, opening, end - first, purity))
     return out
 
 
@@ -585,6 +635,18 @@ def judge_timeline(events, kinds, track, change_s, anchor_s, used=()):
     return None
 
 
+def events_saying(events, warning_, track, change_s, anchor_s):
+    """The timeline events near the change that are what the screen said: of
+    the warning's kind, on the track, and for a move, of the same device."""
+    kind, _, name = warning_
+    return [
+        e for e in events
+        if e[2] == f"device:{kind}" and (track is None or e[1] == track)
+        and (kind == "lost" or same_device(name, e[3]))
+        and -ANCHOR_SLACK_S <= anchor_s + e[0] / 1e9 - change_s <= WITHIN_S + 1.5
+    ]
+
+
 def audio_end_s(samples, epochs):
     """Where the last sample is in session time, in seconds."""
     _, first, anchor_ns = epochs[-1]
@@ -619,8 +681,9 @@ class Run:
         # A mark, pressed at a moment noted here, says where the session's
         # time zero is on this clock: the timeline's events are in session
         # time.
-        self.marked = time.monotonic()
+        before = time.monotonic()
         self.nota.key("m")
+        self.marked = (before + time.monotonic()) / 2
         self.nota.pump(0.3)
 
     def ask(self, text):
@@ -628,18 +691,22 @@ class Run:
         read meanwhile (a full pipe would stall its screen)."""
         if not sys.stdin.isatty():
             raise SystemExit("device-changes: this case needs the user at a terminal")
-        print(f"\n>>> {text}\n>>> Press Enter when ready.", flush=True)
-        while not select.select([sys.stdin], [], [], 0)[0]:
+        print(f"\n>>> {text}\n>>> Press Enter when ready; the change comes after.", flush=True)
+        while not select.select([sys.stdin], [], [], 0.1)[0]:
             self.nota.pump(0.1)
+            if self.nota.eof:
+                raise SystemExit("device-changes: nota stopped while waiting for the user")
         sys.stdin.readline()
         self.armed = time.monotonic()
 
-    def change(self, what, act, expect):
+    def change(self, what, act, expect, watch=None):
         """Runs `act()` and reads the screen until `expect(warning)` holds.
         `act` returns the moment of the change, or None for a change the
-        user makes: then the moment is the server's first sign of it."""
+        user makes: then the moment is the server's first sign of it, of the
+        devices in `watch`."""
         # A warning from before has gone from the border; the next is new.
         self.nota.pump(EVENT_SHOWN_S + 1, until=lambda: not warning(self.nota.row0()))
+        self.ctx.report.check(not warning(self.nota.row0()), f"the border was clear before: {what}")
         before = time.monotonic()
         t = act()
         if t is None:
@@ -654,7 +721,7 @@ class Run:
             return "at" in seen
 
         self.nota.pump(WITHIN_S + 1.5 if t is not None else self.ctx.args.manual_wait, until=shown)
-        sign = self.ctx.server.first_change(before)
+        sign = self.ctx.server.first_change(before, watch if t is None else None)
         if t is None:
             t = sign[0] if sign else before
         # The rest of the change arrives (a stream following a move).
@@ -681,8 +748,10 @@ class Run:
         for change in self.changes:
             t, screen = change["t"], change["screen"]
             report.say(f"- {change['what']}")
-            if change["server"]:
+            if change["server"] and change["server"][0] != t:
                 report.say(f"    the server's first sign: {1000 * (change['server'][0] - t):+.0f} ms ({change['server'][1]})")
+            elif change["server"]:
+                report.say(f"    the change is timed from the server's first sign: {change['server'][1]}")
             shown = ""
             if screen is not None:
                 w = change["warning"]
@@ -695,6 +764,12 @@ class Run:
                 hit is not None and hit[1] <= WITHIN_S,
                 "the timeline logged " + (f"{hit[2]} {hit[3] or ''} {1000 * hit[1]:+.0f} ms from the change".replace("  ", " ") if hit else f"none of {sorted(kinds)}"),
             )
+            if screen is not None:
+                # Moves close together are drawn as the last one: the
+                # warning is some event of the timeline's near the change.
+                w = change["warning"]
+                said = events_saying(events, w, track, t, anchor)
+                report.check(bool(said), f"the screen's {w[0]} {w[2]!r} is an event on the timeline near the change")
             hits.append(hit)
         self.list_events(events, anchor)
         return hits
@@ -713,7 +788,7 @@ class Run:
             if low <= wall <= high:
                 self.ctx.report.say(f"    {1000 * (wall - first):+7.0f}  track {track}  {kind}  {detail or ''}".rstrip())
 
-    def check_exit(self, tail):
+    def check_exit(self):
         self.ctx.report.check(self.nota.status == 0, f"nota exited with status {self.nota.status}")
 
 
@@ -730,12 +805,12 @@ class Context:
 def await_present(node, listing):
     """Asks the user to plug `node` back in if it isn't listed (an earlier
     case unplugged it), and waits for it."""
-    if node in pactl("list", "short", listing):
+    if listed(listing, node):
         return
     if not sys.stdin.isatty():
         raise SystemExit("device-changes: this case needs the user at a terminal")
     input(f"\n>>> {node} isn't there. Plug it in, then press Enter. ")
-    wait_for(lambda: node in pactl("list", "short", listing), f"{node} to come back", seconds=60)
+    wait_for(lambda: listed(listing, node), f"{node} to come back", seconds=60)
     time.sleep(2)  # the session manager's own reaction to it
 
 
@@ -754,15 +829,19 @@ def description(node, listing="sinks"):
 def names_it(detail, *names):
     """Whether a device's detail on the timeline names one of `names`."""
     d = (detail or "").lower()
-    return any(n and (n.lower() in d or d in n.lower()) for n in names) and bool(d)
+    return bool(d) and any(n and n.lower() in d for n in names)
 
 
 def tone_checks(report, samples, epochs, tones, expected, label):
-    """The epochs' tones, in order, are one of the `expected` sequences: the
-    recorded device was the one the timeline names. Returns the epochs'
-    tone summaries."""
+    """The epochs' tones, in order, are one of the `expected` sequences, and
+    each epoch is the one tone throughout: the recorded device was the one the
+    timeline names, and only it. Returns the epochs' tone summaries."""
     summary = epoch_tones(samples, [first for _, first, _ in epochs], tones)
-    names = merged([name for name, _, length in summary if name and length >= 2 * EDGE_S * RATE + WINDOW])
+    names = merged([
+        name if purity >= PURITY else f"mixed({name})"
+        for name, _, length, purity in summary
+        if name and length >= WINDOW
+    ])
     report.check(names in expected, f"{label}: the epochs' audio was {names} (wanted one of {expected})")
     return summary
 
@@ -770,7 +849,7 @@ def tone_checks(report, samples, epochs, tones, expected, label):
 def report_opening(report, summary, tones):
     """GAI-434: whether the old device's audio opened a new epoch."""
     old_in = 0
-    for k, (dominant, opening, _) in enumerate(summary[1:], 1):
+    for k, (_, opening, _, _) in enumerate(summary[1:], 1):
         previous = summary[k - 1][0]
         old = [i for i, name in enumerate(opening) if name == previous and previous in tones]
         old_in += bool(old)
@@ -779,34 +858,77 @@ def report_opening(report, summary, tones):
     return old_in
 
 
+def same_device(screen, logged):
+    """Whether the name the screen shows is the device the timeline logged:
+    the screen may cut a long name short."""
+    a, b = (screen or "").strip().lower(), (logged or "").strip().lower()
+    return bool(a) and bool(b) and (b.startswith(a) or a.startswith(b))
+
+
+def last_device_kind(events, track):
+    """The kind of the track's last device event on the timeline, or None."""
+    kinds = [kind for _, ev_track, kind, _ in events if ev_track == track and kind.startswith("device:")]
+    return kinds[-1] if kinds else None
+
+
+def confirm(text):
+    """Tells the user what is about to happen and waits for Enter, before
+    anything is made or played."""
+    if not sys.stdin.isatty():
+        raise SystemExit("device-changes: this case needs the user at a terminal")
+    input(f"\n>>> {text}\n>>> Press Enter to go on. ")
+
+
+def check_audio(ctx, run, session, events, track, anchor, tones, expected, lost=None):
+    """What the track kept: audio, in the tones of the devices recorded, in
+    order, each epoch the one tone throughout; and after a loss nothing past
+    it. `lost` is whether the track was lost for good (from the timeline, if
+    None: its last device event is a loss)."""
+    report = ctx.report
+    samples, epochs = track_audio(run.data, session, track)
+    report.check(bool(epochs) and len(samples) > 0, f"track {track} kept audio ({len(samples) / RATE:.1f} s)")
+    if lost is None:
+        lost = last_device_kind(events, track) == "device:lost"
+    if lost and epochs:
+        after = anchor + audio_end_s(samples, epochs) - run.changes[0]["t"]
+        report.check(after <= LOST_END_SLACK_S, f"no audio after the loss: the track ends {1000 * after:+.0f} ms from the change")
+    if tones and epochs:
+        return tone_checks(report, samples, epochs, tones, expected, "no wrong device")
+    if not tones:
+        report.say("  (no tone was played into the device, so what it recorded is known only from the timeline's name for it)")
+    return []
+
+
 def case_default_output(ctx):
     args, report, fx = ctx.args, ctx.report, ctx.fixtures
     report.say(f"== default-output: the system audio follows the default output, switched {args.switches} times")
     if ctx.private:
-        for name in ("ndc_quiet_mic", "ndc_probe_a", "ndc_probe_b"):
-            fx.null_sink(name)
-        a, b = "ndc_probe_a", "ndc_probe_b"
-        pactl("set-default-sink", a)
-        wait_for(lambda: ctx.default_sink() == a, "the default to become ndc_probe_a")
+        a, b = fixture_name("probe_a"), fixture_name("probe_b")
         tones = {a: 500, b: 1500}
         amplitude = 8000
     else:
         a, b = ctx.default_sink(), args.other_sink
-        if a == b or b not in pactl("list", "short", "sinks"):
+        if a == b or not listed("sinks", b):
             raise SystemExit(f"device-changes: --other-sink {b} must be a sink other than the default ({a})")
-        fx.null_sink("ndc_quiet_mic")
         tones = {a: 500, b: 1500} if args.tone else {}
         amplitude = REAL_TONE
         report.say(f"  from {a} to {b} and back; the defaults are put back at the end")
+        confirm(f"The default output will be switched from {a} to {b} and back {args.switches} times, then put back."
+                + (" A quiet tone plays into each of the two for about as long." if tones else ""))
+    if ctx.private:
+        for name in (fixture_name("quiet_mic"), a, b):
+            fx.null_sink(name)
+        pactl("set-default-sink", a)
+        wait_for(lambda: ctx.default_sink() == a, "the default to become probe_a")
+    else:
+        fx.null_sink(fixture_name("quiet_mic"))
+    named = {a: description(a) or a, b: description(b) or b}
     # Each switch waits for the last one's warning to leave the border.
     lasts = 60 + (int(EVENT_SHOWN_S) + 10) * args.switches
     for node, freq in tones.items():
         fx.play(freq, node, amplitude, lasts)
-    run = Run(ctx, "default-output", ["--mic", "ndc_quiet_mic"])
+    run = Run(ctx, "default-output", ["--mic", fixture_name("quiet_mic")])
     run.settle()
-    if not ctx.private:
-        run.ask(f"The default output will be switched from {a} to {b} and back {args.switches} times, and put back at the end."
-                + (" A quiet tone plays into each of the two." if tones else ""))
     target = b
     for i in range(args.switches):
         node = target
@@ -817,7 +939,7 @@ def case_default_output(ctx):
             return t
 
         run.change(f"switch {i + 1}: default output -> {node}", act,
-                   lambda w: w[0] == "changed" and w[1] == "system")
+                   lambda w, node=node: w[0] == "changed" and w[1] == "system" and same_device(w[2], named[node]))
         target = a if target == b else b
     if ctx.default_sink() != a:
         pactl("set-default-sink", a)
@@ -826,70 +948,65 @@ def case_default_output(ctx):
     nodes = [b, a] * args.switches
     for hit, node in zip(hits, nodes):
         if hit:
-            report.check(names_it(hit[3], node, description(node)), f"the logged device {hit[3]!r} names {node}")
+            report.check(names_it(hit[3], node, named[node]), f"the logged device {hit[3]!r} names {node}")
     if tones:
-        samples, epochs = track_audio(run.data, session, TRACK_OF["system"])
         sequence = [a]
-        for i in range(args.switches):
+        for _ in range(args.switches):
             sequence.append(b if sequence[-1] == a else a)
+        samples, epochs = track_audio(run.data, session, TRACK_OF["system"])
         summary = tone_checks(report, samples, epochs, tones, [sequence], "no wrong device")
         report_opening(report, summary, tones)
     else:
         report.say("  (no tone was played, so the audio isn't checked: the old device's buffer after a move can't be told; run with --tone)")
-    run.check_exit(tail)
-
-
-def check_audio(ctx, run, session, track, anchor, tones, expected, lost):
-    """What the track kept: audio, in the tones of the devices recorded, in
-    order; and after a loss, nothing past it."""
-    report = ctx.report
-    samples, epochs = track_audio(run.data, session, track)
-    report.check(bool(epochs) and len(samples) > 0, f"track {track} kept audio ({len(samples) / RATE:.1f} s)")
-    if lost and epochs:
-        after = anchor + audio_end_s(samples, epochs) - run.changes[0]["t"]
-        report.check(after <= LOST_END_SLACK_S, f"no audio after the loss: the track ends {1000 * after:+.0f} ms from the change")
-    if tones and epochs:
-        return tone_checks(report, samples, epochs, tones, expected, "no wrong device")
-    if not tones:
-        report.say("  (no tone was played into the device, so what it recorded isn't checked)")
-    return []
+    run.check_exit()
 
 
 def case_pinned_removed(ctx):
     report, fx = ctx.report, ctx.fixtures
     report.say("== pinned-removed: the microphone track pinned to a device that is removed")
-    for name in ("ndc_pin_sink", "ndc_quiet_sys"):
+    pinned = fixture_name("pin_sink")
+    for name in (pinned, fixture_name("quiet_sys")):
         fx.null_sink(name)
-    fx.play(500, "ndc_pin_sink", 8000)
-    run = Run(ctx, "pinned-removed", ["--mic", "ndc_pin_sink", "--system", "ndc_quiet_sys"])
+    fx.play(500, pinned, 8000)
+    run = Run(ctx, "pinned-removed", ["--mic", pinned, "--system", fixture_name("quiet_sys")])
     run.settle()
 
     def act():
         t = time.monotonic()
-        fx.remove("ndc_pin_sink")
+        fx.remove(pinned)
         return t
 
     run.change("pinned device removed", act, lambda w: w[0] == "lost" and w[1] == "mic")
     session, events, anchor, tail = run.finish()
     run.check_changes(events, anchor, {"device:lost"}, TRACK_OF["mic"], "the microphone was lost")
-    check_audio(ctx, run, session, TRACK_OF["mic"], anchor, {"ndc_pin_sink": 500}, [["ndc_pin_sink"]], lost=True)
-    run.check_exit(tail)
+    check_audio(ctx, run, session, events, TRACK_OF["mic"], anchor, {pinned: 500}, [[pinned]], lost=True)
+    run.check_exit()
+
+
+def user_change(run, text, listing, node):
+    """A change the user makes: they press Enter first, with `node` still
+    there (so an early change doesn't read as a late warning)."""
+    run.ask(text)
+    present = listed(listing, node)
+    run.ctx.report.check(present, f"{node} was still there when the user pressed Enter")
+    print(">>> Now.", flush=True)
 
 
 def case_usb_mic_pinned(ctx):
     args, report, fx = ctx.args, ctx.report, ctx.fixtures
     report.say("== usb-mic-pinned: the microphone track pinned to a USB microphone that is unplugged")
-    fx.null_sink("ndc_quiet_sys")
+    fx.null_sink(fixture_name("quiet_sys"))
     tones = {}
     if ctx.private:
-        node = "ndc_usb_mic"
+        node = fixture_name("usb_mic")
         fx.usb_mic(node)
         fx.play(500, f"{node}_feed", 8000)
         tones = {node: 500}
     else:
         node = args.usb_mic
         await_present(node, "sources")
-    run = Run(ctx, "usb-mic-pinned", ["--mic", node, "--system", "ndc_quiet_sys"])
+    watch = [("source", device_index("sources", node))]
+    run = Run(ctx, "usb-mic-pinned", ["--mic", node, "--system", fixture_name("quiet_sys")])
     run.settle()
 
     def act():
@@ -897,15 +1014,14 @@ def case_usb_mic_pinned(ctx):
             t = time.monotonic()
             fx.remove(node)
             return t
-        run.ask(f"UNPLUG the USB microphone ({node}) when you press Enter; nota is recording from it.")
-        print(">>> Unplug it now.", flush=True)
+        user_change(run, f"Press Enter, then UNPLUG the USB microphone ({node}); nota is recording from it.", "sources", node)
         return None
 
-    run.change("USB microphone unplugged", act, lambda w: w[0] == "lost" and w[1] == "mic")
+    run.change("USB microphone unplugged", act, lambda w: w[0] == "lost" and w[1] == "mic", watch)
     session, events, anchor, tail = run.finish()
     run.check_changes(events, anchor, {"device:lost"}, TRACK_OF["mic"], "the microphone was lost")
-    check_audio(ctx, run, session, TRACK_OF["mic"], anchor, tones, [[node]], lost=True)
-    run.check_exit(tail)
+    check_audio(ctx, run, session, events, TRACK_OF["mic"], anchor, tones, [[node]], lost=True)
+    run.check_exit()
     if not ctx.private:
         await_present(node, "sources")
 
@@ -913,15 +1029,15 @@ def case_usb_mic_pinned(ctx):
 def case_usb_mic_default(ctx):
     args, report, fx = ctx.args, ctx.report, ctx.fixtures
     report.say("== usb-mic-default: the microphone track follows the default input, a USB microphone that is unplugged")
-    fx.null_sink("ndc_quiet_sys")
+    fx.null_sink(fixture_name("quiet_sys"))
     tones = {}
     other = None
     if ctx.private:
-        node, other = "ndc_usb_mic", "ndc_builtin_mic"
+        node, other = fixture_name("usb_mic"), fixture_name("builtin_mic")
         for name in (node, other):
             fx.usb_mic(name)
         pactl("set-default-source", node)
-        wait_for(lambda: pactl("get-default-source") == node, "the default input to become ndc_usb_mic")
+        wait_for(lambda: pactl("get-default-source") == node, "the default input to become usb_mic")
         fx.play(500, f"{node}_feed", 8000)
         fx.play(1500, f"{other}_feed", 8000)
         tones = {node: 500, other: 1500}
@@ -933,8 +1049,8 @@ def case_usb_mic_default(ctx):
             report.say(f"  not run: the default input is {have}, not {node}; make the USB microphone the default (this script changes no default input) and run it again")
             ctx.skipped.append("usb-mic-default")
             return
-    named = description(node, "sources")
-    run = Run(ctx, "usb-mic-default", ["--system", "ndc_quiet_sys"])
+    watch = [("source", device_index("sources", node))]
+    run = Run(ctx, "usb-mic-default", ["--system", fixture_name("quiet_sys")])
     run.settle()
 
     def act():
@@ -942,37 +1058,58 @@ def case_usb_mic_default(ctx):
             t = time.monotonic()
             fx.remove(node)
             return t
-        run.ask(f"UNPLUG the USB microphone ({node}), the default input nota records, when you press Enter.")
-        print(">>> Unplug it now.", flush=True)
+        user_change(run, f"Press Enter, then UNPLUG the USB microphone ({node}), the default input nota records.", "sources", node)
         return None
 
-    run.change("default USB microphone unplugged", act, lambda w: w[1] == "mic")
+    run.change("default USB microphone unplugged", act, lambda w: w[1] == "mic", watch)
+    now_default = pactl("get-default-source", check=False)
     session, events, anchor, tail = run.finish()
-    hits = run.check_changes(events, anchor, {"device:lost", "device:changed"}, TRACK_OF["mic"], "the microphone was lost or moved")
-    if hits and hits[0] and hits[0][2] == "device:changed":
-        if other:
-            report.check(names_it(hits[0][3], other), f"the logged device {hits[0][3]!r} names {other}")
-        else:
-            report.check(not names_it(hits[0][3], node, named), f"the logged device {hits[0][3]!r} isn't the unplugged one")
-    check_audio(ctx, run, session, TRACK_OF["mic"], anchor, tones, [[node], [node, other]], lost=False)
-    run.check_exit(tail)
+    run.check_changes(events, anchor, {"device:lost", "device:changed"}, TRACK_OF["mic"], "the microphone was lost or moved")
+    follow_through(ctx, events, TRACK_OF["mic"], node, now_default, "sources")
+    if last_device_kind(events, TRACK_OF["mic"]) == "device:changed":
+        expected = [[node, other]]
+    else:
+        expected = [[node]]
+    check_audio(ctx, run, session, events, TRACK_OF["mic"], anchor, tones, expected)
+    run.check_exit()
     if not ctx.private:
         await_present(node, "sources")
+
+
+def follow_through(ctx, events, track, old, now_default, listing):
+    """Where the track ended up is where the server's default is: the last
+    device the timeline logged for it is the default after the change, or,
+    if it was lost for good, no default is left (or only the old one)."""
+    report = ctx.report
+    last = [e for e in events if e[1] == track and e[2] in ("device:changed", "device:lost")]
+    if not last:
+        return
+    if last[-1][2] == "device:changed":
+        new = description(now_default, listing)
+        report.check(
+            bool(now_default) and now_default != old and names_it(last[-1][3], now_default, new),
+            f"the last device logged, {last[-1][3]!r}, is the default after the change ({now_default or 'none'})",
+        )
+    else:
+        report.check(
+            not now_default or now_default == old,
+            f"the track was lost and the server's default afterwards is {now_default or 'none'}, not another device the track missed",
+        )
 
 
 def case_bluetooth(ctx):
     args, report, fx = ctx.args, ctx.report, ctx.fixtures
     report.say("== bluetooth: the system audio follows a default output whose profile changes")
-    fx.null_sink("ndc_quiet_mic")
+    fx.null_sink(fixture_name("quiet_mic"))
     tones = {}
     new = None
     if ctx.private:
         # A profile change takes the sink away and brings a new one: here,
         # two sinks of different names, the second made the default.
-        node, new = "ndc_bt_a2dp", "ndc_bt_hfp"
+        node, new = fixture_name("bt_a2dp"), fixture_name("bt_hfp")
         fx.null_sink(node)
         pactl("set-default-sink", node)
-        wait_for(lambda: ctx.default_sink() == node, "the default to become ndc_bt_a2dp")
+        wait_for(lambda: ctx.default_sink() == node, "the default to become bt_a2dp")
         fx.play(500, node, 8000)
         tones = {node: 500, new: 1900}
     else:
@@ -982,7 +1119,8 @@ def case_bluetooth(ctx):
             report.say(f"  not run: the default output is {have}, not {node}; make the Bluetooth device the default output (this script changes no default unless asked) and run it again")
             ctx.skipped.append("bluetooth")
             return
-    run = Run(ctx, "bluetooth", ["--mic", "ndc_quiet_mic"])
+    watch = [("sink", device_index("sinks", node))]
+    run = Run(ctx, "bluetooth", ["--mic", fixture_name("quiet_mic")])
     run.settle()
 
     def act():
@@ -993,24 +1131,24 @@ def case_bluetooth(ctx):
             pactl("set-default-sink", new)
             fx.play(1900, new, 8000)
             return t
-        run.ask(f"CHANGE the Bluetooth profile of {node} (headset / handsfree, or back) when you press Enter.")
-        print(">>> Change the profile now.", flush=True)
+        user_change(run, f"Press Enter, then CHANGE the Bluetooth profile of {node} (headset / handsfree, or back).", "sinks", node)
         return None
 
-    run.change("Bluetooth profile changed", act, lambda w: w[1] == "system")
+    run.change("Bluetooth profile changed", act, lambda w: w[1] == "system", watch)
+    now_default = ctx.default_sink()
     session, events, anchor, tail = run.finish()
-    hits = run.check_changes(events, anchor, {"device:lost", "device:changed"}, TRACK_OF["system"], "the system audio was lost or moved")
-    if ctx.private:
-        # The session manager falls back to the other sink (ndc_quiet_mic)
-        # when the node goes, then the new node is made the default: the
-        # track is logged moving to each, and ends on the new one.
-        moves = [e for e in events if e[1] == TRACK_OF["system"] and e[2] == "device:changed"]
-        report.check(bool(moves) and names_it(moves[-1][3], new), f"the last device logged for the system audio, {moves[-1][3] if moves else None!r}, names {new}")
+    run.check_changes(events, anchor, {"device:lost", "device:changed"}, TRACK_OF["system"], "the system audio was lost or moved")
+    follow_through(ctx, events, TRACK_OF["system"], node, now_default, "sinks")
     # The track may be moved to the sink the session manager falls back to
     # (silent here) before the new node: both are recorded, in order.
-    expected = [[node], [node, "silence"], [node, new], [node, "silence", new]]
-    check_audio(ctx, run, session, TRACK_OF["system"], anchor, tones, expected, lost=False)
-    run.check_exit(tail)
+    if last_device_kind(events, TRACK_OF["system"]) == "device:changed":
+        expected = [[node, new], [node, "silence", new]]
+    else:
+        expected = [[node], [node, "silence"]]
+    check_audio(ctx, run, session, events, TRACK_OF["system"], anchor, tones, expected)
+    run.check_exit()
+    if not ctx.private:
+        confirm(f"Change the Bluetooth profile of {node} back to what it was (this script never changes it).")
 
 
 CASES = {
@@ -1042,14 +1180,17 @@ def main(argv):
     p.add_argument("work")
     p.add_argument("nota")
     p.add_argument("--cases", default=",".join(CASES))
+    p.add_argument("--prefix", default="ndc_")
+    p.add_argument("--manual-wait", type=float, default=120.0)
     p.add_argument("--switches", type=int, default=4)
     p.add_argument("--other-sink")
     p.add_argument("--usb-mic")
     p.add_argument("--bt-sink")
     p.add_argument("--allow-default-switch", action="store_true")
     p.add_argument("--tone", action="store_true")
-    p.add_argument("--manual-wait", type=float, default=120.0)
     args = p.parse_args(argv)
+    global PREFIX
+    PREFIX = args.prefix
     wanted = [c for c in args.cases.split(",") if c]
     unknown = [c for c in wanted if c not in CASES]
     if unknown:
@@ -1089,6 +1230,9 @@ def main(argv):
             report.say(f"  - {text}")
         return 1
     ran = len(wanted) - len(ctx.skipped)
+    if ran == 0 or ctx.skipped:
+        report.say(f"INCOMPLETE: {ran} case(s) passed, {len(ctx.skipped)} not run")
+        return 3
     report.say(f"PASSED: {ran} case(s) shown within {WITHIN_S:g} s and logged")
     return 0
 
