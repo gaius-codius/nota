@@ -118,7 +118,7 @@ struct Running {
     reading: Arc<AtomicBool>,
     reader: Option<thread::JoinHandle<()>>,
     /// Set once the reader thread has read to the end of the terminal's
-    /// output, or has been stopped. The test holds no copy of the terminal's
+    /// output, or has been stopped by [`Running::hang_up`]. The test holds no copy of the terminal's
     /// other end, so every copy closes when nota and anything it started
     /// are gone, and the master then reads what is left and fails.
     drained: Arc<AtomicBool>,
@@ -303,12 +303,17 @@ impl Running {
             status.is_some()
         });
         if status.is_some() {
-            // Bounded, for a descendant that outlives nota with the
-            // terminal still open: the output is then as complete as it
-            // was before.
-            wait_until(Duration::from_secs(5), || {
-                self.drained.load(Ordering::SeqCst)
-            });
+            // Bounded, so a descendant that outlives nota with the
+            // terminal still open fails the test instead of hanging it:
+            // its output could be short, and a test asserting that
+            // something wasn't said would pass on it.
+            assert!(
+                wait_until(Duration::from_secs(5), || {
+                    self.drained.load(Ordering::SeqCst)
+                }),
+                "nota exited but the terminal's output never ended: \
+                 something still holds its other end"
+            );
         }
         status
     }
@@ -660,15 +665,6 @@ fn a_refused_sleep_lock_is_said_and_recording_carries_on() {
     let status = nota.exits().expect("nota didn't stop");
     assert!(status.success(), "{status:?}: {}", nota.output());
     assert_everything_sent_saved(&nota, &tmp.0, 1, &[0, 1], 1_450);
-    // The tones' own lines come after the samples sent, and may not all
-    // have been read yet.
-    assert!(
-        wait_until(Duration::from_secs(10), || {
-            tone_events(&visible(&nota.output.lock().unwrap())).len() == 4
-        }),
-        "{}",
-        nota.output()
-    );
     let said = visible(&nota.output.lock().unwrap());
     assert!(
         said.contains(
