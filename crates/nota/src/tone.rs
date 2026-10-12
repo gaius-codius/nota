@@ -19,7 +19,8 @@ const PERIOD: Duration = Duration::from_millis(20);
 /// Each source plays a square wave of its own pitch, timed by the session
 /// clock. Three device names act out failures: `missing` can't be opened,
 /// `fails` stops with an error after half a second, and `warns` says its
-/// device changes aren't watched and then repeats a warning. Each source's
+/// device changes aren't watched, that its host never watches them and
+/// that it has no real-time priority, and then repeats a warning. Each source's
 /// count of samples sent is kept, for the summary ([`Tone::report`]), so
 /// the tests can check that everything sent was saved. With
 /// `NOTA_TONE_STOP_DELAY_MS` set, stopping a tone takes that long, which
@@ -184,6 +185,12 @@ impl CaptureBackend for Tone {
                 if warns {
                     events.notice(CaptureNotice::Unwatched(
                         "device changes aren't watched: the tone has no watch".into(),
+                    ));
+                    events.notice(CaptureNotice::NotWatching(
+                        "the tone follows no default".into(),
+                    ));
+                    events.notice(CaptureNotice::Noted(
+                        "the tone has no real-time priority".into(),
                     ));
                     // A backend whose error comes back on every pass.
                     for _ in 0..50 {

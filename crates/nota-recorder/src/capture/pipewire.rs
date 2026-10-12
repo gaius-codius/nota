@@ -10,7 +10,7 @@
 //! thread of its own: that covers desktops where only rtkit grants it.
 //! `PipeWire`'s own module-rt tries them in the same order. cpal asks rtkit
 //! whatever the direct promotion did: rtkit's refusal is reported as a
-//! [`CaptureNotice::Warning`] only if the direct promotion failed too (or
+//! [`CaptureNotice::Noted`] only if the direct promotion failed too (or
 //! the refusal came back first), and if both succeed, rtkit's priority
 //! (`SCHED_RR` 10) is the one that stays. Asking rtkit also lowers the
 //! process's `RLIMIT_RTTIME` soft limit to about one quantum: a real-time
@@ -110,7 +110,7 @@ impl Promotion {
 /// The stream's thread asks for real-time priority on its first buffer:
 /// `SCHED_FIFO` directly where the user's rtprio limit allows it, and rtkit
 /// otherwise. Refused both ways, it records at normal priority and reports
-/// a [`CaptureNotice::Warning`].
+/// a [`CaptureNotice::Noted`].
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PipeWireBackend;
 
@@ -257,18 +257,37 @@ pub(super) fn stream_error(
         // Real-time priority refused by rtkit.
         ErrorKind::RealtimeDenied if promoted => return None,
         // The same with the direct promotion refused too (or not tried
-        // yet); cpal unable to start the thread that asks rtkit, as the
-        // stream is built (the only `ResourceExhausted` a stream reports
-        // through this callback); and anything cpal flags as a backend
-        // error while the stream runs, such as the default-device watch
-        // failing to start: the stream goes on.
-        ErrorKind::RealtimeDenied | ErrorKind::ResourceExhausted | ErrorKind::BackendError => {
-            Ok(CaptureNotice::Warning(error.to_string()))
+        // yet), and cpal unable to start the thread that asks rtkit, as
+        // the stream is built (the only `ResourceExhausted` a stream
+        // reports through this callback): the stream records at normal
+        // priority, which the listener can't change.
+        ErrorKind::RealtimeDenied | ErrorKind::ResourceExhausted => {
+            Ok(CaptureNotice::Noted(error.to_string()))
         }
+        // Anything cpal flags as a backend error while the stream runs
+        // goes on; its own default-device monitor failing to start is
+        // noted only, since nota's watch is the one that matters.
+        ErrorKind::BackendError if is_monitor_failure(error) => {
+            Ok(CaptureNotice::Noted(error.to_string()))
+        }
+        ErrorKind::BackendError => Ok(CaptureNotice::Warning(error.to_string())),
         ErrorKind::DeviceNotAvailable if follows(source) => return None,
         ErrorKind::DeviceNotAvailable => Err(CaptureError::DeviceNotAvailable(source.clone())),
         _ => Err(CaptureError::Backend(error.to_string())),
     })
+}
+
+/// What cpal's message says when it can't bind `PipeWire`'s metadata for its
+/// own default-device monitor. cpal gives the failure no kind of its own
+/// (it is a [`ErrorKind::BackendError`]), so its words are the only way to
+/// tell it from a backend error that matters. The words are cpal 0.18.2's
+/// (`host/pipewire/stream.rs`): check them when cpal is updated, or the
+/// failure shows as a capture warning again.
+const MONITOR_FAILURE: &str = "device change notifications may be incomplete";
+
+/// Whether `error` is cpal's own default-device monitor failing to start.
+fn is_monitor_failure(error: &cpal::Error) -> bool {
+    error.to_string().contains(MONITOR_FAILURE)
 }
 
 /// Why the stream couldn't be opened or started.
@@ -340,11 +359,11 @@ mod tests {
             (ErrorKind::DeviceChanged, CaptureNotice::RouteChanged),
             (
                 ErrorKind::RealtimeDenied,
-                CaptureNotice::Warning("detail".into()),
+                CaptureNotice::Noted("detail".into()),
             ),
             (
                 ErrorKind::ResourceExhausted,
-                CaptureNotice::Warning("detail".into()),
+                CaptureNotice::Noted("detail".into()),
             ),
             (
                 ErrorKind::BackendError,
@@ -378,6 +397,31 @@ mod tests {
             device("alsa_input.usb")
         );
         assert_eq!(followed(&Source::Microphone), Source::Microphone);
+    }
+
+    /// cpal's default-device monitor failing to bind is noted only: nota's
+    /// own watch still runs. A backend error of any other words is still
+    /// a warning.
+    #[test]
+    fn cpals_monitor_failing_is_noted_not_warned() {
+        let mic = Source::Microphone;
+        let bind = format!("PipeWire: failed to bind metadata object; {MONITOR_FAILURE}: no");
+        assert_eq!(
+            stream_error(
+                &mic,
+                &cpal::Error::with_message(ErrorKind::BackendError, bind),
+                false
+            ),
+            Some(Ok(CaptureNotice::Noted(
+                "PipeWire: failed to bind metadata object; device change notifications may be \
+                 incomplete: no"
+                    .into()
+            )))
+        );
+        assert!(matches!(
+            stream_error(&mic, &error(ErrorKind::BackendError), false),
+            Some(Ok(CaptureNotice::Warning(_)))
+        ));
     }
 
     #[test]

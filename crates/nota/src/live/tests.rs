@@ -425,6 +425,46 @@ fn an_unwatched_device_is_a_warning_for_its_track() {
     );
 }
 
+/// A host that never watches is a warning of its own, not a lost watch: the
+/// screen shows it for a while rather than for the rest of the recording.
+#[test]
+fn a_host_that_never_watches_is_its_own_warning() {
+    let mut live = Live::new(&[opened(MIC, 0)]);
+    let why = "PulseAudio: the mic records alsa_input, and doesn't follow the default";
+    let actions = live.recorder(
+        Some(MIC),
+        RecorderEvent::Capture(CaptureNotice::NotWatching(why.into())),
+    );
+    assert_eq!(
+        actions,
+        Actions {
+            updates: vec![raised(Cause::DevicesNotWatched(why.into()), MIC, ms(0))],
+            ..Actions::default()
+        }
+    );
+}
+
+/// A note the listener can't act on reaches the timeline as a capture
+/// note, and is told once like a backend's warning.
+#[test]
+fn a_noted_report_is_a_capture_note_told_once() {
+    let mut live = Live::new(&[opened(MIC, 0)]);
+    let noted = |live: &mut Live| {
+        let notice = CaptureNotice::Noted("real-time priority refused".into());
+        live.recorder(Some(MIC), RecorderEvent::Capture(notice))
+            .updates
+    };
+    assert_eq!(
+        noted(&mut live),
+        [raised(
+            Cause::CaptureNote("real-time priority refused".into()),
+            MIC,
+            ms(0)
+        )]
+    );
+    assert_eq!(noted(&mut live), []);
+}
+
 /// A report from the backend that doesn't stop the stream is a different
 /// warning from a lost watch: the screen words them differently.
 #[test]

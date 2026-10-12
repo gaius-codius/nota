@@ -1379,6 +1379,19 @@ fn a_stream_that_warns_is_in_the_summary_once_for_each_warning() {
         1,
         "{said}"
     );
+    // A host that never watches, and a note the screen doesn't show, are
+    // in the summary too.
+    assert_eq!(
+        said.matches("the mic: the tone follows no default").count(),
+        1,
+        "{said}"
+    );
+    assert_eq!(
+        said.matches("the mic: capture note: the tone has no real-time priority")
+            .count(),
+        1,
+        "{said}"
+    );
 }
 
 /// A rejected start reports each input failure once.

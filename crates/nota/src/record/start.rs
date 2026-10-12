@@ -908,13 +908,22 @@ fn spawn_recorder(
 
 /// What the summary says of a notice from `track`'s stream, if it's a
 /// warning: the unwatched device's text says what it is, and a backend's
-/// is given its place. The audio server's words are written to the
-/// terminal, so their control characters are left out; the timeline keeps
-/// them as they came.
+/// is given its place. A host that never watches and a note the listener
+/// can't act on are here too, since the screen keeps neither for the rest
+/// of the recording. The audio server's words are written to the terminal,
+/// so their control characters are left out; the timeline keeps them as
+/// they came.
 fn capture_warning(track: Option<TrackId>, notice: &CaptureNotice) -> Option<String> {
     let plain = |why: &str| why.chars().filter(|c| !c.is_control()).collect::<String>();
     match notice {
-        CaptureNotice::Unwatched(why) => Some(format!("{}: {}", track_name(track), plain(why))),
+        CaptureNotice::Unwatched(why) | CaptureNotice::NotWatching(why) => {
+            Some(format!("{}: {}", track_name(track), plain(why)))
+        }
+        CaptureNotice::Noted(why) => Some(format!(
+            "{}: capture note: {}",
+            track_name(track),
+            plain(why)
+        )),
         CaptureNotice::Warning(why) => Some(format!(
             "{}: capture warning: {}",
             track_name(track),
@@ -2327,6 +2336,16 @@ mod capture_warning_tests {
         assert_eq!(
             capture_warning(Some(MIC), &lost).as_deref(),
             Some("the mic: no longer watched: [2Jgone")
+        );
+        let never = CaptureNotice::NotWatching("ALSA: device changes aren't reported".into());
+        assert_eq!(
+            capture_warning(Some(MIC), &never).as_deref(),
+            Some("the mic: ALSA: device changes aren't reported")
+        );
+        let noted = CaptureNotice::Noted("real-time\x1b[2J priority refused".into());
+        assert_eq!(
+            capture_warning(Some(MIC), &noted).as_deref(),
+            Some("the mic: capture note: real-time[2J priority refused")
         );
         for notice in [
             CaptureNotice::Overrun,

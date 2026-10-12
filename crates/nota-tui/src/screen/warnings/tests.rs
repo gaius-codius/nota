@@ -426,6 +426,79 @@ fn an_unwatched_device_warns_to_the_end() {
     assert_eq!(warnings.changes(), [secs(3)]);
 }
 
+/// A host that never watches says so for ten seconds, in gold, and the
+/// band marks it; it isn't a condition for the rest of the recording.
+#[test]
+fn a_host_that_never_watches_says_so_for_ten_seconds() {
+    let mut warnings = two_tracks();
+    let cause = Cause::DevicesNotWatched("PulseAudio doesn't follow the default".into());
+    raise(&mut warnings, cause, Some(MIC), 1);
+    assert_eq!(
+        warnings.top(secs(10)),
+        Some(shown("⚠ mic: devices unwatched", Tone::Gold, 0))
+    );
+    assert_eq!(warnings.top(secs(11)), None);
+    assert!(warnings.conditions(secs(11)).is_empty());
+    assert_eq!(warnings.changes(), [secs(1)]);
+}
+
+/// Tracks that start together share the one event, each named, rather than
+/// the last replacing the first; one that says so after the event has gone
+/// has an event of its own.
+#[test]
+fn tracks_that_start_together_share_the_never_watching_event() {
+    let mut warnings = two_tracks();
+    let cause = || Cause::DevicesNotWatched("doesn't follow the default".into());
+    raise(&mut warnings, cause(), Some(MIC), 1);
+    raise(&mut warnings, cause(), Some(SYSTEM), 1);
+    assert_eq!(
+        warnings.top(secs(2)),
+        Some(shown("⚠ mic, system: devices unwatched", Tone::Gold, 0))
+    );
+    assert_eq!(warnings.changes(), [secs(1), secs(1)]);
+    // Long after, the news has gone; a track saying it later starts anew.
+    raise(&mut warnings, cause(), Some(SYSTEM), 600);
+    assert_eq!(
+        warnings.top(secs(601)),
+        Some(shown("⚠ system: devices unwatched", Tone::Gold, 0))
+    );
+}
+
+/// A watch lost after the host said it never watched is still a
+/// condition: it holds for the rest of the recording.
+#[test]
+fn a_watch_lost_mid_recording_holds_after_the_start_news_has_gone() {
+    let mut warnings = two_tracks();
+    let start = Cause::DevicesNotWatched("PulseAudio doesn't follow the default".into());
+    raise(&mut warnings, start, Some(MIC), 1);
+    raise(
+        &mut warnings,
+        Cause::DevicesUnwatched("device changes are no longer watched".into()),
+        Some(MIC),
+        600,
+    );
+    assert_eq!(
+        warnings.top(secs(4_000)),
+        Some(shown("⚠ mic: devices unwatched", Tone::Gold, 0))
+    );
+    assert_eq!(warnings.changes(), [secs(1), secs(600)]);
+}
+
+/// A capture note is for the timeline and the summary: the screen says
+/// nothing of it and the band doesn't mark it.
+#[test]
+fn a_capture_note_shows_nothing() {
+    let mut warnings = two_tracks();
+    raise(
+        &mut warnings,
+        Cause::CaptureNote("real-time priority refused".into()),
+        Some(MIC),
+        1,
+    );
+    assert_eq!(warnings.top(secs(2)), None);
+    assert!(warnings.changes().is_empty());
+}
+
 /// A backend's warning shows for ten seconds as news, and the band keeps
 /// it.
 #[test]
