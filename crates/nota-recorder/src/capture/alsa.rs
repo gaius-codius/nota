@@ -6,14 +6,15 @@
 //! [`CaptureError::NoSystemAudio`], which says so, and the recording goes
 //! on with the other track. Like the `PulseAudio` host
 //! ([`pulse`](super::pulse)), this one stamps nothing, follows no default
-//! and reports no device events but the stream's own failure.
+//! and reports no device events but the stream's own failure. It says so at
+//! the start, as a [`CaptureNotice::NotWatching`].
 
 use cpal::traits::{DeviceTrait, HostTrait};
 use cpal::{BufferSize, DeviceId, HostId};
 use nota_core::SampleRate;
 
 use super::cpal_input::{self, Listed, PlainStream};
-use super::{CaptureBackend, CaptureError, CaptureSender, Devices, Source};
+use super::{CaptureBackend, CaptureError, CaptureNotice, CaptureSender, Devices, Source};
 
 /// ALSA's name for its default capture device, which converts to the
 /// rate and format asked for. cpal builds it itself
@@ -49,6 +50,14 @@ fn input_for(source: &Source) -> Input<'_> {
         Source::Microphone => Input::Default,
         Source::Device(name) => Input::Named(name),
     }
+}
+
+/// What a stream on `name` says at its start: ALSA never reports changes
+/// of a device, so none is watched.
+fn not_reported(source: &Source, name: &str) -> CaptureNotice {
+    CaptureNotice::NotWatching(format!(
+        "ALSA: {source} records {name}, and device changes aren't reported"
+    ))
 }
 
 impl CaptureBackend for AlsaBackend {
@@ -93,13 +102,18 @@ impl CaptureBackend for AlsaBackend {
         };
         let device = device.ok_or_else(|| CaptureError::DeviceNotAvailable(source.clone()))?;
         let pinned = Source::Device(name.to_owned());
-        cpal_input::open(
+        let told = events.clone();
+        let stream = cpal_input::open(
             &device,
             (source, &pinned),
             rate,
             BufferSize::Default,
             events,
-        )
+        )?;
+        // Said once the stream runs: a start that fails says nothing of a
+        // watch.
+        told.notice(not_reported(source, name));
+        Ok(stream)
     }
 }
 
@@ -121,6 +135,18 @@ mod tests {
         assert_eq!(
             input_for(&Source::Device("hw:1,0".to_owned())),
             Input::Named("hw:1,0")
+        );
+    }
+
+    /// ALSA says it never watches as a host that never watches, not as a
+    /// watch lost (which would stand for the whole recording).
+    #[test]
+    fn alsa_says_the_host_never_watches() {
+        assert_eq!(
+            not_reported(&Source::Microphone, DEFAULT_INPUT),
+            CaptureNotice::NotWatching(
+                "ALSA: the microphone records default, and device changes aren't reported".into()
+            )
         );
     }
 

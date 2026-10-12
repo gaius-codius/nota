@@ -7,13 +7,15 @@
 //!   and nothing-playing warn only while every track is silent, since a
 //!   quiet mic while the system audio carries the lecture is normal.
 //! - **Events** happen once (a route change, a device back, a sleep, a
-//!   capture warning) and show for [`EVENT_SHOWN`]. They give way to a
-//!   condition in the accent colour, so audio being lost is never hidden
-//!   behind news.
+//!   capture warning, a host that doesn't watch devices) and show for
+//!   [`EVENT_SHOWN`]. They give way to a condition in the accent colour,
+//!   so audio being lost is never hidden behind news.
 //! - **The end:** a full disk stops the recording, and the screen says so.
 //!
 //! The band marks every change (a device lost, back or changed, a device
-//! watch lost, a capture warning, a fault starting) at its session time, from [`Warnings::changes`].
+//! watch lost or never run, a capture warning, a fault starting) at its
+//! session time, from [`Warnings::changes`]. A capture note isn't news for
+//! the screen: the timeline and the summary keep it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -87,6 +89,11 @@ pub(crate) enum Happening {
     /// The track's capture backend reported something that doesn't stop
     /// it. The backend's words go to the timeline, not the screen.
     Warned(TrackId),
+    /// The tracks whose host never watches changes of their device, said
+    /// as the recording starts: tracks that start together share one
+    /// event. A watch lost mid-recording is a [`Condition::Unwatched`]
+    /// instead.
+    NotWatching(Vec<TrackId>),
     /// The machine slept, for as long as the gap after it, once one comes.
     Slept {
         /// When it woke: the warning's time.
@@ -256,6 +263,10 @@ impl Warnings {
                 self.track(track).unwatched = Some(warning.at);
                 self.changes_at(warning.at);
             }
+            (Cause::DevicesNotWatched(_), Some(track)) if raised => {
+                self.not_watching(track, now);
+                self.changes_at(warning.at);
+            }
             (Cause::CaptureWarning(_), Some(track)) if raised => {
                 self.happening = Some((Happening::Warned(track), now));
                 self.changes_at(warning.at);
@@ -271,11 +282,27 @@ impl Warnings {
                 self.happening = Some((slept, now));
             }
             (Cause::LibraryUnavailable, _) => self.stand(Condition::LibraryOffline, raised),
-            // Drift is corrected as it's measured: the timeline keeps it,
-            // and there's nothing for the listener to do. The rest are a
+            // Drift is corrected as it's measured, and a capture note is
+            // news the listener can't act on: the timeline keeps them, and
+            // there's nothing for the screen to say. The rest are a
             // track's causes without a track, or clears that never come.
             _ => {}
         }
+    }
+
+    /// Shows that `track`'s host never watches its device, got at `now`:
+    /// with the tracks that said so a moment ago, still showing, rather
+    /// than in place of them.
+    fn not_watching(&mut self, track: TrackId, now: SessionTime) {
+        if let Some((Happening::NotWatching(tracks), at)) = &mut self.happening
+            && shows_at(*at, now)
+        {
+            if !tracks.contains(&track) {
+                tracks.push(track);
+            }
+            return;
+        }
+        self.happening = Some((Happening::NotWatching(vec![track]), now));
     }
 
     /// Applies a change to `track`'s device, noticed at `at` and got at
@@ -448,6 +475,13 @@ impl Warnings {
             Happening::Route(id, name) => (format!("↪ {}: {name}", self.name(*id)), Tone::Plain),
             Happening::Back(id) => (format!("✓ {} back", self.name(*id)), Tone::Good),
             Happening::Warned(id) => (format!("⚠ {}: capture warning", self.name(*id)), Tone::Gold),
+            Happening::NotWatching(ids) => {
+                let names: Vec<String> = ids.iter().map(|&id| self.name(id)).collect();
+                (
+                    format!("⚠ {}: devices unwatched", names.join(", ")),
+                    Tone::Gold,
+                )
+            }
             Happening::Slept {
                 lasted: Some(lasted),
                 ..

@@ -7,7 +7,7 @@
 //! - **No default-device events.** The stream stays on the device that was
 //!   the default when it started; if the default changes, it goes on
 //!   recording the old one, and says so at the start as a
-//!   [`CaptureNotice::Unwatched`].
+//!   [`CaptureNotice::NotWatching`].
 //! - **No device loss reported.** The host gives a failure only when it
 //!   can't read the stream's timing. A server that moves the stream to
 //!   another source when its device is unplugged (as `PulseAudio` and
@@ -130,20 +130,47 @@ impl CaptureBackend for PulseBackend {
         let device = host
             .device_by_id(&DeviceId::new(HostId::PulseAudio, &name))
             .ok_or_else(|| CaptureError::DeviceNotAvailable(source.clone()))?;
-        if follows {
-            events.notice(CaptureNotice::Unwatched(format!(
-                "PulseAudio: {source} records {name}, and doesn't follow the default if it changes"
-            )));
-        }
+        let told = events.clone();
+        let said = follows.then(|| not_following(source, &name));
         let pinned = Source::Device(name);
         let buffer = BufferSize::Fixed(BUFFER_FRAMES);
-        cpal_input::open(&device, (source, &pinned), rate, buffer, events)
+        let stream = cpal_input::open(&device, (source, &pinned), rate, buffer, events)?;
+        // Said once the stream runs: a start that fails says nothing of a
+        // watch.
+        if let Some(notice) = said {
+            told.notice(notice);
+        }
+        Ok(stream)
     }
+}
+
+/// What a stream on `name`, which `source` follows the default to, says
+/// at its start: the host never watches, so a default that changes isn't
+/// followed.
+fn not_following(source: &Source, name: &str) -> CaptureNotice {
+    CaptureNotice::NotWatching(format!(
+        "PulseAudio: {source} records {name}, and doesn't follow the default if it changes"
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The host that never follows a default says so as a host that never
+    /// watches, not as a watch lost (which would stand for the whole
+    /// recording).
+    #[test]
+    fn a_followed_source_says_the_host_never_watches() {
+        assert_eq!(
+            not_following(&Source::Microphone, "alsa_input.usb"),
+            CaptureNotice::NotWatching(
+                "PulseAudio: the microphone records alsa_input.usb, and doesn't follow the \
+                 default if it changes"
+                    .into()
+            )
+        );
+    }
 
     fn sinks() -> Vec<String> {
         vec!["alsa_output.pci".to_owned(), "alsa_output.usb".to_owned()]

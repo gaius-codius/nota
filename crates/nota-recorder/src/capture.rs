@@ -200,8 +200,8 @@
 //!
 //! On `PulseAudio` and ALSA a stream stays on the device it started on
 //! ([`PulseBackend`], [`AlsaBackend`]), unless the server moves it;
-//! `PulseAudio`'s says so at a start on a followed source, as a
-//! [`CaptureNotice::Unwatched`]. Where overruns are reported, a loss is
+//! `PulseAudio` on a followed source, and ALSA, say so at a start, as a
+//! [`CaptureNotice::NotWatching`]. Where overruns are reported, a loss is
 //! timed at the overrun, as for any stream that doesn't stamp its
 //! buffers; on `PulseAudio` a loss isn't noticed. The zeros, quiet and
 //! stalled detectors read the samples and the delivered count, so they
@@ -367,14 +367,23 @@ pub enum CaptureNotice {
     /// measured. Reported once per track, by the recorder rather than the
     /// stream.
     Drifted(Drift),
-    /// Changes of the stream's device aren't watched, for this reason: the
-    /// `PipeWire` watch couldn't start or lost its connection, or the
-    /// `PulseAudio` stream doesn't follow the default.
-    /// The stream records on, but a default that changes, or a device that
-    /// goes, may pass unannounced.
+    /// nota's watch of the stream's device isn't running, for this reason:
+    /// the `PipeWire` watch couldn't start or lost its connection. It is a
+    /// fault on a host that should watch, so the screen keeps it for the
+    /// rest of the recording. The stream records on, but a default that
+    /// changes, or a device that goes, may pass unannounced.
     Unwatched(String),
-    /// Anything else the backend reported without stopping the stream,
-    /// such as real-time priority refused.
+    /// This host never watches changes of the stream's device, for this
+    /// reason: the `PulseAudio` stream doesn't follow the default, and ALSA
+    /// reports no device events. It is said once, at the start; it isn't a
+    /// watch lost, so it isn't a [`CaptureNotice::Unwatched`].
+    NotWatching(String),
+    /// Something the backend reported without stopping the stream that the
+    /// listener can't act on, such as real-time priority refused, or
+    /// cpal's own default-device monitor failing to start while nota's
+    /// watch runs. It goes to the timeline and the summary, not the screen.
+    Noted(String),
+    /// Anything else the backend reported without stopping the stream.
     Warning(String),
 }
 

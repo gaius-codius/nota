@@ -318,13 +318,23 @@ pub enum Cause {
     /// A journal broke, for this reason: the audio around it may have a
     /// gap. Recording goes on in a new one.
     JournalFailed(String),
-    /// Changes of the track's device aren't watched, for this reason: a
-    /// default that changes, or a device that goes, may pass unannounced.
-    /// Recording goes on. Raised once per track and never cleared.
+    /// nota's watch of the track's device isn't running, for this reason
+    /// (it couldn't start, or lost its connection): a default that
+    /// changes, or a device that goes, may pass unannounced. Recording
+    /// goes on. Raised once per track and never cleared.
     DevicesUnwatched(String),
+    /// This host never watches changes of the track's device, for this
+    /// reason (`PulseAudio` and ALSA). Raised once per track, at the start,
+    /// and never cleared.
+    DevicesNotWatched(String),
     /// The track's capture backend reported this without stopping the
     /// stream. Raised once per report and never cleared.
     CaptureWarning(String),
+    /// The track's capture backend reported this without stopping the
+    /// stream, and the listener can't act on it (real-time priority
+    /// refused). The timeline and the summary keep it; the screen doesn't
+    /// show it. Raised once per report and never cleared.
+    CaptureNote(String),
     /// The disk is nearly full.
     DiskLow,
     /// The disk is full.

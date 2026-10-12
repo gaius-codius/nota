@@ -471,6 +471,31 @@ mod tests {
             );
         }
 
+        /// A host that never watches reaches the screen and the timeline as
+        /// its own cause, not as a lost watch.
+        #[test]
+        fn a_host_that_never_watches_reaches_the_screen_and_the_timeline() {
+            use nota_core::recorder::Cause;
+
+            let why = "ALSA: the mic records default, and device changes aren't reported";
+            warned_by(
+                CaptureNotice::NotWatching(why.into()),
+                Cause::DevicesNotWatched(why.into()),
+            );
+        }
+
+        /// A note the listener can't act on reaches the timeline as a
+        /// capture note.
+        #[test]
+        fn a_noted_report_reaches_the_screen_and_the_timeline() {
+            use nota_core::recorder::Cause;
+
+            warned_by(
+                CaptureNotice::Noted("real-time priority refused".into()),
+                Cause::CaptureNote("real-time priority refused".into()),
+            );
+        }
+
         /// A stream error the backend turns into a warning reaches the
         /// screen and the timeline as a capture warning, with its text.
         #[test]
