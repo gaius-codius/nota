@@ -421,7 +421,7 @@ fn notices_are_reported_and_recording_goes_on() {
         .reported
         .iter()
         .filter_map(|e| match e {
-            RecorderEvent::Capture(n) => Some(n),
+            RecorderEvent::Capture { notice: n, .. } => Some(n),
             _ => None,
         })
         .collect();
@@ -435,6 +435,34 @@ fn notices_are_reported_and_recording_goes_on() {
     );
     let journals = all_journals(run.writer, &run.reported);
     assert_eq!(journaled(&fs, &journals), samples(0, 20));
+}
+
+/// Acceptance (GAI-471): a notice is reported at the time the stream sent
+/// it, not where the track's audio so far ends.
+#[test]
+fn a_notice_is_reported_at_the_time_the_stream_sent_it() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let script = vec![
+        Step::Audio(samples(0, 60)),
+        // The stream stalls for 30 s, then reports: its audio still ends
+        // 60 ms in.
+        Step::Advance(secs(30)),
+        Step::Notice(CaptureNotice::Warning("watch lost".into())),
+    ];
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    let notices: Vec<(&CaptureNotice, SessionTime)> = run
+        .reported
+        .iter()
+        .filter_map(|e| match e {
+            RecorderEvent::Capture { notice, at } => Some((notice, *at)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        notices,
+        [(&CaptureNotice::Warning("watch lost".into()), at(30))]
+    );
 }
 
 #[test]
@@ -744,7 +772,10 @@ fn epochs_reported(reported: &[RecorderEvent]) -> Vec<&RecorderEvent> {
                 e,
                 RecorderEvent::Epoch(_)
                     | RecorderEvent::EpochRefused(_)
-                    | RecorderEvent::Capture(CaptureNotice::Overrun)
+                    | RecorderEvent::Capture {
+                        notice: CaptureNotice::Overrun,
+                        ..
+                    }
             )
         })
         .collect()
@@ -790,7 +821,7 @@ fn an_overrun_starts_a_new_epoch_at_its_time_and_the_loss_is_a_gap() {
     assert!(matches!(
         epochs_reported(&run.reported)[..],
         [
-            RecorderEvent::Capture(CaptureNotice::Overrun),
+            RecorderEvent::Capture { notice: CaptureNotice::Overrun, .. },
             RecorderEvent::Epoch(e)
         ] if *e == epoch
     ));
@@ -875,12 +906,14 @@ fn reopenings(reported: &[RecorderEvent]) -> Vec<(&'static str, u32, SessionTime
     reported
         .iter()
         .filter_map(|e| match e {
-            RecorderEvent::Capture(CaptureNotice::RouteChanged) => {
-                Some(("route", 0, SessionTime::ZERO, 0))
-            }
-            RecorderEvent::Capture(CaptureNotice::Suspended) => {
-                Some(("suspend", 0, SessionTime::ZERO, 0))
-            }
+            RecorderEvent::Capture {
+                notice: CaptureNotice::RouteChanged,
+                ..
+            } => Some(("route", 0, SessionTime::ZERO, 0)),
+            RecorderEvent::Capture {
+                notice: CaptureNotice::Suspended,
+                ..
+            } => Some(("suspend", 0, SessionTime::ZERO, 0)),
             RecorderEvent::Epoch(e) => {
                 Some(("epoch", e.id().get(), e.start(), e.first_sample().get()))
             }
@@ -1225,7 +1258,10 @@ fn an_epoch_the_timeline_refuses_is_reported_and_recording_goes_on() {
     assert!(matches!(
         epochs_reported(&run.reported)[..],
         [
-            RecorderEvent::Capture(CaptureNotice::Overrun),
+            RecorderEvent::Capture {
+                notice: CaptureNotice::Overrun,
+                ..
+            },
             RecorderEvent::EpochRefused(EpochError::ImplausibleOverrun { .. })
         ]
     ));
@@ -1793,7 +1829,15 @@ fn epoch_events(reported: &[RecorderEvent]) -> Vec<Epoch> {
 fn overruns_reported(reported: &[RecorderEvent]) -> usize {
     reported
         .iter()
-        .filter(|e| matches!(e, RecorderEvent::Capture(CaptureNotice::Overrun)))
+        .filter(|e| {
+            matches!(
+                e,
+                RecorderEvent::Capture {
+                    notice: CaptureNotice::Overrun,
+                    ..
+                }
+            )
+        })
         .count()
 }
 
@@ -1829,7 +1873,7 @@ fn an_overruns_epoch_starts_when_the_audio_after_it_was_captured() {
     assert!(matches!(
         epochs_reported(&run.reported)[..],
         [
-            RecorderEvent::Capture(CaptureNotice::Overrun),
+            RecorderEvent::Capture { notice: CaptureNotice::Overrun, .. },
             RecorderEvent::Epoch(e)
         ] if *e == epoch
     ));
@@ -2228,18 +2272,34 @@ fn a_drifting_device_is_retimed_and_reported_past_the_limit() {
     assert!(!epoch_events(&run.reported).is_empty());
     let last = run.timeline.current().copied().unwrap();
     assert!((last.drift().ppb() - 400_000).abs() <= 2, "{last:?}"); // check-bound
-    let drifted: Vec<Drift> = run
+    let drifted: Vec<(Drift, SessionTime)> = run
         .reported
         .iter()
         .filter_map(|e| match e {
-            RecorderEvent::Capture(CaptureNotice::Drifted(d)) => Some(*d),
+            RecorderEvent::Capture {
+                notice: CaptureNotice::Drifted(d),
+                at,
+            } => Some((*d, *at)),
             _ => None,
         })
         .collect();
-    let [reported] = drifted[..] else {
+    let [(reported, when)] = drifted[..] else {
         panic!("{drifted:?}");
     };
     assert_eq!(reported, Drift::from_ppb(400_000).unwrap());
+    // Dated when the buffer that showed it was captured: the first audio
+    // reported after it.
+    let showed = run
+        .reported
+        .iter()
+        .skip_while(|e| !matches!(e, RecorderEvent::Capture { .. }))
+        .find_map(|e| match e {
+            RecorderEvent::Audio(chunk) => Some(chunk.range().start()),
+            _ => None,
+        })
+        .unwrap();
+    let captured = SessionTime::from_elapsed(fast_stamp(showed.get())).unwrap();
+    assert_eq!(when, captured);
 
     // The last sample sits within 5 ms of when it was captured, where the
     // nominal rate puts it about 36 ms late.

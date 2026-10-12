@@ -881,7 +881,7 @@ fn spawn_recorder(
                             RecorderEvent::CaptureFailed(error) => {
                                 lost.push(format!("{}: {error}", track_name(track)));
                             }
-                            RecorderEvent::Capture(notice) => {
+                            RecorderEvent::Capture { notice, .. } => {
                                 warned.extend(
                                     capture_warning(track, notice)
                                         .filter(|note| reported.is_new(track, note)),
@@ -1518,8 +1518,9 @@ mod tests {
         use super::*;
 
         /// Hands the live thread, as the recorder would, a stalled microphone,
-        /// a quiet system track, a lost device and a wake from suspend, and
-        /// waits for it to be done: its changes go to `ui` and `saver`.
+        /// a quiet system track, a lost device, a watch lost while the
+        /// microphone has no audio, and a wake from suspend, and waits for it
+        /// to be done: its changes go to `ui` and `saver`.
         pub(super) fn through_live(saver: &Saver, ui: &Sender<Event>, clock: &Arc<dyn Clock>) {
             use nota_core::messages::AudioChunk;
             use nota_core::recorder::DeviceChange;
@@ -1564,10 +1565,23 @@ mod tests {
                 at: at(3_000),
             };
             inputs.send(LiveInput::Recorder(Some(MIC), lost)).unwrap();
+            // Dated when the stream reported it, not where the microphone's
+            // audio ends: it has none yet.
+            let unwatched = RecorderEvent::Capture {
+                notice: CaptureNotice::Unwatched("watch lost".into()),
+                at: at(3_500),
+            };
+            inputs
+                .send(LiveInput::Recorder(Some(MIC), unwatched))
+                .unwrap();
             inputs
                 .send(LiveInput::Recorder(
                     Some(MIC),
-                    RecorderEvent::Capture(CaptureNotice::Suspended),
+                    RecorderEvent::Capture {
+                        notice: CaptureNotice::Suspended,
+                        // Stamped as the first audio after the wake is sent.
+                        at: at(4_000),
+                    },
                 ))
                 .unwrap();
             // The first audio after the suspend, 4 s in, says the sleep ended.
@@ -1580,15 +1594,102 @@ mod tests {
             drop(inputs);
             live.join().unwrap();
         }
+
+        /// Hands the live thread a microphone whose audio ends at 60 s and
+        /// whose watch is lost at 90 s, the stream having stalled between,
+        /// and waits for it to be done: its changes go to `ui` and `saver`.
+        pub(super) fn stalled_then_unwatched(
+            saver: &Saver,
+            ui: &Sender<Event>,
+            clock: &Arc<dyn Clock>,
+        ) {
+            use nota_core::messages::AudioChunk;
+            use nota_core::{SampleIndex, TrackTimeline};
+            use nota_recorder::capture::CaptureNotice;
+
+            let mut timeline = TrackTimeline::new(MIC);
+            timeline
+                .open_epoch(SessionTime::ZERO, SampleIndex::ZERO, RATE)
+                .unwrap();
+            let (inputs, received) = mpsc::channel();
+            let live = spawn_live(
+                Live::new(&[timeline]),
+                None,
+                received,
+                ui.clone(),
+                saver.sender(),
+                Arc::clone(clock),
+                None,
+            )
+            .unwrap();
+            let sixty_seconds = usize::try_from(RATE.hz() * 60).unwrap();
+            let audio = AudioChunk::new(MIC, SampleIndex::ZERO, RATE, vec![1; sixty_seconds]);
+            inputs
+                .send(LiveInput::Recorder(
+                    Some(MIC),
+                    RecorderEvent::Audio(audio.unwrap()),
+                ))
+                .unwrap();
+            let unwatched = RecorderEvent::Capture {
+                notice: CaptureNotice::Unwatched("watch lost".into()),
+                at: SessionTime::from_nanos(90_000_000_000),
+            };
+            inputs
+                .send(LiveInput::Recorder(Some(MIC), unwatched))
+                .unwrap();
+            inputs.send(LiveInput::Done).unwrap();
+            drop(inputs);
+            live.join().unwrap();
+        }
     }
 
-    use feeding::through_live;
+    use feeding::{stalled_then_unwatched, through_live};
+
+    /// Acceptance (GAI-471): a microphone whose audio ends at 60 s, which
+    /// then stalls and loses its watch at 90 s, has the warning's row on
+    /// the session's timeline at 90 s, not where its audio ends.
+    #[test]
+    #[expect(clippy::disallowed_methods, reason = "test scaffolding")]
+    fn a_capture_warning_is_stored_at_the_time_the_stream_reported_it() {
+        use nota_core::FakeClock;
+        use nota_store::Happened;
+
+        let root = std::env::temp_dir().join(format!("nota-unwatched-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let library = Library::open(&root).unwrap();
+        let id = SessionId::new(5);
+        let rows = NewSessionRows::new(library.db().clone(), NewSession::bare(id));
+        let fake = Arc::new(FakeClock::new(SessionTime::from_nanos(95_000_000_000)));
+        let clock: Arc<dyn Clock> = fake;
+        let (ui, _screen) = mpsc::channel::<Event>();
+        let saver = Saver::spawn(
+            saving(rows, id, None),
+            ui.clone(),
+            Arc::clone(&clock),
+            LibraryHealth::default(),
+        )
+        .unwrap();
+
+        stalled_then_unwatched(&saver, &ui, &clock);
+
+        drop(ui);
+        let report = saver.finish();
+        assert_eq!((report.events, report.lost_events), (1, 0));
+        let stored = library.db().with(|db| db.timeline(id)).unwrap();
+        let unwatched = Cause::DevicesUnwatched("watch lost".into());
+        assert_eq!(
+            stored,
+            [entry(90_000, Some(MIC), Happened::Raised(unwatched))]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// Acceptance (GAI-320): what the detectors, the devices, the disk and
     /// sleep report reaches the session's timeline in the library
     /// database, with its track and its session time, through the real
     /// saver and the tees the sources use. A machine's sleep is the live
-    /// view's, from the audio after a suspend.
+    /// view's, from the audio after a suspend. Acceptance (GAI-471): a
+    /// capture warning's row is at the time the stream reported it.
     #[test]
     #[expect(clippy::disallowed_methods, reason = "test scaffolding")]
     fn changes_from_every_source_reach_the_sessions_timeline() {
@@ -1635,7 +1736,7 @@ mod tests {
 
         drop(ui);
         let report = saver.finish();
-        assert_eq!((report.events, report.lost_events), (6, 0));
+        assert_eq!((report.events, report.lost_events), (7, 0));
         let stored = library.db().with(|db| db.timeline(id)).unwrap();
         let none = |cause, ms| entry(ms, None, Happened::Raised(cause));
         assert_eq!(
@@ -1644,6 +1745,11 @@ mod tests {
                 entry(1_000, Some(MIC), Happened::Raised(Cause::Stalled)),
                 entry(2_000, Some(SYSTEM), Happened::Raised(Cause::Quiet)),
                 entry(3_000, Some(MIC), Happened::Device(DeviceChange::Lost)),
+                entry(
+                    3_500,
+                    Some(MIC),
+                    Happened::Raised(Cause::DevicesUnwatched("watch lost".into()))
+                ),
                 none(Cause::Slept, 4_000),
                 none(Cause::DiskLow, 5_000),
                 none(Cause::SleepNotHeld, 6_000),
@@ -1654,7 +1760,7 @@ mod tests {
             .try_iter()
             .filter(|e| matches!(e, Event::Recorder(recorder::Event::Warning(_))))
             .count();
-        assert_eq!(warned, 5);
+        assert_eq!(warned, 6);
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -477,7 +477,7 @@ fn record(mut writer: SessionWriter<StdFs>, events: &CaptureReceiver) -> Recorde
                 first_sample: epoch.first_sample().get(),
                 start: epoch.start().as_nanos(),
             }),
-            RecorderEvent::Capture(notice) => noted.push(Noted::Notice { track, notice }),
+            RecorderEvent::Capture { notice, .. } => noted.push(Noted::Notice { track, notice }),
             _ => {}
         }
     });

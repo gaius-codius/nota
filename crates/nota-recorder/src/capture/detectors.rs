@@ -143,8 +143,9 @@ impl Detectors {
     }
 
     /// Ends `track`'s detectors, its stream having stopped, failed or never
-    /// started: what they raised is cleared, `next` being the sample after
-    /// the last it recorded.
+    /// started, or the track having been refused as it joined: what they
+    /// raised is cleared, `next` being the sample after the last it
+    /// recorded.
     pub(super) fn end(
         &mut self,
         track: TrackId,
