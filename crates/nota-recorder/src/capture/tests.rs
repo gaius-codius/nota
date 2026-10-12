@@ -2362,7 +2362,7 @@ fn held_audio_counts_as_delivered() {
 }
 
 /// A stream that fails, whoever reports it, sends what it held first: it
-/// was the track's audio.
+/// was the track's audio. Nothing it delivers after is sent or counted.
 #[test]
 fn a_failure_sends_what_is_held_first() {
     let (sender, rx) = test_sender(MIC, Arc::new(FakeClock::new(SessionTime::ZERO)));
@@ -2371,9 +2371,12 @@ fn a_failure_sends_what_is_held_first() {
     let events = queued(&rx);
     assert!(matches!(&events[..], [audio, CaptureEvent::Failed(_)]
         if timed(audio).is_some_and(|(samples, _)| samples == [1, 2])));
-    // Nothing is held for the stream's end to send again.
+    // Nothing is held for the stream's end to send again, and nothing
+    // the stream delivers after is the track's.
     sender.release_held();
+    sender.audio_delivered(&[3, 4], Some(delivered(200, 180)));
     assert!(queued(&rx).is_empty());
+    assert_eq!(sender.progress.now().delivered, SampleIndex::new(2));
 }
 
 /// A reopening sends what was held before it, placed when it came, before
