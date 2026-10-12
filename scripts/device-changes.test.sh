@@ -122,6 +122,8 @@ path = os.path.join(work, "library.db")
 db = sqlite3.connect(path)
 db.executescript("""
 CREATE TABLE session (id INTEGER PRIMARY KEY);
+CREATE TABLE mark (id INTEGER PRIMARY KEY, session_id INTEGER, at_ns INTEGER);
+INSERT INTO mark (session_id, at_ns) VALUES (2, 4500000000), (2, 9000000000);
 CREATE TABLE event (id INTEGER PRIMARY KEY, session_id INTEGER, track INTEGER, at_ns INTEGER, kind TEXT, detail TEXT);
 INSERT INTO session VALUES (1), (2);
 INSERT INTO event (session_id, track, at_ns, kind, detail) VALUES
@@ -132,6 +134,7 @@ db.close()
 session, rows = dc.timeline(path)
 expect(f"the newest session's timeline, in time order, wasn't read: {session} {rows}",
        session == 2 and rows == [(20, None, "gap", "40"), (30, 1, "device:changed", "b")])
+expect("the first mark wasn't read", dc.first_mark_ns(path) == 4_500_000_000)
 expect("audio_end_s", abs(dc.audio_end_s([0] * 32000, [(0, 0, 0), (1, 16000, 3_000_000_000)]) - 4.0) < 1e-9)
 
 for failure in failures:

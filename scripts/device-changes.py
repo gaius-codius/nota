@@ -381,11 +381,12 @@ class Fixtures:
         if f"{name}_feed" in self.modules:
             pactl("unload-module", self.modules.pop(f"{name}_feed"))
 
-    def play(self, freq, node, amplitude):
-        """A tone of `freq` Hz into the sink `node` until the case ends. The
+    def play(self, freq, node, amplitude, seconds=120):
+        """A tone of `freq` Hz into the sink `node` for `seconds` (more than
+        the case lasts). The
         player is linked by hand: a stream the session manager places
         follows the default sink when it moves."""
-        path = tone_file(self.work, freq, amplitude)
+        path = tone_file(self.work, freq, amplitude, seconds)
         name = f"tone_{freq}_{node}"
         proc = subprocess.Popen(
             ["pw-play", "--target", "0", "-P", f"node.name={name}", path],
@@ -422,9 +423,9 @@ def wait_for(condition, what, seconds=10):
         time.sleep(0.05)
 
 
-def tone_file(work, freq, amplitude):
-    """A mono 16 kHz WAV of two minutes of a sine of `freq` Hz."""
-    path = os.path.join(work, f"tone-{freq}-{int(amplitude)}.wav")
+def tone_file(work, freq, amplitude, seconds):
+    """A mono 16 kHz WAV of `seconds` of a sine of `freq` Hz."""
+    path = os.path.join(work, f"tone-{freq}-{int(amplitude)}-{seconds}.wav")
     if not os.path.exists(path):
         cycle = [int(amplitude * math.sin(2 * math.pi * freq * i / RATE)) for i in range(RATE)]
         with wave.open(path, "wb") as w:
@@ -432,7 +433,7 @@ def tone_file(work, freq, amplitude):
             w.setsampwidth(2)
             w.setframerate(RATE)
             one_second = struct.pack(f"<{RATE}h", *cycle)
-            w.writeframes(one_second * 120)
+            w.writeframes(one_second * seconds)
     return path
 
 
@@ -451,6 +452,16 @@ def timeline(db_path):
             (row[0],),
         ).fetchall()
         return row[0], events
+    finally:
+        db.close()
+
+
+def first_mark_ns(db_path):
+    """The session time of the first mark, or None."""
+    db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        row = db.execute("SELECT at_ns FROM mark ORDER BY id LIMIT 1").fetchone()
+        return row[0] if row else None
     finally:
         db.close()
 
@@ -590,6 +601,7 @@ class Run:
     def __init__(self, ctx, name, argv):
         self.ctx, self.name = ctx, name
         self.armed = 0.0
+        self.marked = None
         self.dir = os.path.join(ctx.args.work, name)
         os.makedirs(self.dir)
         self.data = os.path.join(self.dir, "data")
@@ -604,6 +616,12 @@ class Run:
         if self.nota.eof:
             tail = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", self.nota.tail)
             raise SystemExit(f"device-changes: nota stopped at once:\n{tail[-1500:]}")
+        # A mark, pressed at a moment noted here, says where the session's
+        # time zero is on this clock: the timeline's events are in session
+        # time.
+        self.marked = time.monotonic()
+        self.nota.key("m")
+        self.nota.pump(0.3)
 
     def ask(self, text):
         """Tells the user what to do and waits for Enter, with nota's output
@@ -647,9 +665,14 @@ class Run:
         """Stops nota, and reads what the session kept."""
         self.nota.stop()
         self.log.close()
-        session, events = timeline(os.path.join(self.data, "library.db"))
+        db = os.path.join(self.data, "library.db")
+        session, events = timeline(db)
         tail = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", self.nota.tail)
-        return session, events, self.nota.first_draw, tail
+        mark = first_mark_ns(db) if self.marked else None
+        if mark is None:
+            self.ctx.report.say("  (no mark was kept, so the timeline's clock is placed at nota's first draw; its times may be late by up to a second)")
+            return session, events, self.nota.first_draw, tail
+        return session, events, self.marked - mark / 1e9, tail
 
     def check_changes(self, events, anchor, kinds, track, expect_text):
         """Each change was said on the screen and logged on the timeline
@@ -769,12 +792,16 @@ def case_default_output(ctx):
         amplitude = 8000
     else:
         a, b = ctx.default_sink(), args.other_sink
+        if a == b or b not in pactl("list", "short", "sinks"):
+            raise SystemExit(f"device-changes: --other-sink {b} must be a sink other than the default ({a})")
         fx.null_sink("ndc_quiet_mic")
         tones = {a: 500, b: 1500} if args.tone else {}
         amplitude = REAL_TONE
         report.say(f"  from {a} to {b} and back; the defaults are put back at the end")
+    # Each switch waits for the last one's warning to leave the border.
+    lasts = 60 + (int(EVENT_SHOWN_S) + 10) * args.switches
     for node, freq in tones.items():
-        fx.play(freq, node, amplitude)
+        fx.play(freq, node, amplitude, lasts)
     run = Run(ctx, "default-output", ["--mic", "ndc_quiet_mic"])
     run.settle()
     if not ctx.private:
