@@ -250,6 +250,7 @@ mod cpal_input;
 mod detect_tests;
 mod detectors;
 mod devices;
+mod hold;
 #[cfg(target_os = "linux")]
 mod host;
 #[cfg(target_os = "linux")]
@@ -260,7 +261,6 @@ mod pulse;
 mod queue;
 // The route is followed by the PipeWire backend's watch; other platforms
 // have no backend yet, and nothing there would use it.
-mod hold;
 #[cfg(target_os = "linux")]
 mod route;
 #[cfg(test)]
@@ -612,20 +612,23 @@ impl CaptureSender {
     /// delivered each buffer, on `CLOCK_MONOTONIC`: its capture stamp is the
     /// cycle's time less a delay the server may not have measured yet, as
     /// on `PipeWire`'s first buffers. Those are held back until a buffer's
-    /// delay settles, and sent dated back from it. A reopening
-    /// sends what's held first, as it came before the stretch the stream
-    /// missed, and its own first buffers are held as a stream's first are. Each buffer is placed on the session clock and counted as
-    /// sent as it comes, held or not: a suspend while it's held doesn't move
-    /// it, and what a crash would lose includes it. `None` for a buffer
-    /// the stream couldn't stamp.
+    /// delay settles, and sent dated back from it. A reopening sends what's
+    /// held first, as it came before the stretch the stream missed, and
+    /// holds its own first buffers as a stream's first are. Each buffer is
+    /// placed on the session clock and counted as sent as it comes, held or
+    /// not: a suspend while it's held doesn't move it, and what a crash
+    /// would lose includes it. A failure sends what's held before it
+    /// ([`Self::failed`]). `None` for a buffer the stream couldn't stamp.
     pub fn audio_delivered(&self, samples: &[i16], delivery: Option<Delivery>) {
+        // A failure sends what's held, under the lock, and then itself:
+        // checked under it, nothing follows the failure.
+        let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
         if samples.is_empty() || self.failed.load(Ordering::SeqCst) {
             return;
         }
         let reopened = self.reopened();
         let delivery = delivery.and_then(|delivery| self.place(delivery));
         self.progress.sent(samples.len());
-        let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
         let Held { settling, reopens } = &mut *held;
         if reopened {
             settling.release(&mut |samples, timed| {
