@@ -60,6 +60,14 @@
 //!   run, `ballast=` in the result says whether, and when, a ballast was
 //!   written, and the worst lag and fsync time among the fsyncs that
 //!   overlapped it.
+//! - `first-epoch <dir> --source NODE --seconds S [--tracks T] [--ready PATH]`
+//!   captures `T` tracks (default 1) of `NODE` through a backend of its own
+//!   that notes each buffer's length, cycle and capture stamp before the
+//!   recorder sees it (`real_capture/first_epoch.rs`), and checks that
+//!   each track's first epoch starts where the first settled buffer's stamp
+//!   puts the stream's first sample, within a sample. It prints each
+//!   track's first buffers and its whole delay profile. See
+//!   `scripts/real-capture-first-epoch.sh` and `scripts/first-epoch-probes.sh`.
 //! - `engine <dir> --source NODE --seconds S --engine PROGRAM --parakeet DIR
 //!   --vad FILE --said TEXT --kill-after-ms MS --ready PATH` captures from
 //!   `NODE` into journals and feeds every frame written to the real engine
@@ -96,7 +104,9 @@ fn main() -> std::process::ExitCode {
 #[cfg(not(target_os = "linux"))]
 fn main() {}
 
+// The modules of `linux` are files in `real_capture/`.
 #[cfg(target_os = "linux")]
+#[path = "real_capture"]
 mod linux {
     use std::collections::{BTreeMap, BTreeSet};
     use std::error::Error;
@@ -134,6 +144,8 @@ mod linux {
     use nota_store::{NewSession, SegmentRow, Store, StoreError};
     use sha2::{Digest, Sha256};
 
+    mod first_epoch;
+
     type Res<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
     const SESSION: SessionId = SessionId::new(1);
@@ -156,7 +168,11 @@ mod linux {
             Some("salvage") => salvage_command(&Args::parse(&args[1..])),
             Some("check") => check_command(&Args::parse(&args[1..])),
             Some("engine") => engine_command(&Args::parse(&args[1..])),
-            _ => Err("usage: real_capture write|salvage|check|engine ... (see the source)".into()),
+            Some("first-epoch") => first_epoch::command(&Args::parse(&args[1..])),
+            _ => Err(
+                "usage: real_capture write|salvage|check|engine|first-epoch ... (see the source)"
+                    .into(),
+            ),
         };
         match result {
             Ok(true) => ExitCode::SUCCESS,
@@ -1795,7 +1811,10 @@ mod linux {
     /// the join or the write instead starts too late by about the frame's
     /// length, and fails. One at session time 0 passes: a buffer that
     /// arrives within its own length of the clock's start is timed from
-    /// 0, since session time can't go earlier.
+    /// 0, since session time can't go earlier. It can't tell an epoch a
+    /// graph quantum late from a right one, as every buffer is written
+    /// after its cycle; the `first-epoch` mode checks that, against the
+    /// stamps `PipeWire` gave the first buffers.
     fn first_epochs(promised: &Promised, after: &Observed) -> Res<()> {
         for (&track, log) in &promised.tracks {
             let Some((first_sample, epoch, start)) = log.joined else {
