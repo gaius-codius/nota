@@ -116,19 +116,24 @@ impl Promotion {
 pub struct PipeWireBackend;
 
 /// A running `PipeWire` stream. Capture stops when it's dropped, then the
-/// buffers it held back are sent, and then the watch on its device stops.
+/// buffers it held back are sent, and then the watch on its device stops:
+/// fields drop in order, and cpal's stream joins its thread as it goes, so
+/// no buffer comes after those held.
 pub struct PipeWireStream {
-    stream: Option<cpal::Stream>,
-    settling: Arc<Mutex<Settling>>,
-    events: CaptureSender,
+    _stream: cpal::Stream,
+    _held: Held,
     _watch: watch::Watch,
 }
 
-impl Drop for PipeWireStream {
+/// The buffers a stream holds back ([`Settling`]), sent to its sender
+/// when this is dropped.
+struct Held {
+    settling: Arc<Mutex<Settling>>,
+    events: CaptureSender,
+}
+
+impl Drop for Held {
     fn drop(&mut self) {
-        // cpal's stream joins its thread as it goes, so no buffer comes
-        // after these.
-        drop(self.stream.take());
         release(&self.settling, &self.events);
     }
 }
@@ -224,9 +229,11 @@ impl CaptureBackend for PipeWireBackend {
             .map_err(|e| start_error(source, &e))?;
         stream.play().map_err(|e| start_error(source, &e))?;
         Ok(PipeWireStream {
-            stream: Some(stream),
-            settling: held,
-            events: sender,
+            _stream: stream,
+            _held: Held {
+                settling: held,
+                events: sender,
+            },
             _watch: watch::watch(followed(source), watched),
         })
     }
@@ -315,6 +322,58 @@ mod tests {
 
     fn error(kind: ErrorKind) -> cpal::Error {
         cpal::Error::with_message(kind, "detail")
+    }
+
+    /// A stream's held buffers are sent, once, as it's dropped.
+    #[test]
+    fn what_a_stream_holds_is_sent_as_it_ends() {
+        use std::sync::atomic::AtomicU64;
+
+        use nota_core::{FakeClock, SampleIndex, SessionTime, TrackId};
+
+        use super::super::queue::Received;
+        use super::super::{CaptureEvent, Progress, test_channel};
+
+        const TRACK: TrackId = TrackId::new(0);
+        let (tx, rx) = test_channel();
+        let events = CaptureSender {
+            events: tx,
+            track: TRACK,
+            progress: Progress::new(SampleIndex::ZERO, SampleIndex::ZERO),
+            clock: Arc::new(FakeClock::new(SessionTime::ZERO)),
+            stopping: Arc::new(AtomicBool::new(false)),
+            failed: Arc::new(AtomicBool::new(false)),
+            lost: Arc::new(AtomicBool::new(false)),
+            // Begun already, so each buffer queues only its audio.
+            began: Arc::new(AtomicBool::new(true)),
+            reroutes: Arc::default(),
+            asleep: Arc::new(AtomicU64::new(0)),
+            rate: SampleRate::SPEECH,
+        };
+        let settling = Arc::new(Mutex::new(Settling::new(SampleRate::SPEECH)));
+        // No delay yet: held.
+        let ms = Duration::from_millis(100);
+        let stamp = Some(Stamp {
+            cycle: ms,
+            capture: ms,
+        });
+        settling
+            .lock()
+            .unwrap()
+            .buffer(&[1, 2], stamp, &mut send(&events));
+        let next = || rx.next(Duration::from_millis(1));
+        assert!(matches!(next(), Received::Idle), "held");
+        drop(Held {
+            settling: Arc::clone(&settling),
+            events: events.clone(),
+        });
+        assert!(matches!(
+            next(),
+            Received::Event(TRACK, CaptureEvent::TimedAudio { samples, .. }) if samples == [1, 2]
+        ));
+        // Sent once.
+        release(&settling, &events);
+        assert!(matches!(next(), Received::Idle));
     }
 
     /// A server that answers lists its devices, and one that can't be

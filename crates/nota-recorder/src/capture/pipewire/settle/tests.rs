@@ -286,10 +286,11 @@ fn a_delay_lost_again_is_settled_again() {
     );
 }
 
-/// A stream whose delay is none from the start, and stays so after the
-/// limit, isn't held again: it never had a delay to lose.
+/// A stream that gave up holding with no delay isn't held again while its
+/// delay stays none: it never had one to lose. Once it has one, losing it
+/// holds its buffers again.
 #[test]
-fn a_stream_that_gave_up_holding_is_not_held_again_until_it_has_a_delay() {
+fn a_stream_that_gave_up_holding_is_held_again_only_after_a_delay() {
     let mut settling = Settling::new(SampleRate::SPEECH);
     let mut sent = Sent::default();
     feed(
@@ -307,7 +308,31 @@ fn a_stream_that_gave_up_holding_is_not_held_again_until_it_has_a_delay() {
         320,
         Some(stamp(120_000_000, 120_000_000)),
     );
-    assert_eq!(sent.0.len(), 2);
+    feed(
+        &mut settling,
+        &mut sent,
+        0,
+        320,
+        Some(stamp(140_000_000, 140_000_000)),
+    );
+    assert_eq!(sent.0.len(), 3);
+    // A delay shorter than its buffer: sent, but not settled.
+    feed(
+        &mut settling,
+        &mut sent,
+        0,
+        320,
+        Some(stamp(160_000_000, 150_000_000)),
+    );
+    assert_eq!(sent.0.len(), 4);
+    feed(
+        &mut settling,
+        &mut sent,
+        0,
+        320,
+        Some(stamp(180_000_000, 180_000_000)),
+    );
+    assert_eq!(sent.0.len(), 4, "a delay lost holds again");
 }
 
 /// The first buffer, stamped with its cycle's time, is placed as captured
