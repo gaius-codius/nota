@@ -14,17 +14,23 @@
 //! So [`Settling`] holds a stream's first buffers back until one is
 //! settled, and dates them back from it: the buffers held run on, one
 //! after another, to the settled buffer's stamp. A track's first epoch
-//! opens at the first of them. The same goes for a run of buffers with no
-//! delay after the stream had one, as `PipeWire` measures it again
-//! (after the stream follows a new device, say), so a reopening's first
-//! audio is dated the same way. Each buffer keeps its cycle's time: it's
+//! opens at the first of them. Each buffer keeps its cycle's time: it's
 //! sent with a delay that much longer, so the drift meter, which reads
 //! the cycles, sees no difference.
 //!
-//! A stream that settles on no delay within [`HOLD_LIMIT`], or ends, or
-//! sends a buffer cpal couldn't stamp, has what it held sent as each
-//! buffer's own stamp places it ([`stamped`]), and its buffers pass from
-//! then on, until it has a delay and loses it again.
+//! A run of buffers with no delay after the stream had one is held and
+//! dated the same way, should `PipeWire` measure the delay again (it
+//! might after the stream follows a new device; that hasn't been seen),
+//! so a reopening's first audio would be dated as a stream's first is.
+//! The sender sends what's held before a reopening, as it came before
+//! the stretch the stream missed, and holds the reopening's first buffers
+//! as a stream's first are ([`Settling::reopen`]).
+//!
+//! A stream that settles on no delay within [`HOLD_LIMIT`] or
+//! [`HOLD_BUFFERS`], or ends, or sends a buffer cpal couldn't stamp, has
+//! what it held sent as each buffer's own stamp places it ([`stamped`]),
+//! and its buffers pass from then on, until it has a delay and loses it
+//! again.
 
 use std::time::Duration;
 
@@ -41,16 +47,24 @@ const HOLD_LIMIT: Duration = Duration::from_millis(500);
 /// part of a sample.
 const SETTLED_WITHIN: Duration = Duration::from_millis(1);
 
-/// When one buffer was delivered and stamped, on `CLOCK_MONOTONIC`.
+/// The most buffers held back: past it, as past [`HOLD_LIMIT`], what's
+/// held is sent. Room for them is made with the sender, off the stream's
+/// real-time thread; a quantum of 256 at 48 kHz fills it in about 340 ms.
+const HOLD_BUFFERS: usize = 64;
+
+/// When a stream's buffer was delivered and stamped, as `PipeWire`
+/// through cpal times it: on `CLOCK_MONOTONIC` as the stream gives it
+/// ([`CaptureSender::audio_delivered`](super::CaptureSender::audio_delivered)),
+/// and as the session clock's elapsed time once the sender has placed it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Stamp {
+pub struct Delivery {
     /// The time of the graph cycle that delivered it.
-    pub(super) cycle: Duration,
-    /// cpal's stamp: the cycle's time less the stream's delay.
-    pub(super) capture: Duration,
+    pub cycle: Duration,
+    /// When it was captured: the cycle's time less the stream's delay.
+    pub capture: Duration,
 }
 
-impl Stamp {
+impl Delivery {
     /// How long before its cycle the buffer was stamped.
     fn delay(self) -> Duration {
         self.cycle.saturating_sub(self.capture)
@@ -71,7 +85,7 @@ pub(super) struct Settling {
     /// The held buffers' samples, one after another.
     samples: Vec<i16>,
     /// Each held buffer's length and stamp, in order.
-    held: Vec<(usize, Stamp)>,
+    held: Vec<(usize, Delivery)>,
     /// Whether buffers are being held.
     holding: bool,
     /// Whether the stream has had a delay since it last settled or gave
@@ -82,7 +96,7 @@ pub(super) struct Settling {
 impl Settling {
     /// A stream at `rate` about to deliver its first buffer, which is
     /// held. Its room for the most it holds is made here, off the stream's
-    /// real-time thread.
+    /// real-time thread, so holding never allocates.
     pub(super) fn new(rate: SampleRate) -> Self {
         let limit = SampleCount::started_within(HOLD_LIMIT, rate)
             .and_then(|count| usize::try_from(count.get()).ok())
@@ -91,7 +105,7 @@ impl Settling {
             rate,
             limit,
             samples: Vec::with_capacity(limit),
-            held: Vec::with_capacity(64),
+            held: Vec::with_capacity(HOLD_BUFFERS),
             holding: true,
             measured: false,
         }
@@ -103,7 +117,7 @@ impl Settling {
     pub(super) fn buffer(
         &mut self,
         samples: &[i16],
-        stamp: Option<Stamp>,
+        stamp: Option<Delivery>,
         send: &mut dyn FnMut(&[i16], Timed),
     ) {
         let Some(stamp) = stamp else {
@@ -128,7 +142,8 @@ impl Settling {
             self.date_from(stamp, send);
             self.measured = true;
             send(samples, Some((stamp.capture, delay)));
-        } else if self.samples.len() + samples.len() > self.limit {
+        } else if self.samples.len() + samples.len() > self.limit || self.held.len() == HOLD_BUFFERS
+        {
             self.release(send);
             send(samples, stamped(stamp, samples.len(), self.rate));
         } else {
@@ -151,10 +166,17 @@ impl Settling {
         self.measured = false;
     }
 
+    /// Holds the buffers that follow, as a stream's first are: the stream
+    /// resumes after a stretch it missed, on a new device or after a
+    /// suspend.
+    pub(super) fn reopen(&mut self) {
+        self.holding = true;
+    }
+
     /// Sends what's held, dated back from `settled`, the stamp of the
     /// buffer that follows it, and stops holding. If they can't be dated,
     /// as [`Self::release`].
-    fn date_from(&mut self, settled: Stamp, send: &mut dyn FnMut(&[i16], Timed)) {
+    fn date_from(&mut self, settled: Delivery, send: &mut dyn FnMut(&[i16], Timed)) {
         let Some(start) = self.start(settled) else {
             self.release(send);
             return;
@@ -177,7 +199,7 @@ impl Settling {
     /// When the first held sample was captured: the samples held before
     /// `settled`'s buffer, back from its stamp, or earlier if that would
     /// put a held buffer's audio after the cycle that delivered it.
-    fn start(&self, settled: Stamp) -> Option<Duration> {
+    fn start(&self, settled: Delivery) -> Option<Duration> {
         let back = settled
             .capture
             .checked_sub(length(self.samples.len(), self.rate)?)?;
@@ -207,7 +229,7 @@ fn length(len: usize, rate: SampleRate) -> Option<Duration> {
 /// the cycle that delivers it, so a delay of none is one `PipeWire` hasn't
 /// measured; the buffer is then taken as ending at its cycle, captured its
 /// length before. `None` if the cycle comes before that length.
-fn stamped(stamp: Stamp, len: usize, rate: SampleRate) -> Timed {
+fn stamped(stamp: Delivery, len: usize, rate: SampleRate) -> Timed {
     let delay = stamp.delay();
     if !delay.is_zero() {
         return Some((stamp.capture, delay));

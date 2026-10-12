@@ -80,8 +80,8 @@
 //! default switch): the epoch then starts where the old audio ends, late
 //! by the overlap ([`TrackTimeline::reopen`]). A `PipeWire` stream whose
 //! delay goes back to none as it moves has its first buffers there held
-//! and dated as a stream's first are ([`PipeWireBackend`]), so the
-//! reopening is timed from when that audio began. The stream's sender
+//! and dated as a stream's first are ([`CaptureSender::audio_delivered`]),
+//! so the reopening is timed from when that audio began. The stream's sender
 //! notices a suspend by the session clock's count of time spent suspended
 //! ([`Clock::suspended`]), read on each buffer, and reports it as a
 //! [`CaptureNotice::Suspended`].
@@ -224,8 +224,8 @@
 //! Other platforms build without it; they record nothing until v2.
 
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -260,6 +260,7 @@ mod pulse;
 mod queue;
 // The route is followed by the PipeWire backend's watch; other platforms
 // have no backend yet, and nothing there would use it.
+mod hold;
 #[cfg(target_os = "linux")]
 mod route;
 #[cfg(test)]
@@ -284,7 +285,10 @@ pub use pulse::PulseBackend;
 pub use queue::{Positions, Progress};
 
 use detectors::Detectors;
+use hold::{Settling, Timed};
 use queue::{Queue, QueueSender, Received};
+
+pub use hold::Delivery;
 
 /// What to capture.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -458,6 +462,27 @@ pub struct CaptureSender {
     asleep: Arc<AtomicU64>,
     /// The rate the stream captures at, to time the first audio.
     rate: SampleRate,
+    /// The buffers held back until the stream's delay settles
+    /// ([`Self::audio_delivered`]).
+    held: Arc<Mutex<Held>>,
+}
+
+/// A stream's buffers held back until its delay settles, and whether the
+/// first of them reopens the track (see [`CaptureSender::audio_delivered`]).
+#[derive(Debug)]
+struct Held {
+    settling: Settling,
+    reopens: bool,
+}
+
+impl Held {
+    /// Nothing held yet, for a stream at `rate`.
+    fn shared(rate: SampleRate) -> Arc<Mutex<Self>> {
+        Arc::new(Mutex::new(Self {
+            settling: Settling::new(rate),
+            reopens: false,
+        }))
+    }
 }
 
 /// The route changes a stream's sender has been told of, and whether its
@@ -583,6 +608,57 @@ impl CaptureSender {
         self.send_audio(samples, stamp);
     }
 
+    /// [`Self::audio_captured`], for a stream stamped by the cycle that
+    /// delivered each buffer, on `CLOCK_MONOTONIC`: its capture stamp is the
+    /// cycle's time less a delay the server may not have measured yet, as
+    /// on `PipeWire`'s first buffers. Those are held back until a buffer's
+    /// delay settles, and sent dated back from it. A reopening
+    /// sends what's held first, as it came before the stretch the stream
+    /// missed, and its own first buffers are held as a stream's first are. Each buffer is placed on the session clock and counted as
+    /// sent as it comes, held or not: a suspend while it's held doesn't move
+    /// it, and what a crash would lose includes it. `None` for a buffer
+    /// the stream couldn't stamp.
+    pub fn audio_delivered(&self, samples: &[i16], delivery: Option<Delivery>) {
+        if samples.is_empty() || self.failed.load(Ordering::SeqCst) {
+            return;
+        }
+        let reopened = self.reopened();
+        let delivery = delivery.and_then(|delivery| self.place(delivery));
+        self.progress.sent(samples.len());
+        let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        let Held { settling, reopens } = &mut *held;
+        if reopened {
+            settling.release(&mut |samples, timed| {
+                self.queue_audio(samples, stamp(timed), std::mem::take(reopens));
+            });
+            *reopens = true;
+            settling.reopen();
+        }
+        settling.buffer(samples, delivery, &mut |samples, timed| {
+            self.queue_audio(samples, stamp(timed), std::mem::take(reopens));
+        });
+    }
+
+    /// Sends the buffers held back ([`Self::audio_delivered`]), each as its
+    /// own stamp places it, as the stream ends.
+    pub(super) fn release_held(&self) {
+        let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        let Held { settling, reopens } = &mut *held;
+        settling.release(&mut |samples, timed| {
+            self.queue_audio(samples, stamp(timed), std::mem::take(reopens));
+        });
+    }
+
+    /// `delivery`, its times on the session clock's elapsed time; `None` if
+    /// the clock can't place them.
+    fn place(&self, delivery: Delivery) -> Option<Delivery> {
+        let place = |awake| self.clock.awake_to_session(awake).map(SessionTime::elapsed);
+        Some(Delivery {
+            cycle: place(delivery.cycle)?,
+            capture: place(delivery.capture)?,
+        })
+    }
+
     /// Sends `samples`, stamped `captured` if the stream gave a time the
     /// session clock could place.
     fn send_audio(&self, samples: &[i16], captured: Option<Stamp>) {
@@ -591,17 +667,24 @@ impl CaptureSender {
         if samples.is_empty() || self.failed.load(Ordering::SeqCst) {
             return;
         }
-        let began = self.began.load(Ordering::SeqCst);
         // Checked on every buffer, the first too, so a suspend before it
         // isn't taken for one after it.
         let reopened = self.reopened();
+        // Counted before it's queued, so it's never missed.
+        self.progress.sent(samples.len());
+        self.queue_audio(samples, captured, reopened);
+    }
+
+    /// Queues `samples`, already counted as sent, stamped `captured` if
+    /// the session clock could place them, and opening a new epoch if they
+    /// follow a stretch the stream missed (`reopened`).
+    fn queue_audio(&self, samples: &[i16], captured: Option<Stamp>, reopened: bool) {
+        let began = self.began.load(Ordering::SeqCst);
         // Without a stamp, the clock is read only when a time is needed: a
         // stream's first buffers, and its first after a gap.
         let at = (!began || reopened)
             .then(|| captured.map_or_else(|| self.captured_at(samples.len()), |s| s.at));
         let first = at.filter(|_| !began).map(|at| (&*self.began, at));
-        // Counted before it's queued, so it's never missed.
-        self.progress.sent(samples.len());
         self.events.first_audio(
             self.track,
             samples,
@@ -697,6 +780,8 @@ impl CaptureSender {
         if self.stopping.load(Ordering::SeqCst) || self.failed.swap(true, Ordering::SeqCst) {
             return;
         }
+        // Audio held back was captured before the failure: the track's.
+        self.release_held();
         if matches!(error, CaptureError::DeviceNotAvailable(_))
             && !self.lost.swap(true, Ordering::SeqCst)
         {
@@ -704,6 +789,13 @@ impl CaptureSender {
         }
         self.events.send(self.track, CaptureEvent::Failed(error));
     }
+}
+
+/// A buffer's stamp from what [`Settling`] made of it: when its first
+/// sample was captured, as the session clock's elapsed time, and its delay.
+fn stamp(timed: Timed) -> Option<Stamp> {
+    let (at, delay) = timed?;
+    SessionTime::from_elapsed(at).map(|at| Stamp { at, delay })
 }
 
 /// The recorder thread's end of the channel: the events of every stream
@@ -777,6 +869,29 @@ impl CaptureReceiver {
 #[cfg(test)]
 fn test_channel() -> (QueueSender, Arc<Queue>) {
     let (queue, sender) = Queue::new();
+    (sender, queue)
+}
+
+/// A sender for `track` that has begun already, so each buffer queues only
+/// its audio, timed by `clock`; and its queue.
+#[cfg(test)]
+fn test_sender(track: TrackId, clock: Arc<dyn Clock>) -> (CaptureSender, Arc<Queue>) {
+    let (events, queue) = test_channel();
+    let rate = SampleRate::SPEECH;
+    let sender = CaptureSender {
+        events,
+        track,
+        progress: Progress::new(SampleIndex::ZERO, SampleIndex::ZERO),
+        clock,
+        stopping: Arc::new(AtomicBool::new(false)),
+        failed: Arc::new(AtomicBool::new(false)),
+        lost: Arc::new(AtomicBool::new(false)),
+        began: Arc::new(AtomicBool::new(true)),
+        reroutes: Arc::default(),
+        asleep: Arc::new(AtomicU64::new(0)),
+        rate,
+        held: Held::shared(rate),
+    };
     (sender, queue)
 }
 
@@ -1033,6 +1148,7 @@ impl TrackStarter {
                 u64::try_from(self.clock.suspended().as_nanos()).unwrap_or(u64::MAX),
             )),
             rate: self.rate,
+            held: Held::shared(self.rate),
         };
         let started_at = self.clock.now();
         backend

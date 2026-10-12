@@ -5,8 +5,8 @@ fn at(nanos: u64) -> Duration {
     Duration::from_nanos(nanos)
 }
 
-fn stamp(cycle: u64, capture: u64) -> Stamp {
-    Stamp {
+fn stamp(cycle: u64, capture: u64) -> Delivery {
+    Delivery {
         cycle: at(cycle),
         capture: at(capture),
     }
@@ -28,7 +28,13 @@ impl Sent {
 
 /// Feeds `settling` a buffer of `len` samples, each its index from
 /// `first`, stamped `stamp`.
-fn feed(settling: &mut Settling, sent: &mut Sent, first: usize, len: usize, stamp: Option<Stamp>) {
+fn feed(
+    settling: &mut Settling,
+    sent: &mut Sent,
+    first: usize,
+    len: usize,
+    stamp: Option<Delivery>,
+) {
     let samples: Vec<i16> = (first..first + len)
         .map(|i| i16::try_from(i % 30_000).unwrap())
         .collect();
@@ -190,6 +196,69 @@ fn a_stream_with_no_delay_is_held_no_longer_than_the_limit() {
     );
     assert_eq!(sent.0.len(), 27);
     assert_eq!(sent.0[26].1, ended(26));
+}
+
+/// A stream of short buffers holds no more of them than it made room for,
+/// so holding never allocates: the next is sent with all it held.
+#[test]
+fn a_hold_sends_what_it_holds_once_its_room_is_full() {
+    let mut settling = Settling::new(SampleRate::SPEECH);
+    let mut sent = Sent::default();
+    // 43 samples, about 2.7 ms: 64 make well under 500 ms.
+    let cycle = |n: u64| 1_000_000_000 + n * 2_687_500;
+    for n in 0..64 {
+        feed(
+            &mut settling,
+            &mut sent,
+            0,
+            43,
+            Some(stamp(cycle(n), cycle(n))),
+        );
+    }
+    assert!(sent.0.is_empty());
+    feed(
+        &mut settling,
+        &mut sent,
+        0,
+        43,
+        Some(stamp(cycle(64), cycle(64))),
+    );
+    assert_eq!(sent.0.len(), 65);
+}
+
+/// A stream that settled and then loses its delay for longer than the
+/// limit sends what it held, and then isn't held again until it has had a
+/// delay once more.
+#[test]
+fn a_delay_lost_past_the_limit_is_not_held_again() {
+    let mut settling = Settling::new(SampleRate::SPEECH);
+    let mut sent = Sent::default();
+    feed(
+        &mut settling,
+        &mut sent,
+        0,
+        320,
+        Some(stamp(100_000_000, 80_000_000)),
+    );
+    let cycle = |n: u64| 1_000_000_000 + n * 20_000_000;
+    for n in 0..26 {
+        feed(
+            &mut settling,
+            &mut sent,
+            0,
+            320,
+            Some(stamp(cycle(n), cycle(n))),
+        );
+    }
+    assert_eq!(sent.0.len(), 27);
+    feed(
+        &mut settling,
+        &mut sent,
+        0,
+        320,
+        Some(stamp(cycle(26), cycle(26))),
+    );
+    assert_eq!(sent.0.len(), 28, "not held again");
 }
 
 /// A stream that ends while buffers are held has them sent, each as its

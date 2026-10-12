@@ -636,6 +636,7 @@ mod tests {
             reroutes: Arc::default(),
             asleep: Arc::new(AtomicU64::new(0)),
             rate: SampleRate::SPEECH,
+            held: super::super::super::Held::shared(SampleRate::SPEECH),
         };
         (sender, queue)
     }

@@ -616,6 +616,7 @@ fn a_channel_with_no_senders_reads_as_stopped() {
         reroutes: Arc::default(),
         asleep: Arc::new(AtomicU64::new(0)),
         rate: rate(),
+        held: Held::shared(rate()),
     };
     sender.audio(&[]);
     assert!(matches!(rx.next(Duration::from_millis(1)), Received::Idle));
@@ -1368,6 +1369,7 @@ fn notices_carry_the_time_they_were_reported() {
         reroutes: Arc::default(),
         asleep: Arc::new(AtomicU64::new(0)),
         rate: rate(),
+        held: Held::shared(rate()),
     };
     sender.notice(CaptureNotice::Overrun);
     // The recorder gets to it later.
@@ -1390,7 +1392,7 @@ fn notices_carry_the_time_they_were_reported() {
 #[derive(Debug, Clone)]
 struct Stalling {
     fs: FakeFs,
-    gate: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    gate: Arc<(Mutex<bool>, std::sync::Condvar)>,
     stalled: mpsc::Sender<()>,
 }
 
@@ -1522,7 +1524,7 @@ fn audio_queued_behind_a_stalled_fsync_counts_as_delivered_and_at_risk() {
     let (stalled, stalls) = mpsc::channel();
     let fs = Stalling {
         fs: FakeFs::with_dirs([dir()]),
-        gate: Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new())),
+        gate: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
         stalled,
     };
     let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(SessionTime::ZERO));
@@ -2293,6 +2295,7 @@ fn a_stamp_the_clock_cant_place_is_sent_unstamped() {
         reroutes: Arc::default(),
         asleep: Arc::new(AtomicU64::new(0)),
         rate: rate(),
+        held: Held::shared(rate()),
     };
     let rx = CaptureReceiver {
         events: rx,
@@ -2316,6 +2319,100 @@ fn a_stamp_the_clock_cant_place_is_sent_unstamped() {
                 delay: Duration::from_millis(2),
             }
     ));
+}
+
+/// A buffer delivered at `cycle_ms`, stamped `capture_ms`, on the stream's
+/// clock.
+const fn delivered(cycle_ms: u64, capture_ms: u64) -> Delivery {
+    Delivery {
+        cycle: Duration::from_millis(cycle_ms),
+        capture: Duration::from_millis(capture_ms),
+    }
+}
+
+/// The events queued so far.
+fn queued(rx: &Queue) -> Vec<CaptureEvent> {
+    let mut events = Vec::new();
+    while let Received::Event(_, event) = rx.next(Duration::from_millis(1)) {
+        events.push(event);
+    }
+    events
+}
+
+/// The samples and stamp of a stamped buffer.
+fn timed(event: &CaptureEvent) -> Option<(&[i16], Stamp)> {
+    match event {
+        CaptureEvent::TimedAudio { samples, stamp } => Some((samples, *stamp)),
+        _ => None,
+    }
+}
+
+/// A stream's buffers held until its delay settles are counted as
+/// delivered as they come, so what a crash would lose includes them.
+#[test]
+fn held_audio_counts_as_delivered() {
+    let (sender, rx) = test_sender(MIC, Arc::new(FakeClock::new(SessionTime::ZERO)));
+    sender.audio_delivered(&[0; 320], Some(delivered(100, 100)));
+    assert!(queued(&rx).is_empty(), "held");
+    assert_eq!(sender.progress.now().delivered, SampleIndex::new(320));
+    // Sent when it settles, and not counted again.
+    sender.audio_delivered(&[0; 320], Some(delivered(140, 120)));
+    assert_eq!(queued(&rx).len(), 2);
+    assert_eq!(sender.progress.now().delivered, SampleIndex::new(640));
+}
+
+/// A stream that fails, whoever reports it, sends what it held first: it
+/// was the track's audio.
+#[test]
+fn a_failure_sends_what_is_held_first() {
+    let (sender, rx) = test_sender(MIC, Arc::new(FakeClock::new(SessionTime::ZERO)));
+    sender.audio_delivered(&[1, 2], Some(delivered(100, 100)));
+    sender.failed(CaptureError::Backend("gone".into()));
+    let events = queued(&rx);
+    assert!(matches!(&events[..], [audio, CaptureEvent::Failed(_)]
+        if timed(audio).is_some_and(|(samples, _)| samples == [1, 2])));
+    // Nothing is held for the stream's end to send again.
+    sender.release_held();
+    assert!(queued(&rx).is_empty());
+}
+
+/// A reopening sends what was held before it, placed when it came, before
+/// a suspend the clock counted since; the reopening's own buffers are
+/// held and dated from the next settled stamp, and the first of them
+/// opens the new epoch.
+#[test]
+fn a_reopening_sends_what_was_held_before_it() {
+    let clock = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let (sender, rx) = test_sender(MIC, Arc::clone(&clock) as Arc<dyn Clock>);
+    sender.audio_delivered(&[1; 320], Some(delivered(100, 100)));
+    clock.suspend(Duration::from_secs(60));
+    // The stream's clock stops while suspended: its next cycle comes 20 ms
+    // after the last.
+    sender.audio_delivered(&[2; 320], Some(delivered(120, 120)));
+    sender.audio_delivered(&[3; 320], Some(delivered(160, 115)));
+    let events = queued(&rx);
+    let ms = |ms: u64| SessionTime::from_nanos(ms * 1_000_000);
+    let asleep = 60_000;
+    assert_eq!(events.len(), 5, "{events:?}");
+    assert!(matches!(
+        events[0],
+        CaptureEvent::Notice {
+            notice: CaptureNotice::Suspended,
+            ..
+        }
+    ));
+    let (samples, stamp) = timed(&events[1]).unwrap();
+    assert_eq!(
+        (samples[0], stamp.at),
+        (1, ms(80)),
+        "placed before the suspend"
+    );
+    assert!(matches!(events[2], CaptureEvent::Reopened { at } if at == ms(asleep + 95)));
+    let (samples, stamp) = timed(&events[3]).unwrap();
+    // 20 ms back from the settled stamp.
+    assert_eq!((samples[0], stamp.at), (2, ms(asleep + 95)));
+    let (samples, stamp) = timed(&events[4]).unwrap();
+    assert_eq!((samples[0], stamp.at), (3, ms(asleep + 115)));
 }
 
 /// A track started first opens its epoch when its stream was asked to
