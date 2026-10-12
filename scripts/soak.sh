@@ -47,7 +47,12 @@
 #     the first 10 minutes;
 #   - each track's drift after correction is under 20 ms;
 #   - no unlogged gaps: every gap in the audio is a timeline event, no burst
-#     is missing, no step goes unexplained, and no track ends early;
+#     is missing, no step between bursts goes over 5 ms, no run of exact
+#     zeros is unlogged, and no track ends early;
+#   - the two tracks' offset varies by less than 20 ms over the run (its
+#     constant part is reported, not judged);
+#   - the durable position never runs more than 2 s behind the audio
+#     delivered (the bound the crash harness holds);
 #   - nota exits 0 after the SIGHUP (everything published) and the default
 #     sink is unchanged.
 #
@@ -116,8 +121,9 @@ done
 # From the repo, so its .cargo/config.toml points the build at the pinned
 # sherpa-onnx libraries (scripts/sherpa-onnx.sh). The release build, with
 # the one measuring feature, which adds a thread reading each track's
-# progress counters every 20 ms and a log of texts, kept as counts and a
-# short list.
+# progress counters every 20 ms (kept as counts), a list of texts, and a list
+# of the screen's draws, which grows by 10 to 20 entries a second (a few MB
+# over three hours, inside the memory this measures).
 (cd "$REPO" && cargo build --release --locked --quiet -p nota --features latency-log)
 NOTA=${CARGO_TARGET_DIR:-$REPO/target}/release/nota
 [[ -x $NOTA ]] || die "built, but no $NOTA"
@@ -179,6 +185,7 @@ wall() { date +%s.%N; }
   echo "tracks=$TRACKS"
   echo "minutes=$MINUTES"
   echo "burst_offset_s=1"
+  echo "latency_log=1"
   echo "nota=$NOTA"
   echo "host=$(uname -srm)"
   echo "cpus=$(nproc)"
