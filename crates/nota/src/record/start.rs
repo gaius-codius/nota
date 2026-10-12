@@ -32,7 +32,7 @@ use super::signals::{SignalThread, listen_for_signals};
 use super::summary::{Outcome, file_names, held_notes, track_name};
 use super::{BoxError, MIC, RATE, RecordArgs, SYSTEM, segment_length};
 use crate::inhibit::{self, Logind, Sleep};
-use crate::latency::{DrawEnds, LatencyLog};
+use crate::latency::{DrawEnds, LagSamples, LatencyLog};
 use crate::library::{
     Library, NewSessionRows, Salvaged, SessionPaths, discard_empty, startup_watch,
 };
@@ -69,6 +69,9 @@ pub(super) struct Started<B: CaptureBackend> {
     pub(super) ballast: BallastPlan,
     pub(super) signals: SignalThread,
     pub(super) draws: Option<DrawEnds>,
+    /// How far behind its stream each track's durable position ran, if
+    /// the latency log was asked for.
+    pub(super) lag: Option<LagSamples>,
     pub(super) library: Library,
     pub(super) session: SessionId,
     pub(super) lock: SessionLock<RecordFs>,
@@ -199,10 +202,7 @@ fn start_with_notes<B: CaptureBackend>(
     let disk = watch_disk(args, &session.audio(), sources.len(), &watch, reports)?;
     // The recorder runs before any stream opens: each track joins it as
     // its stream starts, while the next one opens.
-    let (starter, mut events) = prepare_tracks(&sources, RATE, clock);
-    // A pinned system device is a `Source::Device`, held to the
-    // microphone's 5 s of zeros unless it's told it's the system audio.
-    events.set_thresholds(SYSTEM, Thresholds::SYSTEM_AUDIO);
+    let (starter, events, lag) = prepare_recording(args, &sources, clock)?;
     let recorder = spawn_recorder(
         writer,
         events,
@@ -249,6 +249,7 @@ fn start_with_notes<B: CaptureBackend>(
         ballast: BallastPlan::new(&args.data, ballast_length(args)),
         signals,
         draws,
+        lag,
         library,
         session: session.id,
         lock,
@@ -507,6 +508,25 @@ fn start_live(
         log,
     )?;
     Ok((live_inputs, live))
+}
+
+/// The tracks of `sources`, ready to start: the recorder's end of each,
+/// and the starter of their streams. With a latency log, the lag of each
+/// track's durable position is sampled from here on.
+fn prepare_recording(
+    args: &RecordArgs,
+    sources: &[(TrackId, Source)],
+    clock: &Arc<dyn Clock>,
+) -> std::io::Result<(TrackStarter, CaptureReceiver, Option<LagSamples>)> {
+    let (starter, mut events) = prepare_tracks(sources, RATE, clock);
+    // A pinned system device is a `Source::Device`, held to the
+    // microphone's 5 s of zeros unless it's told it's the system audio.
+    events.set_thresholds(SYSTEM, Thresholds::SYSTEM_AUDIO);
+    let lag = args.latency_log.as_ref().map(|_| LagSamples::default());
+    if let Some(lag) = &lag {
+        lag.start(&events, Arc::clone(clock))?;
+    }
+    Ok((starter, events, lag))
 }
 
 /// What opening the streams came to, and what started before them.

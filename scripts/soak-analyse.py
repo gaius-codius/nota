@@ -51,6 +51,9 @@ TAIL_LIMIT_S = 0.5
 # wasn't captured, whatever the epochs say.
 ZERO_RUN_S = 0.02
 ALIGNMENT_LIMIT_MS = 20
+# The most the durable position may run behind the audio delivered: the
+# bound the crash harness holds (scripts/real-capture-crash.sh).
+LAG_LIMIT_MS = 2000
 
 
 class Report:
@@ -365,7 +368,11 @@ def analyse_track(report, work, db, session, track, env, outputs):
                      f"{tail_should:.2f} s after it ({tail_should - tail_have:+.2f} s short), under {TAIL_LIMIT_S} s:")
     else:
         report.say("end of the audio: not checked (the run didn't get as far as the stop)")
-    zero_runs(report, x, epochs, events, bursts[0][1], bursts[-1][1] + round(9.5 * RATE))
+    # The speech ends PERIOD_S - offset after its last burst; half a second
+    # short of that, so the silence after it isn't read as a loss.
+    zero_runs(report, x, epochs, events, bursts[0][1],
+              bursts[-1][1] + round((PERIOD_S - offset - 0.5) * RATE))
+    lag(report, work, track)
     # And the speech: texts the engine returned.
     count, first_at, last_at = db.execute(
         "SELECT count(*), min(start_ns), max(end_ns) FROM utterance WHERE session_id = ? AND track = ?",
@@ -403,6 +410,37 @@ def zero_runs(report, x, epochs, events, lo, hi):
             unlogged.append((t, length))
     report.check(not unlogged, f"runs of {ZERO_RUN_S * 1000:.0f} ms or more of exact zeros inside the "
                                f"played span: {len(runs)}, unlogged {len(unlogged)}; none unlogged:")
+
+
+def lag(report, work, track):
+    """How far the track's durable position ran behind the audio delivered,
+    from the lag lines the latency log ends with (crates/nota/src/latency.rs):
+    sampled every 20 ms, so a lag that lasted less is missed."""
+    path = os.path.join(work, "latency.tsv")
+    if not os.path.isfile(path):
+        report.say("lag: not measured (no latency log)")
+        return
+    summary, minutes = None, {}
+    with open(path) as f:
+        for line in f:
+            fields = line.rstrip("\n").split("\t")
+            if fields[0] == "lag" and fields[1] == str(track):
+                summary = dict(kv.split("=") for kv in fields[2:])
+            elif fields[0] == "lagmin" and fields[1] == str(track):
+                minutes[int(fields[2])] = int(fields[3])
+    if summary is None:
+        report.check(False, "lag: no lag line for this track in the latency log:")
+        return
+    blocks = {}
+    for minute, highest in minutes.items():
+        blocks[minute // 30] = max(blocks.get(minute // 30, 0), highest)
+    peak = int(summary["max_ms"])
+    report.check(peak <= LAG_LIMIT_MS,
+                 f"lag (delivered, not yet durable): {summary['samples']} samples; median {summary['p50_ms']} ms, "
+                 f"p95 {summary['p95_ms']}, p99 {summary['p99_ms']}, highest {peak}; under {LAG_LIMIT_MS} ms:")
+    report.say(f"  highest in each 30 minutes (ms): "
+               + " ".join(f"{b * 30}m:{v}" for b, v in sorted(blocks.items()))
+               + f"; the recorder fell behind its stream by at most {summary['queued_max_ms']} ms")
 
 
 def alignment(report, bursts):

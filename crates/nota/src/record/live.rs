@@ -587,7 +587,7 @@ mod tests {
         );
         // Drawn by the draw after the first to end at or after 4.2 s.
         assert_eq!(
-            log.contents(&[ms(4_000), ms(4_200), ms(4_230)]),
+            log.contents(&[ms(4_000), ms(4_200), ms(4_230)], ""),
             "kind\ttrack\tstart_ms\tend_ms\thanded_ms\tdrawn_ms\n\
              text\t0\t500\t3500\t4200\t4230\n\
              dropped\t7\t-\t-\t4200\t-\n\

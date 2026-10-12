@@ -25,6 +25,7 @@ pub(super) fn stop<B: CaptureBackend>(started: Started<B>, shown: Shown) -> (Out
         ballast,
         signals,
         draws,
+        lag,
         library,
         session,
         lock,
@@ -41,6 +42,8 @@ pub(super) fn stop<B: CaptureBackend>(started: Started<B>, shown: Shown) -> (Out
     let full_while_recording = disk.full().is_some();
     // Stop, in order.
     drop(captures);
+    // The streams have ended: what's still being made durable is the stop's, not the recording's.
+    let lag_lines = lag.map(|lag| lag.finish()).unwrap_or_default();
     let writer = recorded(recorder.join(), &mut outcome);
     // The recording has ended: the machine may sleep while the last
     // segments are published.
@@ -69,7 +72,7 @@ pub(super) fn stop<B: CaptureBackend>(started: Started<B>, shown: Shown) -> (Out
     });
     outcome.notes.extend(slept.iter().map(Slept::note));
     let draw_ends = draws.map(|d| d.times()).unwrap_or_default();
-    if let Some(Err(e)) = log.map(|log| log.write(&draw_ends)) {
+    if let Some(Err(e)) = log.map(|log| log.write(&draw_ends, &lag_lines)) {
         outcome.notes.push(format!("writing the latency log: {e}"));
     }
     let finishing_failed = stopped.finishing.is_some();

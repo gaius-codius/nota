@@ -31,8 +31,10 @@
 #     any step in the bursts' times that no epoch or event explains, any
 #     burst missing, and how much of the end of the audio is missing;
 #   - cross-track alignment: the same burst's time on the two tracks.
-# The delivered-to-durable lag isn't here: `nota record` doesn't expose the
-# durable position, so it can't be read from outside (see the report).
+#   - lag: how far each track's durable position ran behind the audio the
+#     server had delivered (what a crash then would lose), from the
+#     `--latency-log` build's sampler (crates/nota/src/latency.rs): its
+#     quantiles, and its highest in each minute.
 #
 # Nothing is heard and the user's devices, defaults and volumes are left
 # alone: the recorder captures the sinks by name. Everything started is
@@ -112,9 +114,11 @@ done
 # Absolute, since the build runs from the repo.
 [[ -z ${CARGO_TARGET_DIR:-} || $CARGO_TARGET_DIR == /* ]] || export CARGO_TARGET_DIR=$PWD/$CARGO_TARGET_DIR
 # From the repo, so its .cargo/config.toml points the build at the pinned
-# sherpa-onnx libraries (scripts/sherpa-onnx.sh). The release build as it
-# ships: no measuring features.
-(cd "$REPO" && cargo build --release --locked --quiet -p nota)
+# sherpa-onnx libraries (scripts/sherpa-onnx.sh). The release build, with
+# the one measuring feature, which adds a thread reading each track's
+# progress counters every 20 ms and a log of texts, kept as counts and a
+# short list.
+(cd "$REPO" && cargo build --release --locked --quiet -p nota --features latency-log)
 NOTA=${CARGO_TARGET_DIR:-$REPO/target}/release/nota
 [[ -x $NOTA ]] || die "built, but no $NOTA"
 
@@ -182,7 +186,8 @@ wall() { date +%s.%N; }
 } > "$WORK/run.env"
 
 command=$(printf '%q ' "$NOTA" record --data "$WORK/data" --title soak \
-  --parakeet "$PARAKEET" --vad "$VAD" --mic "$MIC" --system "$SYSTEM")
+  --parakeet "$PARAKEET" --vad "$VAD" --mic "$MIC" --system "$SYSTEM" \
+  --latency-log "$WORK/latency.tsv")
 # A pseudo-terminal for the screen, sized as an ordinary terminal.
 NOTA_STARTED=$(wall)
 SHELL=/bin/bash script -qfec "stty cols 120 rows 40; exec $command" "$WORK/terminal.out" \
