@@ -6,6 +6,7 @@ use nota_store::{StoreError, Wait};
 
 use nota_recorder::segment::Stopped;
 use nota_recorder::session::SessionWriter;
+use nota_tui::Unfinished;
 
 use super::live::{LiveEnd, LiveInput};
 use super::start::{RecordFs, Recorded, Started};
@@ -18,7 +19,7 @@ use crate::inhibit::Slept;
 /// is a note on the outcome, which is reported all the same. With it come
 /// the short phrases for what the stop left unfinished, for the stopped
 /// screen.
-pub(super) fn stop<B: CaptureBackend>(started: Started<B>, shown: Shown) -> (Outcome, Vec<String>) {
+pub(super) fn stop<B: CaptureBackend>(started: Started<B>, shown: Shown) -> (Outcome, Unfinished) {
     let Started {
         mut outcome,
         ballast,

@@ -35,7 +35,9 @@
 //!
 //! When the stop left something unfinished, the second sentence says what
 //! in place of "Everything up to 01:12:48 is saved": `Saved up to 01:12:48
-//! · 2 journals kept for the next start.`
+//! · 2 journals kept for the next start.` When journals were kept for the
+//! next start, the last sentence is `Free some space; the next start
+//! publishes the rest.` in place of the one sending the listener Home.
 //!
 //! From 100 columns (`MainWide`), the marks-and-notes panel takes the
 //! right 32, after a gap of 2; the main panel keeps its layout in the rest:
@@ -57,7 +59,7 @@ use ratatui::text::{Line, Span};
 
 use crate::annotation::Annotation;
 use crate::band::column_of;
-use crate::screen::{Recording, Shown, Tone};
+use crate::screen::{Recording, Shown, Tone, Unfinished};
 use crate::text::{display_width, graphemes, wrap};
 use crate::theme::Theme;
 
@@ -391,19 +393,26 @@ impl Recording {
     /// `area` for the transcript.
     fn draw_stopped_notice(&self, area: Rect, at: SessionTime, buf: &mut Buffer) -> Rect {
         let text_width = usize::from(area.width.saturating_sub(MARGIN + 1));
-        let saved = if self.unfinished.is_empty() {
+        let Unfinished {
+            phrases,
+            next_start_publishes,
+        } = &self.unfinished;
+        let saved = if phrases.is_empty() {
             format!("Everything up to {} is saved.", clock_hms(at))
         } else {
-            format!(
-                "Saved up to {} · {}.",
-                clock_hms(at),
-                self.unfinished.join(" · ")
-            )
+            format!("Saved up to {} · {}.", clock_hms(at), phrases.join(" · "))
+        };
+        // Journals kept are published by the next start's salvage, not by
+        // opening the session.
+        let then = if *next_start_publishes {
+            "Free some space; the next start publishes the rest."
+        } else {
+            "Free some space, then open the session from Home to finish it."
         };
         let sentences = [
             "The disk is full, so nota stopped the recording.".to_owned(),
             saved,
-            "Free some space, then open the session from Home to finish it.".to_owned(),
+            then.to_owned(),
         ];
         let lines: Vec<String> = sentences
             .iter()
