@@ -819,9 +819,9 @@ fn disk_reports(reporting: Reporting) -> impl FnMut(DiskReport) + Send {
                 warning(Cause::DiskFull, WarningState::Raised),
                 recorder::Event::Stopping,
             ],
-            // A disk that couldn't be checked, and a ballast that couldn't
-            // be made, are in the summary. A ballast skipped for want of
-            // room isn't reported anywhere.
+            // A disk that couldn't be checked is in the summary, as is a
+            // start with no ballast (`DiskSummary::started_without_ballast`);
+            // neither reaches the screen.
             DiskReport::Unchecked(_) | DiskReport::Ballast(_) => Vec::new(),
         };
         for event in events {

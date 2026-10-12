@@ -567,6 +567,23 @@ fn main_stopped() {
     insta::assert_snapshot!(terminal.backend());
 }
 
+/// A stop that left journals for the next start says so beside how far
+/// the recording is saved, in place of "everything is saved".
+#[test]
+fn main_stopped_with_journals_kept() {
+    let mut screen = two_track_screen();
+    raise(&mut screen, Cause::DiskFull, None, 4_368);
+    screen.set_unfinished(vec!["2 journals kept for the next start".to_owned()]);
+    let terminal = draw(&mut screen, 62, 20);
+    let drawn = format!("{}", terminal.backend());
+    assert!(
+        drawn.contains("Saved up to 01:12:48 · 2 journals kept for the next"),
+        "{drawn}"
+    );
+    assert!(!drawn.contains("Everything up to"), "{drawn}");
+    insta::assert_snapshot!(terminal.backend());
+}
+
 /// The top border's cell style at the first cell showing `glyph`.
 fn style_of(terminal: &Terminal<TestBackend>, glyph: &str) -> Style {
     let buffer = terminal.backend().buffer();

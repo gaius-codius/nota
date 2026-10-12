@@ -6,6 +6,7 @@
 use nota_core::{SessionId, TrackId, WallTime};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
+use crate::jobs::Wait;
 use crate::segments::{parse_track, session_exists};
 use crate::{Store, StoreError, parse_session, session_key};
 
@@ -288,6 +289,11 @@ impl Store {
     /// recording, or isn't in the library, is only read, so this takes no
     /// write lock for it.
     ///
+    /// The jobs wait for space ([`Wait::Space`]) if the session's timeline
+    /// has a full disk's warning ([`Store::disk_filled`]): the stop that
+    /// would have said so is the write a full disk fails. A timeline that
+    /// can't be read says nothing.
+    ///
     /// # Errors
     ///
     /// [`StoreError::Corrupt`] if its row doesn't parse, and
@@ -295,7 +301,10 @@ impl Store {
     pub fn stop_recording(&mut self, id: SessionId) -> Result<bool, StoreError> {
         match self.session(id)? {
             Some(s) if s.state == SessionState::Recording => {
-                self.finish_recording(id, None)?;
+                self.finish_recording(
+                    id,
+                    self.disk_filled(id).unwrap_or(false).then_some(Wait::Space),
+                )?;
                 Ok(true)
             }
             _ => Ok(false),
