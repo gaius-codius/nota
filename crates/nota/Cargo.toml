@@ -14,8 +14,9 @@ publish.workspace = true
 # (the release build) doesn't.
 fake-capture = []
 # `nota record --latency-log FILE`: logs when each text reached the screen,
-# for `scripts/live-latency.sh`. Turned on for nota's tests as above, and
-# off in the release build.
+# for `scripts/live-latency.sh`, and how far each track's durable position
+# ran behind its stream, for `scripts/soak.sh`. Turned on for nota's tests
+# as above, and off in the release build.
 latency-log = []
 
 [[test]]

@@ -329,6 +329,48 @@ fn the_ballast_is_made_when_the_recording_ends_not_while_it_runs() {
     assert_eq!(std::fs::metadata(&ballast).unwrap().len(), 1 << 20);
 }
 
+/// With a latency log, each track's lag behind its stream is sampled while
+/// recording and written with the log: how many samples, the lag's
+/// quantiles, and its highest in each minute.
+#[test]
+fn the_latency_log_says_how_far_each_tracks_durable_position_ran_behind() {
+    let tmp = TestDir::new("lag-log");
+    let log = tmp.0.join("latency.tsv");
+    let mut nota = Running::start_as(
+        &tmp.0,
+        &["--latency-log", log.to_str().unwrap()],
+        false,
+        &[],
+    );
+    assert!(nota.shows_after(0, "s stop"), "{}", nota.output());
+    pause(Duration::from_millis(1_500));
+    nota.press("s");
+    pause(Duration::from_millis(600));
+    nota.press("y");
+    let status = nota.exits().expect("nota didn't stop");
+    assert!(status.success(), "{status:?}: {}", nota.output());
+    let written = std::fs::read_to_string(&log).unwrap();
+    for track in [0, 1] {
+        let line = written
+            .lines()
+            .find(|l| l.starts_with(&format!("lag\t{track}\t")))
+            .unwrap_or_else(|| panic!("no lag line for track {track}:\n{written}"));
+        let value = |name: &str| -> u64 {
+            let (_, rest) = line.split_once(&format!("{name}=")).unwrap();
+            rest.split('\t').next().unwrap().parse().unwrap()
+        };
+        // 1.5 s at a sample every 20 ms is some 70; allow a loaded machine.
+        assert!(value("samples") >= 10, "{line}"); // check-bound
+        // Within the journal's sync interval and then some.
+        assert!(value("max_ms") <= 2_000, "{line}"); // check-bound
+        assert!(value("p50_ms") <= value("p99_ms"), "{line}");
+        assert!(
+            written.contains(&format!("lagmin\t{track}\t0\t")),
+            "{written}"
+        );
+    }
+}
+
 /// The first recording in a data directory starts with no ballast and says
 /// so in its summary; the next finds the one it left, and says nothing.
 #[test]

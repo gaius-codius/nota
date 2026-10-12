@@ -224,7 +224,9 @@ if [[ $default_changed -eq 1 ]]; then
   echo "the default sink changed during the run (was $default_before) FAIL"
   status=1
 fi
-problems=$(awk -F'\t' 'NR > 1 && $1 != "text"' "$LOG")
+# The log's lag lines (the durable position's lag, which scripts/soak.sh reads)
+# aren't problems.
+problems=$(awk -F'\t' 'NR > 1 && $1 != "text" && $1 !~ /^lag/' "$LOG")
 if [[ -n $problems ]]; then
   echo "kept from the screen FAIL:"
   while IFS= read -r line; do echo "  $line"; done <<< "$problems"
