@@ -3,10 +3,13 @@
 # looped speech from temporary null sinks with real PipeWire for hours, and
 # the session it leaves is measured against what was played.
 #
-# What is played (a 60 s unit, looped): three sentences' worth of the speech
-# fixture (3 x 17.6 s), a low noise floor so no detector reads the silence as
-# a fault, and a 40 ms burst of a 6 kHz tone every 10 s. The bursts are the
-# ground truth. Both tracks hear the same player: it is linked, sample for
+# What is played (a 60 s unit, looped): the speech fixture three times
+# (3 x 17.6 s), a low noise floor throughout, so the pauses are never digital
+# zeros, and a 40 ms burst of a 6 kHz tone every 10 s from the unit's first
+# second (the first second has none, so the player's links are up before the
+# first one). The bursts are the ground truth. Before the player starts and
+# after it ends the sinks are silent, and nota's digital-zeros warning
+# rightly fires there. Both tracks hear the same player: it is linked, sample for
 # sample, to both sinks (`pw-link`), so any difference between the tracks is
 # nota's, not the players'. With --tracks 1 only the mic records and the
 # system audio is a node that doesn't exist.
@@ -33,8 +36,9 @@
 #
 # Nothing is heard and the user's devices, defaults and volumes are left
 # alone: the recorder captures the sinks by name. Everything started is
-# stopped by exact PID and module index on exit, and the work directory is
-# removed unless --keep (a run's directory is the only thing to re-analyse).
+# stopped by exact PID and module index on exit. The work directory is
+# removed after a passing run unless --keep; a failed or interrupted run
+# keeps it (it is the only thing to re-analyse).
 #
 # Pass if (the exit criterion):
 #   - resident memory (recorder plus engine) grows less than 50 MB after
@@ -147,7 +151,7 @@ trap 'exit 130' INT TERM
 # The speech and the bursts, one 60 s unit, then looped to the whole run.
 ffmpeg -nostdin -loglevel error -y -i "$FIXTURE" -i "$FIXTURE" -i "$FIXTURE" \
   -filter_complex "[0:a][1:a][2:a]concat=n=3:v=0:a=1,apad=whole_dur=60[speech];
-    aevalsrc='0.3*sin(2*PI*6000*t)*lt(mod(t,10),0.04)':s=16000:d=60[burst];
+    aevalsrc='0.3*sin(2*PI*6000*t)*gte(t,1)*lt(mod(t-1,10),0.04)':s=16000:d=60[burst];
     anoisesrc=r=16000:d=60:a=0.002:c=white[floor];
     [speech][burst][floor]amix=inputs=3:duration=first:normalize=0" \
   -ar 16000 -ac 1 -c:a pcm_s16le "$WORK/unit.wav"
@@ -170,6 +174,7 @@ wall() { date +%s.%N; }
 {
   echo "tracks=$TRACKS"
   echo "minutes=$MINUTES"
+  echo "burst_offset_s=1"
   echo "nota=$NOTA"
   echo "host=$(uname -srm)"
   echo "cpus=$(nproc)"
@@ -198,7 +203,9 @@ for _ in $(seq 100); do
   [[ $(pw-link -o | grep -c "^$node:output_") -ge 1 ]] && break
   sleep 0.1
 done
-for out in $(pw-link -o | grep "^$node:output_" | sed 's/^[^:]*://'); do
+outs=$(pw-link -o | grep "^$node:output_" | sed 's/^[^:]*://' || true)
+[[ -n $outs ]] || die "the player's ports never appeared"
+for out in $outs; do
   # A mono player feeds both of a sink's inputs.
   ins=("playback_${out#output_}")
   [[ $out == output_MONO ]] && ins=(playback_FL playback_FR)
@@ -238,7 +245,8 @@ sample() {
   if (( tick % (OTHERS_EVERY / SAMPLE_EVERY) == 0 )); then
     {
       echo "== $now s, load $load1 $load5"
-      ps -eo pid,pcpu,rss,args --sort=-pcpu | head -8 | cut -c1-150
+      # sed reads all of ps's output, so ps is never left writing to a closed pipe.
+      ps -eo pid,pcpu,rss,args --sort=-pcpu | sed -n '1,8p' | cut -c1-150
     } >> "$WORK/others.txt"
   fi
   tick=$((tick + 1))
@@ -256,7 +264,7 @@ PLAY_ENDED=$(wall)
 wait "$PLAYER" || die "pw-play failed"
 PLAYER=
 sample
-# The tail of the recording after the speech: the noise floor.
+# The recording goes on a little after the speech, in silence.
 sleep 8
 [[ $(pgrep -P "$TERMINAL" -x nota || true) == "$RECORDER" ]] ||
   die "nota record stopped early: $(tail -c 2000 "$WORK/terminal.out")"
@@ -289,5 +297,6 @@ MODULES=()
 
 status=0
 python3 -I "$ANALYSER" "$WORK" || status=$?
-FINISHED=1
+# A run that failed keeps its directory, whatever --keep says.
+[[ $status -ne 0 ]] || FINISHED=1
 exit $status
