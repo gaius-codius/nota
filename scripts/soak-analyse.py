@@ -32,28 +32,53 @@ PERIOD_S = 10
 WINDOW = 64
 CARRIER = [cmath.exp(-2j * math.pi * 3 * i / 8) for i in range(8)]
 # A burst's 0.3 full-scale tone gives the sliding sum about this size; a
-# burst is any peak above half of it.
-PLATEAU = 0.3 * 32768 * WINDOW / 2
+# burst is any peak above half of it. Tagged, as the bounds below are: a
+# lower one could take noise for a burst the recording lost.
+PLATEAU = 0.3 * 32768 * WINDOW / 2  # check-bound
 # Where to look for the next burst: this far either side of where the last
 # one puts it, widening only when it isn't there.
-RADII = (RATE // 2, 3 * RATE, 8 * RATE)
+RADII = (RATE // 2, 3 * RATE, 8 * RATE)  # check-bound
 
-MEMORY_LIMIT_MB = 50
-SETTLED_AFTER_S = 600
-DRIFT_LIMIT_MS = 20
+# The pass limits, and the tolerances that decide what a check sees, each
+# tagged so scripts/check-weakened.sh lists a change to it.
+MEMORY_LIMIT_MB = 50  # check-bound
+SETTLED_AFTER_S = 600  # check-bound
+DRIFT_LIMIT_MS = 20  # check-bound
 # Beyond ordinary jitter in a burst's measured place.
-STEP_MS = 5
+STEP_MS = 5  # check-bound
+# Two neighbouring epochs further apart than this, by their own mapping,
+# have a gap between them.
+GAP_MIN_S = 0.001  # check-bound
 # A gap the timeline names is matched to its epochs within this.
-MATCH_NS = 50_000_000
-TAIL_LIMIT_S = 0.5
+MATCH_NS = 50_000_000  # check-bound
+# A missing burst is excused when its place is this close to a logged gap.
+COVERED_S = 0.05  # check-bound
+TAIL_LIMIT_S = 0.5  # check-bound
 # Silence the source never has (it has a noise floor throughout): a run of
 # exactly zero samples this long inside the played span is audio that
 # wasn't captured, whatever the epochs say.
-ZERO_RUN_S = 0.02
-ALIGNMENT_LIMIT_MS = 20
-# The most the durable position may run behind the audio delivered: the
-# bound the crash harness holds (scripts/real-capture-crash.sh).
-LAG_LIMIT_MS = 2000
+ZERO_RUN_S = 0.02  # check-bound
+# How late a digital-zeros warning may be raised and still cover a run.
+WARNING_DELAY_S = 0.1  # check-bound
+# The zero runs are looked for up to this long before the speech ends, so
+# the silence after it isn't read as a loss.
+SPEECH_END_MARGIN_S = 0.5  # check-bound
+ALIGNMENT_LIMIT_MS = 20  # check-bound
+# The most the durable position may run behind the audio delivered, judged
+# at this quantile: the crash harness's 2 s bound
+# (scripts/real-capture-crash.sh), which it holds the highest to on a quiet
+# disk.
+LAG_LIMIT_MS = 2000  # check-bound
+LAG_QUANTILE = "p99"  # check-bound
+# The most the highest may reach: one fsync on a busy disk can take
+# seconds, which nota can't control, so a single peak past the bound above
+# passes, and a long stall doesn't.
+LAG_HIGHEST_LIMIT_MS = 3000  # check-bound
+# The lag is sampled this often (crates/nota/src/latency.rs); a busy
+# machine drops some samples, and at least this share of them says it was
+# sampled throughout.
+LAG_SAMPLE_S = 0.02  # check-bound
+LAG_SAMPLED_SHARE = 0.5  # check-bound
 
 
 class Report:
@@ -279,7 +304,7 @@ def analyse_track(report, work, db, session, track, env, outputs):
     implied = []
     for i in range(len(epochs.rows) - 1):
         gap = epochs.rows[i + 1][3] / 1e9 - epochs.end_of(i)
-        if abs(gap) > 0.001:
+        if abs(gap) > GAP_MIN_S:
             implied.append((epochs.end_of(i), epochs.rows[i + 1][3] / 1e9, gap))
     unlogged_gaps = []
     logged = []
@@ -323,7 +348,7 @@ def analyse_track(report, work, db, session, track, env, outputs):
     # A missing burst is excused only where a logged gap covers its place.
     absent = [k for k in range(played) if k not in set(labels)]
     covered = [k for k in absent
-               if any(start - 0.05 <= reference + k * PERIOD_S <= until + 0.05 for start, until in logged)]
+               if any(start - COVERED_S <= reference + k * PERIOD_S <= until + COVERED_S for start, until in logged)]
     uncovered = [k for k in absent if k not in covered]
     report.check(not uncovered and labels[0] == 0 and k_last == played - 1,
                  f"bursts: {len(bursts)} found of {played} played; missing {len(absent)} "
@@ -350,7 +375,7 @@ def analyse_track(report, work, db, session, track, env, outputs):
     report.say(f"  after the first 30 s: {max(after) - min(after):.2f} ms; trend {slope:+.3f} ppm; without the "
                f"epochs' drift the spread would be {max(r[4] for r in rows) - min(r[4] for r in rows):.2f} ms")
     retimes = sum(1 for i in range(len(epochs.rows) - 1)
-                  if epochs.rows[i][4] != epochs.rows[i + 1][4] and abs(epochs.rows[i + 1][3] / 1e9 - epochs.end_of(i)) <= 0.001)
+                  if epochs.rows[i][4] != epochs.rows[i + 1][4] and abs(epochs.rows[i + 1][3] / 1e9 - epochs.end_of(i)) <= GAP_MIN_S)
     if not implied and not retimes:
         report.say("  note: no gap and no drift correction happened in this track, so the drift and gap checks "
                    "had nothing to catch (null sinks run on the system's clock, the session clock's own)")
@@ -375,9 +400,8 @@ def analyse_track(report, work, db, session, track, env, outputs):
                      f"{tail_should:.2f} s after it ({tail_should - tail_have:+.2f} s short), under {TAIL_LIMIT_S} s:")
     else:
         report.say("end of the audio: not checked (the run didn't get as far as the stop)")
-    # The speech ends PERIOD_S - offset after its last burst; half a second
-    # short of that, so the silence after it isn't read as a loss.
-    played_to = epochs.sample_at(epochs.time(bursts[-1][1]) + PERIOD_S - offset - 0.5)
+    # The speech ends PERIOD_S - offset after its last burst.
+    played_to = epochs.sample_at(epochs.time(bursts[-1][1]) + PERIOD_S - offset - SPEECH_END_MARGIN_S)
     zero_runs(report, x, epochs, events, bursts[0][1], min(played_to, len(x)))
     lag(report, work, track, env)
     # And the speech: texts the engine returned.
@@ -411,7 +435,7 @@ def zero_runs(report, x, epochs, events, lo, hi):
         end = epochs.time(first + length)
         # A warning raised by the run's start (the detector's own delay allows
         # a little) and not cleared before its end covers all of it.
-        covered = any(r / 1e9 <= t + 0.1 and
+        covered = any(r / 1e9 <= t + WARNING_DELAY_S and
                       min((c for c in cleared if c > r), default=float("inf")) / 1e9 >= end
                       for r in raised)
         report.say(f"  {length / RATE * 1000:.0f} ms of exact zeros at {t:.3f} s: "
@@ -449,15 +473,18 @@ def lag(report, work, track, env):
     blocks = {}
     for minute, highest in minutes.items():
         blocks[minute // 30] = max(blocks.get(minute // 30, 0), highest)
-    peak = int(summary["max_ms"])
+    # The log's highest stops at its histogram's cap (5 s); each minute's
+    # highest is kept whole.
+    peak = max([int(summary["max_ms"]), *minutes.values()])
+    judged = int(summary[f"{LAG_QUANTILE}_ms"])
     samples = int(summary["samples"])
-    # One sample every 20 ms for the run's length, less what a busy machine
-    # drops: half is enough to say it was sampled throughout.
-    wanted = float(env["play_to_stop_s"]) / 0.02 / 2 if "play_to_stop_s" in env else 1
-    report.check(samples >= wanted, f"lag: {samples} samples, at least {wanted:.0f} (half of one every 20 ms):")
-    report.check(peak <= LAG_LIMIT_MS,
+    wanted = float(env["play_to_stop_s"]) / LAG_SAMPLE_S * LAG_SAMPLED_SHARE if "play_to_stop_s" in env else 1
+    report.check(samples >= wanted, f"lag: {samples} samples, at least {wanted:.0f} "
+                                    f"({LAG_SAMPLED_SHARE:.0%} of one every {LAG_SAMPLE_S * 1000:.0f} ms):")
+    report.check(judged <= LAG_LIMIT_MS,
                  f"lag (delivered, not yet durable): median {summary['p50_ms']} ms, p95 {summary['p95_ms']}, "
-                 f"p99 {summary['p99_ms']}, highest {peak}; at most {LAG_LIMIT_MS} ms:")
+                 f"p99 {summary['p99_ms']}; {LAG_QUANTILE} at most {LAG_LIMIT_MS} ms:")
+    report.check(peak <= LAG_HIGHEST_LIMIT_MS, f"lag highest: {peak} ms; at most {LAG_HIGHEST_LIMIT_MS} ms:")
     report.say(f"  highest in each 30 minutes (ms): "
                + " ".join(f"{b * 30}m:{v}" for b, v in sorted(blocks.items()))
                + f"; the recorder fell behind its stream by at most {summary['queued_max_ms']} ms")

@@ -37,6 +37,8 @@ jobs:
       - run: scripts/check-files.test.sh
       - run: scripts/check-clippy-bans.test.sh
       - run: scripts/check-test-targets.test.sh
+      # The soak analyser's lag check; the soak itself is run by hand.
+      - run: scripts/soak-analyse.test.sh
       # The crash runner's prerequisites, fault accounting and clean-up,
       # against stand-ins for LazyFS and the recorder; the real sweep is run
       # by hand (see the script).

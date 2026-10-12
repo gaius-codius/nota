@@ -5,9 +5,10 @@
 # is reported, as are two files swapping values, and one moved unchanged
 # isn't; a lowered coverage floor and a crash script's `#`-tagged bound are
 # reported, and a tag quoted or mentioned in a shell comment isn't one; a
-# base with no merge base is an error; and a call with no base prints its
-# usage. Also checks that the crash harnesses' bounds in this repo carry the
-# tag, and that every crash or seed sweep in the crash test files (each
+# Python script's raised bound is reported the same way; a base with no
+# merge base is an error; and a call with no base prints its usage. Also
+# checks that the crash harnesses' and the soak's bounds in this repo carry
+# the tag, and that every crash or seed sweep in the crash test files (each
 # file with tests that uses the fake filesystem) reports into the sweep
 # helper, whose floor proves it wasn't vacuous.
 #
@@ -144,6 +145,23 @@ git commit -qam shell-prose
 out=$("$script" main shell-prose 2>&1) || true
 [[ $out == "check-weakened: nothing found" ]] ||
   fail "took a comment's mention of the tag for a bound: $out"
+# A Python script's bound, tagged as in a shell script.
+git checkout -q main
+printf 'DRIFT_LIMIT_MS = 20  # check-bound\nNAME = "x # check-bound"\nSTEP_MS = 5  # check-bound\n' >bound.py
+git add bound.py
+git commit -qm python
+git checkout -q -b python
+printf 'DRIFT_LIMIT_MS = 40  # check-bound\nNAME = "y # check-bound"\n# STEP_MS carries # check-bound\nSTEP_MS = 5  # check-bound\n' >bound.py
+git commit -qam python
+out=$("$script" main python 2>&1) || true
+grep -qx '  - bound set: bound.py: DRIFT_LIMIT_MS = 40  # check-bound' <<<"$out" ||
+  fail "missed a Python bound's new value: $out"
+grep -qx '  - bound was: bound.py: DRIFT_LIMIT_MS = 20  # check-bound' <<<"$out" ||
+  fail "missed a Python bound's old value: $out"
+grep -qE 'NAME|carries' <<<"$out" && fail "took a quoted or mentioned tag for a Python bound: $out"
+if PR_BODY=nothing "$script" main python >/dev/null 2>&1; then
+  fail "passed an unexplained loosened Python bound"
+fi
 
 # Unrelated histories have no merge base: an error, never "nothing found".
 git checkout -q --orphan unrelated
@@ -521,6 +539,18 @@ found=$(cd "$repo/crates" && bypassing "${swept[@]}")
 tagged "the sweeps' floors" "$(grep -rhE --include='*.rs' \
   '\.(interrupted_more_than|interrupted_at_least|saw_more_than|saw_each)\(' \
   --exclude=sweep.rs "$repo/crates" || true)"
+
+# Every constant the soak analyser sets carries the tag, so a pass limit or
+# tolerance added later without it is found here, not only when it changes.
+# The exceptions are what the played signal is (its rate, the bursts'
+# period and carrier) and the detector's window; one added here is listed as
+# a change to this test.
+constants=$(grep -E '^[A-Z][A-Z_0-9]* = ' "$scripts/soak-analyse.py" |
+  grep -vE '^(RATE|PERIOD_S|WINDOW|CARRIER) = ' || true)
+(( $(grep -c . <<<"$constants") >= 18 )) || fail "expected at least 18 of the soak's bounds: $constants"
+while IFS= read -r line; do
+  grep -qE '[[:space:]]#[[:space:]]*check-bound[[:space:]]*$' <<<"$line" || fail "bound without its tag: $line"
+done <<<"$constants"
 
 floors=$(grep -E '^min_[a-z_]+=' "$scripts/real-capture-crash.sh" || true)
 [[ $(grep -c . <<<"$floors") -eq 2 ]] || fail "expected the script's 2 baseline floors: $floors"
