@@ -527,7 +527,7 @@ fn a_track_joining_a_resumed_session_carries_on_after_its_audio() {
 /// its own: 300, 200 and 100 samples.
 struct Opening {
     clock: Arc<FakeClock>,
-    gate: std::sync::Mutex<mpsc::Receiver<()>>,
+    gate: Mutex<mpsc::Receiver<()>>,
 }
 
 impl CaptureBackend for Opening {
@@ -603,7 +603,7 @@ fn the_first_track_records_while_the_second_stream_is_still_opening() {
     let (open, gate) = mpsc::channel();
     let backend = Opening {
         clock: Arc::clone(&clock),
-        gate: std::sync::Mutex::new(gate),
+        gate: Mutex::new(gate),
     };
     let (starter, seen, recorder, progress) = record_joining(
         &fs,
@@ -663,7 +663,7 @@ fn the_first_epoch_opens_at_the_first_buffer() {
     let (_open, gate) = mpsc::channel();
     let backend = Opening {
         clock: Arc::clone(&clock),
-        gate: std::sync::Mutex::new(gate),
+        gate: Mutex::new(gate),
     };
     let (starter, seen, recorder, _) =
         record_joining(&fs, &clock, &[(MIC, Source::Device("late".into()))]);

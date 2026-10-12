@@ -24,9 +24,12 @@
 //! callback's time less the buffer's length when the driver hasn't started.
 //! Each buffer is sent with its stamp and that delay, the cycle's time
 //! less the stamp ([`CaptureSender::audio_captured`]), so the recorder
-//! times losses and drift by them. The delay steps when the graph's
-//! quantum changes, and cpal holds the stamp back rather than let it go
-//! back; the cycle's time steps only when the graph does.
+//! times losses and drift by them. A stream's first buffers carry no
+//! delay, as `PipeWire` hasn't measured one yet, so their stamps are when
+//! their audio ended: they're held back until a buffer's delay settles,
+//! and dated back from it ([`CaptureSender::audio_delivered`]), so a track's first epoch starts
+//! when its audio did. The delay steps when the graph's quantum changes;
+//! the cycle's time steps only when the graph does.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,7 +43,9 @@ use thread_priority::{
     set_thread_priority_and_policy, thread_native_id,
 };
 
-use super::{CaptureBackend, CaptureError, CaptureNotice, CaptureSender, Devices, Source};
+use super::{
+    CaptureBackend, CaptureError, CaptureNotice, CaptureSender, Delivery, Devices, Source,
+};
 
 mod watch;
 
@@ -109,11 +114,24 @@ impl Promotion {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PipeWireBackend;
 
-/// A running `PipeWire` stream. Capture stops when it's dropped, and then
-/// the watch on its device.
+/// A running `PipeWire` stream. Capture stops when it's dropped, then the
+/// buffers its sender held back are sent, and then the watch on its device
+/// stops: fields drop in order, and cpal's stream joins its thread as it
+/// goes, so no buffer comes after those held.
 pub struct PipeWireStream {
     _stream: cpal::Stream,
+    _held: Held,
     _watch: watch::Watch,
+}
+
+/// Sends the buffers a stream's sender holds back as it's dropped
+/// ([`CaptureSender::release_held`]).
+struct Held(CaptureSender);
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.0.release_held();
+    }
 }
 
 impl std::fmt::Debug for PipeWireStream {
@@ -155,12 +173,14 @@ impl CaptureBackend for PipeWireBackend {
         let errors = events.clone();
         let watched = events.clone();
         let failed_source = source.clone();
+        let held = Held(events.clone());
         let mut promotion = Promotion::new();
         let promoted = Arc::clone(&promotion.promoted);
         let stream = device
             .build_input_stream::<i16, _, _>(
                 config,
-                // Only a copy into the channel, in a buffer it already has:
+                // Only a copy into the channel, in a buffer it already has,
+                // or for a stream's first buffers into room made for them:
                 // no I/O, no waiting on the recorder, and in the steady
                 // state no allocation. The first buffer also asks for
                 // real-time priority, a few system calls.
@@ -169,13 +189,15 @@ impl CaptureBackend for PipeWireBackend {
                     // cpal stamps the buffer with PipeWire's capture time,
                     // on CLOCK_MONOTONIC.
                     let stamp = info.timestamp();
-                    let delay = stamp.callback.duration_since(stamp.capture);
-                    match u64::try_from(stamp.capture.as_nanos()) {
-                        Ok(nanos) => {
-                            events.audio_captured(samples, Duration::from_nanos(nanos), delay);
-                        }
-                        Err(_) => events.audio(samples),
-                    }
+                    let monotonic = |instant: cpal::StreamInstant| {
+                        u64::try_from(instant.as_nanos())
+                            .ok()
+                            .map(Duration::from_nanos)
+                    };
+                    let delivery = monotonic(stamp.callback)
+                        .zip(monotonic(stamp.capture))
+                        .map(|(cycle, capture)| Delivery { cycle, capture });
+                    events.audio_delivered(samples, delivery);
                 },
                 move |error: cpal::Error| match stream_error(
                     &failed_source,
@@ -192,6 +214,7 @@ impl CaptureBackend for PipeWireBackend {
         stream.play().map_err(|e| start_error(source, &e))?;
         Ok(PipeWireStream {
             _stream: stream,
+            _held: held,
             _watch: watch::watch(followed(source), watched),
         })
     }
@@ -264,6 +287,34 @@ mod tests {
 
     fn error(kind: ErrorKind) -> cpal::Error {
         cpal::Error::with_message(kind, "detail")
+    }
+
+    /// A stream's held buffers are sent, once, as it's dropped.
+    #[test]
+    fn what_a_stream_holds_is_sent_as_it_ends() {
+        use nota_core::{FakeClock, SessionTime, TrackId};
+
+        use super::super::queue::Received;
+        use super::super::{CaptureEvent, test_sender};
+
+        let clock = Arc::new(FakeClock::new(SessionTime::ZERO));
+        let (events, rx) = test_sender(TrackId::new(0), clock);
+        // No delay yet: held.
+        let ms = Duration::from_millis(100);
+        let delivery = Delivery {
+            cycle: ms,
+            capture: ms,
+        };
+        events.audio_delivered(&[1, 2], Some(delivery));
+        let next = || rx.next(Duration::from_millis(1));
+        assert!(matches!(next(), Received::Idle), "held");
+        drop(Held(events.clone()));
+        assert!(matches!(
+            next(),
+            Received::Event(_, CaptureEvent::TimedAudio { samples, .. }) if samples == [1, 2]
+        ));
+        events.release_held();
+        assert!(matches!(next(), Received::Idle), "sent once");
     }
 
     /// A server that answers lists its devices, and one that can't be
