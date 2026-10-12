@@ -522,8 +522,8 @@ fn prepare_recording(
     // A pinned system device is a `Source::Device`, held to the
     // microphone's 5 s of zeros unless it's told it's the system audio.
     events.set_thresholds(SYSTEM, Thresholds::SYSTEM_AUDIO);
-    let lag = args.latency_log.as_ref().map(|_| LagSamples::default());
-    if let Some(lag) = &lag {
+    let mut lag = args.latency_log.as_ref().map(|_| LagSamples::default());
+    if let Some(lag) = &mut lag {
         lag.start(&events, Arc::clone(clock))?;
     }
     Ok((starter, events, lag))

@@ -12,6 +12,7 @@ use super::live::{LiveEnd, LiveInput};
 use super::start::{RecordFs, Recorded, Started};
 use super::summary::{Outcome, Shown, note_published, note_saved, unfinished};
 use crate::inhibit::Slept;
+use crate::latency::LagSamples;
 
 /// Stops what `started` started, in order, and finishes the session.
 /// The session is saved by now, so whatever goes wrong while stopping (the
@@ -43,7 +44,7 @@ pub(super) fn stop<B: CaptureBackend>(started: Started<B>, shown: Shown) -> (Out
     // Stop, in order.
     drop(captures);
     // The streams have ended: what's still being made durable is the stop's, not the recording's.
-    let lag_lines = lag.map(|lag| lag.finish()).unwrap_or_default();
+    let lag_lines = lag.map(LagSamples::finish).unwrap_or_default();
     let writer = recorded(recorder.join(), &mut outcome);
     // The recording has ended: the machine may sleep while the last
     // segments are published.

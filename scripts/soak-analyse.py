@@ -168,6 +168,13 @@ class Epochs:
         factor = 1 + drift_ppb / 1e9 if corrected else 1
         return anchor_ns / 1e9 + (sample - first) / (rate * factor)
 
+    def sample_at(self, seconds):
+        """The sample that plays at session time `seconds`, by the last epoch
+        that has begun by then (the first epoch's start if none had)."""
+        begun = [r for r in self.rows if r[3] / 1e9 <= seconds] or self.rows[:1]
+        first, _, rate, anchor_ns, drift_ppb = begun[-1]
+        return first + round((seconds - anchor_ns / 1e9) * rate * (1 + drift_ppb / 1e9))
+
     def end_of(self, i):
         """When epoch `i`'s audio ends by its own mapping, which is where
         the next one's first sample would play without a gap."""
@@ -370,9 +377,9 @@ def analyse_track(report, work, db, session, track, env, outputs):
         report.say("end of the audio: not checked (the run didn't get as far as the stop)")
     # The speech ends PERIOD_S - offset after its last burst; half a second
     # short of that, so the silence after it isn't read as a loss.
-    zero_runs(report, x, epochs, events, bursts[0][1],
-              bursts[-1][1] + round((PERIOD_S - offset - 0.5) * RATE))
-    lag(report, work, track)
+    played_to = epochs.sample_at(epochs.time(bursts[-1][1]) + PERIOD_S - offset - 0.5)
+    zero_runs(report, x, epochs, events, bursts[0][1], min(played_to, len(x)))
+    lag(report, work, track, env.get("latency_log") == "1")
     # And the speech: texts the engine returned.
     count, first_at, last_at = db.execute(
         "SELECT count(*), min(start_ns), max(end_ns) FROM utterance WHERE session_id = ? AND track = ?",
@@ -401,8 +408,11 @@ def zero_runs(report, x, epochs, events, lo, hi):
     unlogged = []
     for first, length in runs:
         t = epochs.time(first)
-        covered = any(r / 1e9 <= t + 0.1 and (not [c for c in cleared if c > r] or
-                                              min(c for c in cleared if c > r) / 1e9 >= t)
+        end = epochs.time(first + length)
+        # A warning raised by the run's start (the detector's own delay allows
+        # a little) and not cleared before its end covers all of it.
+        covered = any(r / 1e9 <= t + 0.1 and
+                      min((c for c in cleared if c > r), default=float("inf")) / 1e9 >= end
                       for r in raised)
         report.say(f"  {length / RATE * 1000:.0f} ms of exact zeros at {t:.3f} s: "
                    f"{'a digital-zeros warning covers it' if covered else 'NOT on the timeline'}")
@@ -412,13 +422,16 @@ def zero_runs(report, x, epochs, events, lo, hi):
                                f"played span: {len(runs)}, unlogged {len(unlogged)}; none unlogged:")
 
 
-def lag(report, work, track):
+def lag(report, work, track, required):
     """How far the track's durable position ran behind the audio delivered,
     from the lag lines the latency log ends with (crates/nota/src/latency.rs):
     sampled every 20 ms, so a lag that lasted less is missed."""
     path = os.path.join(work, "latency.tsv")
     if not os.path.isfile(path):
-        report.say("lag: not measured (no latency log)")
+        if required:
+            report.check(False, "lag: the run asked for a latency log and there is none:")
+        else:
+            report.say("lag: not measured (this run didn't ask for a latency log)")
         return
     summary, minutes = None, {}
     with open(path) as f:

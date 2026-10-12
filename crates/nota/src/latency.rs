@@ -289,73 +289,80 @@ fn millis(count: SampleCount, rate: SampleRate) -> usize {
 
 /// How far each track's durable position ran behind the audio delivered
 /// while recording, as a thread samples it ([`Self::start`]) and
-/// [`Self::finish`] reports.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct LagSamples(Arc<Mutex<Lag>>);
-
+/// [`Self::finish`] reports. Dropping it stops the thread.
 #[derive(Debug, Default)]
-struct Lag {
-    tracks: Vec<(TrackId, TrackLag)>,
-    /// Dropping it stops the sampling thread.
+pub(crate) struct LagSamples {
+    /// What the samples found, shared with the thread.
+    tracks: Arc<Mutex<Vec<(TrackId, TrackLag)>>>,
+    /// Dropping it ends the sampling thread, which waits on its other end.
     stop: Option<Sender<()>>,
 }
 
 impl LagSamples {
     /// Starts sampling each of `events`' tracks every [`LAG_TICK`], on a
-    /// thread that runs until [`Self::finish`].
+    /// thread that runs until this is finished or dropped.
     ///
     /// # Errors
     ///
     /// If the thread can't start.
-    pub(crate) fn start(&self, events: &CaptureReceiver, clock: Arc<dyn Clock>) -> io::Result<()> {
-        let tracks: Vec<(TrackId, Progress)> = events
+    pub(crate) fn start(
+        &mut self,
+        events: &CaptureReceiver,
+        clock: Arc<dyn Clock>,
+    ) -> io::Result<()> {
+        let progress: Vec<(TrackId, Progress)> = events
             .tracks()
             .into_iter()
             .filter_map(|track| events.progress(track).map(|progress| (track, progress)))
             .collect();
         let (stop, stopped) = mpsc::channel::<()>();
-        if let Ok(mut lag) = self.0.lock() {
-            lag.stop = Some(stop);
-        }
-        let samples = self.clone();
+        let tracks = Arc::clone(&self.tracks);
         thread::Builder::new()
             .name("nota-lag".into())
             .spawn(move || {
                 // The wait is the tick, and ends for good when the sender is dropped.
                 while let Err(RecvTimeoutError::Timeout) = stopped.recv_timeout(LAG_TICK) {
                     let at = clock.now();
-                    for (track, progress) in &tracks {
-                        samples.note(*track, progress.now(), at);
+                    for (track, progress) in &progress {
+                        note(&tracks, *track, progress.now(), at);
                     }
                 }
             })?;
+        self.stop = Some(stop);
         Ok(())
-    }
-
-    /// Notes `track`'s `positions` at `at`.
-    fn note(&self, track: TrackId, positions: Positions, at: SessionTime) {
-        let Ok(mut lag) = self.0.lock() else { return };
-        if !lag.tracks.iter().any(|(t, _)| *t == track) {
-            lag.tracks.push((track, TrackLag::default()));
-        }
-        if let Some((_, found)) = lag.tracks.iter_mut().find(|(t, _)| *t == track) {
-            found.note(positions, at);
-        }
     }
 
     /// Stops the sampling, and gives the log's `lag` and `lagmin` lines for
     /// each track that had audio, in track order.
-    pub(crate) fn finish(&self) -> String {
-        let Ok(mut lag) = self.0.lock() else {
+    pub(crate) fn finish(self) -> String {
+        drop(self.stop);
+        let Ok(found) = self.tracks.lock() else {
             return String::new();
         };
-        lag.stop = None;
-        let mut tracks: Vec<_> = lag.tracks.iter().collect();
+        let mut tracks: Vec<_> = found.iter().collect();
         tracks.sort_by_key(|(track, _)| *track);
         tracks
             .iter()
             .map(|(track, found)| found.lines(*track))
             .collect()
+    }
+}
+
+/// Notes `track`'s `positions` at `at` among `tracks`.
+fn note(
+    tracks: &Mutex<Vec<(TrackId, TrackLag)>>,
+    track: TrackId,
+    positions: Positions,
+    at: SessionTime,
+) {
+    let Ok(mut tracks) = tracks.lock() else {
+        return;
+    };
+    if !tracks.iter().any(|(t, _)| *t == track) {
+        tracks.push((track, TrackLag::default()));
+    }
+    if let Some((_, found)) = tracks.iter_mut().find(|(t, _)| *t == track) {
+        found.note(positions, at);
     }
 }
 
@@ -600,19 +607,22 @@ mod tests {
     }
 
     #[test]
-    fn finished_lag_lists_the_tracks_in_order_and_stops_the_samples() {
+    fn finished_lag_lists_the_tracks_in_order() {
         let lag = LagSamples::default();
-        lag.note(
+        note(
+            &lag.tracks,
             TrackId::new(1),
             positions(16_000, 16_000, 15_200),
             minutes(0),
         );
-        lag.note(
+        note(
+            &lag.tracks,
             TrackId::new(0),
             positions(16_000, 16_000, 16_000),
             minutes(0),
         );
-        lag.note(
+        note(
+            &lag.tracks,
             TrackId::new(1),
             positions(32_000, 32_000, 31_200),
             minutes(0),
