@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Tests soak-analyse.py's lag check against latency logs written here: a
-# run whose p99 is within 2 s passes it, and its highest is named (as over
-# the bound, not judged, when it is), from a minute's highest when that
-# passes the log's 5 s cap; a p99 past 2 s fails, one at 2 s doesn't; and a
-# log sampled less than half the run fails.
+# Tests soak-analyse.py's lag checks against latency logs written here: a
+# p99 past 2 s fails, one at 2 s doesn't; a highest past 3 s fails, one at
+# 3 s doesn't, so a single peak like the 3-hour soak's 2.39 s passes; the
+# highest is taken from a minute's when that passes the log's 5 s cap; and
+# a log sampled less than half the run fails.
 #
 # Requires: bash, python3.
 set -euo pipefail
@@ -56,17 +56,23 @@ lines, failed = run(856, 2392)
 expect(f"a p99 within the bound with a higher peak failed: {lines}", not failed)
 expect(f"the lag check didn't pass on its p99: {lines}",
        any(line.startswith("lag (delivered") and "p99 856" in line and line.endswith(" pass") for line in lines))
-expect(f"the highest wasn't named as over the bound: {lines}",
-       "  highest 2392 ms, over 2000 ms: reported, not judged" in lines)
+expect(f"the highest wasn't checked against 3 s: {lines}",
+       "lag highest: 2392 ms; at most 3000 ms: pass" in lines)
 
-# The log's highest stops at 5 s; the minute's keeps the whole 8 s.
+lines, failed = run(856, 3000)
+expect(f"a highest at 3 s failed: {lines}", not failed and "lag highest: 3000 ms; at most 3000 ms: pass" in lines)
+lines, failed = run(856, 3001)
+expect(f"a highest past 3 s passed: {lines}", failed and "lag highest: 3001 ms; at most 3000 ms: FAIL" in lines)
+
+# The log's highest stops at 5 s; the minute's keeps the whole 8 s, a stall.
 lines, failed = run(856, 5000, minute_peak=8000)
-expect(f"a peak past the log's cap wasn't named whole: {lines}", not failed
-       and "  highest 8000 ms, over 2000 ms: reported, not judged" in lines)
+expect(f"a stall past the log's cap passed, or wasn't named whole: {lines}", failed
+       and "lag highest: 8000 ms; at most 3000 ms: FAIL" in lines)
 
 # A log whose minutes went unsampled still names its highest.
 lines, failed = run(856, 900, minutes=False)
-expect(f"a log with no minute sampled lost its highest: {lines}", not failed and "  highest 900 ms" in lines)
+expect(f"a log with no minute sampled lost its highest: {lines}", not failed
+       and "lag highest: 900 ms; at most 3000 ms: pass" in lines)
 
 lines, failed = run(2001, 2392)
 expect(f"a p99 past the bound passed: {lines}", failed)
@@ -75,7 +81,7 @@ expect(f"a p99 past the bound wasn't the check that failed: {lines}",
 
 lines, failed = run(2000, 2000)
 expect(f"a p99 at the bound failed: {lines}", not failed)
-expect(f"a highest at the bound was called over it: {lines}", "  highest 2000 ms" in lines)
+expect(f"a highest of 2 s wasn't named: {lines}", "lag highest: 2000 ms; at most 3000 ms: pass" in lines)
 
 # 100 s sampled every 20 ms is 5,000 samples; at least half are wanted.
 lines, failed = run(500, 500, samples=2499)

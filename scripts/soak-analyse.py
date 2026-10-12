@@ -67,10 +67,13 @@ ALIGNMENT_LIMIT_MS = 20  # check-bound
 # The most the durable position may run behind the audio delivered, judged
 # at this quantile: the crash harness's 2 s bound
 # (scripts/real-capture-crash.sh), which it holds the highest to on a quiet
-# disk. Here the highest is reported, not judged: one fsync on a busy disk
-# can take seconds, which nota can't control.
+# disk.
 LAG_LIMIT_MS = 2000  # check-bound
 LAG_QUANTILE = "p99"  # check-bound
+# The most the highest may reach: one fsync on a busy disk can take
+# seconds, which nota can't control, so a single peak past the bound above
+# passes, and a long stall doesn't.
+LAG_HIGHEST_LIMIT_MS = 3000  # check-bound
 # The lag is sampled this often (crates/nota/src/latency.rs); a busy
 # machine drops some samples, and at least this share of them says it was
 # sampled throughout.
@@ -481,8 +484,7 @@ def lag(report, work, track, env):
     report.check(judged <= LAG_LIMIT_MS,
                  f"lag (delivered, not yet durable): median {summary['p50_ms']} ms, p95 {summary['p95_ms']}, "
                  f"p99 {summary['p99_ms']}; {LAG_QUANTILE} at most {LAG_LIMIT_MS} ms:")
-    report.say(f"  highest {peak} ms"
-               + (f", over {LAG_LIMIT_MS} ms: reported, not judged" if peak > LAG_LIMIT_MS else ""))
+    report.check(peak <= LAG_HIGHEST_LIMIT_MS, f"lag highest: {peak} ms; at most {LAG_HIGHEST_LIMIT_MS} ms:")
     report.say(f"  highest in each 30 minutes (ms): "
                + " ".join(f"{b * 30}m:{v}" for b, v in sorted(blocks.items()))
                + f"; the recorder fell behind its stream by at most {summary['queued_max_ms']} ms")
