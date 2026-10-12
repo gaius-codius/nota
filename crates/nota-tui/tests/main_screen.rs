@@ -593,6 +593,28 @@ fn main_stopped_with_journals_kept() {
     insta::assert_snapshot!(terminal.backend());
 }
 
+/// The stopped notice wraps at the width the margin leaves: at 62 columns
+/// that is 56, so a 57-character sentence breaks before its last word.
+#[test]
+fn the_stopped_notice_wraps_at_the_width_the_margin_leaves() {
+    let mut screen = two_track_screen();
+    raise(&mut screen, Cause::DiskFull, None, 4_368);
+    // "Saved up to 01:12:48 · 1 journal kept for the next start." is 57.
+    screen.set_unfinished(Unfinished {
+        phrases: vec!["1 journal kept for the next start".to_owned()],
+        next_start_publishes: true,
+    });
+    let drawn = format!("{}", draw(&mut screen, 62, 20).backend());
+    assert!(
+        drawn.contains("│   Saved up to 01:12:48 · 1 journal kept for the next       │"),
+        "{drawn}"
+    );
+    assert!(
+        drawn.contains("│   start.                                                   │"),
+        "{drawn}"
+    );
+}
+
 /// Something unfinished that the next start won't publish (a damaged
 /// journal) still sends the listener Home, as an unfinished stop did
 /// before.
