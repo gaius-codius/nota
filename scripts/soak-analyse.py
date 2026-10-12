@@ -32,11 +32,12 @@ PERIOD_S = 10
 WINDOW = 64
 CARRIER = [cmath.exp(-2j * math.pi * 3 * i / 8) for i in range(8)]
 # A burst's 0.3 full-scale tone gives the sliding sum about this size; a
-# burst is any peak above half of it.
-PLATEAU = 0.3 * 32768 * WINDOW / 2
+# burst is any peak above half of it. Tagged, as the bounds below are: a
+# lower one could take noise for a burst the recording lost.
+PLATEAU = 0.3 * 32768 * WINDOW / 2  # check-bound
 # Where to look for the next burst: this far either side of where the last
 # one puts it, widening only when it isn't there.
-RADII = (RATE // 2, 3 * RATE, 8 * RATE)
+RADII = (RATE // 2, 3 * RATE, 8 * RATE)  # check-bound
 
 # The pass limits, and the tolerances that decide what a check sees, each
 # tagged so scripts/check-weakened.sh lists a change to it.
@@ -63,14 +64,17 @@ WARNING_DELAY_S = 0.1  # check-bound
 # the silence after it isn't read as a loss.
 SPEECH_END_MARGIN_S = 0.5  # check-bound
 ALIGNMENT_LIMIT_MS = 20  # check-bound
-# The most the durable position may run behind the audio delivered, at the
-# quantile judged: the bound the crash harness holds
-# (scripts/real-capture-crash.sh). The highest is reported, not judged: one
-# fsync on a busy disk can take seconds, which nota can't control.
+# The most the durable position may run behind the audio delivered, judged
+# at this quantile: the crash harness's 2 s bound
+# (scripts/real-capture-crash.sh), which it holds the highest to on a quiet
+# disk. Here the highest is reported, not judged: one fsync on a busy disk
+# can take seconds, which nota can't control.
 LAG_LIMIT_MS = 2000  # check-bound
 LAG_QUANTILE = "p99"  # check-bound
-# The lag is sampled every 20 ms; a busy machine drops some samples, and at
-# least this share of them says it was sampled throughout.
+# The lag is sampled this often (crates/nota/src/latency.rs); a busy
+# machine drops some samples, and at least this share of them says it was
+# sampled throughout.
+LAG_SAMPLE_S = 0.02  # check-bound
 LAG_SAMPLED_SHARE = 0.5  # check-bound
 
 
@@ -466,12 +470,14 @@ def lag(report, work, track, env):
     blocks = {}
     for minute, highest in minutes.items():
         blocks[minute // 30] = max(blocks.get(minute // 30, 0), highest)
-    peak = int(summary["max_ms"])
+    # The log's highest stops at its histogram's cap (5 s); each minute's
+    # highest is kept whole.
+    peak = max([int(summary["max_ms"]), *minutes.values()])
     judged = int(summary[f"{LAG_QUANTILE}_ms"])
     samples = int(summary["samples"])
-    wanted = float(env["play_to_stop_s"]) / 0.02 * LAG_SAMPLED_SHARE if "play_to_stop_s" in env else 1
+    wanted = float(env["play_to_stop_s"]) / LAG_SAMPLE_S * LAG_SAMPLED_SHARE if "play_to_stop_s" in env else 1
     report.check(samples >= wanted, f"lag: {samples} samples, at least {wanted:.0f} "
-                                    f"({LAG_SAMPLED_SHARE:.0%} of one every 20 ms):")
+                                    f"({LAG_SAMPLED_SHARE:.0%} of one every {LAG_SAMPLE_S * 1000:.0f} ms):")
     report.check(judged <= LAG_LIMIT_MS,
                  f"lag (delivered, not yet durable): median {summary['p50_ms']} ms, p95 {summary['p95_ms']}, "
                  f"p99 {summary['p99_ms']}; {LAG_QUANTILE} at most {LAG_LIMIT_MS} ms:")

@@ -52,8 +52,9 @@
 #   - the two tracks' offset varies by less than 20 ms over the run (its
 #     constant part is reported, not judged);
 #   - the durable position's lag behind the audio delivered has a p99 of
-#     at most 2 s (the bound the crash harness holds); its highest is
-#     reported, not judged, since one fsync on a busy disk can take seconds;
+#     at most 2 s (the crash harness's bound, judged here at the p99); its
+#     highest is reported, not judged, since one fsync on a busy disk can
+#     take seconds;
 #   - nota exits 0 after the SIGHUP (everything published) and the default
 #     sink is unchanged.
 #

@@ -540,16 +540,17 @@ tagged "the sweeps' floors" "$(grep -rhE --include='*.rs' \
   '\.(interrupted_more_than|interrupted_at_least|saw_more_than|saw_each)\(' \
   --exclude=sweep.rs "$repo/crates" || true)"
 
-# The soak's pass limits and the tolerances that decide what its checks
-# see, each named, so one left untagged is found here, not only when it
-# changes.
-for name in MEMORY_LIMIT_MB SETTLED_AFTER_S DRIFT_LIMIT_MS STEP_MS GAP_MIN_S MATCH_NS COVERED_S \
-  TAIL_LIMIT_S ZERO_RUN_S WARNING_DELAY_S SPEECH_END_MARGIN_S ALIGNMENT_LIMIT_MS LAG_LIMIT_MS \
-  LAG_QUANTILE LAG_SAMPLED_SHARE; do
-  line=$(grep -E "^$name = " "$scripts/soak-analyse.py" || true)
-  [[ $(grep -c . <<<"$line") -eq 1 ]] || fail "expected one line setting $name in soak-analyse.py: $line"
+# Every constant the soak analyser sets carries the tag, so a pass limit or
+# tolerance added later without it is found here, not only when it changes.
+# The exceptions are what the played signal is (its rate, the bursts'
+# period and carrier) and the detector's window; one added here is listed as
+# a change to this test.
+constants=$(grep -E '^[A-Z][A-Z_0-9]* = ' "$scripts/soak-analyse.py" |
+  grep -vE '^(RATE|PERIOD_S|WINDOW|CARRIER) = ' || true)
+(( $(grep -c . <<<"$constants") >= 18 )) || fail "expected at least 18 of the soak's bounds: $constants"
+while IFS= read -r line; do
   grep -qE '[[:space:]]#[[:space:]]*check-bound[[:space:]]*$' <<<"$line" || fail "bound without its tag: $line"
-done
+done <<<"$constants"
 
 floors=$(grep -E '^min_[a-z_]+=' "$scripts/real-capture-crash.sh" || true)
 [[ $(grep -c . <<<"$floors") -eq 2 ]] || fail "expected the script's 2 baseline floors: $floors"
