@@ -17,7 +17,6 @@
 #![cfg(target_os = "linux")]
 
 use std::io::{Read, Write};
-use std::os::fd::OwnedFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -118,9 +117,11 @@ struct Running {
     /// Stops the thread reading the terminal, which holds a copy of it.
     reading: Arc<AtomicBool>,
     reader: Option<thread::JoinHandle<()>>,
-    /// The terminal's other end, kept to read its modes after the child
-    /// exits.
-    slave: OwnedFd,
+    /// Set once the reader thread has read to the end of the terminal's
+    /// output, or has been stopped. The test holds no copy of the terminal's
+    /// other end, so every copy closes when nota and anything it started
+    /// are gone, and the master then reads what is left and fails.
+    drained: Arc<AtomicBool>,
     output: Arc<Mutex<Vec<u8>>>,
 }
 
@@ -165,6 +166,8 @@ impl Running {
         grantpt(&master).unwrap();
         unlockpt(&master).unwrap();
         let name = ptsname(&master, Vec::new()).unwrap();
+        // Dropped when this function ends, so nota's copies are the only
+        // ones.
         let slave = rustix::fs::open(
             name.as_c_str(),
             OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC,
@@ -202,6 +205,8 @@ impl Running {
         let sink = Arc::clone(&output);
         let reading = Arc::new(AtomicBool::new(true));
         let still = Arc::clone(&reading);
+        let drained = Arc::new(AtomicBool::new(false));
+        let done = Arc::clone(&drained);
         let reader = thread::spawn(move || {
             let mut buf = [0_u8; 4096];
             while still.load(Ordering::SeqCst) {
@@ -218,13 +223,14 @@ impl Running {
                     Ok(n) => sink.lock().unwrap().extend_from_slice(&buf[..n]),
                 }
             }
+            done.store(true, Ordering::SeqCst);
         });
         Self {
             child,
             master: Some(master),
             reading,
             reader: Some(reader),
-            slave,
+            drained,
             output,
         }
     }
@@ -287,18 +293,30 @@ impl Running {
         self.child.id()
     }
 
+    /// Waits for nota to exit and for what it wrote to be in
+    /// [`Running::output`]: the reader thread can be behind when the
+    /// process is gone, and a test that read the output then saw it short.
     fn exits(&mut self) -> Option<ExitStatus> {
         let mut status = None;
         wait_until(Duration::from_secs(20), || {
             status = self.child.try_wait().unwrap();
             status.is_some()
         });
+        if status.is_some() {
+            // Bounded, for a descendant that outlives nota with the
+            // terminal still open: the output is then as complete as it
+            // was before.
+            wait_until(Duration::from_secs(5), || {
+                self.drained.load(Ordering::SeqCst)
+            });
+        }
         status
     }
 
     /// Whether the terminal is back in its usual (cooked, echoing) mode.
     fn terminal_restored(&self) -> bool {
-        let modes = tcgetattr(&self.slave).unwrap().local_modes;
+        let master = self.master.as_ref().expect("the terminal was hung up");
+        let modes = tcgetattr(master).unwrap().local_modes;
         modes.contains(LocalModes::ICANON | LocalModes::ECHO)
     }
 }
