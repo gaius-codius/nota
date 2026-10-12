@@ -12,14 +12,25 @@
 //! `CaptureSender::audio_delivered`, but first writes down its length,
 //! cycle and capture stamp. The hold, the epoch and the recorder are the
 //! real ones; what this backend leaves out is `PipeWireBackend`'s
-//! real-time priority, its device watch, and the mapping of the stream's
-//! errors, so `write` and the crash runs stay on `PipeWireBackend`.
+//! real-time priority, its device watch, the mapping of the stream's
+//! errors, and the guard that sends the buffers still held when the stream
+//! drops (that call is private to the recorder). So `write` and the crash
+//! runs stay on `PipeWireBackend`, and a run that ends within the hold's
+//! 500 ms of a move or a resume doesn't show the epoch that opens for it.
 //!
 //! The check: the first buffer that settled (its delay at least its length,
 //! within a millisecond, as the hold judges) puts the stream's first sample
 //! at its stamp less the samples before it, and the track's first epoch
 //! must start there, within a sample. A run with the hold off opens it at
-//! the first buffer's cycle less its length instead, a quantum later.
+//! the first buffer's cycle less its length instead, a quantum later. A
+//! buffer that settles only after the hold has given up (500 ms or 64
+//! buffers) is reported as that, not as a hold that failed: the first epoch
+//! was dated by the zero-delay rule, as the recorder does for a stream
+//! whose delay is slow to arrive, and it fails the check all the same.
+//!
+//! Each buffer's stamps are placed on the session clock as the buffer
+//! arrives, as the sender places them: a suspend later must not move
+//! them.
 //!
 //! The mode prints each track's first buffers and then its whole delay
 //! profile, as runs of buffers with the same length and delay, so the
@@ -47,12 +58,22 @@ use super::{Args, RATE, Res, SESSION, ms, wait};
 
 /// How far short of its buffer's length a delay can be and still be
 /// settled: the same judgment as the hold's `SETTLED_WITHIN`.
-const SETTLED_WITHIN: Duration = Duration::from_millis(1);
+const SETTLED_WITHIN: Duration = Duration::from_millis(1); // check-bound
+
+/// How long, and how many buffers, the hold waits for a settled stamp: the
+/// same limits as the hold's `HOLD_LIMIT` and `HOLD_BUFFERS`.
+const HOLD_LIMIT: Duration = Duration::from_millis(500); // check-bound
+const HOLD_BUFFERS: usize = 64; // check-bound
+
+/// The rounding of a buffer's length and of the clock readings to the
+/// nanosecond, allowed on top of a sample in the first epoch's start.
+const ROUNDING_NANOS: u64 = 1_000; // check-bound
 
 /// How far from the first settled buffer's start the first epoch may open:
-/// one sample, and the rounding of the buffer's length and the clock
-/// readings to the nanosecond.
-const EPOCH_WITHIN_NANOS: u64 = 1_000_000_000 / 16_000 + 1_000; // check-bound
+/// one sample, and the rounding.
+fn epoch_within_nanos() -> u64 {
+    1_000_000_000 / u64::from(RATE.hz()) + ROUNDING_NANOS
+}
 
 /// The most buffers noted for each track: about 21 minutes at the
 /// graph's usual quantum.
@@ -69,6 +90,10 @@ struct Raw {
     /// Its cycle's time and its capture stamp, on `CLOCK_MONOTONIC`; `None`
     /// if cpal couldn't stamp it.
     stamp: Option<Delivery>,
+    /// The same stamps on the session clock's elapsed time, placed as the
+    /// buffer arrived; `None` if it wasn't stamped or the clock can't place
+    /// them (they come before it started).
+    placed: Option<Delivery>,
 }
 
 /// One track's buffers, as the stream's callback notes them.
@@ -76,8 +101,10 @@ type Buffers = Arc<Mutex<Vec<Raw>>>;
 
 /// Captures through cpal's `PipeWire` host as `PipeWireBackend` does, and
 /// notes each buffer's length and stamps before it goes to the sender.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct StampBackend {
+    /// The session clock, to place each buffer's stamps as it arrives.
+    clock: Arc<dyn Clock>,
     /// The buffers noted for each stream started, in the order they were
     /// started: the order the tracks were asked for, since the starter
     /// opens them one after another.
@@ -85,6 +112,14 @@ struct StampBackend {
 }
 
 impl StampBackend {
+    /// A backend that places stamps on `clock`.
+    fn new(clock: Arc<dyn Clock>) -> Self {
+        Self {
+            clock,
+            taps: Mutex::default(),
+        }
+    }
+
     /// The buffers noted for each stream, in the order they started.
     fn taps(&self) -> Vec<Buffers> {
         self.taps
@@ -128,21 +163,14 @@ impl CaptureBackend for StampBackend {
             .unwrap_or_else(PoisonError::into_inner)
             .push(Arc::clone(&tap));
         let errors = events.clone();
+        let clock = Arc::clone(&self.clock);
         let backend = |e: cpal::Error| CaptureError::Backend(format!("{source}: {e}"));
         let stream = device
             .build_input_stream::<i16, _, _>(
                 config,
                 move |samples: &[i16], info: &cpal::InputCallbackInfo| {
-                    let stamp = info.timestamp();
-                    let monotonic = |instant: cpal::StreamInstant| {
-                        u64::try_from(instant.as_nanos())
-                            .ok()
-                            .map(Duration::from_nanos)
-                    };
-                    let delivery = monotonic(stamp.callback)
-                        .zip(monotonic(stamp.capture))
-                        .map(|(cycle, capture)| Delivery { cycle, capture });
-                    note(&tap, samples.len(), delivery);
+                    let delivery = delivery_of(info);
+                    note(&tap, &*clock, samples.len(), delivery);
                     events.audio_delivered(samples, delivery);
                 },
                 move |error: cpal::Error| match error.kind() {
@@ -158,14 +186,36 @@ impl CaptureBackend for StampBackend {
     }
 }
 
-/// Notes a buffer of `len` samples stamped `stamp`, if there's room.
-fn note(tap: &Buffers, len: usize, stamp: Option<Delivery>) {
+/// The stamps cpal gave a buffer, on `CLOCK_MONOTONIC`; `None` if it gave
+/// none.
+fn delivery_of(info: &cpal::InputCallbackInfo) -> Option<Delivery> {
+    let stamp = info.timestamp();
+    let monotonic = |instant: cpal::StreamInstant| {
+        u64::try_from(instant.as_nanos())
+            .ok()
+            .map(Duration::from_nanos)
+    };
+    monotonic(stamp.callback)
+        .zip(monotonic(stamp.capture))
+        .map(|(cycle, capture)| Delivery { cycle, capture })
+}
+
+/// Notes a buffer of `len` samples stamped `stamp`, if there's room, with
+/// the stamps placed on `clock` now.
+fn note(tap: &Buffers, clock: &dyn Clock, len: usize, stamp: Option<Delivery>) {
     if len == 0 {
         return;
     }
+    let place = |awake| clock.awake_to_session(awake).map(SessionTime::elapsed);
+    let placed = stamp.and_then(|stamp| {
+        Some(Delivery {
+            cycle: place(stamp.cycle)?,
+            capture: place(stamp.capture)?,
+        })
+    });
     let mut seen = tap.lock().unwrap_or_else(PoisonError::into_inner);
     if seen.len() < PROFILE_CAP {
-        seen.push(Raw { len, stamp });
+        seen.push(Raw { len, stamp, placed });
     }
 }
 
@@ -180,22 +230,37 @@ fn length(len: usize, rate: SampleRate) -> Option<Duration> {
 struct Settled {
     /// Its place among the buffers.
     index: usize,
-    /// The stream's first sample, on `CLOCK_MONOTONIC`: the buffer's capture
-    /// stamp less the samples before it.
-    start: Duration,
+    /// The stream's first sample, on the session clock's elapsed time: the
+    /// buffer's capture stamp, placed as it arrived, less the samples before
+    /// it. `None` if the clock couldn't place the stamp, or it comes before
+    /// the clock started.
+    start: Option<Duration>,
+    /// Whether the hold was still waiting when this buffer came, so it
+    /// dated the buffers before it from this one's stamp. If not, it had
+    /// given up, and sent them by their own.
+    in_hold: bool,
 }
 
 /// The first of `buffers` whose delay is at least its length (within
 /// [`SETTLED_WITHIN`]). `None` if none is, or an unstamped buffer comes
 /// first.
 fn settled(buffers: &[Raw], rate: SampleRate) -> Option<Settled> {
+    let limit = SampleCount::started_within(HOLD_LIMIT, rate)
+        .and_then(|count| usize::try_from(count.get()).ok())
+        .unwrap_or(0);
     let mut before = 0_usize;
     for (index, raw) in buffers.iter().enumerate() {
         let stamp = raw.stamp?;
         let delay = stamp.cycle.saturating_sub(stamp.capture);
         if !delay.is_zero() && delay + SETTLED_WITHIN >= length(raw.len, rate)? {
-            let start = stamp.capture.checked_sub(length(before, rate)?)?;
-            return Some(Settled { index, start });
+            let start = raw
+                .placed
+                .and_then(|placed| placed.capture.checked_sub(length(before, rate)?));
+            return Some(Settled {
+                index,
+                start,
+                in_hold: before <= limit && index <= HOLD_BUFFERS,
+            });
         }
         before += raw.len;
     }
@@ -209,8 +274,9 @@ enum Outcome {
     NoEpoch,
     /// No buffer settled, so there's nothing to hold the epoch to.
     Unsettled,
-    /// A buffer settled, but its stamp comes before the session clock
-    /// started, so the clock can't place it: nothing to hold the epoch to.
+    /// A buffer settled, but its stamp can't be placed on the session
+    /// clock, or comes before the clock started: nothing to hold the epoch
+    /// to.
     Unplaced,
     /// The epoch opened `off_nanos` after (negative: before) the stream's
     /// first sample, as the buffer at `index` settled it.
@@ -219,28 +285,37 @@ enum Outcome {
         index: usize,
         /// How much later the epoch started than the settled stamps say.
         off_nanos: i128,
+        /// Whether the hold was still waiting when that buffer came. If not,
+        /// it had given up and dated the first buffers by their own stamps.
+        in_hold: bool,
     },
 }
 
 impl Outcome {
-    /// Whether the epoch is where the settled stamps put it, within a sample.
+    /// Whether the epoch is where the settled stamps put it, within a
+    /// sample. An epoch the hold gave up on is never where they put it.
     fn holds(self) -> bool {
-        matches!(self, Self::Measured { off_nanos, .. }
-            if off_nanos.unsigned_abs() <= u128::from(EPOCH_WITHIN_NANOS))
+        matches!(self, Self::Measured { off_nanos, in_hold: true, .. }
+            if off_nanos.unsigned_abs() <= u128::from(epoch_within_nanos()))
     }
 }
 
+/// The first sample as the first settled buffer puts it: its place among
+/// the buffers, how far into the session if the clock can place it, and
+/// whether the hold was still waiting when it came.
+type Expected = (usize, Option<u64>, bool);
+
 /// The epoch starting `epoch` nanoseconds into the session, against the
-/// stream's first sample as the settled buffer at `index` puts it:
-/// `expected` nanoseconds into the session, if the clock can place it.
-fn outcome(epoch: Option<u64>, settled: Option<(usize, Option<u64>)>) -> Outcome {
-    match (epoch, settled) {
+/// stream's first sample as `expected` puts it, if a buffer settled.
+fn outcome(epoch: Option<u64>, expected: Option<Expected>) -> Outcome {
+    match (epoch, expected) {
         (None, _) => Outcome::NoEpoch,
         (_, None) => Outcome::Unsettled,
-        (_, Some((_, None))) => Outcome::Unplaced,
-        (Some(epoch), Some((index, Some(expected)))) => Outcome::Measured {
+        (_, Some((_, None, _))) => Outcome::Unplaced,
+        (Some(epoch), Some((index, Some(at), in_hold))) => Outcome::Measured {
             index,
-            off_nanos: i128::from(epoch) - i128::from(expected),
+            off_nanos: i128::from(epoch) - i128::from(at),
+            in_hold,
         },
     }
 }
@@ -256,18 +331,23 @@ struct Run {
     len: usize,
     /// Each one's delay; `None` for buffers cpal couldn't stamp.
     delay: Option<Duration>,
-    /// When the run began, by its first cycle's time after the stream's.
+    /// When the run began, by its first cycle's time on the session clock
+    /// after the stream's first; zero if the clock couldn't place it. A
+    /// suspend shows here as a gap, as the stamps stop during it.
     at: Duration,
+}
+
+/// The first buffer's cycle on the session clock's elapsed time, if the
+/// clock could place it.
+fn first_placed_cycle(buffers: &[Raw]) -> Option<Duration> {
+    buffers.first()?.placed.map(|placed| placed.cycle)
 }
 
 /// `buffers` as runs: a buffer joins the run before it if it's as long
 /// (within a sample: a quantum resampled comes as 341 or 342 samples) and its
 /// delay is within [`SETTLED_WITHIN`] of the run's first.
 fn runs(buffers: &[Raw]) -> Vec<Run> {
-    let first_cycle = buffers
-        .iter()
-        .find_map(|raw| raw.stamp)
-        .map_or(Duration::ZERO, |stamp| stamp.cycle);
+    let first_cycle = first_placed_cycle(buffers).unwrap_or(Duration::ZERO);
     let mut runs: Vec<Run> = Vec::new();
     for (from, raw) in buffers.iter().enumerate() {
         let delay = raw
@@ -284,9 +364,9 @@ fn runs(buffers: &[Raw]) -> Vec<Run> {
         if let Some(run) = runs.last_mut().filter(|run| joins(run)) {
             run.count += 1;
         } else {
-            let at = raw
-                .stamp
-                .map_or(Duration::ZERO, |s| s.cycle.saturating_sub(first_cycle));
+            let at = raw.placed.map_or(Duration::ZERO, |placed| {
+                placed.cycle.saturating_sub(first_cycle)
+            });
             runs.push(Run {
                 from,
                 count: 1,
@@ -310,40 +390,13 @@ fn millis(d: Duration) -> f64 {
 }
 
 /// Prints `track`'s first buffers one by one, then its delay profile, with
-/// where its first cycle sits on the session clock.
-fn print_profile(
-    out: &mut impl io::Write,
-    track: TrackId,
-    buffers: &[Raw],
-    clock: &dyn Clock,
-) -> io::Result<()> {
+/// where its first cycle sits on the session clock, which the epochs are on.
+fn print_profile(out: &mut impl io::Write, track: TrackId, buffers: &[Raw]) -> io::Result<()> {
     let t = track.get();
-    let first_cycle = buffers
-        .iter()
-        .find_map(|raw| raw.stamp)
-        .map_or(Duration::ZERO, |stamp| stamp.cycle);
-    // Where the profile's times sit on the session clock, which the epochs
-    // are on.
-    if let Some(at) = buffers
-        .iter()
-        .find_map(|raw| raw.stamp)
-        .and_then(|stamp| clock.awake_to_session(stamp.cycle))
-    {
-        writeln!(out, "first-cycle {t} session {:.3}", millis(at.elapsed()))?;
+    if let Some(at) = first_placed_cycle(buffers) {
+        writeln!(out, "first-cycle {t} session {:.3}", millis(at))?;
     }
-    for (i, raw) in buffers.iter().take(FIRST_PRINTED).enumerate() {
-        let len = len_ms(raw.len);
-        match raw.stamp {
-            Some(s) => writeln!(
-                out,
-                "buffer {t} {i} len {len:.3} cycle {:.3} capture {:.3} delay {:.3}",
-                millis(s.cycle.saturating_sub(first_cycle)),
-                millis(s.capture.saturating_sub(first_cycle)),
-                millis(s.cycle.saturating_sub(s.capture)),
-            )?,
-            None => writeln!(out, "buffer {t} {i} len {len:.3} unstamped")?,
-        }
-    }
+    print_first_buffers(out, t, buffers)?;
     for run in runs(buffers) {
         let delay = run
             .delay
@@ -356,6 +409,29 @@ fn print_profile(
             len_ms(run.len),
             millis(run.at)
         )?;
+    }
+    Ok(())
+}
+
+/// Prints the first [`FIRST_PRINTED`] of `buffers`, with their stamps
+/// after the first cycle's.
+fn print_first_buffers(out: &mut impl io::Write, t: u32, buffers: &[Raw]) -> io::Result<()> {
+    let first_cycle = buffers
+        .iter()
+        .find_map(|raw| raw.stamp)
+        .map_or(Duration::ZERO, |stamp| stamp.cycle);
+    for (i, raw) in buffers.iter().take(FIRST_PRINTED).enumerate() {
+        let len = len_ms(raw.len);
+        match raw.stamp {
+            Some(s) => writeln!(
+                out,
+                "buffer {t} {i} len {len:.3} cycle {:.3} capture {:.3} delay {:.3}",
+                millis(s.cycle.saturating_sub(first_cycle)),
+                millis(s.capture.saturating_sub(first_cycle)),
+                millis(s.cycle.saturating_sub(s.capture)),
+            )?,
+            None => writeln!(out, "buffer {t} {i} len {len:.3} unstamped")?,
+        }
     }
     Ok(())
 }
@@ -457,7 +533,7 @@ pub(super) fn command(args: &Args) -> Res<bool> {
     let sources: Vec<(TrackId, Source)> = tracks.iter().map(|&t| (t, source.clone())).collect();
     let (starter, events) = prepare_tracks(&sources, RATE, &clock);
     let recorder = thread::spawn(move || record(writer, &events));
-    let backend = StampBackend::default();
+    let backend = StampBackend::new(Arc::clone(&clock));
     let captures: Result<Vec<_>, CaptureError> = starter.start(&backend).into_iter().collect();
     let captures = match captures {
         Ok(captures) => captures,
@@ -476,25 +552,29 @@ pub(super) fn command(args: &Args) -> Res<bool> {
     let (writer, noted, result) = recorder
         .join()
         .map_err(|_| "the recorder thread panicked")?;
-    writer.finish()?;
+    // The report comes first, so a probe that ends in an error still shows
+    // what it saw; the recording's own error comes before the writer's.
+    let reported = report(&tracks, &backend.taps(), &noted);
+    let finished = writer.finish();
     result?;
-    report(&tracks, &backend.taps(), &noted, &*clock)
+    finished?;
+    reported
 }
 
 /// Prints each track's profile and its first epoch's outcome, and the
 /// result line. `true` if every track's first epoch holds.
-fn report(tracks: &[TrackId], taps: &[Buffers], noted: &[Noted], clock: &dyn Clock) -> Res<bool> {
+fn report(tracks: &[TrackId], taps: &[Buffers], noted: &[Noted]) -> Res<bool> {
     let mut out = io::stdout();
     let starts = first_starts(noted);
     let mut ok = true;
     for (&track, tap) in tracks.iter().zip(taps) {
         let buffers = tap.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        print_profile(&mut out, track, &buffers, clock)?;
-        // The stamps are on the monotonic clock; the epoch is on the
-        // session's.
+        print_profile(&mut out, track, &buffers)?;
         let expected = settled(&buffers, RATE).map(|s| {
-            let at = clock.awake_to_session(s.start);
-            (s.index, at.map(SessionTime::as_nanos))
+            let at = s
+                .start
+                .and_then(|start| u64::try_from(start.as_nanos()).ok());
+            (s.index, at, s.in_hold)
         });
         let found = outcome(starts.get(&track).copied(), expected);
         ok &= found.holds();
@@ -535,22 +615,32 @@ fn print_noted(out: &mut impl io::Write, noted: &[Noted]) -> io::Result<()> {
 fn describe(found: Outcome) -> String {
     match found {
         Outcome::NoEpoch => "FAIL no first epoch".to_owned(),
-        Outcome::Unsettled => {
-            "FAIL no buffer settled: its delay never reached its length".to_owned()
-        }
-        Outcome::Unplaced => {
-            "FAIL the settled buffer's stamp comes before the session clock started".to_owned()
-        }
-        Outcome::Measured { index, off_nanos } => {
+        Outcome::Unsettled => "FAIL no buffer settled: its delay never reached its length, \
+             or a buffer came unstamped"
+            .to_owned(),
+        Outcome::Unplaced => "FAIL the settled buffer's stamp can't be placed on the session \
+             clock, or comes before it started"
+            .to_owned(),
+        Outcome::Measured {
+            index,
+            off_nanos,
+            in_hold,
+        } => {
             // A nanosecond difference this size is exact in an f64.
             #[expect(
                 clippy::cast_precision_loss,
                 reason = "an epoch's offset is far below 2^52 nanoseconds"
             )]
             let off = off_nanos as f64 / 1e6;
+            let gave_up = if in_hold {
+                ""
+            } else {
+                ": the hold gave up (500 ms, 64 buffers) before this buffer settled, so \
+                 the epoch is dated by the zero-delay rule"
+            };
             format!(
                 "{} first epoch starts {off:+.3} ms from the first sample the settled \
-                 buffer ({index}) puts",
+                 buffer ({index}) puts{gave_up}",
                 if found.holds() { "ok" } else { "FAIL" }
             )
         }
@@ -564,29 +654,44 @@ mod tests {
     /// 683 samples at 16 kHz: a graph quantum of 42.667 ms, resampled.
     const QUANTUM: usize = 683;
 
-    /// A stamp whose cycle is `cycle_ms` after a second in, and whose
-    /// capture is `delay` before it.
-    fn delivery(cycle_ms: u64, delay: Duration) -> Delivery {
+    /// A buffer of `len` samples whose cycle is `cycle_ms` after a second in,
+    /// and whose capture is `delay` before it. Its placement on the session
+    /// clock is the same times.
+    fn raw(len: usize, cycle_ms: u64, delay: Duration) -> Raw {
         let cycle = Duration::from_millis(1_000 + cycle_ms);
-        Delivery {
+        let stamp = Delivery {
             cycle,
             capture: cycle.saturating_sub(delay),
+        };
+        Raw {
+            len,
+            stamp: Some(stamp),
+            placed: Some(stamp),
         }
     }
 
-    /// A stream as a real capture's: the first buffers carry no delay, the
-    /// next carry one shorter than themselves, and from the seventh on the
-    /// delay is a whole buffer.
+    /// A stream as a real capture's: the first six buffers carry no delay,
+    /// and from the seventh on the delay is a whole buffer.
     fn real_profile() -> Vec<Raw> {
         let quantum = length(QUANTUM, RATE).unwrap_or_default();
         (0..12_u64)
             .map(|i| {
-                let delay = if i < 6 { Duration::ZERO } else { quantum };
-                Raw {
-                    len: QUANTUM,
-                    stamp: Some(delivery(i * 43, delay)),
-                }
+                raw(
+                    QUANTUM,
+                    i * 43,
+                    if i < 6 { Duration::ZERO } else { quantum },
+                )
             })
+            .collect()
+    }
+
+    /// A stream of 341-sample buffers (21.3 ms) with no delay until the
+    /// buffer at `index`, and a delay of two buffers from it.
+    fn settling_at(index: u64) -> Vec<Raw> {
+        let len = 341;
+        let delay = length(2 * len, RATE).unwrap_or_default();
+        (0..=index)
+            .map(|i| raw(len, i * 21, if i < index { Duration::ZERO } else { delay }))
             .collect()
     }
 
@@ -598,21 +703,49 @@ mod tests {
         let buffers = real_profile();
         let found = settled(&buffers, RATE).expect("a buffer settles");
         assert_eq!(found.index, 6);
-        let stamp = buffers[6].stamp.expect("stamped");
+        let capture = buffers[6].placed.expect("placed").capture;
         let before = length(6 * QUANTUM, RATE).expect("a length");
-        assert_eq!(found.start, stamp.capture.saturating_sub(before));
+        assert_eq!(found.start, Some(capture.saturating_sub(before)));
+        assert!(found.in_hold);
+    }
+
+    /// The first sample is dated from the stamp placed as the buffer
+    /// arrived, not the monotonic stamp: a suspend after it moves the
+    /// clock's reading of that stamp, and must not move this.
+    #[test]
+    fn the_first_sample_is_dated_from_the_placement_made_on_arrival() {
+        let mut buffers = real_profile();
+        let early = buffers[6].placed.expect("placed");
+        let shift = Duration::from_secs(10);
+        buffers[6].placed = Some(Delivery {
+            cycle: early.cycle + shift,
+            capture: early.capture + shift,
+        });
+        let before = length(6 * QUANTUM, RATE).expect("a length");
+        let found = settled(&buffers, RATE).expect("a buffer settles");
+        assert_eq!(
+            found.start,
+            Some((early.capture + shift).saturating_sub(before))
+        );
+    }
+
+    /// A settled buffer the clock couldn't place has no start to hold the
+    /// epoch to.
+    #[test]
+    fn a_settled_buffer_the_clock_could_not_place_has_no_start() {
+        let mut buffers = real_profile();
+        buffers[6].placed = None;
+        let found = settled(&buffers, RATE).expect("a buffer settles");
+        assert_eq!((found.index, found.start), (6, None));
     }
 
     /// A delay a hair short of its buffer's, as the quantum resampled
-    /// leaves it, still settles; one a sample short doesn't.
+    /// leaves it, still settles; one 2 ms short doesn't.
     #[test]
     fn a_delay_within_a_millisecond_of_its_buffer_settles() {
         let quantum = length(QUANTUM, RATE).expect("a length");
         let at = |short: Duration| {
-            let buffers = [Raw {
-                len: QUANTUM,
-                stamp: Some(delivery(0, quantum.saturating_sub(short))),
-            }];
+            let buffers = [raw(QUANTUM, 0, quantum.saturating_sub(short))];
             settled(&buffers, RATE).map(|s| s.index)
         };
         assert_eq!(at(Duration::from_micros(900)), Some(0));
@@ -624,49 +757,76 @@ mod tests {
     #[test]
     fn a_stream_that_never_settles_has_no_settled_buffer() {
         let never: Vec<Raw> = (0..10)
-            .map(|i| Raw {
-                len: QUANTUM,
-                stamp: Some(delivery(i * 43, Duration::from_millis(5))),
-            })
+            .map(|i| raw(QUANTUM, i * 43, Duration::from_millis(5)))
             .collect();
         assert_eq!(settled(&never, RATE), None);
         let unstamped = [Raw {
             len: QUANTUM,
             stamp: None,
+            placed: None,
         }];
         assert_eq!(settled(&unstamped, RATE), None);
     }
 
-    /// An epoch where the settled stamps put it holds; one a quantum later,
-    /// as taking the first buffer to end at its cycle puts it, doesn't; one
-    /// a sample early or late still holds.
+    /// A buffer that settles while the hold is still waiting (within
+    /// 500 ms of audio) is in the hold; one that settles after is not,
+    /// as the hold sent what it held by then.
     #[test]
-    fn an_epoch_a_quantum_late_fails_and_one_within_a_sample_holds() {
+    fn a_buffer_that_settles_after_the_hold_gave_up_is_not_in_the_hold() {
+        // 20 buffers of 341 samples are 426 ms; 30 are 639 ms.
+        assert!(settled(&settling_at(20), RATE).expect("settles").in_hold);
+        let late = settled(&settling_at(30), RATE).expect("settles");
+        assert_eq!(late.index, 30);
+        assert!(!late.in_hold);
+    }
+
+    /// An epoch where the settled stamps put it holds, and one a sample
+    /// early or late still does.
+    #[test]
+    fn an_epoch_within_a_sample_of_the_settled_start_holds() {
+        let at = 5_000_000_000;
+        let sample = 62_500;
+        assert!(outcome(Some(at), Some((6, Some(at), true))).holds());
+        assert!(outcome(Some(at + sample), Some((6, Some(at), true))).holds());
+        assert!(outcome(Some(at - sample), Some((6, Some(at), true))).holds());
+    }
+
+    /// An epoch a quantum after the settled start, as taking the first
+    /// buffer to end at its cycle puts it, doesn't hold, and says by how
+    /// much.
+    #[test]
+    fn an_epoch_a_quantum_late_fails() {
         let at = 5_000_000_000;
         let quantum = 42_688_000;
-        let sample = 62_500;
-        assert!(outcome(Some(at), Some((6, Some(at)))).holds());
-        assert!(outcome(Some(at + sample), Some((6, Some(at)))).holds());
-        assert!(outcome(Some(at - sample), Some((6, Some(at)))).holds());
-        let late = outcome(Some(at + quantum), Some((6, Some(at))));
+        let late = outcome(Some(at + quantum), Some((6, Some(at), true)));
         assert_eq!(
             late,
             Outcome::Measured {
                 index: 6,
-                off_nanos: i128::from(quantum)
+                off_nanos: i128::from(quantum),
+                in_hold: true
             }
         );
         assert!(!late.holds());
-        assert!(!outcome(Some(at - quantum), Some((6, Some(at)))).holds());
+        assert!(!outcome(Some(at - quantum), Some((6, Some(at), true))).holds());
+    }
+
+    /// An epoch right on a buffer that settled after the hold gave up still
+    /// fails: the hold dated the first buffers by their own stamps.
+    #[test]
+    fn an_epoch_on_a_buffer_that_settled_after_the_hold_gave_up_fails() {
+        let found = outcome(Some(5_000), Some((30, Some(5_000), false)));
+        assert!(!found.holds());
+        assert!(describe(found).contains("the hold gave up"));
     }
 
     /// A track with no epoch, or no settled buffer, can't hold.
     #[test]
     fn a_track_without_an_epoch_or_a_settled_buffer_fails() {
-        assert_eq!(outcome(None, Some((6, Some(1)))), Outcome::NoEpoch);
+        assert_eq!(outcome(None, Some((6, Some(1), true))), Outcome::NoEpoch);
         assert_eq!(outcome(None, None), Outcome::NoEpoch);
         assert_eq!(outcome(Some(1), None), Outcome::Unsettled);
-        assert_eq!(outcome(Some(1), Some((6, None))), Outcome::Unplaced);
+        assert_eq!(outcome(Some(1), Some((6, None, true))), Outcome::Unplaced);
         assert!(!Outcome::Unplaced.holds());
         assert!(!Outcome::NoEpoch.holds());
         assert!(!Outcome::Unsettled.holds());
@@ -715,18 +875,9 @@ mod tests {
         // run; a move that resets the delay, and a shorter buffer, each
         // begin one.
         let mut buffers = real_profile();
-        buffers.push(Raw {
-            len: QUANTUM + 1,
-            stamp: Some(delivery(600, quantum)),
-        });
-        buffers.push(Raw {
-            len: QUANTUM,
-            stamp: Some(delivery(643, Duration::ZERO)),
-        });
-        buffers.push(Raw {
-            len: 256,
-            stamp: Some(delivery(686, Duration::ZERO)),
-        });
+        buffers.push(raw(QUANTUM + 1, 600, quantum));
+        buffers.push(raw(QUANTUM, 643, Duration::ZERO));
+        buffers.push(raw(256, 686, Duration::ZERO));
         let found = runs(&buffers);
         assert_eq!(
             found.iter().map(|r| (r.from, r.count)).collect::<Vec<_>>(),

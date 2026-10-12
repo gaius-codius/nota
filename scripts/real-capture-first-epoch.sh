@@ -24,8 +24,8 @@
 # A hardware microphone, and a suspend and resume, can't be run on a private
 # instance (see scripts/first-epoch-probes.sh).
 #
-# Not run in CI: it needs PipeWire 1.x, WirePlumber 0.5, pipewire-pulse and
-# `pactl`. Run it by hand after changing capture.
+# Not run in CI: it needs PipeWire 1.x, WirePlumber 0.5, pipewire-pulse,
+# `pactl` and `pw-cat`. Run it by hand after changing capture.
 #
 # Usage: scripts/real-capture-first-epoch.sh [--seconds S]
 #   --seconds S   recording length per run (default 8; the move run
@@ -50,6 +50,25 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/nota-first-epoch.XXXXXX")
 pids=()
 recorder=
 players=()
+
+# Silence played into a sink as a client does, started the moment the
+# recorder's streams are running. The graph's delay for a capture stream
+# shows only once a client is playing, and a stream that opens as one
+# starts gets its first buffers with no delay: the case the recorder's hold
+# is for. The player's PID is kept to stop it by.
+play_into() {
+  pw-cat --playback --target "$1" --rate 16000 --channels 1 --format s16 \
+    --raw /dev/zero >/dev/null 2>&1 &
+  players+=($!)
+}
+
+stop_players() {
+  for pid in ${players[@]+"${players[@]}"}; do
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+  players=()
+}
 
 cleanup() {
   # The recorder and the players are stopped by their PIDs while they run.
@@ -150,25 +169,6 @@ done
 }
 
 failed=0
-
-# Silence played into a sink as a client does, started the moment the
-# recorder's streams are running. The graph's delay for a capture stream
-# shows only once a client is playing, and a stream that opens as one
-# starts gets its first buffers with no delay: the case the recorder's hold
-# is for. The player's PID is kept to stop it by.
-play_into() {
-  pw-cat --playback --target "$1" --rate 16000 --channels 1 --format s16 \
-    --raw /dev/zero >/dev/null 2>&1 &
-  players+=($!)
-}
-
-stop_players() {
-  for pid in ${players[@]+"${players[@]}"}; do
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
-  done
-  players=()
-}
 
 # run LABEL [--switch] RECORDER-ARGS...: records, starts the players once the
 # streams run, and with --switch moves the default sink to B 3 s in.

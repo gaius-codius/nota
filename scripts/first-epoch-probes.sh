@@ -12,18 +12,19 @@
 # suspend and the speech yourself, when it says. Record from the default
 # output's monitor only with something playing (music in a browser will do).
 #
-#   mic      records the default microphone for S seconds (default 10).
+#   mic      records the default microphone for S seconds (default 10,
+#            at least 6).
 #            Speak, or tap the microphone, from the start. Reports whether
 #            the delay ever reaches a buffer's length, which is what the
 #            recorder's hold waits for: a microphone whose delay never does
 #            gives its first epoch from the zero-delay rule after 500 ms.
-#   resume   records for S seconds (default 60). Suspend the machine
+#   resume   records for S seconds (default 60, at least 40). Suspend the machine
 #            (`systemctl suspend`) for 10 seconds or more, between 10 s and
 #            S - 20 s in, and wake it. Reports the profile after the resume:
 #            whether the delay goes back to zero, and the epoch the resume
 #            opens.
 #   move     records the default output's monitor for S seconds (default
-#            30), with something playing. Once, between 10 s and S - 10 s in,
+#            30, at least 30), with something playing. Once, between 10 s and S - 10 s in,
 #            switch the default output (to the headphones, say) the way you
 #            usually do, and back afterwards if you like. Reports whether
 #            the delay goes back to zero after the stream follows it, and
@@ -63,8 +64,14 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
-[[ $seconds =~ ^[0-9]+$ && $seconds -ge 6 ]] || {
-  echo "first-epoch-probes: --seconds needs a number, at least 6" >&2
+# The least that leaves room for what each probe asks of the user.
+case $mode in
+  mic) least=6 ;;
+  move) least=30 ;;
+  resume) least=40 ;;
+esac
+[[ $seconds =~ ^[0-9]+$ && $seconds -ge $least ]] || {
+  echo "first-epoch-probes: --seconds needs a number, at least $least for $mode" >&2
   exit 2
 }
 
