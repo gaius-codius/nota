@@ -173,7 +173,8 @@ pub(crate) struct RecordArgs {
     pub(crate) models: Option<(PathBuf, PathBuf)>,
     /// Record a tone instead of the audio server (tests only).
     pub(crate) tone: bool,
-    /// Log when each text reached the screen to this file
+    /// Log when each text reached the screen, and how far each track's
+    /// durable position ran behind its stream, to this file
     /// (`--latency-log`, built only with the `latency-log` feature).
     pub(crate) latency_log: Option<PathBuf>,
     /// Run the final pass with nota's stand-in engine, `nota engine fake`

@@ -43,7 +43,8 @@ pub(super) fn stop<B: CaptureBackend>(started: Started<B>, shown: Shown) -> (Out
     let full_while_recording = disk.full().is_some();
     // Stop, in order.
     drop(captures);
-    // The streams have ended: what's still being made durable is the stop's, not the recording's.
+    // The streams have ended: what's still being made durable is the
+    // stop's, not the recording's.
     let lag_lines = lag.map(LagSamples::finish).unwrap_or_default();
     let writer = recorded(recorder.join(), &mut outcome);
     // The recording has ended: the machine may sleep while the last

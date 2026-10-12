@@ -1,6 +1,7 @@
 //! A log of how long each text took to reach the screen, for measuring
 //! live-text latency (`nota record --latency-log FILE`, built only with the
-//! `latency-log` feature). `scripts/live-latency.sh` reads it.
+//! `latency-log` feature), and how far each track's durable position ran
+//! behind its stream. `scripts/live-latency.sh` and `scripts/soak.sh` read it.
 //!
 //! Each text is noted as the live thread hands it to the screen, and the
 //! screen's output is watched for the end of each draw ([`Watched`]). A
@@ -21,11 +22,12 @@
 //! [`LAG_TICK`] a thread reads each track's [`Progress`], the counters the
 //! recorder keeps for any thread to read, and notes the audio delivered and
 //! not yet durable (what a crash then would lose) and the audio delivered
-//! and not yet in a journal. They are kept as counts, so a recording of
-//! hours takes no more memory than one of minutes, and written as `lag`
-//! lines (a track's quantiles) and `lagmin` lines (its highest in each
-//! minute), which have their own columns, named in the line. `scripts/soak.sh`
-//! reads them.
+//! and not yet in a journal. They are kept as counts and a number for each
+//! minute, so the memory grows by a few bytes a minute and not with the
+//! samples, and written as `lag` lines (a track's quantiles) and `lagmin`
+//! lines (its highest in each minute, `-` for a minute not sampled), which
+//! have their own columns, named in the line. It is an amount of audio, not
+//! an age: the two are the same while the stream delivers in real time.
 
 use std::fmt::Write as _;
 use std::io::{self, Write};
@@ -190,8 +192,8 @@ fn drawn(handed: SessionTime, draw_ends: &[SessionTime]) -> Option<SessionTime> 
 /// How often each track's progress is read.
 const LAG_TICK: Duration = Duration::from_millis(20);
 
-/// The most lag, in milliseconds, the counts tell apart: a sample that
-/// found more counts as this.
+/// The most lag, in milliseconds, the quantiles tell apart: a sample that
+/// found more counts as this there (each minute's highest is kept whole).
 const LAG_CAP_MS: usize = 5_000;
 
 /// The minutes whose highest lag is kept, a day's worth; later ones count
@@ -207,8 +209,9 @@ struct TrackLag {
     /// delivered and not yet durable (rounded down); the last takes every
     /// sample that found more.
     at_risk: Vec<u64>,
-    /// The most of it found in each minute of the recording.
-    minute_max: Vec<u64>,
+    /// The most of it found in each minute of the recording, `None` for a
+    /// minute with no sample.
+    minute_max: Vec<Option<u64>>,
     /// The most audio found delivered and not yet in a journal, in
     /// milliseconds: the recorder falling behind its stream.
     queued_max: u64,
@@ -232,10 +235,11 @@ impl TrackLag {
             .unwrap_or(LAG_MINUTES)
             .min(LAG_MINUTES - 1);
         if self.minute_max.len() <= minute {
-            self.minute_max.resize(minute + 1, 0);
+            self.minute_max.resize(minute + 1, None);
         }
         if let Some(highest) = self.minute_max.get_mut(minute) {
-            *highest = (*highest).max(u64::try_from(at_risk).unwrap_or(u64::MAX));
+            let found = u64::try_from(at_risk).unwrap_or(u64::MAX);
+            *highest = Some((*highest).map_or(found, |h| h.max(found)));
         }
         let queued = u64::try_from(millis(positions.queued(), RATE)).unwrap_or(u64::MAX);
         self.queued_max = self.queued_max.max(queued);
@@ -245,6 +249,9 @@ impl TrackLag {
     /// The lag that `percent` of the samples were at or under, by nearest
     /// rank.
     fn percentile(&self, percent: u64) -> usize {
+        if self.count == 0 {
+            return 0;
+        }
         let rank = (self.count * percent).div_ceil(100).max(1);
         let mut seen = 0;
         for (ms, samples) in self.at_risk.iter().enumerate() {
@@ -276,6 +283,7 @@ impl TrackLag {
             self.queued_max
         );
         for (minute, highest) in self.minute_max.iter().enumerate() {
+            let highest = highest.map_or_else(|| "-".to_owned(), |h| h.to_string());
             let _ = writeln!(out, "lagmin\t{}\t{minute}\t{highest}", track.get());
         }
         out
@@ -320,14 +328,16 @@ impl LagSamples {
         thread::Builder::new()
             .name("nota-lag".into())
             .spawn(move || {
-                // The wait is the tick, and ends for good when the sender is dropped.
+                // The wait is the tick, and ends for good when the sender
+                // is dropped.
                 while let Err(RecvTimeoutError::Timeout) = stopped.recv_timeout(LAG_TICK) {
                     let at = clock.now();
                     for (track, progress) in &progress {
                         note(&tracks, *track, progress.now(), at);
                     }
                 }
-            })?;
+            })
+            .map_err(|e| io::Error::new(e.kind(), format!("starting the lag sampler: {e}")))?;
         self.stop = Some(stop);
         Ok(())
     }
@@ -339,7 +349,8 @@ impl LagSamples {
         let Ok(found) = self.tracks.lock() else {
             return String::new();
         };
-        let mut tracks: Vec<_> = found.iter().collect();
+        // A track that never had audio has nothing to report.
+        let mut tracks: Vec<_> = found.iter().filter(|(_, lag)| lag.count > 0).collect();
         tracks.sort_by_key(|(track, _)| *track);
         tracks
             .iter()
@@ -468,6 +479,7 @@ mod tests {
         );
     }
 
+    /// The lag lines follow the texts and problems.
     #[test]
     fn the_lag_lines_close_the_log() {
         let mut log = LatencyLog::new(PathBuf::new());
@@ -538,6 +550,8 @@ mod tests {
         SessionTime::from_nanos(minutes * 60_000_000_000)
     }
 
+    /// What a crash now would lose is what's delivered and not yet durable,
+    /// in whole milliseconds; what waits for a journal is counted apart.
     #[test]
     fn lag_is_audio_delivered_and_not_yet_durable() {
         let mut lag = TrackLag::default();
@@ -555,24 +569,33 @@ mod tests {
         );
         assert_eq!(lag.highest(), 800);
         assert_eq!(lag.queued_max, 100);
-        assert_eq!(lag.minute_max, [800, 1]);
+        assert_eq!(lag.minute_max, [Some(800), Some(1)]);
     }
 
+    /// A track whose stream hasn't delivered anything has no lag to count.
     #[test]
-    fn lag_waits_for_the_first_audio_and_stops_counting_at_the_cap() {
+    fn lag_waits_for_the_first_audio() {
         let mut lag = TrackLag::default();
         lag.note(positions(0, 0, 0), minutes(0));
         assert_eq!(lag.count, 0);
         assert!(lag.at_risk.is_empty());
-        // Ten seconds behind counts as the cap.
+        assert_eq!((lag.percentile(50), lag.highest()), (0, 0));
+    }
+
+    /// The quantiles stop at the cap; the minute's highest keeps the whole.
+    #[test]
+    fn lag_over_the_cap_counts_as_the_cap() {
+        let mut lag = TrackLag::default();
+        // Ten seconds behind.
         lag.note(positions(160_000, 160_000, 0), minutes(0));
         assert_eq!(
             (lag.highest(), lag.percentile(50)),
             (LAG_CAP_MS, LAG_CAP_MS)
         );
-        assert_eq!(lag.minute_max, [10_000]);
+        assert_eq!(lag.minute_max, [Some(10_000)]);
     }
 
+    /// A hundred samples, one at each millisecond from 1 to 100.
     #[test]
     fn lag_percentiles_are_by_nearest_rank() {
         let mut lag = TrackLag::default();
@@ -592,6 +615,7 @@ mod tests {
         );
     }
 
+    /// A minute without a sample is `-`, not a lag of nothing.
     #[test]
     fn lag_lines_name_the_track_and_its_minutes() {
         let mut lag = TrackLag::default();
@@ -601,11 +625,35 @@ mod tests {
             lag.lines(TrackId::new(1)),
             "lag\t1\tsamples=2\tp50_ms=50\tp95_ms=500\tp99_ms=500\tmax_ms=500\tqueued_max_ms=0\n\
              lagmin\t1\t0\t500\n\
-             lagmin\t1\t1\t0\n\
+             lagmin\t1\t1\t-\n\
              lagmin\t1\t2\t50\n"
         );
     }
 
+    /// Finishing, or dropping, the lag samples ends the sampling thread, which
+    /// waits on the other end of the channel they hold.
+    #[test]
+    fn finishing_or_dropping_the_lag_samples_ends_the_thread() {
+        for finish in [true, false] {
+            let (stop, stopped) = mpsc::channel::<()>();
+            let lag = LagSamples {
+                stop: Some(stop),
+                ..LagSamples::default()
+            };
+            assert_eq!(
+                stopped.recv_timeout(Duration::from_millis(10)),
+                Err(RecvTimeoutError::Timeout)
+            );
+            if finish {
+                let _ = lag.finish();
+            } else {
+                drop(lag);
+            }
+            assert_eq!(stopped.try_recv(), Err(mpsc::TryRecvError::Disconnected));
+        }
+    }
+
+    /// Tracks come out in order, and one that never had audio doesn't.
     #[test]
     fn finished_lag_lists_the_tracks_in_order() {
         let lag = LagSamples::default();
@@ -627,6 +675,7 @@ mod tests {
             positions(32_000, 32_000, 31_200),
             minutes(0),
         );
+        note(&lag.tracks, TrackId::new(2), positions(0, 0, 0), minutes(0));
         let lines = lag.finish();
         let heads: Vec<_> = lines.lines().filter(|l| l.starts_with("lag\t")).collect();
         assert_eq!(

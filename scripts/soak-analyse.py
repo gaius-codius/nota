@@ -379,7 +379,7 @@ def analyse_track(report, work, db, session, track, env, outputs):
     # short of that, so the silence after it isn't read as a loss.
     played_to = epochs.sample_at(epochs.time(bursts[-1][1]) + PERIOD_S - offset - 0.5)
     zero_runs(report, x, epochs, events, bursts[0][1], min(played_to, len(x)))
-    lag(report, work, track, env.get("latency_log") == "1")
+    lag(report, work, track, env)
     # And the speech: texts the engine returned.
     count, first_at, last_at = db.execute(
         "SELECT count(*), min(start_ns), max(end_ns) FROM utterance WHERE session_id = ? AND track = ?",
@@ -422,11 +422,12 @@ def zero_runs(report, x, epochs, events, lo, hi):
                                f"played span: {len(runs)}, unlogged {len(unlogged)}; none unlogged:")
 
 
-def lag(report, work, track, required):
+def lag(report, work, track, env):
     """How far the track's durable position ran behind the audio delivered,
     from the lag lines the latency log ends with (crates/nota/src/latency.rs):
     sampled every 20 ms, so a lag that lasted less is missed."""
     path = os.path.join(work, "latency.tsv")
+    required = env.get("latency_log") == "1"
     if not os.path.isfile(path):
         if required:
             report.check(False, "lag: the run asked for a latency log and there is none:")
@@ -440,7 +441,8 @@ def lag(report, work, track, required):
             if fields[0] == "lag" and fields[1] == str(track):
                 summary = dict(kv.split("=") for kv in fields[2:])
             elif fields[0] == "lagmin" and fields[1] == str(track):
-                minutes[int(fields[2])] = int(fields[3])
+                if fields[3] != "-":
+                    minutes[int(fields[2])] = int(fields[3])
     if summary is None:
         report.check(False, "lag: no lag line for this track in the latency log:")
         return
@@ -448,9 +450,14 @@ def lag(report, work, track, required):
     for minute, highest in minutes.items():
         blocks[minute // 30] = max(blocks.get(minute // 30, 0), highest)
     peak = int(summary["max_ms"])
+    samples = int(summary["samples"])
+    # One sample every 20 ms for the run's length, less what a busy machine
+    # drops: half is enough to say it was sampled throughout.
+    wanted = float(env["play_to_stop_s"]) / 0.02 / 2 if "play_to_stop_s" in env else 1
+    report.check(samples >= wanted, f"lag: {samples} samples, at least {wanted:.0f} (half of one every 20 ms):")
     report.check(peak <= LAG_LIMIT_MS,
-                 f"lag (delivered, not yet durable): {summary['samples']} samples; median {summary['p50_ms']} ms, "
-                 f"p95 {summary['p95_ms']}, p99 {summary['p99_ms']}, highest {peak}; under {LAG_LIMIT_MS} ms:")
+                 f"lag (delivered, not yet durable): median {summary['p50_ms']} ms, p95 {summary['p95_ms']}, "
+                 f"p99 {summary['p99_ms']}, highest {peak}; at most {LAG_LIMIT_MS} ms:")
     report.say(f"  highest in each 30 minutes (ms): "
                + " ".join(f"{b * 30}m:{v}" for b, v in sorted(blocks.items()))
                + f"; the recorder fell behind its stream by at most {summary['queued_max_ms']} ms")

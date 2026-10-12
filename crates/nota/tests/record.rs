@@ -360,9 +360,9 @@ fn the_latency_log_says_how_far_each_tracks_durable_position_ran_behind() {
             rest.split('\t').next().unwrap().parse().unwrap()
         };
         // 1.5 s at a sample every 20 ms is some 70; allow a loaded machine.
-        assert!(value("samples") >= 10, "{line}");
+        assert!(value("samples") >= 10, "{line}"); // check-bound
         // Within the journal's sync interval and then some.
-        assert!(value("max_ms") <= 2_000, "{line}");
+        assert!(value("max_ms") <= 2_000, "{line}"); // check-bound
         assert!(value("p50_ms") <= value("p99_ms"), "{line}");
         assert!(
             written.contains(&format!("lagmin\t{track}\t0\t")),
