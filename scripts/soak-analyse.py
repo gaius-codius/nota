@@ -40,7 +40,7 @@ PLATEAU = 0.3 * 32768 * WINDOW / 2  # check-bound
 RADII = (RATE // 2, 3 * RATE, 8 * RATE)  # check-bound
 
 # The pass limits, and the tolerances that decide what a check sees, each
-# tagged so scripts/check-weakened.sh lists a change to it.
+# tagged so the weakened-checks detector lists a change to it.
 MEMORY_LIMIT_MB = 50  # check-bound
 SETTLED_AFTER_S = 600  # check-bound
 DRIFT_LIMIT_MS = 20  # check-bound

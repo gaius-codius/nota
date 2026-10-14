@@ -53,4 +53,8 @@ pre-push:
       run: cargo test --workspace --locked --doc
     weakened:
       # Report only; CI requires an explanation in the PR body.
-      run: git rev-parse -q --verify origin/main >/dev/null && scripts/check-weakened.sh origin/main HEAD || true
+      run: |
+        wc=${XDG_CACHE_HOME:-$HOME/.cache}/weakened-checks/v1.0.0
+        [ -x "$wc/check-weakened.sh" ] ||
+          git clone -q --depth 1 -b v1.0.0 https://github.com/gaius-codius/weakened-checks "$wc"
+        if git rev-parse -q --verify origin/main >/dev/null; then "$wc/check-weakened.sh" origin/main HEAD || true; fi
