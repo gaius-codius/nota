@@ -240,6 +240,26 @@ jobs:
         run: scripts/sherpa-onnx.sh
       - run: cargo build --workspace --all-targets --locked
 
+  clippy-windows:
+    # Clippy for the Windows target, which the Linux lint job never sees. Not
+    # a required check; it shows platform lint breakage early, like the build
+    # above. Natively on a Windows runner, so no cross-compiling toolchain.
+    name: Clippy (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # See the rust job.
+          key: sherpa-onnx-${{ hashFiles('scripts/sherpa-onnx.sh') }}
+      - name: Fetch the pinned sherpa-onnx libraries
+        shell: bash
+        run: scripts/sherpa-onnx.sh
+      - run: cargo clippy --workspace --all-targets --locked
+
   coverage-scope:
     # Coverage runs on every push to main, and on a pull request only when
     # it changes how coverage runs, so a broken coverage command fails
