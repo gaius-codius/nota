@@ -168,10 +168,12 @@ impl QuitSignals {
         Ok(Self)
     }
 
+    #[expect(clippy::unused_self, reason = "the same shape as the Unix version")]
     pub(crate) fn asked(&self) -> bool {
         false
     }
 
+    #[expect(clippy::unused_self, reason = "the same shape as the Unix version")]
     pub(crate) fn show_home(&self, _events: Option<Sender<Event>>) {}
 }
 
@@ -182,6 +184,7 @@ pub(crate) struct SignalThread;
 
 #[cfg(not(unix))]
 impl SignalThread {
+    #[expect(clippy::unused_self, reason = "the same shape as the Unix version")]
     pub(crate) fn close(self) -> bool {
         false
     }
