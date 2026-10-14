@@ -1,0 +1,4 @@
+# Exceptions to prohibited weakened-check findings, read from HEAD by
+# gaius-codius/weakened-checks. One entry per line:
+#   RULE PATTERN REASON...
+# nota's config prohibits nothing, so this stays empty.

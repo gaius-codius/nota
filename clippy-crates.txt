@@ -36,7 +36,7 @@
 # as you would in a new crate, then record the new line. A bump within the line
 # passes unchecked, though a minor release can add a function too; that gap is
 # accepted so `cargo update` stays quiet (GAI-366). Changes here count as check
-# changes (scripts/check-weakened.sh).
+# changes (weakened-checks).
 
 [ban]
 # cpal's stream clock, which nota reads through the session clock instead.

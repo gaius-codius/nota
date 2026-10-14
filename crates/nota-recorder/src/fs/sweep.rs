@@ -11,7 +11,7 @@
 //! crash or failure interrupted the operation there, and what the point led
 //! to. It then states its floor: at least so many interrupted points, or
 //! every outcome it must reach. The line stating a floor ends with the
-//! check-bound tag, so `scripts/check-weakened.sh` reports any change to
+//! check-bound tag, so the weakened-checks detector reports any change to
 //! it. A sweep dropped without a floor fails the test, and
 //! `scripts/check-weakened.test.sh` fails on a sweep without a floor in any
 //! file with tests that uses [`FakeFs`], but for the fake's, the crash
