@@ -130,6 +130,10 @@ fn protocol_output() -> io::Result<std::fs::File> {
 }
 
 #[cfg(not(unix))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "matches the unix signature, which can fail"
+)]
 fn protocol_output() -> io::Result<io::Stdout> {
     Ok(io::stdout())
 }
