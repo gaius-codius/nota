@@ -21,7 +21,7 @@ jobs:
     # The shared lint, test, deps and workflow-lint jobs, from rust-ci; their
     # checks are "rust / lint", "rust / test", "rust / deps" and
     # "rust / workflows". nota's own steps go in through the inputs.
-    uses: gaius-codius/rust-ci/.github/workflows/rust.yml@04229b0c6e3fbc7440dcce3dcdb56d6c5308b5a6 # main, before v1.0.0
+    uses: gaius-codius/rust-ci/.github/workflows/rust.yml@04229b0c6e3fbc7440dcce3dcdb56d6c5308b5a6 # v1.0.0
     with:
       # The native build dependencies (after which the package lists are
       # fresh), and the sherpa-onnx libraries from the archive pinned by
