@@ -260,6 +260,10 @@ fn create_private(path: &Path) -> Result<(), StoreError> {
 
 /// Elsewhere the file's permissions come from its directory.
 #[cfg(not(unix))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "matches the unix signature, which can fail"
+)]
 fn create_private(_path: &Path) -> Result<(), StoreError> {
     Ok(())
 }
