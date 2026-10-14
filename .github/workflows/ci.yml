@@ -143,6 +143,10 @@ jobs:
     # and slices put them on one shard. On one 88-mutant diff the slowest
     # shard took 16 minutes as slices and 9 dealt round-robin.
     # The weekly full run is in mutants.yml.
+    #
+    # A PR with no .rs changes has no mutants. The skip is a step inside the
+    # job, not a job-level `if:`: a skipped shard fails the required
+    # aggregator below, and this way the shard's result stays `success`.
     name: Mutation testing (shard ${{ strategy.job-index }} of ${{ strategy.job-total }})
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -165,22 +169,40 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # Every step after this one runs only when the PR changes a .rs file.
+      - name: Look for Rust changes
+        id: rust
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if git diff --quiet "$PR_BASE...HEAD" -- '*.rs'; then
+            echo "No .rs files changed; no mutants to test."
+            echo changed=false >>"$GITHUB_OUTPUT"
+          else
+            echo changed=true >>"$GITHUB_OUTPUT"
+          fi
+      - if: steps.rust.outputs.changed == 'true'
+        run: rustup toolchain install
+      - if: steps.rust.outputs.changed == 'true'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           # cargo-mutants builds in its own copy of the tree, so a cached
           # target directory would go unused.
           cache-targets: false
-      - run: scripts/install-linux-build-deps.sh
-      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+      - if: steps.rust.outputs.changed == 'true'
+        run: scripts/install-linux-build-deps.sh
+      - if: steps.rust.outputs.changed == 'true'
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: cargo-mutants@27.1.0,cargo-nextest
       - name: Diff against the base branch
+        if: steps.rust.outputs.changed == 'true'
         env:
           PR_BASE: ${{ github.event.pull_request.base.sha }}
         run: git diff --src-prefix=a/ --dst-prefix=b/ "$PR_BASE...HEAD" > "$RUNNER_TEMP/pr.diff"
       # A shard dealt no mutants (a small diff, or none in these crates) passes.
-      - env:
+      - if: steps.rust.outputs.changed == 'true'
+        env:
           SHARD: ${{ strategy.job-index }}
           SHARDS: ${{ strategy.job-total }}
         run: >-
@@ -188,7 +210,7 @@ jobs:
           -p nota-core -p nota-recorder
           --shard "$SHARD/$SHARDS" --sharding round-robin
           --test-tool nextest --jobs 2 --output "$RUNNER_TEMP"
-      - if: failure()
+      - if: failure() && steps.rust.outputs.changed == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mutants-shard-${{ strategy.job-index }}
@@ -199,7 +221,7 @@ jobs:
     # cancelled or skipped shard fails it, and it runs even then (always()),
     # so it can't be skipped, which a ruleset would count as passing. A run
     # cancelled by a newer push therefore fails here too; that commit is
-    # superseded.
+    # superseded, and the message says so rather than blaming the mutants.
     name: Mutation testing (changed code)
     if: always() && github.event_name == 'pull_request'
     needs: mutants-shard
@@ -209,10 +231,17 @@ jobs:
       - env:
           SHARDS_RESULT: ${{ needs.mutants-shard.result }}
         run: |
-          if [ "$SHARDS_RESULT" != success ]; then
-            echo "::error::Mutation testing shards: $SHARDS_RESULT (every shard must pass)"
-            exit 1
-          fi
+          case "$SHARDS_RESULT" in
+            success) ;;
+            cancelled)
+              echo "::error::Superseded: the mutation testing shards were cancelled, most likely by a newer push to this branch. This is not a mutation failure; the newer commit's run decides."
+              exit 1
+              ;;
+            *)
+              echo "::error::Mutation testing shards: $SHARDS_RESULT (every shard must pass)"
+              exit 1
+              ;;
+          esac
           echo "Every mutation testing shard passed."
 
   build:

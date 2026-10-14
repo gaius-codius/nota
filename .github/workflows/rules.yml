@@ -37,11 +37,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - env:
-          PR_BASE: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
-          PR_BODY: ${{ github.event.pull_request.body }}
-        run: scripts/check-weakened.sh "$PR_BASE" "$PR_HEAD"
+      - uses: gaius-codius/weakened-checks@1cfd71c36cc09c744740bf9dd9677991ea5aed77 # v1.0.0
 
   secrets:
     name: No secrets (gitleaks)
