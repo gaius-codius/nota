@@ -1,17 +1,24 @@
 # Git hooks for nota. Install once per clone: `lefthook install`.
 # CI runs the same checks, so skipping a hook only delays the failure, and
 # skipping one on purpose (--no-verify) is against the "Code quality" rules in AGENTS.md.
-# Needs on PATH: cargo, typos, gitleaks, jq; uvx and actionlint for workflow edits.
+# Needs on PATH: cargo, cargo-deny, cargo-shear, typos, gitleaks, jq; uvx and
+# actionlint for workflow edits.
 # A lefthook-local.yml next to this file, if present, adds hooks for one machine.
+#
+# The hooks every gaius-codius Rust project runs the same way (fmt, typos,
+# workflows; deny, shear) come from rust-ci's lefthook/rust.yml. Its `ref`
+# moves with the rust-ci pin in .github/workflows/ci.yml; run `lefthook
+# install` again after it changes, and check `lefthook dump` lists them.
+# A remote command overrides one of the same name here.
+remotes:
+  - git_url: https://github.com/gaius-codius/rust-ci
+    ref: v1.0.0
+    configs:
+      - lefthook/rust.yml
 
 pre-commit:
   parallel: true
   commands:
-    fmt:
-      glob: "*.rs"
-      run: cargo fmt --all --check
-    typos:
-      run: typos --force-exclude {staged_files}
     files:
       run: scripts/check-files.sh --staged
     clippy-bans:
@@ -19,9 +26,6 @@ pre-commit:
       run: scripts/check-clippy-bans.sh
     secrets:
       run: gitleaks git --pre-commit --staged --no-banner --redact .
-    workflows:
-      glob: ".github/workflows/*"
-      run: actionlint && uvx zizmor@1.30.1 --offline .github/workflows/
 
 pre-push:
   parallel: true
@@ -43,14 +47,10 @@ pre-push:
     script-tests:
       # check-clippy-bans.sh's and check-test-targets.sh's tests, and the crash
       # runner's against stand-ins (no FUSE or LazyFS; the real sweep stays a manual gate). CI
-      # runs these and the other scripts' tests in its lint job.
+      # runs these and the other scripts' tests in its Script tests job.
       run: scripts/check-clippy-bans.test.sh && scripts/check-test-targets.test.sh && scripts/lazyfs-crash.test.sh
     doctest:
       run: cargo test --workspace --locked --doc
-    deny:
-      run: cargo deny --locked check
-    shear:
-      run: cargo shear
     weakened:
       # Report only; CI requires an explanation in the PR body.
       run: git rev-parse -q --verify origin/main >/dev/null && scripts/check-weakened.sh origin/main HEAD || true

@@ -17,21 +17,45 @@ env:
   CARGO_BUILD_WARNINGS: deny
 
 jobs:
-  lint:
-    name: fmt, clippy, typos
+  rust:
+    # The shared lint, test, deps and workflow-lint jobs, from rust-ci; their
+    # checks are "rust / lint", "rust / test", "rust / deps" and
+    # "rust / workflows". nota's own steps go in through the inputs.
+    uses: gaius-codius/rust-ci/.github/workflows/rust.yml@04229b0c6e3fbc7440dcce3dcdb56d6c5308b5a6 # v1.0.0
+    with:
+      # The native build dependencies (after which the package lists are
+      # fresh), and the sherpa-onnx libraries from the archive pinned by
+      # SHA-256: every build links these (.cargo/config.toml), never an
+      # unchecked download.
+      setup-scripts: |
+        scripts/install-linux-build-deps.sh
+        scripts/sherpa-onnx.sh
+      # sherpa-onnx-sys's cached build bundles the pinned libraries. A new pin
+      # renames their directory, so cargo rebuilds it anyway; a new cache with
+      # each pin keeps old builds from piling up.
+      cache-key-files: scripts/sherpa-onnx.sh
+      # The engine tests' models and speech fixture, and
+      # NOTA_REQUIRE_TEST_MODELS: .github/actions/pre-test.
+      pre-test-action: true
+      # --all-targets: examples' unit tests too, run by the test harness, so
+      # no example's main runs.
+      test-command: cargo nextest run --workspace --all-targets --locked --profile ci --no-tests=fail
+      # Every workspace target was in the run above (cargo skips one whose
+      # required-features are off without a word); the arguments must match.
+      post-test-script: scripts/check-test-targets.sh
+      # Broken doc links and stray HTML in doc comments. All features, so the
+      # test fakes behind `fake-fs`, `fake-clock` and the rest are checked too.
+      doc-all-features: true
+
+  scripts:
+    # The scripts' own tests, and the clippy-bans check. None of them builds
+    # Rust.
+    name: Script tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          # sherpa-onnx-sys's cached build bundles the pinned libraries. A
-          # new pin renames their directory, so cargo rebuilds it anyway; a
-          # new cache with each pin keeps old builds from piling up.
-          key: sherpa-onnx-${{ hashFiles('scripts/sherpa-onnx.sh') }}
-      - run: scripts/install-linux-build-deps.sh
       - run: scripts/sherpa-onnx.test.sh
       - run: scripts/check-weakened.test.sh
       - run: scripts/check-files.test.sh
@@ -46,100 +70,6 @@ jobs:
       # Every crate in the lock files is classified in clippy-crates.txt, and
       # what it bans is in clippy.toml.
       - run: scripts/check-clippy-bans.sh
-      # The sherpa-onnx libraries, from the archive pinned by SHA-256; every
-      # build links these (.cargo/config.toml), never an unchecked download.
-      - name: Fetch the pinned sherpa-onnx libraries
-        shell: bash
-        run: scripts/sherpa-onnx.sh
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --locked
-      # Broken doc links and stray HTML in doc comments. All features, so the
-      # test fakes behind `fake-fs`, `fake-clock` and the rest are checked too.
-      - run: cargo doc --no-deps --document-private-items --workspace --all-features --locked
-        env:
-          RUSTDOCFLAGS: -D warnings
-      - uses: crate-ci/typos@00f422f3b19c57bc6338715ebfe3316d38768461 # v1.50.3
-
-  test:
-    name: Tests (Linux)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          # See the lint job.
-          key: sherpa-onnx-${{ hashFiles('scripts/sherpa-onnx.sh') }}
-      # The sherpa-onnx libraries, from the archive pinned by SHA-256; every
-      # build links these (.cargo/config.toml), never an unchecked download.
-      - name: Fetch the pinned sherpa-onnx libraries
-        shell: bash
-        run: scripts/sherpa-onnx.sh
-      - run: scripts/install-linux-build-deps.sh
-      # The engine tests' models and speech fixture. The script checks every
-      # model file against its pinned SHA-256 on each run, cached or not, and
-      # fails on a mismatch. The fixture is generated (text-to-speech from
-      # pinned inputs, then ffmpeg) only when the cache misses.
-      - name: Restore the test models
-        id: test-models
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.local/share/nota/test-models/parakeet-tdt-0.6b-v3-int8
-            ~/.local/share/nota/test-models/silero_vad_v6.onnx
-            ~/.local/share/nota/test-models/fixtures
-          key: test-models-${{ hashFiles('scripts/fetch-test-models.sh', 'crates/nota-engine/tests/fixtures/invented-lecture.txt') }}
-      # After install-linux-build-deps.sh, which updates the package lists.
-      - name: Install ffmpeg for the fixture
-        if: steps.test-models.outputs.cache-hit != 'true'
-        run: sudo apt-get install -y -qq --no-install-recommends ffmpeg
-      - run: scripts/fetch-test-models.sh
-      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
-        with:
-          tool: cargo-nextest
-      # With the variable set, an engine test whose models are missing fails
-      # instead of skipping. --all-targets: examples' unit tests too, run by
-      # the test harness, so no example's main runs.
-      - run: cargo nextest run --workspace --all-targets --locked --profile ci --no-tests=fail
-        env:
-          NOTA_REQUIRE_TEST_MODELS: "1"
-      # Every workspace target was in the run above (cargo skips one whose
-      # required-features are off without a word); the arguments must match.
-      - run: scripts/check-test-targets.sh
-      # nextest does not run doctests.
-      - run: cargo test --workspace --locked --doc
-
-  deps:
-    name: Dependencies (cargo-deny, cargo-shear)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
-        with:
-          arguments: --all-features --locked
-      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
-        with:
-          tool: cargo-shear
-      - run: cargo shear
-
-  workflows:
-    name: Workflow lint (actionlint, zizmor)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: docker://rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
-        with:
-          args: -color
-      - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
-        with:
-          version: 1.30.1
-          advanced-security: false
 
   no-gpl:
     # A nota for distribution links sherpa-onnx without text-to-speech, so no
@@ -154,7 +84,7 @@ jobs:
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          # See the lint job.
+          # See the rust job.
           key: sherpa-onnx-${{ hashFiles('scripts/sherpa-onnx.sh') }}
       - run: scripts/check-no-gpl.test.sh
       # nota links the recorder, whose capture needs PipeWire's and ALSA's
@@ -301,7 +231,7 @@ jobs:
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          # See the lint job.
+          # See the rust job.
           key: sherpa-onnx-${{ hashFiles('scripts/sherpa-onnx.sh') }}
       # The sherpa-onnx libraries, from the archive pinned by SHA-256; every
       # build links these (.cargo/config.toml), never an unchecked download.
@@ -351,7 +281,7 @@ jobs:
       - run: rustup toolchain install && rustup component add llvm-tools-preview
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          # See the lint job.
+          # See the rust job.
           key: sherpa-onnx-${{ hashFiles('scripts/sherpa-onnx.sh') }}
       # The sherpa-onnx libraries, from the archive pinned by SHA-256; every
       # build links these (.cargo/config.toml), never an unchecked download.
