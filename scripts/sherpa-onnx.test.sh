@@ -14,6 +14,8 @@
 #      and removes the old one.
 #   4. It refuses to fill the default directory while .cargo/config.toml
 #      names another.
+#   5. It reuses a checked archive from the shared cache instead of
+#      downloading it, and --if-missing leaves unpacked libraries alone.
 #
 # Requires: what sherpa-onnx.sh requires.
 set -euo pipefail
@@ -26,6 +28,8 @@ trap 'rm -rf "$dir"' EXIT
 mkdir "$dir/real-target"
 ln -s real-target "$dir/target"
 export CARGO_TARGET_DIR=$dir/target
+# The shared archive cache, kept out of the real one.
+export NOTA_SHERPA_CACHE=$dir/cache
 
 status=0
 fail() {
@@ -122,6 +126,7 @@ grep -qx "https://github.com/k2-fsa/sherpa-onnx/releases/download/v[0-9.]*/$name
 [[ -f $dest/$name ]] || fail "didn't keep the archive"
 [[ ! -e $dest/$name.part ]] || fail "left the partial download"
 [[ ! -e $dest/sherpa-onnx-unpack ]] || fail "left the unpacking directory"
+cmp -s "$dest/$name" "$NOTA_SHERPA_CACHE/$name" || fail "didn't keep the archive in the shared cache"
 if [[ $(uname -s)-$(uname -m) == Linux-x86_64 ]]; then
   for stub in espeak-ng piper_phonemize ucd; do
     [[ $(cat "$lib/lib$stub.a") == '!<arch>' ]] || fail "no empty stand-in for lib$stub.a"
@@ -147,6 +152,8 @@ fi
   fail "a new pin kept the directory $moved; builds wouldn't see the change"
 [[ -f $moved/libsherpa-onnx-c-api.a ]] || fail "didn't unpack the new libraries into $moved"
 [[ ! -e $lib ]] || fail "kept the old pin's libraries in $lib"
+grep -q fails "$dir/err" || fail "used the old pin's cached archive without saying it failed the check"
+cmp -s "$dest/$name" "$NOTA_SHERPA_CACHE/$name" || fail "didn't replace the old pin's archive in the shared cache"
 
 # 4. The default directory while .cargo/config.toml names another.
 mkdir -p "$repo/.cargo"
@@ -158,5 +165,21 @@ fi
 grep -q "must set SHERPA_ONNX_LIB_DIR to \"target/sherpa-onnx/${moved##*/}\"" "$dir/err" ||
   fail "expected the directory .cargo/config.toml should name, got: $(cat "$dir/err")"
 [[ ! -e $repo/target ]] || fail "wrote to the default directory before refusing"
+
+# 5. A new directory, as in a new worktree: the cached archive, not a
+# download. Then --if-missing keeps the libraries it finds.
+rm -f "$dir/curl.log"
+fresh=$dir/fresh
+if ! got=$(PATH=$dir/bin:$PATH "$repo/scripts/sherpa-onnx.sh" --if-missing "$fresh" 2>"$dir/err"); then
+  fail "refused the cached archive: $(cat "$dir/err")"
+fi
+[[ $got == "$fresh/${moved##*/}" && -f $got/libsherpa-onnx-c-api.a ]] ||
+  fail "didn't unpack the cached archive into $fresh (printed $got)"
+[[ ! -e $dir/curl.log ]] || fail "downloaded an archive the shared cache had"
+touch "$got/marker"
+if ! kept=$(PATH=$dir/bin:$PATH "$repo/scripts/sherpa-onnx.sh" --if-missing "$fresh" 2>"$dir/err"); then
+  fail "--if-missing failed with the libraries in place: $(cat "$dir/err")"
+fi
+[[ $kept == "$got" && -e $got/marker ]] || fail "--if-missing unpacked the libraries again"
 
 exit "$status"

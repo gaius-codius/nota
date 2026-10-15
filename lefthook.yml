@@ -16,6 +16,15 @@ remotes:
     configs:
       - lefthook/rust.yml
 
+post-checkout:
+  commands:
+    sherpa-onnx:
+      # Builds link the pinned sherpa-onnx libraries from target/, which a new
+      # clone or worktree doesn't have yet (.cargo/config.toml). Unpacks them
+      # when this pin's are missing, from the shared archive cache or a
+      # download; otherwise does nothing.
+      run: scripts/sherpa-onnx.sh --if-missing >/dev/null
+
 pre-commit:
   parallel: true
   commands:

@@ -11,5 +11,4 @@ Open lint and tooling items. One bullet each: what, where, why.
 
 ## Mutation testing
 
-- **`mutants.sh` goes stale in a fresh worktree.** The sherpa-onnx path is not carried over, so `SHERPA_ONNX_LIB_DIR` has to be set by hand. Fix: derive it in the script instead of hard-coding it.
 - **One baseline run failed once, then passed.** An unidentified flaky test. Worth catching when it fails again (keep the log) because a flaky baseline makes mutant results unreliable.
