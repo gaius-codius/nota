@@ -10,9 +10,10 @@ rustflags = ["-C", "target-feature=+crt-static"]
 
 # sherpa-onnx's libraries come from the archive scripts/sherpa-onnx.sh pins
 # by SHA-256 and unpacks here, never from the sys crate's own unchecked
-# download. Run the script once per clone (and after `cargo clean`); until
-# then, builds that link sherpa-onnx fail with "SHERPA_ONNX_LIB_DIR does not
-# exist". An SHERPA_ONNX_LIB_DIR set in the environment wins. Cargo reads
+# download. lefthook's post-checkout hook runs the script in a new clone or
+# worktree; run it by hand without the hooks, and after `cargo clean`. Until
+# it has run, builds that link sherpa-onnx fail with "SHERPA_ONNX_LIB_DIR does
+# not exist". An SHERPA_ONNX_LIB_DIR set in the environment wins. Cargo reads
 # this file only when it runs inside the repo; nota-engine's build script
 # stops a build from elsewhere, where the variable is unset. The directory's
 # name carries a hash of the pins, so a new pin changes the variable and

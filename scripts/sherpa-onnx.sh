@@ -14,9 +14,16 @@
 #
 #   scripts/sherpa-onnx.sh           # then cargo build, test, clippy...
 #
+# lefthook's post-checkout hook runs it with --if-missing, so a new clone or
+# worktree (`git worktree add` checks out, so the hook runs) gets the
+# libraries without a manual step once `lefthook install` has run.
+#
 # Each run checks the archive again, unpacks it afresh and replaces the
 # library directory. The old one is removed first, so after a failed check
-# no library is left for a build to use.
+# no library is left for a build to use. The archive is also kept in a cache
+# shared by every clone and worktree (NOTA_SHERPA_CACHE, default
+# ~/.cache/nota-sherpa-onnx; empty turns it off), so a new worktree doesn't
+# download it again. A cached copy is checked like a download.
 #
 # Cargo bundles the libraries into sherpa-onnx-sys's rlib and reruns its
 # build script only when SHERPA_ONNX_LIB_DIR changes, in each target
@@ -36,12 +43,14 @@
 # default archive, which links GPL text-to-speech code: those builds must not
 # be distributed (no-TTS archives for them are planned).
 #
-# Usage: sherpa-onnx.sh [--no-tts] [--archive-name] [DIR]
+# Usage: sherpa-onnx.sh [--no-tts] [--archive-name] [--if-missing] [DIR]
 #   DIR             download and unpack here (default: target/sherpa-onnx in
 #                   the repo); the archive is kept and reused if it matches
 #   --no-tts        fail unless this platform's pinned archive is the no-TTS
 #                   one (builds for distribution)
 #   --archive-name  print this platform's archive file name and exit
+#   --if-missing    leave this pin's libraries alone if an earlier run
+#                   unpacked them (only a checked archive is ever unpacked)
 # Requires: bash, curl, tar (bzip2), sha256sum or shasum.
 set -euo pipefail
 
@@ -55,11 +64,13 @@ die() {
 
 require_no_tts=0
 print_name=0
+if_missing=0
 dest=
 while [[ $# -gt 0 ]]; do
   case $1 in
     --no-tts) require_no_tts=1 ;;
     --archive-name) print_name=1 ;;
+    --if-missing) if_missing=1 ;;
     -*) die "unknown option: $1" ;;
     *)
       [[ -z $dest ]] || die "more than one DIR given"
@@ -109,6 +120,12 @@ if [[ $require_no_tts -eq 1 && $no_tts -eq 0 ]]; then
   die "no pinned no-TTS archive for $platform"
 fi
 name=sherpa-onnx-v$version-$suffix
+# The library every build links first, to check an archive's layout by.
+if [[ $platform == win-x64 ]]; then
+  first=sherpa-onnx-c-api.lib
+else
+  first=libsherpa-onnx-c-api.a
+fi
 if [[ $print_name -eq 1 ]]; then
   echo "$name.tar.bz2"
   exit 0
@@ -154,6 +171,8 @@ url=https://github.com/k2-fsa/sherpa-onnx/releases/download/v$version/$name.tar.
 archive=$dest/$name.tar.bz2
 lib=$dest/$lib_name
 unpack=$dest/sherpa-onnx-unpack
+cache=${NOTA_SHERPA_CACHE-${XDG_CACHE_HOME:-$HOME/.cache}/nota-sherpa-onnx}
+cached=$cache/$name.tar.bz2
 
 # Drops the libraries an earlier run bundled into sherpa-onnx-sys's rlib:
 # its build output in every profile and target of the target directory
@@ -176,11 +195,36 @@ clean_sys() {
   fi
 }
 
+# Prints the library directory the way the end of the script does.
+print_lib() {
+  # Windows tools want a Windows path (forward slashes work).
+  if command -v cygpath >/dev/null; then
+    cygpath -m "$lib"
+  else
+    echo "$lib"
+  fi
+}
+
+if [[ $if_missing -eq 1 && -f $lib/$first ]]; then
+  print_lib
+  exit 0
+fi
+
 # Nothing is left to link until the archive has passed its check: neither
 # this pin's libraries nor an earlier pin's (nor the checksum stamp that
 # scripts before the pinned directory name kept).
 rm -rf "$dest"/sherpa-onnx-lib "$dest"/sherpa-onnx-lib-* "$dest"/sherpa-onnx-lib.sha256 "$unpack"
 
+# A cached copy that fails the check is dropped, and the archive downloaded.
+if [[ ! -f $archive && -n $cache && -f $cached ]]; then
+  if [[ $(sha256_of "$cached") == "$sha256" ]]; then
+    cp "$cached" "$archive.part"
+    mv "$archive.part" "$archive"
+  else
+    echo "sherpa-onnx.sh: $cached fails the check; removed it" >&2
+    rm -f "$cached"
+  fi
+fi
 if [[ ! -f $archive ]]; then
   curl -fsSL --proto =https --retry 3 --retry-all-errors --connect-timeout 30 -o "$archive.part" "$url"
   mv "$archive.part" "$archive"
@@ -192,14 +236,16 @@ if [[ $got != "$sha256" ]]; then
   die "checksum mismatch for $archive: expected $sha256, got $got; removed it"
 fi
 
+# Keep the checked archive for other clones and worktrees. Best effort: a
+# cache that can't be written doesn't fail the build's setup.
+if [[ -n $cache && ! -f $cached ]]; then
+  { mkdir -p "$cache" && cp "$archive" "$cached.part.$$" && mv "$cached.part.$$" "$cached"; } ||
+    { rm -f "$cached.part.$$"; echo "sherpa-onnx.sh: couldn't cache the archive in $cache" >&2; }
+fi
+
 mkdir "$unpack"
 tar -xjf "$archive" -C "$unpack"
 [[ -d $unpack/$name/lib ]] || die "unexpected archive layout: no $name/lib"
-if [[ $platform == win-x64 ]]; then
-  first=sherpa-onnx-c-api.lib
-else
-  first=libsherpa-onnx-c-api.a
-fi
 [[ -f $unpack/$name/lib/$first ]] || die "unexpected archive layout: no $name/lib/$first"
 if [[ $no_tts -eq 1 ]]; then
   for stub in espeak-ng piper_phonemize ucd; do
@@ -213,9 +259,4 @@ fi
 mv "$unpack/$name/lib" "$lib"
 rm -rf "$unpack"
 
-# Windows tools want a Windows path (forward slashes work).
-if command -v cygpath >/dev/null; then
-  cygpath -m "$lib"
-else
-  echo "$lib"
-fi
+print_lib
