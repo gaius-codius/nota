@@ -52,6 +52,11 @@ const DEFAULT_METADATA: &str = "default";
 const DEFAULT_SINK: &str = "default.audio.sink";
 const DEFAULT_SOURCE: &str = "default.audio.source";
 
+/// The registry property holding a global's serial. Spelled out rather
+/// than taken from `pw::keys`, whose constant is built only with the
+/// crate's `v0_3_41` feature, which nota's dependency doesn't ask for.
+const OBJECT_SERIAL: &str = "object.serial";
+
 /// How long [`Subscription::snapshot`] waits for the server to answer: well over the few
 /// local messages a snapshot takes, short enough that Setup isn't held up
 /// by a server that never answers.
@@ -516,7 +521,7 @@ fn audio_node(id: u32, props: &DictRef) -> Option<Node> {
 /// so a node made again under its old id and name then goes unnoticed.
 fn serial(id: u32, props: &DictRef) -> u64 {
     props
-        .get(*pw::keys::OBJECT_SERIAL)
+        .get(OBJECT_SERIAL)
         .and_then(|serial| serial.parse().ok())
         .unwrap_or_else(|| u64::from(id))
 }
