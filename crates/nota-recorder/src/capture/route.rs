@@ -69,9 +69,8 @@ pub(super) struct Node {
     /// The server's serial for it, which it never gives another node (it
     /// does reuse ids), or the id on a server too old to give one (the
     /// watch's `serial` says so). A node removed and made again under the
-    /// same name,
-    /// as a Bluetooth headset's is when it changes profile, has a new one:
-    /// it's another device, whose audio starts a new epoch.
+    /// same name, as a Bluetooth headset's is when it changes profile, has
+    /// a new one: it's another device, whose audio starts a new epoch.
     pub(super) serial: u64,
 }
 
@@ -312,9 +311,10 @@ impl Route {
             On::Device(was) | On::Missing { was: Some(was), .. } if was.serial == node.serial => {
                 (On::Device(node), None)
             }
-            // The pinned node is gone, and another has its name: made
-            // again between two looks, as only the poll would see it.
-            // The node the stream was on is gone all the same.
+            // The pinned node is gone, and another has its name: one made
+            // again between two looks, as only the poll would see it, or
+            // another node under the same name. Either way the node the
+            // stream was on is gone.
             On::Device(_) if !follows => (On::Lost, Some(DeviceChange::Lost)),
             On::Device(_) | On::Missing { .. } | On::Lost => {
                 let change = DeviceChange::Changed(node.description.clone());
