@@ -43,11 +43,14 @@ jobs:
           tool: cargo-mutants@27.1.0,cargo-nextest
       - env:
           SHARD: ${{ matrix.shard }}
-          # Each test process gets at most 4 GiB of address space. A mutant
-          # that removes a size limit can make a test grow until the runner
-          # runs out of memory and shuts down, losing the shard's report;
-          # capped, the test fails instead and the mutant counts as caught.
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: prlimit --as=4294967296 --
+          # Each test process gets at most 1 GiB of address space. A mutant
+          # that makes a test grow without end (one that keeps the engine's
+          # reader thread queueing after its output ends, say) would
+          # otherwise fill the runner's memory and shut it down, losing the
+          # shard's report; capped, the test fails and the mutant counts as
+          # caught. Two jobs of four tests each stay under the runner's
+          # 16 GB at the cap, and the tests pass under half of it.
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: prlimit --as=1073741824 --
         run: >-
           cargo mutants -p nota-core -p nota-recorder
           --shard "$SHARD/8"

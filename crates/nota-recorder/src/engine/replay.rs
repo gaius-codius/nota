@@ -609,6 +609,25 @@ mod tests {
         assert_eq!(starts(&sent(&mut replay)), [None, Some(50)]);
     }
 
+    /// Text held for audio that a skip drops goes with it: it's never
+    /// released, and the next text starts where the skip ended.
+    #[test]
+    fn a_skip_drops_the_text_held_for_it() {
+        let mut replay = Replay::new(TRACK);
+        replay.push_audio(&chunk(0, 10), SessionTime::ZERO);
+        replay.push_audio(&chunk(10, 10), SessionTime::ZERO);
+        sent(&mut replay);
+        replay.on_transcript(t(0, 5)).unwrap();
+        assert_eq!(
+            replay.skip(SampleCount::new(10)),
+            [SampleRange::new(at(0), at(10)).unwrap()]
+        );
+        // Held text for 0..5 would make this one start in the wrong place,
+        // and be released with it.
+        replay.on_transcript(t(10, 15)).unwrap();
+        assert_eq!(replay.on_confirmed(at(15)).unwrap(), [t(10, 15)]);
+    }
+
     #[test]
     fn a_track_is_idle_from_its_latest_audio_until_flushed() {
         let mut replay = Replay::new(TRACK);
