@@ -610,7 +610,13 @@ class Report:
 
     def say(self, text=""):
         print(text, flush=True)
+        # Flushed per line: the file holds every line printed even if the run
+        # dies before `close`.
         self.file.write(text + "\n")
+        self.file.flush()
+
+    def close(self):
+        self.file.close()
 
     def check(self, ok, text):
         self.say(f"  {'ok  ' if ok else 'FAIL'} {text}")
@@ -1076,10 +1082,21 @@ def case_usb_mic_default(ctx):
         await_present(node, "sources")
 
 
-def follow_through(ctx, events, track, old, now_default, listing):
+def is_new_default(old, old_id, now_default, now_id):
+    """Whether the default after the change is another device than `old`: a
+    different name, or the same name on a new node (a Bluetooth profile change
+    brings the device back under its old name), told by the server's index."""
+    if not now_default:
+        return False
+    return now_default != old or (old_id is not None and now_id is not None and now_id != old_id)
+
+
+def follow_through(ctx, events, track, old, now_default, listing, old_id=None):
     """Where the track ended up is where the server's default is: the last
     device the timeline logged for it is the default after the change, or,
-    if it was lost for good, no default is left (or only the old one)."""
+    if it was lost for good, no default is left (or only the old one).
+    `old_id` is the old device's index on the server, for a device that
+    comes back under the same name."""
     report = ctx.report
     last = [e for e in events if e[1] == track and e[2] in ("device:changed", "device:lost")]
     if not last:
@@ -1087,12 +1104,13 @@ def follow_through(ctx, events, track, old, now_default, listing):
     if last[-1][2] == "device:changed":
         new = description(now_default, listing)
         report.check(
-            bool(now_default) and now_default != old and names_it(last[-1][3], now_default, new),
+            is_new_default(old, old_id, now_default, device_index(listing, now_default) if now_default else None)
+            and names_it(last[-1][3], now_default, new),
             f"the last device logged, {last[-1][3]!r}, is the default after the change ({now_default or 'none'})",
         )
     else:
         report.check(
-            not now_default or now_default == old,
+            not now_default or not is_new_default(old, old_id, now_default, device_index(listing, now_default)),
             f"the track was lost and the server's default afterwards is {now_default or 'none'}, not another device the track missed",
         )
 
@@ -1119,7 +1137,8 @@ def case_bluetooth(ctx):
             report.say(f"  not run: the default output is {have}, not {node}; make the Bluetooth device the default output (this script changes no default unless asked) and run it again")
             ctx.skipped.append("bluetooth")
             return
-    watch = [("sink", device_index("sinks", node))]
+    old_id = device_index("sinks", node)
+    watch = [("sink", old_id)]
     run = Run(ctx, "bluetooth", ["--mic", fixture_name("quiet_mic")])
     run.settle()
 
@@ -1138,7 +1157,7 @@ def case_bluetooth(ctx):
     now_default = ctx.default_sink()
     session, events, anchor, tail = run.finish()
     run.check_changes(events, anchor, {"device:lost", "device:changed"}, TRACK_OF["system"], "the system audio was lost or moved")
-    follow_through(ctx, events, TRACK_OF["system"], node, now_default, "sinks")
+    follow_through(ctx, events, TRACK_OF["system"], node, now_default, "sinks", old_id)
     # The track may be moved to the sink the session manager falls back to
     # (silent here) before the new node: both are recorded, in order.
     if last_device_kind(events, TRACK_OF["system"]) == "device:changed":
@@ -1200,6 +1219,15 @@ def main(argv):
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
 
     report = Report(os.path.join(args.work, "report.txt"))
+    try:
+        return run_cases(args, report, wanted)
+    finally:
+        report.close()
+
+
+def run_cases(args, report, wanted):
+    """Runs the cases, writes the verdict to `report` and returns the exit
+    status."""
     server = Server()
     fixtures = Fixtures(args.work)
     ctx = Context(args, report, server, fixtures)

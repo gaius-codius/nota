@@ -197,6 +197,114 @@ expect(f"the newest session's timeline, in time order, wasn't read: {session} {r
 expect("the first mark wasn't read", dc.first_mark_ns(path) == 4_500_000_000)
 expect("audio_end_s", abs(dc.audio_end_s([0] * 32000, [(0, 0, 0), (1, 16000, 3_000_000_000)]) - 4.0) < 1e-9)
 
+# --- report.txt: whole runs against stubbed cases and server, passing and
+# failing, and one that dies. The file must hold every line printed.
+import contextlib
+import io
+
+
+class NoServer:
+    def close(self):
+        pass
+
+
+class NoFixtures:
+    def __init__(self, *_):
+        pass
+
+    def close(self):
+        pass
+
+
+def full_run(name, cases, argv_cases):
+    out_dir = os.path.join(work, name)
+    os.mkdir(out_dir)
+    dc.CASES = cases
+    dc.Server, dc.Fixtures, dc.server_name = NoServer, NoFixtures, lambda: "stub"
+    buf = io.StringIO()
+    status = error = None
+    with contextlib.redirect_stdout(buf):
+        try:
+            status = dc.main(["private", out_dir, "nota", "--cases", argv_cases])
+        except RuntimeError as e:
+            error = e
+    with open(os.path.join(out_dir, "report.txt"), encoding="utf-8") as f:
+        return status, error, buf.getvalue(), f.read()
+
+
+def case_pass(ctx):
+    ctx.report.say("== pass")
+    ctx.report.check(True, "fine")
+
+
+def case_fail(ctx):
+    ctx.report.say("== fail")
+    ctx.report.check(False, "broken")
+
+
+def case_dies(ctx):
+    ctx.report.say("== dies")
+    raise RuntimeError("boom")
+
+
+status, _, printed, filed = full_run("passing", {"p": case_pass}, "p")
+expect(f"a passing run's exit status was {status}", status == 0)
+expect(f"a passing run's report.txt wasn't what was printed: {filed!r} vs {printed!r}", filed == printed and "PASSED" in filed and "  ok   fine" in filed)
+status, _, printed, filed = full_run("failing", {"p": case_pass, "f": case_fail}, "p,f")
+expect(f"a failing run's exit status was {status}", status == 1)
+expect(f"a failing run's report.txt wasn't what was printed: {filed!r} vs {printed!r}", filed == printed and "FAILED (1):" in filed and "  - broken" in filed)
+status, error, printed, filed = full_run("dying", {"p": case_pass, "d": case_dies}, "p,d")
+expect(f"a run that died lost its error: {error}", isinstance(error, RuntimeError))
+expect(f"a run that died left report.txt short: {filed!r} vs {printed!r}", filed == printed and "== dies" in filed)
+
+# An open report holds every line before it is closed (a run killed past
+# its clean-up still has them).
+r = dc.Report(os.path.join(work, "open.txt"))
+with contextlib.redirect_stdout(io.StringIO()):
+    r.say("one")
+    r.check(False, "two")
+with open(os.path.join(work, "open.txt"), encoding="utf-8") as f:
+    held = f.read()
+r.close()
+expect(f"an unclosed report didn't hold its lines: {held!r}", held == "one\n  FAIL two\n")
+
+# --- a device that comes back under the same name (a Bluetooth profile
+# change) is a new default when the server's index for it is new.
+expect("the same name on a new node wasn't a new default", dc.is_new_default("bz.1", "70", "bz.1", "75") is True)
+expect("the same name on the same node was a new default", dc.is_new_default("bz.1", "70", "bz.1", "70") is False)
+expect("the same name with no indexes was a new default", dc.is_new_default("bz.1", None, "bz.1", None) is False)
+expect("another name wasn't a new default", dc.is_new_default("a", "1", "b", "1") is True)
+expect("no default was a new default", dc.is_new_default("a", "1", "", None) is False)
+
+
+class Ctx:
+    report = None
+
+
+def follow(events, old, now, listing_ids):
+    quiet = Quiet()
+    quiet.said = []
+    ctx = Ctx()
+    ctx.report = quiet
+    real_index, real_desc = dc.device_index, dc.description
+    dc.device_index = lambda listing, node: listing_ids.get(node)
+    dc.description = lambda node, listing="sinks": "Melomania P100 SE"
+    try:
+        dc.follow_through(ctx, events, 1, old, now, "sinks", "70")
+    finally:
+        dc.device_index, dc.description = real_index, real_desc
+    return quiet.said
+
+
+moved = [(1, 1, "device:changed", "Melomania P100 SE")]
+said = follow(moved, "bz.1", "bz.1", {"bz.1": "75"})
+expect(f"a same-name node after a move failed the follow check: {said}", said and said[-1][0] is True)
+said = follow(moved, "bz.1", "bz.1", {"bz.1": "70"})
+expect(f"the old node as the default passed a move's follow check: {said}", said and said[-1][0] is False)
+lost = [(1, 1, "device:lost", None)]
+said = follow(lost, "bz.1", "bz.1", {"bz.1": "75"})
+expect(f"a lost track with a new same-name default passed: {said}", said and said[-1][0] is False)
+
 for failure in failures:
     print(f"device-changes.test.sh: {failure}", file=sys.stderr)
 sys.exit(1 if failures else 0)
