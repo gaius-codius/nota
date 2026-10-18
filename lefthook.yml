@@ -6,16 +6,10 @@
 # A lefthook-local.yml next to this file, if present, adds hooks for one machine.
 #
 # The hooks every gaius-codius Rust project runs the same way (fmt, typos,
-# secrets, workflows; deny, shear) come from rust-ci's lefthook/rust.yml.
-# Its `ref` moves with the rust-ci pin in .github/workflows/ci.yml; run
-# `lefthook install` again after it changes, and check `lefthook dump` lists
-# them.
-# A remote command overrides one of the same name here.
-remotes:
-  - git_url: https://github.com/gaius-codius/rust-ci
-    ref: v3.2.0
-    configs:
-      - lefthook/rust.yml
+# secrets, workflows; deny, shear) and the weakened-checks report before push
+# are shared hooks, installed locally, once per clone and worktree, into the
+# git-ignored lefthook-local.yml. Check that `lefthook dump` lists them.
+# A shared command overrides one of the same name here.
 
 post-checkout:
   commands:
@@ -62,10 +56,3 @@ pre-push:
       run: scripts/check-clippy-bans.test.sh && scripts/check-test-targets.test.sh && scripts/lazyfs-crash.test.sh
     doctest:
       run: cargo test --workspace --locked --doc
-    weakened:
-      # Report only; CI requires an explanation in the PR body.
-      run: |
-        wc=${XDG_CACHE_HOME:-$HOME/.cache}/weakened-checks/v1.3.0
-        [ -x "$wc/check-weakened.sh" ] ||
-          git clone -q --depth 1 -b v1.3.0 https://github.com/gaius-codius/weakened-checks "$wc"
-        if git rev-parse -q --verify origin/main >/dev/null; then "$wc/check-weakened.sh" origin/main HEAD || true; fi
