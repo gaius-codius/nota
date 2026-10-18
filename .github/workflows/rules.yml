@@ -37,4 +37,4 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: gaius-codius/weakened-checks@a4bdd8405c3a21a0e4e2e2ac3b3cf760d36dc3ab # v2.0.0
+      - uses: gaius-codius/weakened-checks@cc325ccc488212c9abbc453557266ba42c0177f8 # v2.1.0
