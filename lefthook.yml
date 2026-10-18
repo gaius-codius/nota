@@ -28,7 +28,7 @@ pre-commit:
     clippy-bans:
       # Every crate in the lock files is classified in clippy-crates.txt.
       run: scripts/check-clippy-bans.sh
-    # Not named `secrets`: rust-ci's command of that name would replace it.
+    # Not named `secrets`: the shared `secrets` hook would replace it.
     secrets-strict:
       run: gitleaks git --pre-commit --staged --no-banner --redact .
 
