@@ -528,7 +528,6 @@ mod linux {
             ],
             &clock,
         );
-        heard.listen(Duration::from_secs(1));
 
         // The followed default switched from A to B.
         let switched = clock.now();
@@ -611,16 +610,42 @@ mod linux {
             is_device(e, &DeviceChange::Changed(SINK_A.1.into()))
         });
         assert!(changed.checked_duration_since(remade).unwrap() <= SHOWN_WITHIN);
+        // The one change told, with no loss or stand-in default before it:
+        // only then does the test tell the node made again apart, rather
+        // than a default renamed and back.
+        let told: Vec<_> = heard
+            .seen
+            .iter()
+            .filter(|(at, t, e)| {
+                *t == Some(SYSTEM)
+                    && (remade..=changed).contains(at)
+                    && matches!(e, RecorderEvent::Device { .. })
+            })
+            .map(|(_, _, e)| e)
+            .collect();
+        assert!(
+            matches!(
+                told[..],
+                [RecorderEvent::Device {
+                    change: DeviceChange::Changed(_),
+                    ..
+                }]
+            ),
+            "the instance took another path than a node made again: {told:?}"
+        );
         let after = heard.audio_events_after(SYSTEM, changed);
         let until = clock.now().checked_add(PATIENCE).unwrap();
         while heard.audio_events_after(SYSTEM, changed) == after {
             assert!(clock.now() < until, "nothing recorded from the new sink");
             heard.listen(Duration::from_millis(100));
         }
+        // One epoch, however late: its overrun here measures how far the
+        // monitor stream's first epoch was misdated (about 500 ms on
+        // `PipeWire` 1.6, GAI-489), not where this one starts.
         let reopened = heard.reopenings(SYSTEM, remade);
         assert!(
-            matches!(reopened.first(), Some(Ok(_))),
-            "the new sink opened no epoch: {reopened:?}"
+            matches!(reopened[..], [Ok(_)]),
+            "the new sink opened not one epoch but {reopened:?}"
         );
 
         drop(streams);

@@ -368,13 +368,15 @@ fn a_followed_node_made_again_under_its_name_is_a_change() {
     let switched = ms(4_000);
     made_again(&mut registry, switched, 71, 171);
     registry.run_to(ms(9_000));
-    let seen = registry.seen_after(switched);
-    assert_eq!(seen, [(Duration::from_millis(300), changed("Headset"))]);
-    assert!(seen[0].0 <= SHOWN_WITHIN);
+    assert_eq!(
+        registry.seen_after(switched),
+        [(Duration::from_millis(300), changed("Headset"))]
+    );
 }
 
-/// The server may give the node made again the id the old one had: its
-/// serial still says it's another device.
+/// The server may give the node made again the id the old one had, so the
+/// graph replaces it under the same key: its serial, not its id or name,
+/// still says it's another device.
 #[test]
 fn a_node_made_again_under_its_old_id_is_a_change() {
     let mut registry = FakeRegistry::new(Source::SystemAudio, with_headset());
@@ -434,6 +436,43 @@ fn a_pinned_node_replaced_between_looks_is_lost_for_good() {
     );
 }
 
+/// Another node under the track's device's name, at a lower id than it
+/// (the server doesn't keep names unique, and reuses ids), isn't a change:
+/// the node the track is on is still there.
+#[test]
+fn another_node_under_the_same_name_is_nothing() {
+    for source in [
+        Source::SystemAudio,
+        Source::Device("bluez_output.AA_BB.1".into()),
+    ] {
+        let mut registry = FakeRegistry::new(source.clone(), with_headset());
+        registry.at(
+            ms(1_000),
+            added(12, sink("bluez_output.AA_BB.1", "Loopback")),
+        );
+        registry.run_to(ms(4_000));
+        assert_eq!(registry.seen, [], "{source:?}");
+    }
+}
+
+/// Of two nodes under a default's name, the one the track was on going
+/// leaves the other: a change to it, at once.
+#[test]
+fn the_node_it_was_on_going_moves_it_to_another_under_the_name() {
+    let mut registry = FakeRegistry::new(Source::SystemAudio, with_headset());
+    registry.at(
+        ms(1_000),
+        added(80, sink("bluez_output.AA_BB.1", "Loopback")),
+    );
+    let gone = ms(2_000);
+    registry.at(gone, GraphEvent::Removed { id: 70 });
+    registry.run_to(ms(5_000));
+    assert_eq!(
+        registry.seen_after(gone),
+        [(Duration::ZERO, changed("Loopback"))]
+    );
+}
+
 /// The poll's fresh copy of an unchanged graph holds the same nodes under
 /// the same serials: taking it in is nothing to tell.
 #[test]
@@ -473,9 +512,9 @@ fn a_default_names_only_its_own_kind() {
     let mut graph = Graph::default();
     graph.apply(added(1, source("same-name", "A source")));
     graph.apply(default(Class::Sink, "same-name"));
-    assert_eq!(graph.device(&Source::SystemAudio), None);
+    assert_eq!(graph.device(&Source::SystemAudio, None), None);
     assert_eq!(
-        graph.device(&Source::Device("same-name".into())),
+        graph.device(&Source::Device("same-name".into()), None),
         Some(&Node {
             serial: 1,
             ..source("same-name", "A source")

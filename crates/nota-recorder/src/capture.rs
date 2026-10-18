@@ -511,10 +511,15 @@ impl Held {
 /// only one reports opens one too.
 ///
 /// The reopening is the first buffer sent after the first report: the old
-/// device's buffers sent before stay in the old epoch. Both reports come
-/// from the server's `default` metadata, which the session manager
-/// changes before it moves the stream; on `PipeWire`, the next buffer is
-/// the new device's (`scripts/pipewire-devices.sh` checks it).
+/// device's buffers sent before stay in the old epoch. When the default
+/// switches, both reports come from the server's `default` metadata,
+/// which the session manager changes before it moves the stream; on
+/// `PipeWire`, the next buffer is the new device's
+/// (`scripts/pipewire-devices.sh` checks it). A node made again under the
+/// default's own name may leave the metadata as it was; then only the
+/// watch reports it, from the registry, as the new node appears. Which
+/// buffer comes next is then up to the session manager: the script checks
+/// that the change opens one epoch, not where it starts.
 #[derive(Debug)]
 struct Reroutes {
     /// When the stream last reported a change the watch hasn't, in session

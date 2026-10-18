@@ -67,7 +67,9 @@ pub(super) struct Node {
     /// What it is.
     pub(super) class: Class,
     /// The server's serial for it, which it never gives another node (it
-    /// does reuse ids). A node removed and made again under the same name,
+    /// does reuse ids), or the id on a server too old to give one (the
+    /// watch's `serial` says so). A node removed and made again under the
+    /// same name,
     /// as a Bluetooth headset's is when it changes profile, has a new one:
     /// it's another device, whose audio starts a new epoch.
     pub(super) serial: u64,
@@ -130,16 +132,23 @@ impl Graph {
 
     /// The node `source` captures now, if there is one: the default sink or
     /// source it follows, or the node it's pinned to. A default that names
-    /// a node not (or no longer) in the graph is none.
-    pub(super) fn device(&self, source: &Source) -> Option<&Node> {
+    /// a node not (or no longer) in the graph is none. The server doesn't
+    /// keep node names unique: of several under the name, the one with the
+    /// serial `on` (the node the track is on) is it while it's there.
+    pub(super) fn device(&self, source: &Source, on: Option<u64>) -> Option<&Node> {
         let (name, class) = match source {
             Source::SystemAudio => (self.default_sink.as_deref()?, Some(Class::Sink)),
             Source::Microphone => (self.default_source.as_deref()?, Some(Class::Source)),
             Source::Device(name) => (name.as_str(), None),
         };
-        self.nodes
-            .values()
-            .find(|node| node.name == name && class.is_none_or(|class| node.class == class))
+        let named = || {
+            self.nodes
+                .values()
+                .filter(move |node| node.name == name && class.is_none_or(|c| node.class == c))
+        };
+        named()
+            .find(|node| Some(node.serial) == on)
+            .or_else(|| named().next())
     }
 
     /// The sinks and sources the graph holds, and its defaults, as Setup
@@ -164,8 +173,12 @@ impl Graph {
         Devices {
             outputs: of(Class::Sink),
             inputs: of(Class::Source),
-            default_output: self.device(&Source::SystemAudio).map(|n| n.name.clone()),
-            default_input: self.device(&Source::Microphone).map(|n| n.name.clone()),
+            default_output: self
+                .device(&Source::SystemAudio, None)
+                .map(|n| n.name.clone()),
+            default_input: self
+                .device(&Source::Microphone, None)
+                .map(|n| n.name.clone()),
         }
     }
 }
@@ -187,6 +200,20 @@ enum On {
     },
     /// No device: lost. For a pinned track, for good.
     Lost,
+}
+
+impl On {
+    /// The serial of the node the track is on, or was on before it went
+    /// missing.
+    const fn serial(&self) -> Option<u64> {
+        match self {
+            Self::Device(node)
+            | Self::Missing {
+                was: Some(node), ..
+            } => Some(node.serial),
+            Self::Unseen | Self::Missing { was: None, .. } | Self::Lost => None,
+        }
+    }
 }
 
 /// A moment a route looks at: the session time, and the clock's count of
@@ -257,8 +284,9 @@ impl Route {
     /// doesn't count towards a missing default's grace: a device swapped
     /// as the machine slept is named again as it wakes.
     pub(super) fn look(&mut self, graph: &Graph, now: Moment) -> Option<Changes> {
+        let serial = self.on.serial();
         let on = std::mem::replace(&mut self.on, On::Unseen);
-        let (on, change) = match graph.device(&self.source).cloned() {
+        let (on, change) = match graph.device(&self.source, serial).cloned() {
             Some(node) => {
                 let (on, change) = self.found(on, node);
                 (on, change.map(|change| (change, now.at)))
@@ -284,9 +312,9 @@ impl Route {
             On::Device(was) | On::Missing { was: Some(was), .. } if was.serial == node.serial => {
                 (On::Device(node), None)
             }
-            // The pinned node went and came back under its name between
-            // two looks, as only the poll would see it: the node the
-            // stream was on is gone all the same.
+            // The pinned node is gone, and another has its name: made
+            // again between two looks, as only the poll would see it.
+            // The node the stream was on is gone all the same.
             On::Device(_) if !follows => (On::Lost, Some(DeviceChange::Lost)),
             On::Device(_) | On::Missing { .. } | On::Lost => {
                 let change = DeviceChange::Changed(node.description.clone());
