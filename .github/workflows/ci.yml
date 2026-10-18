@@ -206,6 +206,8 @@ jobs:
         env:
           SHARD: ${{ strategy.job-index }}
           SHARDS: ${{ strategy.job-total }}
+          # Caps each test process's memory, as in mutants.yml.
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: prlimit --as=4294967296 --
         run: >-
           cargo mutants --in-diff "$RUNNER_TEMP/pr.diff"
           -p nota-core -p nota-recorder
