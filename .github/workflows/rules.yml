@@ -1,13 +1,12 @@
 # Repo rules that aren't about the code itself: no recordings or large files,
 # and no silent weakening of checks. Separate from CI so editing a PR's body
-# re-runs only this. The secrets scan is the shared "rust / secrets" job in
-# ci.yml. Editing a closed PR's text runs nothing: its
-# branch may be gone, and nothing on it needs checking any more.
+# re-runs only this. Both jobs are about a pull request, so nothing runs on a
+# push to main. The secrets scan is the shared "rust / secrets" job in ci.yml.
+# Editing a closed PR's text runs nothing: its branch may be gone, and nothing
+# on it needs checking any more.
 name: Repo rules
 
 on:
-  push:
-    branches: [main]
   pull_request:
     types: [opened, synchronize, reopened, edited]
 
