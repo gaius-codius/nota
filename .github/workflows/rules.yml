@@ -37,7 +37,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: gaius-codius/weakened-checks@1cfd71c36cc09c744740bf9dd9677991ea5aed77 # v1.0.0
+      - uses: gaius-codius/weakened-checks@071f467393341b483e1827e0d63c7d02e96fb801 # v1.3.0
 
   secrets:
     name: No secrets (gitleaks)
