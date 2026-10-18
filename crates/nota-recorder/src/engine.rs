@@ -1241,6 +1241,90 @@ mod tests {
         );
     }
 
+    /// Each engine started gets a generation of its own, so what an engine
+    /// killed before it sends is never taken for the new one's.
+    #[test]
+    fn each_engine_started_has_a_new_generation() {
+        let (mut supervisor, _, _) = supervisor("cat");
+        supervisor.spawn();
+        let first = supervisor.running();
+        // Dropping the running engine kills it, as a restart does.
+        supervisor.phase = Phase::Waiting(supervisor.clock.now());
+        supervisor.spawn();
+        assert_eq!((first, supervisor.running()), (Some(1), Some(2)));
+    }
+
+    /// A supervisor running engine number 2, `cat`, with ten samples on
+    /// track 0 sent to it and unconfirmed. `cat` answers only by echoing
+    /// the hello, and its output ends once its stdin closes.
+    fn draining() -> (Supervisor, Sender<Input>, Receiver<Input>, Running) {
+        let (mut supervisor, inputs, rx) = supervisor("cat");
+        supervisor.generation = 2;
+        let running = start_child(&supervisor.config.command, 2, &inputs).unwrap();
+        let track = TrackId::new(0);
+        let chunk =
+            AudioChunk::new(track, SampleIndex::ZERO, SampleRate::SPEECH, vec![0; 10]).unwrap();
+        let now = supervisor.clock.now();
+        let mut replay = Replay::new(track);
+        replay.push_audio(&chunk, now);
+        replay.take_unsent(now);
+        supervisor.tracks.insert(track, replay);
+        (supervisor, inputs, rx, running)
+    }
+
+    /// While a stop drains the engine's last replies, what an engine
+    /// already killed sends is ignored: its output ending doesn't end the
+    /// drain, and its replies aren't checked.
+    #[test]
+    fn a_stop_draining_the_engine_ignores_an_older_engine() {
+        let (mut supervisor, inputs, rx, running) = draining();
+        let confirm = |generation, track| Input::Engine {
+            generation,
+            event: FromChild::Frame(Frame::Message(FromEngine::Confirmed {
+                track: TrackId::new(track),
+                up_to: SampleIndex::new(10),
+            })),
+        };
+        // The older engine's end, and a reply about a track it never had,
+        // which from the running engine would end the drain as a fault.
+        // Then the running engine's confirmation, which must still count.
+        for input in [
+            Input::Engine {
+                generation: 1,
+                event: FromChild::End,
+            },
+            confirm(1, 9),
+            confirm(2, 0),
+        ] {
+            inputs.send(input).unwrap();
+        }
+        let far = supervisor
+            .clock
+            .now()
+            .checked_add(Duration::from_secs(10))
+            .unwrap();
+        supervisor.drain(running, &rx, far);
+        assert!(!supervisor.unconfirmed());
+    }
+
+    /// A stop's drain ends as soon as the engine's output does, without
+    /// waiting out the grace an engine with nothing left to confirm gets.
+    #[test]
+    fn a_stop_ends_when_the_engines_output_ends() {
+        let (mut supervisor, _inputs, rx, running) = draining();
+        supervisor.tracks.clear();
+        let start = supervisor.clock.now();
+        let far = start.checked_add(Duration::from_secs(10)).unwrap();
+        supervisor.drain(running, &rx, far);
+        let took = supervisor
+            .clock
+            .now()
+            .checked_duration_since(start)
+            .unwrap();
+        // `cat` exits as soon as its stdin closes; the grace is 3 s.
+        assert!(took < SHUTDOWN_GRACE, "{took:?}");
+    }
+
     #[test]
     fn an_engine_already_taken_is_not_waited_for() {
         assert_eq!(reap(&Mutex::new(None)), None);

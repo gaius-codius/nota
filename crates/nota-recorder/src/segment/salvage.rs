@@ -1167,6 +1167,8 @@ mod tests {
     use nota_store::{AudioDigest, Sha256Digest};
 
     use super::*;
+    use crate::fs::fake::FakeFs;
+    use crate::segment::plan::Part;
 
     #[test]
     fn a_row_is_proven_by_its_audio_or_before_audio_digests_by_its_file() {
@@ -1207,6 +1209,31 @@ mod tests {
                 &legacy(at(0, 300), other).with_audio(AudioDigest::new([1; 32]))
             ),
             Err(Problem::HashMismatch)
+        );
+    }
+
+    /// A journal gone by the time its segment is encoded, after it read
+    /// when the segment was planned, stops the run as changed: something
+    /// else is writing to the session. It isn't a failed read.
+    #[test]
+    fn a_journal_gone_when_its_segment_is_encoded_is_changed() {
+        let dir = Path::new("/session");
+        // The session's directory, without the journal the plan names.
+        let fs = FakeFs::with_dirs([dir]);
+        let journal = JournalId::new(3);
+        let range = SampleRange::new(SampleIndex::ZERO, SampleIndex::new(100)).unwrap();
+        let segment = PlannedSegment {
+            track: TrackId::new(0),
+            epoch: EpochId::new(0),
+            rate: SampleRate::SPEECH,
+            anchor: None,
+            range,
+            parts: vec![Part { journal, range }],
+        };
+        let err = encode(&fs, dir, &segment).unwrap_err();
+        assert!(
+            matches!(err, PublishError::Changed(id) if id == journal),
+            "{err}"
         );
     }
 }

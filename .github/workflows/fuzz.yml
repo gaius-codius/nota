@@ -76,3 +76,37 @@ jobs:
         with:
           name: fuzz-crashes-${{ matrix.target }}
           path: fuzz/out-${{ matrix.target }}
+
+  report-failure:
+    # A red run opens an issue labelled fuzz-weekly, or comments on the open
+    # one, as mutants.yml does: GitHub emails a scheduled run's failure only to
+    # whoever last changed this file. A green or cancelled run skips this job.
+    name: Report a failed run
+    needs: fuzz
+    if: >-
+      !cancelled() && needs.fuzz.result != 'success'
+      && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write # to open or comment on the failure issue and its label
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REF: ${{ github.ref_name }}
+        run: |
+          gh label create fuzz-weekly --force --color B60205 \
+            --description "A weekly fuzz run failed"
+          body="[Fuzz run]($RUN_URL) on \`$REF\` failed. A target's crashes are in
+          its fuzz-crashes-TARGET artifact; fuzz/README.md says how to turn one
+          into a test."
+          open=$(gh issue list --label fuzz-weekly --state open --limit 1 \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$open" ]; then
+            gh issue comment "$open" --body "$body"
+          else
+            gh issue create --title "Weekly fuzz run failed" \
+              --label fuzz-weekly --body "$body"
+          fi

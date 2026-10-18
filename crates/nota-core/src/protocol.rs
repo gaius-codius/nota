@@ -907,6 +907,50 @@ mod tests {
         }
     }
 
+    /// A stream cut inside a length prefix ends truncated, even when the
+    /// bytes that came would read as a zero length.
+    #[test]
+    fn a_cut_prefix_is_truncated_even_if_it_reads_as_zero() {
+        // The first byte of a 256-byte body's prefix, `[0, 1, 0, 0]`: zero,
+        // like the three that never came. Read as a whole prefix, it would
+        // be an empty frame, refused as a bad body rather than a cut one.
+        let bytes = [0_u8];
+        let mut reader = FrameReader::new(&bytes[..]);
+        assert!(matches!(
+            reader.read_frame::<FromEngine>(),
+            Err(ReadError::Truncated)
+        ));
+    }
+
+    /// A frame is handed over once its last byte has come, without asking
+    /// the stream for more: a stream that breaks right after a frame still
+    /// gives that frame.
+    #[test]
+    fn a_whole_frame_is_read_without_asking_the_stream_for_more() {
+        /// The bytes, then a broken pipe on any read after the last of them.
+        struct BreaksWhenDone<'a>(&'a [u8]);
+        impl Read for BreaksWhenDone<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if self.0.is_empty() {
+                    return Err(io::Error::from(io::ErrorKind::BrokenPipe));
+                }
+                self.0.read(buf)
+            }
+        }
+        let frame = Frame::Message(FromEngine::Confirmed {
+            track: TrackId::new(1),
+            up_to: SampleIndex::new(300),
+        });
+        let bytes = encode(&frame).unwrap();
+        let mut reader = FrameReader::new(BreaksWhenDone(&bytes));
+        assert_eq!(reader.read_frame::<FromEngine>().unwrap(), Some(frame));
+        // The next read reaches the break.
+        assert!(matches!(
+            reader.read_frame::<FromEngine>(),
+            Err(ReadError::Io(_))
+        ));
+    }
+
     #[test]
     fn write_frame_writes_the_encoding() {
         let frame = Frame::Message(ToEngine::Flush {

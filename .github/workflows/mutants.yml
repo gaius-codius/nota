@@ -43,6 +43,14 @@ jobs:
           tool: cargo-mutants@27.1.0,cargo-nextest
       - env:
           SHARD: ${{ matrix.shard }}
+          # Each test process gets at most 1 GiB of address space. A mutant
+          # that makes a test grow without end (one that keeps the engine's
+          # reader thread queueing after its output ends, say) would
+          # otherwise fill the runner's memory and shut it down, losing the
+          # shard's report; capped, the test fails and the mutant counts as
+          # caught. Two jobs of four tests each stay under the runner's
+          # 16 GB at the cap, and the tests pass under half of it.
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: prlimit --as=1073741824 --
         run: >-
           cargo mutants -p nota-core -p nota-recorder
           --shard "$SHARD/8"
@@ -52,3 +60,40 @@ jobs:
         with:
           name: mutants-shard-${{ matrix.shard }}
           path: ${{ runner.temp }}/mutants.out
+
+  report-failure:
+    # A red run opens an issue labelled mutants-weekly, or comments on the
+    # open one, so it doesn't go unseen: GitHub emails a scheduled run's
+    # failure only to whoever last changed this file. A green run skips this
+    # job, and so does a cancelled one. A shard that times out counts as
+    # failed.
+    name: Report a failed run
+    needs: mutants
+    if: >-
+      !cancelled() && needs.mutants.result != 'success'
+      && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write # to open or comment on the failure issue and its label
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REF: ${{ github.ref_name }}
+        run: |
+          gh label create mutants-weekly --force --color B60205 \
+            --description "A weekly mutation testing run failed"
+          body="[Mutation testing run]($RUN_URL) on \`$REF\` failed. Each shard's
+          missed and timed-out mutants are in its mutants-shard-N artifact
+          (missed.txt, timeout.txt); a shard that stopped without one lists them
+          in its log."
+          open=$(gh issue list --label mutants-weekly --state open --limit 1 \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$open" ]; then
+            gh issue comment "$open" --body "$body"
+          else
+            gh issue create --title "Weekly mutation testing failed" \
+              --label mutants-weekly --body "$body"
+          fi

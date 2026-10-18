@@ -1,5 +1,21 @@
 # cargo-mutants (the PR job in ci.yml, the weekly run in mutants.yml).
 
+# Test doubles and test harnesses aren't mutated: they exist only for the
+# tests, which check the recorder against them, so a mutant in them shows
+# what the double happens not to need, not a gap in what nota does. They
+# build only for tests or behind the test-only features (fake-fs,
+# fake-engine, fake-clock), which nothing enables outside dev-dependencies:
+# the fake filesystem and its crash and sweep harnesses (fs/fake.rs,
+# fs/crash.rs, fs/sweep.rs), the fake speech engine (bin/nota-fake-engine.rs),
+# and the inline `fake` modules below in exclude_re (FakeClock in
+# nota-core's clock.rs, FakeStore in segment/store.rs).
+exclude_globs = [
+  "crates/nota-recorder/src/fs/fake.rs",
+  "crates/nota-recorder/src/fs/crash.rs",
+  "crates/nota-recorder/src/fs/sweep.rs",
+  "crates/nota-recorder/src/bin/nota-fake-engine.rs",
+]
+
 # The PipeWire stream's Debug impl only names the type, and a test would need
 # a running PipeWire to make one.
 #
@@ -27,7 +43,33 @@
 # PlainStream's Debug impl. Nothing runs them until the real PulseAudio run
 # on M7's VM (GAI-207). What they decide, from the device split and names to
 # the host choice, is in functions with unit tests; those stay mutated.
+#
+# cargo-mutants edits the source whatever its cfg, so a mutant in a function
+# built only off Linux changes nothing CI's Linux runners build, and no test
+# there can catch it: the other platforms' monotonic_now in nota-core's
+# clock.rs, and sync_dir in fs/real.rs. Each is named by its line, since its
+# Linux twin has the same name and the same mutants; if the function moves,
+# move the line here too.
+#
+# Some mutants change nothing nota does:
+# - EngineSupervisor::shutdown takes the supervisor, and dropping it stops
+#   it the same way (its Drop calls the same stop), so an empty shutdown
+#   still stops it.
+# - With Supervisor::next_deadline always at session time zero, the
+#   supervisor's loop never waits: it checks its deadlines and inputs over
+#   and over, and does the same things at the same times, only spinning a
+#   core. No test can tell that apart without timing the thread.
+# - flacenc writes a source's len_hint as the file's total sample count,
+#   and otherwise counts the samples it read. Runs reads exactly the total
+#   it hints, so the file is the same either way.
+# - In Replay::sent_run_end, each sent audio entry starts where the one
+#   before it ended unless a flush comes between: push_audio flushes before
+#   any jump, and skips and confirmations cut only from the front. The check
+#   guards that order, so with it replaced by `true` the run ends in the
+#   same place.
 exclude_re = [
+  # The inline test doubles; see exclude_globs above.
+  "(nota-core/src/clock|nota-recorder/src/segment/store)\\.rs:.* fake::",
   "pipewire/watch\\.rs:.*(impl std::fmt::Debug for Watch>|impl Drop for Watch>|replace watch -> | run -> | in run$|Watcher::|Subscription::)",
   "impl .*Debug for PipeWireStream",
   "alsa\\.rs:.*replace host -> ",
@@ -37,4 +79,10 @@ exclude_re = [
   "replace promote_current_thread -> bool with false",
   "replace <impl Clock for SystemClock>::suspended -> Duration with Default::default\\(\\)",
   "replace asleep_now -> Duration with Default::default\\(\\)",
+  "nota-core/src/clock\\.rs:200:5: replace monotonic_now -> ",
+  "nota-recorder/src/fs/real\\.rs:348:5: replace sync_dir -> ",
+  "replace EngineSupervisor::shutdown with \\(\\)$",
+  "replace Supervisor::next_deadline -> Option<SessionTime> with Some\\(Default::default\\(\\)\\)$",
+  "replace <impl Source for Runs<'_>>::len_hint -> Option<usize> with None$",
+  "replace match guard end\\.is_none_or\\(\\|end\\| end == chunk\\.range\\(\\)\\.start\\(\\)\\) with true in Replay::sent_run_end$",
 ]
