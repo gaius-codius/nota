@@ -504,11 +504,11 @@ impl Held {
 /// ([`DeviceChange::Changed`]). Either may be missing (cpal reports a
 /// failed watch of its own as a warning), late (the watch's poll catches
 /// what its events missed about a second after), or report a change the
-/// other doesn't (a default swapped within the watch's grace). So a report
-/// is the same change as the other source's last one if that came within
-/// [`SAME_CHANGE`] before it and isn't already paired; otherwise it's a new
-/// change, and the audio reopens for it. A change both report opens one
-/// epoch, in either order, and a change only one reports opens one too.
+/// other doesn't. So a report is the same change as the other source's
+/// last one if that came within [`SAME_CHANGE`] before it and isn't
+/// already paired; otherwise it's a new change, and the audio reopens for
+/// it. A change both report opens one epoch, in either order, and a change
+/// only one reports opens one too.
 ///
 /// The reopening is the first buffer sent after the first report: the old
 /// device's buffers sent before stay in the old epoch. Both reports come

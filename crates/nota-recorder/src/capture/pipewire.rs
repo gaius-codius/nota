@@ -47,7 +47,7 @@ use super::{
     CaptureBackend, CaptureError, CaptureNotice, CaptureSender, Delivery, Devices, Source,
 };
 
-mod watch;
+pub(super) mod watch;
 
 /// The `SCHED_FIFO` priority the callback's thread asks for: `PipeWire`'s
 /// default for client threads, below its own (88).

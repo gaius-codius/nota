@@ -15,19 +15,35 @@ const fn ms(ms: u64) -> SessionTime {
     SessionTime::from_nanos(ms * 1_000_000)
 }
 
+/// A sink, its serial given by [`added`].
 fn sink(name: &str, description: &str) -> Node {
     Node {
         name: name.to_owned(),
         description: description.to_owned(),
         class: Class::Sink,
+        serial: 0,
     }
 }
 
+/// A source, its serial given by [`added`].
 fn source(name: &str, description: &str) -> Node {
     Node {
         name: name.to_owned(),
         description: description.to_owned(),
         class: Class::Source,
+        serial: 0,
+    }
+}
+
+/// `node` added under the id `id`, with that as its serial too, as
+/// `PipeWire` gives them until it starts reusing ids.
+fn added(id: u32, node: Node) -> GraphEvent {
+    GraphEvent::Added {
+        id,
+        node: Node {
+            serial: u64::from(id),
+            ..node
+        },
     }
 }
 
@@ -148,18 +164,9 @@ const LOST_FOR_GOOD: Told = Told {
 /// Two sinks, speakers the default, and a microphone.
 fn desk() -> Vec<GraphEvent> {
     vec![
-        GraphEvent::Added {
-            id: 40,
-            node: sink("alsa_output.speakers", "Speakers"),
-        },
-        GraphEvent::Added {
-            id: 41,
-            node: sink("alsa_output.headphones", "Headphones"),
-        },
-        GraphEvent::Added {
-            id: 50,
-            node: source("alsa_input.builtin", "Built-in Microphone"),
-        },
+        added(40, sink("alsa_output.speakers", "Speakers")),
+        added(41, sink("alsa_output.headphones", "Headphones")),
+        added(50, source("alsa_input.builtin", "Built-in Microphone")),
         default(Class::Sink, "alsa_output.speakers"),
         default(Class::Source, "alsa_input.builtin"),
     ]
@@ -189,10 +196,7 @@ fn a_pinned_device_removed_is_lost_for_good() {
     // Plugged back in: still lost, the stream is gone.
     registry.at(
         ms(6_000),
-        GraphEvent::Added {
-            id: 42,
-            node: sink("alsa_output.headphones", "Headphones"),
-        },
+        added(42, sink("alsa_output.headphones", "Headphones")),
     );
     registry.run_to(ms(10_000));
     assert_eq!(
@@ -204,10 +208,7 @@ fn a_pinned_device_removed_is_lost_for_good() {
 /// A USB microphone and the built-in one, the USB one the default.
 fn with_usb_mic() -> Vec<GraphEvent> {
     let mut setup = desk();
-    setup.push(GraphEvent::Added {
-        id: 60,
-        node: source("alsa_input.usb-mic", "USB Microphone"),
-    });
+    setup.push(added(60, source("alsa_input.usb-mic", "USB Microphone")));
     setup.push(default(Class::Source, "alsa_input.usb-mic"));
     setup
 }
@@ -250,10 +251,7 @@ fn a_pinned_usb_mic_unplugged_is_lost() {
 /// the default input's sibling.
 fn with_headset() -> Vec<GraphEvent> {
     let mut setup = desk();
-    setup.push(GraphEvent::Added {
-        id: 70,
-        node: sink("bluez_output.AA_BB.1", "Headset (A2DP)"),
-    });
+    setup.push(added(70, sink("bluez_output.AA_BB.1", "Headset (A2DP)")));
     setup.push(default(Class::Sink, "bluez_output.AA_BB.1"));
     setup
 }
@@ -265,10 +263,7 @@ fn profile_change(registry: &mut FakeRegistry, from: SessionTime) {
     registry.at(from, GraphEvent::Removed { id: 70 });
     registry.at(
         from.checked_add(Duration::from_millis(150)).unwrap(),
-        GraphEvent::Added {
-            id: 71,
-            node: sink("bluez_output.AA_BB.0", "Headset (HFP)"),
-        },
+        added(71, sink("bluez_output.AA_BB.0", "Headset (HFP)")),
     );
     registry.at(
         from.checked_add(Duration::from_millis(400)).unwrap(),
@@ -315,13 +310,7 @@ fn a_followed_default_that_stays_missing_is_lost_then_changed() {
     let mut registry = FakeRegistry::new(Source::Microphone, desk());
     let removed = ms(1_000);
     registry.at(removed, GraphEvent::Removed { id: 50 });
-    registry.at(
-        ms(5_000),
-        GraphEvent::Added {
-            id: 51,
-            node: source("alsa_input.webcam", "Webcam"),
-        },
-    );
+    registry.at(ms(5_000), added(51, source("alsa_input.webcam", "Webcam")));
     registry.at(ms(5_100), default(Class::Source, "alsa_input.webcam"));
     let seen = registry.seen_after(removed);
     let lost = Told {
@@ -338,21 +327,132 @@ fn a_followed_default_that_stays_missing_is_lost_then_changed() {
     );
 }
 
-/// A followed default that goes and comes back as the same device within
-/// the grace is nothing.
+/// A followed default cleared and named again within the grace, its node
+/// never gone, is nothing: the track was on that node throughout.
 #[test]
-fn a_default_that_blinks_is_nothing() {
+fn a_default_named_again_within_the_grace_is_nothing() {
     let mut registry = FakeRegistry::new(Source::SystemAudio, desk());
-    registry.at(ms(1_000), GraphEvent::Removed { id: 40 });
     registry.at(
-        ms(1_500),
-        GraphEvent::Added {
-            id: 43,
-            node: sink("alsa_output.speakers", "Speakers"),
+        ms(1_000),
+        GraphEvent::Default {
+            class: Class::Sink,
+            name: None,
         },
     );
+    registry.at(ms(1_500), default(Class::Sink, "alsa_output.speakers"));
     registry.run_to(ms(6_000));
     assert_eq!(registry.seen, []);
+}
+
+/// The headset's A2DP node, the followed default, removed and made again
+/// under the same name in its call profile, as `PipeWire` does: the
+/// default never changes name, but the track is on another device. It's
+/// a change, told when the new node comes, with no "lost" on the way.
+fn made_again(registry: &mut FakeRegistry, from: SessionTime, id: u32, serial: u64) {
+    registry.at(from, GraphEvent::Removed { id: 70 });
+    let node = Node {
+        serial,
+        ..sink("bluez_output.AA_BB.1", "Headset")
+    };
+    registry.at(
+        from.checked_add(Duration::from_millis(300)).unwrap(),
+        GraphEvent::Added { id, node },
+    );
+}
+
+/// GAI-487: a followed node removed and made again under its own name is
+/// a change to it, within the 2 s.
+#[test]
+fn a_followed_node_made_again_under_its_name_is_a_change() {
+    let mut registry = FakeRegistry::new(Source::SystemAudio, with_headset());
+    let switched = ms(4_000);
+    made_again(&mut registry, switched, 71, 171);
+    registry.run_to(ms(9_000));
+    let seen = registry.seen_after(switched);
+    assert_eq!(seen, [(Duration::from_millis(300), changed("Headset"))]);
+    assert!(seen[0].0 <= SHOWN_WITHIN);
+}
+
+/// The server may give the node made again the id the old one had: its
+/// serial still says it's another device.
+#[test]
+fn a_node_made_again_under_its_old_id_is_a_change() {
+    let mut registry = FakeRegistry::new(Source::SystemAudio, with_headset());
+    let switched = ms(4_000);
+    made_again(&mut registry, switched, 70, 171);
+    registry.run_to(ms(9_000));
+    assert_eq!(
+        registry.seen_after(switched),
+        [(Duration::from_millis(300), changed("Headset"))]
+    );
+}
+
+/// A followed node made again only after the grace has run out is lost,
+/// then a change when it comes back.
+#[test]
+fn a_followed_node_made_again_after_the_grace_is_lost_then_changed() {
+    let mut registry = FakeRegistry::new(Source::SystemAudio, with_headset());
+    let removed = ms(4_000);
+    registry.at(removed, GraphEvent::Removed { id: 70 });
+    registry.at(
+        ms(6_000),
+        added(71, sink("bluez_output.AA_BB.1", "Headset")),
+    );
+    let lost = Told {
+        change: DeviceChange::Lost,
+        ends_stream: false,
+    };
+    assert_eq!(
+        registry.seen_after(removed),
+        [
+            (Duration::from_millis(1_000), lost),
+            (Duration::from_millis(2_000), changed("Headset")),
+        ]
+    );
+}
+
+/// A pinned node replaced under its name between two looks, as only the
+/// poll's fresh copy of the graph would show it, is lost for good: the
+/// node its stream was on is gone.
+#[test]
+fn a_pinned_node_replaced_between_looks_is_lost_for_good() {
+    let pinned = Source::Device("bluez_output.AA_BB.1".into());
+    let mut registry = FakeRegistry::new(pinned, with_headset());
+    let mut fresh = Graph::default();
+    for event in desk() {
+        fresh.apply(event);
+    }
+    fresh.apply(added(71, sink("bluez_output.AA_BB.1", "Headset")));
+    let told = registry.route.look(&fresh, moment(ms(2_000)));
+    assert_eq!(
+        told,
+        Some(Changes {
+            change: DeviceChange::Lost,
+            ends_stream: true,
+            at: ms(2_000),
+        })
+    );
+}
+
+/// The poll's fresh copy of an unchanged graph holds the same nodes under
+/// the same serials: taking it in is nothing to tell.
+#[test]
+fn a_fresh_copy_of_the_same_graph_is_nothing() {
+    for source in [
+        Source::SystemAudio,
+        Source::Device("bluez_output.AA_BB.1".into()),
+    ] {
+        let mut registry = FakeRegistry::new(source.clone(), with_headset());
+        let mut fresh = Graph::default();
+        for event in with_headset() {
+            fresh.apply(event);
+        }
+        assert_eq!(
+            registry.route.look(&fresh, moment(ms(2_000))),
+            None,
+            "{source:?}"
+        );
+    }
 }
 
 /// The microphone ignores the default output changing, and the system
@@ -371,15 +471,15 @@ fn each_source_follows_its_own_default() {
 #[test]
 fn a_default_names_only_its_own_kind() {
     let mut graph = Graph::default();
-    graph.apply(GraphEvent::Added {
-        id: 1,
-        node: source("same-name", "A source"),
-    });
+    graph.apply(added(1, source("same-name", "A source")));
     graph.apply(default(Class::Sink, "same-name"));
     assert_eq!(graph.device(&Source::SystemAudio), None);
     assert_eq!(
         graph.device(&Source::Device("same-name".into())),
-        Some(&source("same-name", "A source"))
+        Some(&Node {
+            serial: 1,
+            ..source("same-name", "A source")
+        })
     );
 }
 
@@ -405,10 +505,7 @@ fn a_followed_default_missing_at_the_first_look_has_the_grace() {
     let mut graph = Graph::default();
     let mut route = Route::new(Source::SystemAudio);
     assert_eq!(route.look(&graph, moment(ms(0))), None);
-    graph.apply(GraphEvent::Added {
-        id: 1,
-        node: sink("alsa_output.speakers", "Speakers"),
-    });
+    graph.apply(added(1, sink("alsa_output.speakers", "Speakers")));
     graph.apply(default(Class::Sink, "alsa_output.speakers"));
     assert_eq!(route.look(&graph, moment(ms(500))), None);
     // And without one, it's lost once the grace has run out.
@@ -434,10 +531,7 @@ fn a_suspend_does_not_use_up_the_grace() {
     registry.run_to(woke.checked_add(Duration::from_millis(500)).unwrap());
     registry.at(
         woke.checked_add(Duration::from_millis(600)).unwrap(),
-        GraphEvent::Added {
-            id: 71,
-            node: sink("bluez_output.AA_BB.0", "Headset (HFP)"),
-        },
+        added(71, sink("bluez_output.AA_BB.0", "Headset (HFP)")),
     );
     registry.at(
         woke.checked_add(Duration::from_millis(700)).unwrap(),
@@ -550,6 +644,7 @@ fn the_graph_lists_its_sinks_and_sources() {
                 name: "both".to_owned(),
                 description: "Duplex".to_owned(),
                 class: Class::Other,
+                serial: 5,
             },
         ),
     ];
@@ -587,14 +682,8 @@ fn the_graph_lists_its_sinks_and_sources() {
 #[test]
 fn the_graph_names_only_a_listed_default() {
     let mut graph = Graph::default();
-    graph.apply(GraphEvent::Added {
-        id: 1,
-        node: sink("tv", "TV"),
-    });
-    graph.apply(GraphEvent::Added {
-        id: 2,
-        node: source("seiren", "Seiren Mini"),
-    });
+    graph.apply(added(1, sink("tv", "TV")));
+    graph.apply(added(2, source("seiren", "Seiren Mini")));
     graph.apply(default(Class::Sink, "seiren"));
     graph.apply(default(Class::Source, "seiren"));
     assert_eq!(graph.devices().default_output, None);

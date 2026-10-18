@@ -25,8 +25,8 @@ mod linux {
         Clock, Epoch, EpochError, SampleRate, SessionId, SessionTime, SystemClock, TrackId,
     };
     use nota_recorder::capture::{
-        CaptureBackend as _, CaptureError, Device, Devices, PipeWireBackend, RecorderEvent, Source,
-        prepare_tracks, record_tracks,
+        CaptureBackend, CaptureError, Device, Devices, PipeWireBackend, RecordError, RecorderEvent,
+        Source, Started, prepare_tracks, record_tracks,
     };
     use nota_recorder::fs::StdFs;
     use nota_recorder::segment::SegmentLength;
@@ -433,6 +433,63 @@ mod linux {
         matches!(event, RecorderEvent::Device { change: c, .. } if c == change)
     }
 
+    /// A recording of some tracks on the private instance, each track's
+    /// audio already come.
+    struct Recording {
+        /// The tracks' streams; dropping them ends the recording.
+        streams: Vec<Started<<PipeWireBackend as CaptureBackend>::Stream>>,
+        /// The recorder's thread, and what it returns once the streams end.
+        recorder: thread::JoinHandle<Result<(), RecordError>>,
+        /// What the recorder reported.
+        heard: Heard,
+        /// Where the session is written; removed on drop.
+        _scratch: Scratch,
+    }
+
+    impl Recording {
+        /// Records `tracks`, timed by `clock`, and waits for each one's
+        /// first audio and a second more.
+        fn start(tracks: &[(TrackId, Source)], clock: &Arc<SystemClock>) -> Self {
+            let scratch = Scratch::new();
+            let rate = SampleRate::SPEECH;
+            let session_clock = Arc::clone(clock) as Arc<dyn Clock>;
+            let session = SessionDir::new(SessionId::new(1), StdFs, &scratch.0)
+                .lock()
+                .unwrap();
+            let mut writer = SessionWriter::open(
+                &session,
+                rate,
+                SegmentLength::default_at(rate),
+                Arc::clone(&session_clock),
+            )
+            .unwrap();
+            let (starter, receiver) = prepare_tracks(tracks, rate, &session_clock);
+            let (sender, events) = mpsc::channel();
+            let recorder = thread::spawn(move || {
+                record_tracks(&mut writer, &mut [], &receiver, &mut |track, event| {
+                    let _ = sender.send((track, event));
+                })
+            });
+            let streams = starter.start(&PipeWireBackend);
+            assert!(streams.iter().all(Result::is_ok), "{streams:?}");
+            let mut heard = Heard {
+                events,
+                seen: Vec::new(),
+                clock: Arc::clone(clock),
+            };
+            for (track, _) in tracks {
+                heard.wait_for(*track, |e| matches!(e, RecorderEvent::Audio(_)));
+            }
+            heard.listen(Duration::from_secs(1));
+            Self {
+                streams,
+                recorder,
+                heard,
+                _scratch: scratch,
+            }
+        }
+    }
+
     /// A followed default switched and a pinned sink removed, on the
     /// private instance: each shows within 2 s, the pinned track ends with
     /// nothing recorded after, and the capture moves to the new sink in an
@@ -457,45 +514,20 @@ mod linux {
         fixtures.play_tone(SINK_B.0, LOUD);
         fixtures.play_tone(SINK_A.0, QUIET);
 
-        let scratch = Scratch::new();
-        let rate = SampleRate::SPEECH;
         let clock = Arc::new(SystemClock::start().unwrap());
-        let session_clock = Arc::clone(&clock) as Arc<dyn Clock>;
-        let session = SessionDir::new(SessionId::new(1), StdFs, &scratch.0)
-            .lock()
-            .unwrap();
-        let mut writer = SessionWriter::open(
-            &session,
-            rate,
-            SegmentLength::default_at(rate),
-            Arc::clone(&session_clock),
-        )
-        .unwrap();
-        let (starter, receiver) = prepare_tracks(
+        let Recording {
+            streams,
+            recorder,
+            mut heard,
+            _scratch,
+        } = Recording::start(
             &[
                 (MIC, Source::Microphone),
                 (SYSTEM, Source::SystemAudio),
                 (PINNED, Source::Device(SINK_B.0.into())),
             ],
-            rate,
-            &session_clock,
+            &clock,
         );
-        let (sender, events) = mpsc::channel();
-        let recorder = thread::spawn(move || {
-            record_tracks(&mut writer, &mut [], &receiver, &mut |track, event| {
-                let _ = sender.send((track, event));
-            })
-        });
-        let streams = starter.start(&PipeWireBackend);
-        assert!(streams.iter().all(Result::is_ok), "{streams:?}");
-        let mut heard = Heard {
-            events,
-            seen: Vec::new(),
-            clock: Arc::clone(&clock),
-        };
-        for track in [MIC, SYSTEM, PINNED] {
-            heard.wait_for(track, |e| matches!(e, RecorderEvent::Audio(_)));
-        }
         heard.listen(Duration::from_secs(1));
 
         // The followed default switched from A to B.
@@ -543,6 +575,53 @@ mod linux {
         // whatever device the server moved its stream to.
         let after_failure = heard.audio_events_after(PINNED, failed);
         assert_eq!(after_failure, 0, "audio on the pinned track after its loss");
+
+        drop(streams);
+        let outcome = recorder.join().unwrap();
+        assert!(outcome.is_ok(), "{outcome:?}");
+    }
+
+    /// GAI-487 on the private instance: the followed default sink removed
+    /// and made again at once under the same name, as a Bluetooth
+    /// headset's node is when it changes profile. The default keeps its
+    /// name, but the node is another: the change to it shows within 2 s,
+    /// and the audio after it opens a new epoch.
+    #[test]
+    fn a_followed_sink_made_again_under_its_name_is_a_change() {
+        let Some(_private) = private_instance() else {
+            return;
+        };
+        let mut fixtures = Fixtures::default();
+        let a = fixtures.sink(SINK_A);
+        pactl(&["set-default-sink", SINK_A.0]);
+        let clock = Arc::new(SystemClock::start().unwrap());
+        let Recording {
+            streams,
+            recorder,
+            mut heard,
+            _scratch,
+        } = Recording::start(&[(SYSTEM, Source::SystemAudio)], &clock);
+
+        // Unloaded and loaded again straight after, before the session
+        // manager has named another default.
+        let remade = clock.now();
+        fixtures.remove(&a);
+        fixtures.sink(SINK_A);
+        let changed = heard.wait_for(SYSTEM, |e| {
+            is_device(e, &DeviceChange::Changed(SINK_A.1.into()))
+        });
+        assert!(changed.checked_duration_since(remade).unwrap() <= SHOWN_WITHIN);
+        let after = heard.audio_events_after(SYSTEM, changed);
+        let until = clock.now().checked_add(PATIENCE).unwrap();
+        while heard.audio_events_after(SYSTEM, changed) == after {
+            assert!(clock.now() < until, "nothing recorded from the new sink");
+            heard.listen(Duration::from_millis(100));
+        }
+        let reopened = heard.reopenings(SYSTEM, remade);
+        assert!(
+            matches!(reopened.first(), Some(Ok(_))),
+            "the new sink opened no epoch: {reopened:?}"
+        );
 
         drop(streams);
         let outcome = recorder.join().unwrap();

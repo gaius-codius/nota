@@ -327,7 +327,7 @@ impl Watcher {
 /// default with nothing to follow keeps its stream, for the next default
 /// there is (unless cpal ends it, as it does when the default is cleared
 /// altogether).
-fn report(events: &CaptureSender, source: &Source, changes: route::Changes) {
+pub(in crate::capture) fn report(events: &CaptureSender, source: &Source, changes: route::Changes) {
     if changes.ends_stream {
         events.failed(CaptureError::DeviceNotAvailable(source.clone()));
     } else {
@@ -429,8 +429,8 @@ impl Subscription {
     ) {
         match global.type_ {
             ObjectType::Node => {
-                if let Some(node) = global.props.and_then(audio_node) {
-                    let id = global.id;
+                let id = global.id;
+                if let Some(node) = global.props.and_then(|props| audio_node(id, props)) {
                     this.borrow_mut()
                         .graph
                         .apply(GraphEvent::Added { id, node });
@@ -487,8 +487,9 @@ impl Subscription {
     }
 }
 
-/// The audio node a registry global's `props` describe, if it is one.
-fn audio_node(props: &DictRef) -> Option<Node> {
+/// The audio node a registry global's `props` describe, if it is one; the
+/// global's `id` stands in for its serial if it has none.
+fn audio_node(id: u32, props: &DictRef) -> Option<Node> {
     let class = match props.get(*pw::keys::MEDIA_CLASS)? {
         "Audio/Sink" => Class::Sink,
         "Audio/Source" | "Audio/Source/Virtual" => Class::Source,
@@ -505,7 +506,19 @@ fn audio_node(props: &DictRef) -> Option<Node> {
         name,
         description,
         class,
+        serial: serial(id, props),
     })
+}
+
+/// The node's `object.serial` in its registry `props`: a number the server
+/// never gives another object. A server too old to give one, or one that
+/// gives something else, has the node's `id` stand in: ids can be reused,
+/// so a node made again under its old id and name then goes unnoticed.
+fn serial(id: u32, props: &DictRef) -> u64 {
+    props
+        .get(*pw::keys::OBJECT_SERIAL)
+        .and_then(|serial| serial.parse().ok())
+        .unwrap_or_else(|| u64::from(id))
 }
 
 /// What a `default` metadata property says, if it's the default sink or
@@ -554,13 +567,15 @@ mod tests {
                 ("node.name", "alsa.x"),
                 ("node.description", "Speakers"),
                 ("node.nick", "Spk"),
+                ("object.serial", "4294967310"),
             ]);
             assert_eq!(
-                audio_node(node.as_ref()),
+                audio_node(7, node.as_ref()),
                 Some(Node {
                     name: "alsa.x".into(),
                     description: "Speakers".into(),
                     class: kind,
+                    serial: 4_294_967_310,
                 }),
                 "{class}"
             );
@@ -576,7 +591,7 @@ mod tests {
             ("node.nick", "Nick"),
         ]);
         let bare = props(&[("media.class", "Audio/Sink"), ("node.name", "n")]);
-        let described = |p: &PropertiesBox| audio_node(p.as_ref()).map(|n| n.description);
+        let described = |p: &PropertiesBox| audio_node(7, p.as_ref()).map(|n| n.description);
         assert_eq!(
             (described(&nick), described(&bare)),
             (Some("Nick".into()), Some("n".into()))
@@ -592,7 +607,25 @@ mod tests {
             props(&[("media.class", "Audio/Sink")]),
             props(&[("node.name", "x")]),
         ] {
-            assert_eq!(audio_node(node.as_ref()), None);
+            assert_eq!(audio_node(7, node.as_ref()), None);
+        }
+    }
+
+    /// A node without a serial the server gave, or with one that isn't a
+    /// number, goes by its id instead.
+    #[test]
+    fn a_node_without_a_readable_serial_goes_by_its_id() {
+        for serial in [
+            None,
+            Some(""),
+            Some("-1"),
+            Some("x7"),
+            Some("18446744073709551616"),
+        ] {
+            let mut pairs = vec![("media.class", "Audio/Sink"), ("node.name", "n")];
+            pairs.extend(serial.map(|serial| ("object.serial", serial)));
+            let node = audio_node(7, props(&pairs).as_ref()).map(|n| n.serial);
+            assert_eq!(node, Some(7), "{serial:?}");
         }
     }
 
