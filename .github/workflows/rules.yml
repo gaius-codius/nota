@@ -1,6 +1,7 @@
 # Repo rules that aren't about the code itself: no recordings or large files,
-# no secrets, and no silent weakening of checks. Separate from CI so editing a
-# PR's body re-runs only this. Editing a closed PR's text runs nothing: its
+# and no silent weakening of checks. Separate from CI so editing a PR's body
+# re-runs only this. The secrets scan is the shared "rust / secrets" job in
+# ci.yml. Editing a closed PR's text runs nothing: its
 # branch may be gone, and nothing on it needs checking any more.
 name: Repo rules
 
@@ -38,23 +39,3 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - uses: gaius-codius/weakened-checks@071f467393341b483e1827e0d63c7d02e96fb801 # v1.3.0
-
-  secrets:
-    name: No secrets (gitleaks)
-    if: github.event_name != 'pull_request' || github.event.pull_request.state == 'open'
-    runs-on: ubuntu-latest
-    env:
-      GITLEAKS_VERSION: 8.30.1
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Install gitleaks (checksum verified)
-        run: |
-          base="https://github.com/gitleaks/gitleaks/releases/download/v$GITLEAKS_VERSION"
-          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          curl -fsSLO "$base/$tarball"
-          curl -fsSL "$base/gitleaks_${GITLEAKS_VERSION}_checksums.txt" | grep " $tarball$" | sha256sum -c -
-          tar xzf "$tarball" gitleaks
-      - run: ./gitleaks git --no-banner --redact .
