@@ -9,7 +9,13 @@ all-features = true
 # they're direct dependencies of a workspace crate.
 unmaintained = "workspace"
 yanked = "deny"
-ignore = []
+# zip 2.4.2, through sherpa-onnx-sys's build script only. Remove these when
+# sherpa-onnx-sys moves to zip >= 9.0.0.
+ignore = [
+  { id = "RUSTSEC-2026-0367", reason = "zip 2.x is only a build dependency of sherpa-onnx-sys 1.13.8 (the latest release, which requires zip ^2); its build script uses zip only for iOS .xcframework.zip archives, and nota's targets unpack .tar.bz2. No patched zip 2.x exists (the fix is >= 9.0.0). Revisit when sherpa-onnx-sys moves to zip >= 9." },
+  { id = "RUSTSEC-2026-0368", reason = "zip 2.x is only a build dependency of sherpa-onnx-sys 1.13.8 (the latest release, which requires zip ^2); its build script uses zip only for iOS .xcframework.zip archives, and nota's targets unpack .tar.bz2. No patched zip 2.x exists (the fix is >= 9.0.0). Revisit when sherpa-onnx-sys moves to zip >= 9." },
+  { id = "RUSTSEC-2026-0369", reason = "zip 2.x is only a build dependency of sherpa-onnx-sys 1.13.8 (the latest release, which requires zip ^2); its build script uses zip only for iOS .xcframework.zip archives, and nota's targets unpack .tar.bz2. No patched zip 2.x exists (the fix is >= 9.0.0). Revisit when sherpa-onnx-sys moves to zip >= 9." },
+]
 
 [licenses]
 # Permissive licences only. GPL, LGPL and AGPL code is never linked into a
