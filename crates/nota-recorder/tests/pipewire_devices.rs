@@ -55,8 +55,15 @@ mod linux {
     /// buffer is stamped tens of milliseconds before the old sink's audio
     /// ends (40–90 ms measured on `PipeWire` 1.6), and the monitor's first
     /// epoch, whose first audio its stamps date before the session started,
-    /// starts at zero, about 22 ms late (GAI-491): 60–69 ms in all.
-    const MOST_LATE: Duration = Duration::from_millis(250); // check-bound
+    /// starts at zero, about 22 ms late (GAI-491). 55–69 ms in all over 40
+    /// runs of the script (GAI-494); the bound leaves over a quantum (21 ms
+    /// on the private instance) above that.
+    const MOST_LATE: Duration = Duration::from_millis(100); // check-bound
+
+    /// The most the remade sink's epoch may start late by, which is how far
+    /// the monitor's first epoch was misdated: 21–24 ms over 40 runs of the
+    /// script (GAI-494), with about a quantum above that.
+    const MOST_MISDATED: Duration = Duration::from_millis(50); // check-bound
 
     /// The longest the test waits for anything before failing.
     const PATIENCE: Duration = Duration::from_secs(10);
@@ -678,6 +685,11 @@ mod linux {
         let _ = writeln!(
             std::io::stderr(),
             "the remade sink's epoch: {:?} late",
+            epoch.overrun()
+        );
+        assert!(
+            epoch.overrun() <= MOST_MISDATED,
+            "{:?} late",
             epoch.overrun()
         );
         let first = epoch.first_sample().get();
