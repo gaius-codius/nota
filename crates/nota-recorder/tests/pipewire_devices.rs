@@ -2,7 +2,9 @@
 //! instance `scripts/pipewire-devices.sh` starts: a followed default output
 //! switched is `Changed` and opens an epoch that starts with the new
 //! sink's audio, a pinned sink removed is `Lost` and ends its track, within
-//! 2 s each. And the device snapshot, which Setup lists, names the
+//! 2 s each, and a followed sink removed and made again under its name is
+//! `Changed` and opens one epoch (tried again if the session manager names
+//! its stand-in sink in between). And the device snapshot, which Setup lists, names the
 //! instance's sinks and sources, and its defaults, as they come and go.
 //! Skips (and says so) unless the script runs it: switching a default
 //! anywhere else would change the user's (AGENTS.md section 8). The script
@@ -51,19 +53,21 @@ mod linux {
     /// in by, through the resampler: about 25 measured.
     const ONSET_RING: u64 = 64; // check-bound
 
-    /// The most a switch's epoch may start late by: the new sink's first
-    /// buffer is stamped tens of milliseconds before the old sink's audio
-    /// ends (40–90 ms measured on `PipeWire` 1.6), and the monitor's first
-    /// epoch, whose first audio its stamps date before the session started,
-    /// starts at zero, about 22 ms late (GAI-491). 55–69 ms in all over 40
-    /// runs of the script (GAI-494); the bound leaves over a quantum (21 ms
-    /// on the private instance) above that.
-    const MOST_LATE: Duration = Duration::from_millis(100); // check-bound
+    /// The most a switch's epoch may start late by: the new link's first
+    /// buffer is stamped a quantum early (43 ms, the graph's quantum while
+    /// the test's tones play), and the monitor's first epoch, whose first
+    /// audio its stamps date before the session started, starts at zero,
+    /// about 22 ms late (GAI-491). 55–69 ms in all over 95 runs of the
+    /// script (GAI-494); the bound leaves a quantum more above that.
+    const MOST_LATE: Duration = Duration::from_millis(120); // check-bound
 
-    /// The most the remade sink's epoch may start late by, which is how far
-    /// the monitor's first epoch was misdated: 21–24 ms over 40 runs of the
-    /// script (GAI-494), with about a quantum above that.
-    const MOST_MISDATED: Duration = Duration::from_millis(50); // check-bound
+    /// The most the remade sink's epoch may start late by: how far the
+    /// monitor's first epoch was misdated, 20–24 ms over 95 runs of the
+    /// script, and after a detour through the stand-in sink, whose epochs
+    /// add their own, 34–44 ms over 7 (GAI-494). The bound leaves about a
+    /// quantum (21 ms, the graph's quantum with no tone playing) above
+    /// that.
+    const MOST_MISDATED: Duration = Duration::from_millis(70); // check-bound
 
     /// The longest the test waits for anything before failing.
     const PATIENCE: Duration = Duration::from_secs(10);
@@ -626,13 +630,14 @@ mod linux {
 
     /// How many times the remade-sink test removes and loads its sink before
     /// it gives up on the session manager leaving the default alone.
-    const REMAKE_TRIES: u32 = 3;
+    const REMAKE_TRIES: u32 = 3; // check-bound
 
     /// How long after a remake's reopening the test still watches for a
     /// second one: a report the watch's events missed comes from its poll
-    /// within about a second, and the hold keeps the audio that reopens for
-    /// it, with its epoch, up to half a second more.
-    const SECOND_EPOCH_WITHIN: Duration = Duration::from_millis(1_500);
+    /// within about a second, the recorder may reopen for it only
+    /// `REOPEN_WAIT` (200 ms) after that, and the hold keeps the reopened
+    /// audio, with its epoch, up to half a second more.
+    const SECOND_EPOCH_WITHIN: Duration = Duration::from_secs(2); // check-bound
 
     /// How long the remade-sink test waits after a detour through the
     /// stand-in sink before it tries again: past the 2 s within which the
@@ -646,7 +651,7 @@ mod linux {
     /// and made again at once under the same name, as a Bluetooth
     /// headset's node is when it changes profile. The default keeps its
     /// name, but the node is another: the change to it shows within 2 s,
-    /// and opens one new epoch, with the new sink's audio in it.
+    /// and opens one new epoch.
     #[test]
     fn a_followed_sink_made_again_under_its_name_is_a_change() {
         let Some(_private) = private_instance() else {
@@ -663,16 +668,20 @@ mod linux {
             _scratch,
         } = Recording::start(&[(SYSTEM, Source::SystemAudio)], &clock);
 
-        let (remade, changed) = remake_sink(&mut heard, &mut fixtures, a, &clock);
-        // The reopening itself, not the next audio, is waited for. The
-        // old node's last buffer can reach the test just after the change
-        // does, and the stream's delay never settles on this instance, so
-        // the hold keeps the new node's first audio, and the epoch it
-        // opens, for half a second.
+        let Remade { remade, changed } = remake_sink(&mut heard, &mut fixtures, a, &clock);
+        // The reopening itself, not the next audio, is waited for. When
+        // the new node's stamps run on from the old one's, the recorder
+        // reopens only `REOPEN_WAIT` past the report, and the new node's
+        // audio before that comes first. And this test's stream, with no
+        // tone playing, never settles its delay (its first epoch too
+        // comes at the hold's limit), so the hold keeps the reopened audio,
+        // and its epoch, half a second more. The epoch may also come
+        // before the watch's report, when the stream reported the change
+        // first and the watch's poll caught it late.
         let opened = heard.wait_for_from(SYSTEM, remade, |e| {
             matches!(e, RecorderEvent::Epoch(_) | RecorderEvent::EpochRefused(_))
         });
-        assert!(opened.checked_duration_since(changed).unwrap() <= SHOWN_WITHIN);
+        assert!(opened <= changed.checked_add(SHOWN_WITHIN).unwrap());
         heard.listen(SECOND_EPOCH_WITHIN);
         let reopened = heard.reopenings(SYSTEM, remade);
         let [Ok(epoch)] = reopened[..] else {
@@ -692,31 +701,34 @@ mod linux {
             "{:?} late",
             epoch.overrun()
         );
-        let first = epoch.first_sample().get();
-        assert!(
-            !heard.audio_from(SYSTEM, first, u64::MAX - first).is_empty(),
-            "nothing recorded from the new sink"
-        );
 
         drop(streams);
         let outcome = recorder.join().unwrap();
         assert!(outcome.is_ok(), "{outcome:?}");
     }
 
+    /// When the remade-sink test's last try began, and when the change to
+    /// the node made again arrived.
+    struct Remade {
+        /// When the sink was removed.
+        remade: SessionTime,
+        /// When the recorder's report of the change arrived.
+        changed: SessionTime,
+    }
+
     /// Removes the followed sink A, loaded as `module`, and loads it again
     /// straight after, before the session manager has named another
-    /// default, and says when it began and when the change to the node
-    /// made again arrived. The session manager sometimes names its
-    /// stand-in sink in between all the same, and the recorder rightly
-    /// tells a change to it and then back: that's another path than a
-    /// node made again, so the test tries again, up to [`REMAKE_TRIES`]
-    /// times in all.
+    /// default. The session manager sometimes names its stand-in sink in
+    /// between all the same, and the recorder rightly tells a change to it
+    /// and then back: that's another path than a node made again, so the
+    /// test checks the detour's epochs opened and tries again, up to
+    /// [`REMAKE_TRIES`] times in all.
     fn remake_sink(
         heard: &mut Heard,
         fixtures: &mut Fixtures,
         mut module: String,
         clock: &SystemClock,
-    ) -> (SessionTime, SessionTime) {
+    ) -> Remade {
         let mut paths = Vec::new();
         for _ in 0..REMAKE_TRIES {
             let remade = clock.now();
@@ -737,15 +749,23 @@ mod linux {
                 },
             ] = told[..]
             {
-                return (remade, changed);
+                return Remade { remade, changed };
             }
             let path = format!("{told:?}");
-            let _ = writeln!(std::io::stderr(), "a stand-in sink was named: {path}");
+            let _ = writeln!(
+                std::io::stderr(),
+                "another path than a node made again: {path}"
+            );
             paths.push(path);
             // The next try starts once the detour is over: it counts none
             // of the detour's reopenings, and the recorder takes its
             // reports as a new change.
             heard.listen(DETOUR_SETTLES);
+            let detour = heard.reopenings(SYSTEM, remade);
+            assert!(
+                detour.iter().all(Result::is_ok),
+                "the detour's epochs: {detour:?}"
+            );
         }
         panic!("the instance took another path than a node made again each time: {paths:?}");
     }

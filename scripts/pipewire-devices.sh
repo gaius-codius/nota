@@ -2,7 +2,8 @@
 # The recorder's device events against real PipeWire (the
 # `pipewire_devices` tests in nota-recorder): a followed default output
 # switched is Changed and opens an epoch that starts with the new device's
-# audio, a pinned sink removed is Lost and ends its track; and the device
+# audio, a pinned sink removed is Lost and ends its track, a followed sink
+# made again under its name is Changed and opens one epoch; and the device
 # snapshot Setup lists (`PipeWireBackend::devices`) names each sink and
 # source the test makes, and the defaults, and drops each one it removes.
 #
