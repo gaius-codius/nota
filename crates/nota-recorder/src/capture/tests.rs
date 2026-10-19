@@ -51,6 +51,10 @@ enum Step {
     Notice(CaptureNotice),
     /// What the backend's watch on the audio server saw.
     Device(DeviceChange),
+    /// What the `PipeWire` backend's watch saw, through the track's route,
+    /// reported as the watch reports it.
+    #[cfg(target_os = "linux")]
+    Watch(route::Changes),
     Fail(CaptureError),
     /// Moves the session clock on.
     Advance(Duration),
@@ -115,6 +119,10 @@ impl CaptureBackend for Synthetic {
                     }
                     Step::Notice(n) => feeder_events.notice(n),
                     Step::Device(c) => feeder_events.device(c),
+                    #[cfg(target_os = "linux")]
+                    Step::Watch(changes) => {
+                        pipewire::watch::report(&feeder_events, &Source::Microphone, changes);
+                    }
                     Step::Fail(e) => feeder_events.failed(e),
                     Step::Advance(by) => clock.advance(by),
                     Step::Suspend(by) => clock.suspend(by),
@@ -974,6 +982,73 @@ fn a_change_only_the_watch_saw_opens_an_epoch_at_the_next_audio() {
     assert_eq!(reopenings(&run.reported), [("epoch", 1, reopened, 200)]);
     let gaps: Vec<_> = run.timeline.gaps().map(|g| (g.from(), g.to())).collect();
     assert_eq!(gaps, [(SessionTime::from_nanos(200_000_000), reopened)]);
+    let journals = all_journals(run.writer, &run.reported);
+    assert_eq!(journal_epochs(&fs, &journals), [(0, 0, 200), (1, 200, 400)]);
+}
+
+/// GAI-487 on the fake backend: the followed microphone's node removed and
+/// made again under its own name, as a Bluetooth headset's is when it
+/// changes profile. The route the watch keeps tells a change to it, the
+/// recorder reports that for the timeline and the screen, and the audio
+/// after opens a new epoch; the audio before stays in the old one.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_followed_node_made_again_under_its_name_opens_an_epoch() {
+    use route::{Class, Graph, GraphEvent, Moment, Node, Route};
+
+    let headset = |serial| Node {
+        name: "bluez_input.AA_BB.0".to_owned(),
+        description: "Headset".to_owned(),
+        class: Class::Source,
+        serial,
+    };
+    let look = |route: &mut Route, graph: &Graph, at| {
+        let asleep = Duration::ZERO;
+        route.look(graph, Moment { at, asleep })
+    };
+    let mut graph = Graph::default();
+    graph.apply(GraphEvent::Added {
+        id: 70,
+        node: headset(70),
+    });
+    graph.apply(GraphEvent::Default {
+        class: Class::Source,
+        name: Some("bluez_input.AA_BB.0".to_owned()),
+    });
+    let mut route = Route::new(Source::Microphone);
+    assert_eq!(look(&mut route, &graph, at(0)), None);
+    graph.apply(GraphEvent::Removed { id: 70 });
+    assert_eq!(look(&mut route, &graph, at(1)), None);
+    // The default still names it: only the serial says it's new.
+    graph.apply(GraphEvent::Added {
+        id: 71,
+        node: headset(171),
+    });
+    let changes = look(&mut route, &graph, at(1)).unwrap();
+
+    let fs = FakeFs::with_dirs([dir()]);
+    let script = vec![
+        Step::Audio(samples(0, 100)),
+        Step::Advance(secs(1)),
+        Step::Audio(samples(100, 100)),
+        Step::Watch(changes),
+        Step::Advance(secs(2)),
+        Step::Audio(samples(200, 100)),
+        Step::Audio(samples(300, 100)),
+    ];
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    let told: Vec<_> = run
+        .reported
+        .iter()
+        .filter_map(|e| match e {
+            RecorderEvent::Device { change, at } => Some((change.clone(), *at)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(told, [(DeviceChange::Changed("Headset".into()), at(1))]);
+    let reopened = SessionTime::from_nanos(2_900_000_000);
+    assert_eq!(reopenings(&run.reported), [("epoch", 1, reopened, 200)]);
     let journals = all_journals(run.writer, &run.reported);
     assert_eq!(journal_epochs(&fs, &journals), [(0, 0, 200), (1, 200, 400)]);
 }

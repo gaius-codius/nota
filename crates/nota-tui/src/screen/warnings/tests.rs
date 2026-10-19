@@ -209,6 +209,22 @@ fn a_route_change_shows_for_ten_seconds() {
     assert_eq!(warnings.changes(), [secs(100)]);
 }
 
+/// A change to a device under the name the track is already on (a
+/// Bluetooth headset that changed profile) still shows: it's another
+/// device to the audio server, and the recording has a gap there.
+#[test]
+fn a_change_to_the_same_name_still_shows() {
+    let mut warnings = two_tracks();
+    let headset = || DeviceChange::Changed("Headset".into());
+    device(&mut warnings, SYSTEM, headset(), 100);
+    device(&mut warnings, SYSTEM, headset(), 200);
+    assert_eq!(
+        warnings.top(secs(205)),
+        Some(shown("↪ system: Headset", Tone::Plain, 0))
+    );
+    assert_eq!(warnings.changes(), [secs(100), secs(200)]);
+}
+
 /// The most severe condition shows, with a count of the rest.
 #[test]
 fn the_most_severe_shows_with_a_count_of_the_rest() {
