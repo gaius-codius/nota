@@ -928,11 +928,11 @@ impl CaptureSender {
     /// Reports something that doesn't stop the stream, stamped with the
     /// session time now. After a [`CaptureNotice::RouteChanged`], the
     /// new device's audio opens a new epoch, unless it pairs with a
-    /// [`DeviceChange::Changed`] not yet paired and reported within 2 s:
-    /// a change both report opens one epoch, even when the two reports
-    /// come at the same moment, and a change only one reports opens one
-    /// too, but for the case `Reroutes` names. Which buffer is the new
-    /// device's is as the module docs say.
+    /// [`DeviceChange::Changed`] not yet paired, stamped up to 2 s before
+    /// it or at any time after: a change both report opens one epoch, even
+    /// when the two reports come at the same moment, and a change only one
+    /// reports opens one too, but for the case `Reroutes` names. Which
+    /// buffer is the new device's is as the module docs say.
     pub fn notice(&self, notice: CaptureNotice) {
         let at = self.clock.now();
         if notice == CaptureNotice::RouteChanged {
