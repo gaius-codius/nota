@@ -12,7 +12,10 @@
 //! fresh copy has caught up, takes it in place of the old one, so an event
 //! the old subscription missed is caught within about a second. The route
 //! is looked at after every event and every [`TICK`], which is what turns
-//! a default missing for longer than its grace into a loss.
+//! a default missing for longer than its grace into a loss. A change seen
+//! after an event was heard as it happened; one seen as a fresh copy takes
+//! over, or at a tick, may be late, and pairs with the stream's own report
+//! of it over a wider window (see `Reroutes` in [`super::super`]).
 //!
 //! A watch that can't connect, or whose connection fails, says so once as a
 //! [`CaptureNotice::Unwatched`]; the stream records on without it, and the
@@ -35,7 +38,7 @@ use pw::types::ObjectType;
 
 use super::super::devices::Devices;
 use super::super::route::{self, Class, Graph, GraphEvent, Node, Route};
-use super::super::{CaptureError, CaptureNotice, CaptureSender, Source};
+use super::super::{CaptureError, CaptureNotice, CaptureSender, Heard, Source};
 
 /// How often the route is looked at with no event: 250 ms, so a default
 /// missing for its 1 s grace is lost within about 1.25 s, inside the 2 s a
@@ -182,7 +185,9 @@ fn run(
                     let _ = Watcher::subscribe(&watcher);
                 }
             }
-            Watcher::look(&watcher);
+            // Only time has passed since the last look: what it finds is a
+            // loss, or something a look missed.
+            Watcher::look(&watcher, Heard::MaybeLate);
         }
     });
     // Can't fail for a timer the loop just made.
@@ -292,6 +297,7 @@ impl Watcher {
             }
             caught_up
         };
+        let mut took_over = false;
         if caught_up {
             let mut watcher = this.borrow_mut();
             if watcher
@@ -300,13 +306,22 @@ impl Watcher {
                 .is_some_and(|s| s.borrow().pending.caught_up())
             {
                 watcher.current = watcher.fresh.take();
+                took_over = true;
             }
         }
-        Self::look(&Rc::downgrade(&this));
+        // A fresh copy that took over shows what the old one's events
+        // missed, up to a poll late.
+        let heard = if took_over {
+            Heard::MaybeLate
+        } else {
+            Heard::AtOnce
+        };
+        Self::look(&Rc::downgrade(&this), heard);
     }
 
-    /// Looks at the current graph, and reports what changed for the track.
-    fn look(this: &Weak<RefCell<Self>>) {
+    /// Looks at the current graph, and reports what changed for the track,
+    /// heard as `heard` says.
+    fn look(this: &Weak<RefCell<Self>>, heard: Heard) {
         let Some(this) = this.upgrade() else {
             return;
         };
@@ -322,7 +337,7 @@ impl Watcher {
         let Some(changes) = watcher.route.look(&current.borrow().graph, now) else {
             return;
         };
-        report(&watcher.events, watcher.route.source(), changes);
+        report(&watcher.events, watcher.route.source(), changes, heard);
     }
 }
 
@@ -331,12 +346,17 @@ impl Watcher {
 /// failure tells the loss first ([`CaptureSender::failed`]). A followed
 /// default with nothing to follow keeps its stream, for the next default
 /// there is (unless cpal ends it, as it does when the default is cleared
-/// altogether).
-pub(in crate::capture) fn report(events: &CaptureSender, source: &Source, changes: route::Changes) {
+/// altogether). The watch heard of `changes` as `heard` says.
+pub(in crate::capture) fn report(
+    events: &CaptureSender,
+    source: &Source,
+    changes: route::Changes,
+    heard: Heard,
+) {
     if changes.ends_stream {
         events.failed(CaptureError::DeviceNotAvailable(source.clone()));
     } else {
-        events.device_at(changes.change, changes.at);
+        events.device_at(changes.change, changes.at, heard);
     }
 }
 
@@ -399,7 +419,7 @@ impl Subscription {
                     move |global| {
                         if let Some(this) = this.upgrade() {
                             Self::global(&this, &core, &watcher, global);
-                            Watcher::look(&watcher);
+                            Watcher::look(&watcher, Heard::AtOnce);
                         }
                     }
                 })
@@ -408,7 +428,7 @@ impl Subscription {
                     move |id| {
                         if let Some(this) = this.upgrade() {
                             this.borrow_mut().graph.apply(GraphEvent::Removed { id });
-                            Watcher::look(&watcher);
+                            Watcher::look(&watcher, Heard::AtOnce);
                         }
                     }
                 })
@@ -478,7 +498,7 @@ impl Subscription {
                         && let Some(event) = default_event(key, value)
                     {
                         this.borrow_mut().graph.apply(event);
-                        Watcher::look(&watcher);
+                        Watcher::look(&watcher, Heard::AtOnce);
                     }
                     0
                 }
@@ -701,7 +721,7 @@ mod tests {
             ends_stream: true,
             at: SessionTime::ZERO,
         };
-        report(&events, &usb, lost);
+        report(&events, &usb, lost, Heard::AtOnce);
         assert_eq!(
             queued(&queue),
             [
@@ -715,7 +735,7 @@ mod tests {
             ends_stream: false,
             at: SessionTime::from_nanos(7),
         };
-        report(&events, &Source::Microphone, changed);
+        report(&events, &Source::Microphone, changed, Heard::AtOnce);
         assert_eq!(
             queued(&queue),
             ["Device { change: Changed(\"Headphones\"), at: SessionTime(7) }"]
