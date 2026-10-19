@@ -243,10 +243,20 @@ mod linux {
             track: TrackId,
             wanted: impl Fn(&RecorderEvent) -> bool,
         ) -> SessionTime {
+            self.wait_for_from(track, SessionTime::ZERO, wanted)
+        }
+
+        /// [`Self::wait_for`], for an event that arrived at `from` or after.
+        fn wait_for_from(
+            &mut self,
+            track: TrackId,
+            from: SessionTime,
+            wanted: impl Fn(&RecorderEvent) -> bool,
+        ) -> SessionTime {
             if let Some((at, ..)) = self
                 .seen
                 .iter()
-                .find(|(_, t, e)| *t == Some(track) && wanted(e))
+                .find(|(at, t, e)| *at >= from && *t == Some(track) && wanted(e))
             {
                 return *at;
             }
@@ -262,12 +272,31 @@ mod linux {
                     .recv_timeout(left)
                     .unwrap_or_else(|_| panic!("nothing wanted on track {}", track.get()));
                 let at = self.clock.now();
-                let hit = t == Some(track) && wanted(&event);
+                let hit = at >= from && t == Some(track) && wanted(&event);
                 self.seen.push((at, t, event));
                 if hit {
                     return at;
                 }
             }
+        }
+
+        /// The device changes `track` reported that arrived from `from` to
+        /// `to`, both included.
+        fn changes_told(
+            &self,
+            track: TrackId,
+            from: SessionTime,
+            to: SessionTime,
+        ) -> Vec<&RecorderEvent> {
+            self.seen
+                .iter()
+                .filter(|(at, t, e)| {
+                    *t == Some(track)
+                        && (from..=to).contains(at)
+                        && matches!(e, RecorderEvent::Device { .. })
+                })
+                .map(|(_, _, e)| e)
+                .collect()
         }
 
         /// How many audio events `track` reported that arrived after `at`.
@@ -373,6 +402,12 @@ mod linux {
             [Ok(epoch)] => *epoch,
             other => panic!("the switch opened not one epoch but {other:?}"),
         };
+        // Written out, so the runs measure what [`MOST_LATE`] allows.
+        let _ = writeln!(
+            std::io::stderr(),
+            "the switch's epoch: {:?} late",
+            epoch.overrun()
+        );
         assert!(epoch.overrun() <= MOST_LATE, "{:?} late", epoch.overrun());
         let first = epoch.first_sample().get();
         let tone = heard.wait_for_tone(SYSTEM, first);
@@ -582,11 +617,29 @@ mod linux {
         assert!(outcome.is_ok(), "{outcome:?}");
     }
 
+    /// How many times the remade-sink test removes and loads its sink before
+    /// it gives up on the session manager leaving the default alone.
+    const REMAKE_TRIES: u32 = 3;
+
+    /// How long after a remake's reopening the test still watches for a
+    /// second one: a report the watch's events missed comes from its poll
+    /// within about a second, and the hold keeps the audio that reopens for
+    /// it, with its epoch, up to half a second more.
+    const SECOND_EPOCH_WITHIN: Duration = Duration::from_millis(1_500);
+
+    /// How long the remade-sink test waits after a detour through the
+    /// stand-in sink before it tries again: past the 2 s within which the
+    /// recorder takes one source's report as the same change as the
+    /// other's last, so the detour's reports can't pair with the next
+    /// try's, and past the half second the hold keeps the detour's
+    /// reopened audio and its epochs.
+    const DETOUR_SETTLES: Duration = Duration::from_millis(2_500);
+
     /// GAI-487 on the private instance: the followed default sink removed
     /// and made again at once under the same name, as a Bluetooth
     /// headset's node is when it changes profile. The default keeps its
     /// name, but the node is another: the change to it shows within 2 s,
-    /// and the audio after it opens a new epoch.
+    /// and opens one new epoch, with the new sink's audio in it.
     #[test]
     fn a_followed_sink_made_again_under_its_name_is_a_change() {
         let Some(_private) = private_instance() else {
@@ -603,57 +656,86 @@ mod linux {
             _scratch,
         } = Recording::start(&[(SYSTEM, Source::SystemAudio)], &clock);
 
-        // Unloaded and loaded again straight after, before the session
-        // manager has named another default.
-        let remade = clock.now();
-        fixtures.remove(&a);
-        fixtures.sink(SINK_A);
-        let changed = heard.wait_for(SYSTEM, |e| {
-            is_device(e, &DeviceChange::Changed(SINK_A.1.into()))
+        let (remade, changed) = remake_sink(&mut heard, &mut fixtures, a, &clock);
+        // The reopening itself, not the next audio, is waited for. The
+        // old node's last buffer can reach the test just after the change
+        // does, and the stream's delay never settles on this instance, so
+        // the hold keeps the new node's first audio, and the epoch it
+        // opens, for half a second.
+        let opened = heard.wait_for_from(SYSTEM, remade, |e| {
+            matches!(e, RecorderEvent::Epoch(_) | RecorderEvent::EpochRefused(_))
         });
-        assert!(changed.checked_duration_since(remade).unwrap() <= SHOWN_WITHIN);
-        // The one change told, with no loss or stand-in default before it:
-        // only then does the test tell the node made again apart, rather
-        // than a default renamed and back.
-        let told: Vec<_> = heard
-            .seen
-            .iter()
-            .filter(|(at, t, e)| {
-                *t == Some(SYSTEM)
-                    && (remade..=changed).contains(at)
-                    && matches!(e, RecorderEvent::Device { .. })
-            })
-            .map(|(_, _, e)| e)
-            .collect();
-        assert!(
-            matches!(
-                told[..],
-                [RecorderEvent::Device {
-                    change: DeviceChange::Changed(_),
-                    ..
-                }]
-            ),
-            "the instance took another path than a node made again: {told:?}"
-        );
-        let after = heard.audio_events_after(SYSTEM, changed);
-        let until = clock.now().checked_add(PATIENCE).unwrap();
-        while heard.audio_events_after(SYSTEM, changed) == after {
-            assert!(clock.now() < until, "nothing recorded from the new sink");
-            heard.listen(Duration::from_millis(100));
-        }
-        // One epoch, however late: its overrun here measures how far the
-        // monitor stream's first epoch was misdated (about 20 ms on
-        // `PipeWire` 1.6, its first audio from before the session started
-        // placed at the start, GAI-491), not where this one starts.
+        assert!(opened.checked_duration_since(changed).unwrap() <= SHOWN_WITHIN);
+        heard.listen(SECOND_EPOCH_WITHIN);
         let reopened = heard.reopenings(SYSTEM, remade);
+        let [Ok(epoch)] = reopened[..] else {
+            panic!("the new sink opened not one epoch but {reopened:?}");
+        };
+        // Its overrun here measures how far the monitor stream's first
+        // epoch was misdated (its first audio, from before the session
+        // started, placed at the start, GAI-491), not where this one
+        // starts.
+        let _ = writeln!(
+            std::io::stderr(),
+            "the remade sink's epoch: {:?} late",
+            epoch.overrun()
+        );
+        let first = epoch.first_sample().get();
         assert!(
-            matches!(reopened[..], [Ok(_)]),
-            "the new sink opened not one epoch but {reopened:?}"
+            !heard.audio_from(SYSTEM, first, u64::MAX - first).is_empty(),
+            "nothing recorded from the new sink"
         );
 
         drop(streams);
         let outcome = recorder.join().unwrap();
         assert!(outcome.is_ok(), "{outcome:?}");
+    }
+
+    /// Removes the followed sink A, loaded as `module`, and loads it again
+    /// straight after, before the session manager has named another
+    /// default, and says when it began and when the change to the node
+    /// made again arrived. The session manager sometimes names its
+    /// stand-in sink in between all the same, and the recorder rightly
+    /// tells a change to it and then back: that's another path than a
+    /// node made again, so the test tries again, up to [`REMAKE_TRIES`]
+    /// times in all.
+    fn remake_sink(
+        heard: &mut Heard,
+        fixtures: &mut Fixtures,
+        mut module: String,
+        clock: &SystemClock,
+    ) -> (SessionTime, SessionTime) {
+        let mut paths = Vec::new();
+        for _ in 0..REMAKE_TRIES {
+            let remade = clock.now();
+            fixtures.remove(&module);
+            module = fixtures.sink(SINK_A);
+            let changed = heard.wait_for_from(SYSTEM, remade, |e| {
+                is_device(e, &DeviceChange::Changed(SINK_A.1.into()))
+            });
+            assert!(changed.checked_duration_since(remade).unwrap() <= SHOWN_WITHIN);
+            // The one change told, with no loss or stand-in default
+            // before it: only then does the test tell the node made again
+            // apart, rather than a default renamed and back.
+            let told = heard.changes_told(SYSTEM, remade, changed);
+            if let [
+                RecorderEvent::Device {
+                    change: DeviceChange::Changed(_),
+                    ..
+                },
+            ] = told[..]
+            {
+                return (remade, changed);
+            }
+            let path = format!("{told:?}");
+            let _ = writeln!(std::io::stderr(), "a stand-in sink was named: {path}");
+            paths.push(path);
+            // The next try starts once the detour is over: it counts none
+            // of the detour's reopenings, and the recorder takes its
+            // reports as a new change.
+            heard.listen(DETOUR_SETTLES);
+        }
+        panic!("the instance took another path than a node made again each time: {paths:?}");
     }
 
     /// The snapshot's sinks and sources: two sinks and a source the test
