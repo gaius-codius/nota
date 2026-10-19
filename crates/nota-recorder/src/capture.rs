@@ -555,7 +555,11 @@ impl Held {
 /// as it was; then only the watch reports it, from the registry, as the
 /// new node appears. Which buffer comes next is then up to the session
 /// manager: `scripts/pipewire-devices.sh` checks that the change opens one
-/// epoch, not where it starts.
+/// epoch, not where it starts. On its null sinks the new node's stamps
+/// mostly broke from the old one's, but once in 180 runs ran on within
+/// 0.64 ms, and the epoch opened at the wait's end (GAI-494). The script
+/// bounds how late the epoch is, which there measures how far the
+/// stream's first epoch was misdated, not where this one starts.
 #[derive(Debug)]
 struct Reroutes {
     /// When the stream last reported a change the watch hasn't, in session
