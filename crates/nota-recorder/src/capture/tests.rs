@@ -52,9 +52,9 @@ enum Step {
     /// What the backend's watch on the audio server saw.
     Device(DeviceChange),
     /// What the `PipeWire` backend's watch saw, through the track's route,
-    /// reported as the watch reports it.
+    /// reported as the watch reports it, having heard of it as it says.
     #[cfg(target_os = "linux")]
-    Watch(route::Changes),
+    Watch(route::Changes, Heard),
     Fail(CaptureError),
     /// Moves the session clock on.
     Advance(Duration),
@@ -120,8 +120,9 @@ impl CaptureBackend for Synthetic {
                     Step::Notice(n) => feeder_events.notice(n),
                     Step::Device(c) => feeder_events.device(c),
                     #[cfg(target_os = "linux")]
-                    Step::Watch(changes) => {
-                        pipewire::watch::report(&feeder_events, &Source::Microphone, changes);
+                    Step::Watch(changes, heard) => {
+                        let mic = &Source::Microphone;
+                        pipewire::watch::report(&feeder_events, mic, changes, heard);
                     }
                     Step::Fail(e) => feeder_events.failed(e),
                     Step::Advance(by) => clock.advance(by),
@@ -1031,7 +1032,7 @@ fn a_followed_node_made_again_under_its_name_opens_an_epoch() {
         Step::Audio(samples(0, 100)),
         Step::Advance(secs(1)),
         Step::Audio(samples(100, 100)),
-        Step::Watch(changes),
+        Step::Watch(changes, Heard::AtOnce),
         Step::Advance(secs(2)),
         Step::Audio(samples(200, 100)),
         Step::Audio(samples(300, 100)),
@@ -1129,6 +1130,201 @@ fn changes_one_source_alone_reports_open_an_epoch_each() {
         .map(|e| e.first_sample().get())
         .collect();
     assert_eq!(firsts, [0, 100, 200, 300, 400]);
+}
+
+/// What the `PipeWire` watch reports when the followed microphone becomes
+/// `name` at `at`, having heard of it as `heard` says.
+#[cfg(target_os = "linux")]
+fn watched(name: &str, at: SessionTime, heard: Heard) -> Step {
+    let changes = route::Changes {
+        change: DeviceChange::Changed(name.into()),
+        ends_stream: false,
+        at,
+    };
+    Step::Watch(changes, heard)
+}
+
+/// The first sample of each of `timeline`'s epochs.
+#[cfg(target_os = "linux")]
+fn epoch_firsts(timeline: &TrackTimeline) -> Vec<u64> {
+    timeline
+        .epochs()
+        .iter()
+        .map(|e| e.first_sample().get())
+        .collect()
+}
+
+/// GAI-500's first example: a node made again under the default's name,
+/// which only the watch's events report, and a second later a switch of
+/// the default, which only the stream reports. Each opens an epoch: the
+/// switch's report doesn't pair with the remake's.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_switch_only_the_stream_reports_after_a_remake_only_the_watch_reports_opens_an_epoch() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let ms = Duration::from_millis;
+    let script = vec![
+        Step::Audio(samples(0, 100)),
+        Step::Advance(secs(1)),
+        watched("Headset", at(1), Heard::AtOnce),
+        Step::Advance(ms(500)),
+        Step::Audio(samples(100, 100)),
+        // A second after the remake's report, inside the 2 s a late report
+        // of it could come in, but not one heard at once.
+        Step::Advance(ms(500)),
+        Step::Notice(CaptureNotice::RouteChanged),
+        Step::Advance(ms(500)),
+        Step::Audio(samples(200, 100)),
+    ];
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    assert_eq!(epoch_firsts(&run.timeline), [0, 100, 200]);
+}
+
+/// The first example with the switch caught by the watch's poll a second
+/// after the stream reported it: the poll's late report pairs with the
+/// stream's, and the switch opens one epoch, not a second when the poll
+/// reports it.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_switch_the_poll_reports_late_pairs_with_the_stream_s_report_not_a_remake_s() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let ms = Duration::from_millis;
+    let script = vec![
+        Step::Audio(samples(0, 100)),
+        Step::Advance(secs(1)),
+        watched("Headset", at(1), Heard::AtOnce),
+        Step::Advance(ms(500)),
+        Step::Audio(samples(100, 100)),
+        Step::Advance(ms(500)),
+        Step::Notice(CaptureNotice::RouteChanged),
+        Step::Advance(ms(500)),
+        Step::Audio(samples(200, 100)),
+        // The poll reads the graph afresh and finds the switch the watch's
+        // events missed.
+        Step::Advance(ms(500)),
+        watched("Speakers", at(3), Heard::MaybeLate),
+        Step::Advance(ms(500)),
+        Step::Audio(samples(300, 100)),
+    ];
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    assert_eq!(epoch_firsts(&run.timeline), [0, 100, 200]);
+}
+
+/// GAI-500's second example: change A only the stream reports; change B,
+/// a second later, both report, the watch first; change C, 1.5 s after B,
+/// only the watch's events report. B's watch report pairs with B's stream
+/// report, not A's, so none is left for C's to pair with, and each change
+/// opens an epoch.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_change_only_the_watch_reports_after_a_shifted_pair_opens_an_epoch() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let script = vec![
+        Step::Audio(samples(0, 100)),
+        Step::Advance(secs(1)),
+        Step::Notice(CaptureNotice::RouteChanged),
+        Step::Audio(samples(100, 100)),
+        // The watch takes the lock before the stream does.
+        Step::Advance(secs(1)),
+        watched("B", at(2), Heard::AtOnce),
+        Step::Notice(CaptureNotice::RouteChanged),
+        Step::Audio(samples(200, 100)),
+        Step::Advance(Duration::from_millis(1_500)),
+        watched("C", SessionTime::from_nanos(3_500_000_000), Heard::AtOnce),
+        Step::Audio(samples(300, 100)),
+    ];
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    assert_eq!(epoch_firsts(&run.timeline), [0, 100, 200, 300]);
+}
+
+/// The shifted pair followed by a change only the poll reports, 1.8 s
+/// after change A's stream report: once B's reports have paired, A's is
+/// dropped, as the poll can no longer report A, so C opens an epoch.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_change_only_the_poll_reports_after_a_shifted_pair_opens_an_epoch() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let script = vec![
+        Step::Audio(samples(0, 100)),
+        Step::Advance(secs(1)),
+        Step::Notice(CaptureNotice::RouteChanged),
+        Step::Audio(samples(100, 100)),
+        Step::Advance(secs(1)),
+        watched("B", at(2), Heard::AtOnce),
+        Step::Notice(CaptureNotice::RouteChanged),
+        Step::Audio(samples(200, 100)),
+        // Within the 2 s a late report of A could come in.
+        Step::Advance(Duration::from_millis(800)),
+        watched(
+            "C",
+            SessionTime::from_nanos(2_800_000_000),
+            Heard::MaybeLate,
+        ),
+        Step::Audio(samples(300, 100)),
+    ];
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    assert_eq!(epoch_firsts(&run.timeline), [0, 100, 200, 300]);
+}
+
+/// A change only the stream reports, then one only the watch's events
+/// report a second later, then one only the poll reports 1.8 s after the
+/// first: the poll can't report the first change once the watch has
+/// reported the second, so the stream's leftover report is dropped, and
+/// each change opens an epoch.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_change_only_the_poll_reports_after_two_single_reports_opens_an_epoch() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let script = vec![
+        Step::Audio(samples(0, 100)),
+        Step::Advance(secs(1)),
+        Step::Notice(CaptureNotice::RouteChanged),
+        Step::Audio(samples(100, 100)),
+        Step::Advance(secs(1)),
+        watched("B", at(2), Heard::AtOnce),
+        Step::Audio(samples(200, 100)),
+        // Within the 2 s a late report of the first change could come in.
+        Step::Advance(Duration::from_millis(800)),
+        watched(
+            "C",
+            SessionTime::from_nanos(2_800_000_000),
+            Heard::MaybeLate,
+        ),
+        Step::Audio(samples(300, 100)),
+    ];
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    assert_eq!(epoch_firsts(&run.timeline), [0, 100, 200, 300]);
+}
+
+/// A known limit, pinned so a change to it is seen: a change only the
+/// poll reports, within 2 s of a change only the stream reported, pairs
+/// with it and opens no epoch, as the poll's late report of the first
+/// change would.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_change_only_the_poll_reports_soon_after_one_only_the_stream_reports_opens_none() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let script = vec![
+        Step::Audio(samples(0, 100)),
+        Step::Advance(secs(1)),
+        Step::Notice(CaptureNotice::RouteChanged),
+        Step::Audio(samples(100, 100)),
+        Step::Advance(Duration::from_millis(1_500)),
+        watched(
+            "B",
+            SessionTime::from_nanos(2_500_000_000),
+            Heard::MaybeLate,
+        ),
+        Step::Audio(samples(200, 100)),
+    ];
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    assert_eq!(epoch_firsts(&run.timeline), [0, 100]);
 }
 
 /// A new device's first buffer stamped before the end of the old audio
@@ -1328,8 +1524,18 @@ fn an_unstamped_buffer_reopens_at_once_and_leaves_no_run() {
 const RACES: usize = 20_000;
 
 /// One of a stream's two sources reporting a change at a time:
-/// [`Reroutes::stream_moved`] or [`Reroutes::watch_moved`].
+/// [`Reroutes::stream_moved`], [`watch_at_once`] or [`watch_maybe_late`].
 type Moved = fn(&Reroutes, SessionTime);
+
+/// The watch's report of a change its events heard as it happened.
+fn watch_at_once(reroutes: &Reroutes, at: SessionTime) {
+    reroutes.watch_moved(at, Heard::AtOnce);
+}
+
+/// The watch's report of a change it may have heard late, from its poll.
+fn watch_maybe_late(reroutes: &Reroutes, at: SessionTime) {
+    reroutes.watch_moved(at, Heard::MaybeLate);
+}
 
 /// Sets its flag if dropped while its thread panics, so a thread waiting
 /// on that thread can stop waiting.
@@ -1346,9 +1552,9 @@ impl Drop for PanicFlag<'_> {
 /// One change's two reports, from the stream and the watch at the same
 /// moment on two threads, pair with each other under any interleaving:
 /// the change is due by the time either report returns, it opens an
-/// epoch, and the next change half a second later still opens its own.
-/// Both reports left unpaired would each pair with one of the next
-/// change's, which then would open none (GAI-495).
+/// epoch, and neither report is left waiting to pair. Both left unpaired
+/// would shift the pairs of the changes after, and a later change one
+/// source alone reports could then open no epoch (GAI-495).
 #[test]
 fn one_change_reported_from_both_at_once_pairs() {
     let first = SessionTime::from_nanos(1_000_000_000);
@@ -1379,35 +1585,32 @@ fn one_change_reported_from_both_at_once_pairs() {
         undue
     };
     let (watch_undue, stream_undue) = thread::scope(|scope| {
-        let watch = scope.spawn(|| report(Reroutes::watch_moved));
+        let watch = scope.spawn(|| report(watch_at_once));
         let stream = report(Reroutes::stream_moved);
         (watch.join().unwrap(), stream)
     });
     assert_eq!((watch_undue, stream_undue), (vec![], vec![]));
-    let second = SessionTime::from_nanos(1_500_000_000);
-    let unopened: Vec<usize> = (0..RACES)
+    let unpaired: Vec<usize> = (0..RACES)
         .filter(|&round| {
             let reroutes = &all[round];
-            let first_opened = reroutes.take(None);
-            reroutes.stream_moved(second);
-            reroutes.watch_moved(second);
-            !(first_opened && reroutes.take(None))
+            let opened = reroutes.take(None);
+            !opened || reroutes.unpaired.lock().unwrap().is_some()
         })
         .collect();
     // Each round names itself, so a failure shows how often it raced.
     assert!(
-        unopened.is_empty(),
-        "{} of {RACES} rounds had a change that opened no epoch: {unopened:?}",
-        unopened.len()
+        unpaired.is_empty(),
+        "{} of {RACES} rounds opened no epoch or left a report unpaired: {unpaired:?}",
+        unpaired.len()
     );
 }
 
-/// A report pairs with the other source's last one up to [`SAME_CHANGE`]
-/// after it, and a nanosecond later is a change of its own, whichever
-/// source reports first.
+/// A report pairs with the other source's last one up to a window after
+/// it, and a nanosecond later is a change of its own, whichever source
+/// reports first: 200 ms for a watch report its events heard at once
+/// ([`HEARD_AT_ONCE`]), 2 s for one that may be late ([`SAME_CHANGE`]).
 #[test]
-fn a_report_pairs_up_to_same_change_after_the_other() {
-    let window = u64::try_from(SAME_CHANGE.as_nanos()).unwrap();
+fn a_report_pairs_up_to_its_window_after_the_other() {
     let reopens_after = |earlier: Moved, later: Moved, gap: u64| {
         let reroutes = Reroutes::default();
         earlier(&reroutes, SessionTime::from_nanos(1_000_000_000));
@@ -1415,13 +1618,16 @@ fn a_report_pairs_up_to_same_change_after_the_other() {
         later(&reroutes, SessionTime::from_nanos(1_000_000_000 + gap));
         reroutes.take(None)
     };
-    let orders: [(Moved, Moved); 2] = [
-        (Reroutes::watch_moved, Reroutes::stream_moved),
-        (Reroutes::stream_moved, Reroutes::watch_moved),
+    let watches: [(Moved, u64); 2] = [
+        (watch_at_once, 200_000_000),
+        (watch_maybe_late, 2_000_000_000),
     ];
-    for (earlier, later) in orders {
-        assert!(!reopens_after(earlier, later, window));
-        assert!(reopens_after(earlier, later, window + 1));
+    for (watch, window) in watches {
+        let stream: Moved = Reroutes::stream_moved;
+        for (earlier, later) in [(watch, stream), (stream, watch)] {
+            assert!(!reopens_after(earlier, later, window));
+            assert!(reopens_after(earlier, later, window + 1));
+        }
     }
 }
 
@@ -1432,7 +1638,7 @@ fn a_report_pairs_up_to_same_change_after_the_other() {
 fn a_report_stamped_before_the_other_still_pairs_with_it() {
     let reroutes = Reroutes::default();
     assert!(!reroutes.take(Some(cycle_at(980, 0))));
-    reroutes.watch_moved(SessionTime::from_nanos(1_001_000_000));
+    watch_at_once(&reroutes, SessionTime::from_nanos(1_001_000_000));
     // The stream's thread read the clock first but got here second.
     reroutes.stream_moved(SessionTime::from_nanos(1_000_000_000));
     let reopened: Vec<u64> = (50..70)

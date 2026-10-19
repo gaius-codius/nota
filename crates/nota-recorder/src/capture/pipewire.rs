@@ -101,9 +101,9 @@ impl Promotion {
 /// than record whatever `PipeWire` moves it to.
 ///
 /// Each stream has a watch on `PipeWire`'s graph, on a thread of its own,
-/// that reports which device the source is on as it changes
-/// ([`CaptureSender::device`]): a new default followed, or the device
-/// lost. A route change also opens an epoch, as cpal reports it
+/// that reports which device the source is on as it changes, and how it
+/// heard of the change (`watch::report`): a new default followed, or the
+/// device lost. A route change also opens an epoch, as cpal reports it
 /// ([`CaptureNotice::RouteChanged`]) or the watch does
 /// ([`DeviceChange::Changed`](nota_core::recorder::DeviceChange::Changed)).
 ///
