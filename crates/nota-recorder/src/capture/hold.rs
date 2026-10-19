@@ -18,6 +18,14 @@
 //! sent with a delay that much longer, so the drift meter, which reads
 //! the cycles, sees no difference.
 //!
+//! A stream started with the session can have its first audio dated
+//! before the session clock's start: on a private `PipeWire`'s null sink,
+//! the settled stamp put a monitor's first sample 22 ms before it
+//! (GAI-491). Session time has nothing before its start, so that audio
+//! is placed at the start, late by as much: the held buffers run on from
+//! it, and a buffer dated by its own stamp ([`stamped`]) starts there.
+//! Each still keeps its cycle.
+//!
 //! A run of buffers with no delay after the stream had one is held and
 //! dated the same way, should `PipeWire` measure the delay again (it
 //! might after the stream follows a new device; that hasn't been seen),
@@ -198,15 +206,17 @@ impl Settling {
 
     /// When the first held sample was captured: the samples held before
     /// `settled`'s buffer, back from its stamp, or earlier if that would
-    /// put a held buffer's audio after the cycle that delivered it.
+    /// put a held buffer's audio after the cycle that delivered it; but no
+    /// earlier than the session clock's start (see the module docs).
+    /// `None` only if a length overflows.
     fn start(&self, settled: Delivery) -> Option<Duration> {
         let back = settled
             .capture
-            .checked_sub(length(self.samples.len(), self.rate)?)?;
+            .saturating_sub(length(self.samples.len(), self.rate)?);
         let mut end = 0;
         self.held.iter().try_fold(back, |start, &(len, stamp)| {
             end += len;
-            Some(start.min(stamp.cycle.checked_sub(length(end, self.rate)?)?))
+            Some(start.min(stamp.cycle.saturating_sub(length(end, self.rate)?)))
         })
     }
 
@@ -228,14 +238,15 @@ fn length(len: usize, rate: SampleRate) -> Option<Duration> {
 /// it, unless its delay is none. A capture stream's audio comes before
 /// the cycle that delivers it, so a delay of none is one `PipeWire` hasn't
 /// measured; the buffer is then taken as ending at its cycle, captured its
-/// length before. `None` if the cycle comes before that length.
+/// length before, or at the session clock's start if that's later (see
+/// the module docs). `None` only if the length overflows.
 fn stamped(stamp: Delivery, len: usize, rate: SampleRate) -> Timed {
     let delay = stamp.delay();
     if !delay.is_zero() {
         return Some((stamp.capture, delay));
     }
-    let length = length(len, rate)?;
-    Some((stamp.cycle.checked_sub(length)?, length))
+    let began = stamp.cycle.saturating_sub(length(len, rate)?);
+    Some((began, stamp.cycle.saturating_sub(began)))
 }
 
 #[cfg(test)]

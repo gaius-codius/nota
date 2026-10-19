@@ -640,8 +640,9 @@ mod linux {
             heard.listen(Duration::from_millis(100));
         }
         // One epoch, however late: its overrun here measures how far the
-        // monitor stream's first epoch was misdated (about 500 ms on
-        // `PipeWire` 1.6, GAI-489), not where this one starts.
+        // monitor stream's first epoch was misdated (about 20 ms on
+        // `PipeWire` 1.6, its first audio from before the session started
+        // placed at the start, GAI-491), not where this one starts.
         let reopened = heard.reopenings(SYSTEM, remade);
         assert!(
             matches!(reopened[..], [Ok(_)]),
