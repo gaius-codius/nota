@@ -25,8 +25,7 @@ mod linux {
 
     use nota_core::recorder::DeviceChange;
     use nota_core::{
-        Clock, Epoch, EpochError, SampleIndex, SampleRate, SessionId, SessionTime, SystemClock,
-        TrackId,
+        Clock, Epoch, EpochError, SampleRate, SessionId, SessionTime, SystemClock, TrackId,
     };
     use nota_recorder::capture::{
         CaptureBackend, CaptureError, CaptureNotice, Device, Devices, PipeWireBackend, RecordError,
@@ -389,21 +388,19 @@ mod linux {
                 .unwrap()
         }
 
-        /// The session time `track`'s sample `sample` plays at, by the
-        /// epoch it was recorded in: the last one opened from a sample at or
-        /// before it.
-        fn time_of(&self, track: TrackId, sample: u64) -> SessionTime {
-            let epoch = self
-                .seen
-                .iter()
-                .filter(|(_, t, _)| *t == Some(track))
-                .filter_map(|(_, _, e)| match e {
-                    RecorderEvent::Epoch(epoch) => Some(*epoch),
-                    _ => None,
-                })
-                .rfind(|epoch| epoch.first_sample().get() <= sample)
-                .unwrap();
-            epoch.time_of(SampleIndex::new(sample)).unwrap()
+        /// Whether the stream reported a route change on `track` at a time
+        /// from `from` to `to`.
+        fn stream_reported(&self, track: TrackId, from: SessionTime, to: SessionTime) -> bool {
+            self.seen.iter().any(|(_, t, e)| {
+                *t == Some(track)
+                    && matches!(
+                        e,
+                        RecorderEvent::Capture {
+                            notice: CaptureNotice::RouteChanged,
+                            at,
+                        } if (from..=to).contains(at)
+                    )
+            })
         }
 
         /// Where `track`'s audio received before `at` ends.
@@ -452,9 +449,9 @@ mod linux {
 
     /// The switch opened one epoch, though the stream and the watch both
     /// report it, late by no more than [`MOST_LATE`]. Where it starts
-    /// depends on when the switch was first reported: before B's tone,
-    /// whose first loud sample is `tone`, was recorded ([`check_prompt`]),
-    /// or only after ([`check_late`]).
+    /// depends on when the switch was reported: in time for B's tone, whose
+    /// first loud sample is `tone`, to open it ([`check_prompt`]), or too
+    /// late, leaving the tone in A's epoch ([`check_late`]).
     fn check_reopening(heard: &mut Heard, switched: SessionTime, tone: u64) {
         let epoch = match heard.reopenings(SYSTEM, switched).as_slice() {
             [Ok(epoch)] => *epoch,
@@ -467,11 +464,10 @@ mod linux {
             epoch.overrun()
         );
         assert!(epoch.overrun() <= MOST_LATE, "{:?} late", epoch.overrun());
-        let reported = heard.first_report(SYSTEM, switched);
-        if reported < heard.time_of(SYSTEM, tone) {
-            check_prompt(heard, &epoch);
+        if tone < epoch.first_sample().get() {
+            check_late(heard, &epoch, switched);
         } else {
-            check_late(heard, &epoch, reported);
+            check_prompt(heard, &epoch);
         }
     }
 
@@ -505,18 +501,26 @@ mod linux {
 
     /// The switch reported only once B's tone was already recorded. Now
     /// and then a fresh private instance forwards none of its `default`
-    /// metadata's changes to the clients bound to it (GAI-496), so neither
-    /// the stream nor the watch's events hear of the switch, and the
-    /// watch's poll reports it up to a second late. With no break in the stamps left to wait for, the recorder
+    /// metadata's changes to the clients already bound to it (GAI-496), so
+    /// the stream never hears of the switch, nor do the watch's events, and
+    /// the watch's poll reports it up to a second late. Any other reason
+    /// for a late epoch fails here: the stream must not have reported the
+    /// switch. With no break in the stamps left to wait for, the recorder
     /// opens the epoch at the first buffer whose cycle is [`REOPEN_WAIT`]
     /// past the report, as `Reroutes` documents, and B's audio before it
-    /// stays in A's epoch, timed by its stamps. So the epoch starts after
-    /// the report, within the wait and [`MOST_LATE`] of it, on B's tone.
-    fn check_late(heard: &Heard, epoch: &Epoch, reported: SessionTime) {
+    /// stays in A's epoch, timed within `LOSS_MIN` of its stamps. So the
+    /// epoch starts after the report, within the wait and [`MOST_LATE`] of
+    /// it, on B's tone.
+    fn check_late(heard: &Heard, epoch: &Epoch, switched: SessionTime) {
         let _ = writeln!(
             std::io::stderr(),
-            "the switch was first reported after B's tone: checked as reported late"
+            "B's tone came before the switch's epoch: checked as reported late"
         );
+        assert!(
+            !heard.stream_reported(SYSTEM, switched, epoch.start()),
+            "the stream reported the switch, yet its epoch came after B's tone"
+        );
+        let reported = heard.first_report(SYSTEM, switched);
         let after = epoch.start().checked_duration_since(reported);
         assert!(
             after.is_some_and(|after| after <= REOPEN_WAIT + MOST_LATE),
@@ -687,10 +691,10 @@ mod linux {
         );
         // The switch's epoch comes with the new device's audio, or, if the
         // switch is reported late, once its stamps are REOPEN_WAIT past a
-        // report up to a second late; then half a second more, in which a
-        // second epoch for the switch would show.
+        // report up to a second late; then a wait in which a second epoch,
+        // for a report the recorder didn't pair with the first, would show.
         heard.wait_for_from(SYSTEM, switched, |e| matches!(e, RecorderEvent::Epoch(_)));
-        heard.listen(Duration::from_millis(500));
+        heard.listen(SECOND_EPOCH_WITHIN);
         check_reopening(&mut heard, switched, tone_from);
 
         // The pinned sink, now also the default, removed.
@@ -726,8 +730,8 @@ mod linux {
     /// it gives up on the session manager leaving the default alone.
     const REMAKE_TRIES: u32 = 3; // check-bound
 
-    /// How long after a remake's reopening the test still watches for a
-    /// second one: a report the watch's events missed comes from its poll
+    /// How long after a switch's or a remake's reopening the tests still
+    /// watch for a second one: a report the watch's events missed comes from its poll
     /// within about a second, the recorder may reopen for it only
     /// `REOPEN_WAIT` (200 ms) after that, and the hold keeps the reopened
     /// audio, with its epoch, up to half a second more.

@@ -573,10 +573,11 @@ impl Held {
 /// (the watch's poll, up to about a second late) has no break left to wait
 /// for, and opens its epoch at the wait's end rather than at the next
 /// buffer. On a private `PipeWire`, now and then a fresh instance forwards
-/// none of its `default` metadata's changes to the clients bound to it, so
-/// neither the stream nor the watch's events hear of a switch, and only
-/// the poll reports it (GAI-496); `scripts/pipewire-devices.sh` checks this
-/// path when it comes.
+/// none of its `default` metadata's changes to the clients already bound
+/// to it, so neither the stream nor the watch's events hear of a switch,
+/// and only the poll, whose fresh subscription reads the new value, reports
+/// it (GAI-496); `scripts/pipewire-devices.sh` checks this path when it
+/// comes.
 ///
 /// A node made again under the default's own name may leave the metadata
 /// as it was; then only the watch reports it, from the registry, as the
