@@ -1,15 +1,16 @@
 //! The recorder's device events against real `PipeWire`, in the private
 //! instance `scripts/pipewire-devices.sh` starts: a followed default output
-//! switched is `Changed` and opens an epoch that starts with the new
-//! sink's audio, a pinned sink removed is `Lost` and ends its track, a
-//! followed sink removed and made again under its name is `Changed` and
-//! opens one epoch (tried again if the session manager names its stand-in
-//! sink in between), within 2 s each. And the device snapshot, which Setup
-//! lists, names the instance's sinks and sources, and its defaults, as
-//! they come and go.
-//! Skips (and says so) unless the script runs it: switching a default
-//! anywhere else would change the user's (AGENTS.md section 8). The script
-//! runs the tests one at a time, since each sets the defaults.
+//! switched is `Changed` and opens an epoch that starts with the new sink's
+//! audio, or, when only the watch's poll reports the switch, with the new
+//! sink's audio at the end of the recorder's wait past that report, a pinned
+//! sink removed is `Lost` and ends its track, a followed sink removed and
+//! made again under its name is `Changed` and opens one epoch (tried again if
+//! the session manager names its stand-in sink in between), within 2 s each.
+//! And the device snapshot, which Setup lists, names the instance's sinks and
+//! sources, and its defaults, as they come and go. Skips (and says so) unless
+//! the script runs it: switching a default anywhere else would change the
+//! user's (AGENTS.md section 8). The script runs the tests one at a time,
+//! since each sets the defaults.
 
 // Test code throughout: clippy allows unwraps and panics in it.
 #![cfg(test)]
@@ -365,9 +366,9 @@ mod linux {
                 .collect()
         }
 
-        /// When `track`'s route change was first reported at `after` or later,
-        /// by the stream (`RouteChanged`) or the watch (`Changed`): the
-        /// stamp the recorder waits from.
+        /// When `track`'s route change was first reported at `after` or
+        /// later, by the stream (`RouteChanged`) or the watch (`Changed`):
+        /// the stamp the recorder waits from.
         fn first_report(&self, track: TrackId, after: SessionTime) -> SessionTime {
             self.seen
                 .iter()
@@ -447,11 +448,12 @@ mod linux {
         }
     }
 
-    /// The switch opened one epoch, though the stream and the watch both
-    /// report it, late by no more than [`MOST_LATE`]. Where it starts
-    /// depends on when the switch was reported: in time for B's tone, whose
-    /// first loud sample is `tone`, to open it ([`check_prompt`]), or too
-    /// late, leaving the tone in A's epoch ([`check_late`]).
+    /// The switch opened one epoch, whether the stream and the watch both
+    /// report it or only the watch's poll does, late by no more than
+    /// [`MOST_LATE`]. Where it starts depends on when the switch was
+    /// reported: in time for B's tone, whose first loud sample is `tone`, to
+    /// open it ([`check_prompt`]), or too late, leaving the tone in A's epoch
+    /// ([`check_late`]).
     fn check_reopening(heard: &mut Heard, switched: SessionTime, tone: u64) {
         let epoch = match heard.reopenings(SYSTEM, switched).as_slice() {
             [Ok(epoch)] => *epoch,
@@ -509,8 +511,8 @@ mod linux {
     /// opens the epoch at the first buffer whose cycle is [`REOPEN_WAIT`]
     /// past the report, as `Reroutes` documents, and B's audio before it
     /// stays in A's epoch, timed within `LOSS_MIN` of its stamps. So the
-    /// epoch starts after the report, within the wait and [`MOST_LATE`] of
-    /// it, on B's tone.
+    /// epoch starts the wait after the report, give or take [`MOST_LATE`],
+    /// on B's tone.
     fn check_late(heard: &Heard, epoch: &Epoch, switched: SessionTime) {
         let _ = writeln!(
             std::io::stderr(),
@@ -522,8 +524,14 @@ mod linux {
         );
         let reported = heard.first_report(SYSTEM, switched);
         let after = epoch.start().checked_duration_since(reported);
+        let _ = writeln!(
+            std::io::stderr(),
+            "the late switch's epoch: {after:?} after its report"
+        );
         assert!(
-            after.is_some_and(|after| after <= REOPEN_WAIT + MOST_LATE),
+            after.is_some_and(|after| {
+                after >= REOPEN_WAIT.saturating_sub(MOST_LATE) && after <= REOPEN_WAIT + MOST_LATE
+            }),
             "the late switch's epoch started {after:?} after its report"
         );
         let opening = heard.audio_from(SYSTEM, epoch.first_sample().get(), 160);
@@ -629,12 +637,13 @@ mod linux {
         }
     }
 
-    /// A followed default switched and a pinned sink removed, on the
-    /// private instance: each shows within 2 s, the pinned track ends with
-    /// nothing recorded after, and the capture moves to the new sink in an
-    /// epoch that starts with the new sink's audio, not the old's. With no
-    /// microphone left, the followed microphone is lost but follows the
-    /// next default.
+    /// A followed default switched and a pinned sink removed, on the private
+    /// instance: each shows within 2 s, the pinned track ends with nothing
+    /// recorded after, and the capture moves to the new sink in an epoch that
+    /// starts with the new sink's audio, not the old's (or, when only the
+    /// watch's poll reports the switch, the recorder's wait after that
+    /// report, on the new sink's audio). With no microphone left, the
+    /// followed microphone is lost but follows the next default.
     #[test]
     fn device_changes_show_on_real_pipewire() {
         let Some(_private) = private_instance() else {
@@ -731,8 +740,8 @@ mod linux {
     const REMAKE_TRIES: u32 = 3; // check-bound
 
     /// How long after a switch's or a remake's reopening the tests still
-    /// watch for a second one: a report the watch's events missed comes from its poll
-    /// within about a second, the recorder may reopen for it only
+    /// watch for a second one: a report the watch's events missed comes from
+    /// its poll within about a second, the recorder may reopen for it only
     /// `REOPEN_WAIT` (200 ms) after that, and the hold keeps the reopened
     /// audio, with its epoch, up to half a second more.
     const SECOND_EPOCH_WITHIN: Duration = Duration::from_secs(2); // check-bound
