@@ -64,6 +64,9 @@ jobs:
       - run: scripts/check-test-targets.test.sh
       # The soak analyser's lag check; the soak itself is run by hand.
       - run: scripts/soak-analyse.test.sh
+      # The T4 device-change script's screen reader, tone classifier and
+      # event matching; the runs against PipeWire are made by hand.
+      - run: scripts/device-changes.test.sh
       # The crash runner's prerequisites, fault accounting and clean-up,
       # against stand-ins for LazyFS and the recorder; the real sweep is run
       # by hand (see the script).
