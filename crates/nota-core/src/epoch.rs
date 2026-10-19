@@ -483,9 +483,9 @@ impl TrackTimeline {
     /// which is reported as its overrun.
     ///
     /// The new device's stamps don't carry on from the old one's: on
-    /// `PipeWire`, the first buffer after a default switch is stamped tens
-    /// of milliseconds before the end of the old device's audio, far past
-    /// any drift. Refusing the epoch would leave the audio in the old one,
+    /// `PipeWire`, the new device's first buffer after a default switch is
+    /// stamped tens of milliseconds before the end of the old device's
+    /// audio, far past any drift. Refusing the epoch would leave the audio in the old one,
     /// timed from the same moment, so starting at the old audio's end
     /// places it no later than a refusal would, and gives it an epoch of
     /// its own.
