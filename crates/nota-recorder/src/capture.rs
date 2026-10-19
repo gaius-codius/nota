@@ -532,10 +532,15 @@ impl Held {
 /// sink made again that only the watch's events report, and a switch a
 /// second later that only the stream reports, each open an epoch, as does
 /// a change only the watch's events report a second after another
-/// change's leftover stream report (GAI-500). A change only the stream
-/// reports, followed within 2 s by one only the poll reports, still pairs
-/// with it, and the second opens no epoch: that's what the poll's late
-/// report of the first looks like.
+/// change's leftover stream report (GAI-500). A source's leftover report
+/// is dropped once a later report of its own pairs, as the other source
+/// can no longer report that change. What's left: a change only one
+/// source reports still pairs with the other source's report of the next
+/// change if that comes within 2 s and is the poll's (a change only the
+/// stream reports, then one only the poll reports, is what the poll's late
+/// report of the first looks like; the other way round, the same), or
+/// within 200 ms from the watch's events. Then the second change opens no
+/// epoch.
 ///
 /// The stream's callback and the watch's thread report one switch of the
 /// default at nearly the same moment (9 µs apart on a private `PipeWire`,
@@ -770,11 +775,18 @@ impl Reroutes {
                 .is_some(),
             Reporter::Watch(heard) => stream.take_if(|&mut was| same(was, heard)).is_some(),
         };
+        // Once a report pairs, its source's older report left unpaired is
+        // for a change the device has since moved on from: the other
+        // source can't report that change any more, the poll included, as
+        // the graph it reads has moved on too. Kept, it could pair with a
+        // later change's report.
+        match (from, paired) {
+            (Reporter::Stream, true) => *stream = None,
+            (Reporter::Watch(_), true) => *watch = None,
+            (Reporter::Stream, false) => *stream = Some(at),
+            (Reporter::Watch(heard), false) => *watch = Some((at, heard)),
+        }
         if !paired {
-            match from {
-                Reporter::Stream => *stream = Some(at),
-                Reporter::Watch(heard) => *watch = Some((at, heard)),
-            }
             // A change before the audio reopened for the last is reopened
             // for with it, and waited for from the first.
             self.due.fetch_min(at, Ordering::SeqCst);

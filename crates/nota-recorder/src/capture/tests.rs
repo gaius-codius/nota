@@ -1239,6 +1239,36 @@ fn a_change_only_the_watch_reports_after_a_shifted_pair_opens_an_epoch() {
     assert_eq!(epoch_firsts(&run.timeline), [0, 100, 200, 300]);
 }
 
+/// The shifted pair followed by a change only the poll reports, 1.8 s
+/// after change A's stream report: once B's reports have paired, A's is
+/// dropped, as the poll can no longer report A, so C opens an epoch.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_change_only_the_poll_reports_after_a_shifted_pair_opens_an_epoch() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let script = vec![
+        Step::Audio(samples(0, 100)),
+        Step::Advance(secs(1)),
+        Step::Notice(CaptureNotice::RouteChanged),
+        Step::Audio(samples(100, 100)),
+        Step::Advance(secs(1)),
+        watched("B", at(2), Heard::AtOnce),
+        Step::Notice(CaptureNotice::RouteChanged),
+        Step::Audio(samples(200, 100)),
+        // Within the 2 s a late report of A could come in.
+        Step::Advance(Duration::from_millis(800)),
+        watched(
+            "C",
+            SessionTime::from_nanos(2_800_000_000),
+            Heard::MaybeLate,
+        ),
+        Step::Audio(samples(300, 100)),
+    ];
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    assert_eq!(epoch_firsts(&run.timeline), [0, 100, 200, 300]);
+}
+
 /// The limit that's left: a change only the poll reports, within 2 s of
 /// a change only the stream reported, pairs with it and opens no epoch,
 /// as the poll's late report of the first change would.

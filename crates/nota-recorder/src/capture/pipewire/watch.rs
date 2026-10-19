@@ -309,14 +309,7 @@ impl Watcher {
                 took_over = true;
             }
         }
-        // A fresh copy that took over shows what the old one's events
-        // missed, up to a poll late.
-        let heard = if took_over {
-            Heard::MaybeLate
-        } else {
-            Heard::AtOnce
-        };
-        Self::look(&Rc::downgrade(&this), heard);
+        Self::look(&Rc::downgrade(&this), heard_after_sync(took_over));
     }
 
     /// Looks at the current graph, and reports what changed for the track,
@@ -338,6 +331,18 @@ impl Watcher {
             return;
         };
         report(&watcher.events, watcher.route.source(), changes, heard);
+    }
+}
+
+/// How a change seen as a sync is answered was heard: up to a poll late if
+/// a fresh copy of the graph `took_over` (it shows what the old one's
+/// events missed), otherwise as it happened, as the events that changed
+/// the current graph were.
+const fn heard_after_sync(took_over: bool) -> Heard {
+    if took_over {
+        Heard::MaybeLate
+    } else {
+        Heard::AtOnce
     }
 }
 
@@ -740,6 +745,14 @@ mod tests {
             queued(&queue),
             ["Device { change: Changed(\"Headphones\"), at: SessionTime(7) }"]
         );
+    }
+
+    /// A change the look after a fresh copy takes over finds may be a poll
+    /// late; one after any other sync was heard as it happened.
+    #[test]
+    fn only_a_fresh_copy_taking_over_hears_changes_late() {
+        assert_eq!(heard_after_sync(true), Heard::MaybeLate);
+        assert_eq!(heard_after_sync(false), Heard::AtOnce);
     }
 
     /// A watch that can't run says so, and why.
