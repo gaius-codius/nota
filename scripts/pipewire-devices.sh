@@ -92,7 +92,14 @@ for _ in $(seq 50); do
 done
 
 # The guard the test checks too: pactl must be talking to this instance.
-server=$(pactl info | sed -n 's/^Server String: //p')
+# The instance has now and then refused pactl here (GAI-494), with nothing
+# to say why: its logs go with the directory, so they're shown first.
+if ! info=$(pactl info 2>&1); then
+  echo "pipewire-devices.sh: the private pipewire-pulse didn't answer: $info" >&2
+  tail -n 20 "$work"/*.log >&2
+  exit 1
+fi
+server=$(printf '%s\n' "$info" | sed -n 's/^Server String: //p')
 case $server in
   "$XDG_RUNTIME_DIR"/*) ;;
   *) echo "pipewire-devices.sh: pactl reached $server, not the private instance" >&2; exit 1 ;;
