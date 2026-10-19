@@ -77,12 +77,13 @@
 //! gap between epochs, as it is after an overrun. A route change is
 //! reported before the stream moves, so the old device's last buffers may
 //! still follow the report: from a stamped stream, the new device's audio
-//! is the first buffer whose stamps break from the old run, or failing
-//! that the first 200 ms after the report (see `Reroutes`). The new device's stamps
-//! don't carry on from the old one's, and may put that audio before the
-//! old audio's end (on `PipeWire`, tens of milliseconds before, after a
-//! default switch): the epoch then starts where the old audio ends, late
-//! by the overlap ([`TrackTimeline::reopen`]). A `PipeWire` stream whose
+//! starts at the first buffer whose stamps break from the old run, or
+//! failing that at the first whose cycle is 200 ms or more after the
+//! report (see `Reroutes`). Where the new device's stamps don't carry on
+//! from the old one's, they may put that audio before the old audio's end
+//! (on `PipeWire`, tens of milliseconds before, after a default switch):
+//! the epoch then starts where the old audio ends, late by the overlap
+//! ([`TrackTimeline::reopen`]). A `PipeWire` stream whose
 //! delay goes back to none as it moves has its first buffers there held
 //! and dated as a stream's first are ([`CaptureSender::audio_delivered`]),
 //! so the reopening is timed from when that audio began. The stream's sender
@@ -520,23 +521,33 @@ impl Held {
 /// `default` metadata, which the session manager changes before it moves
 /// the stream, so the old device's buffers can still follow the report: on
 /// hardware, about 40 ms of them did in 1 of 11 switches (GAI-434). A
-/// stamped buffer therefore reopens only where its stream's cycle breaks
-/// from the old device's run: by [`LOSS_MIN`] or more from where the
-/// buffer before it puts it, as the drift meter reads a run (the new
-/// device's first buffer came 40 to 90 ms early). The old device's
-/// buffers before that stay in the old epoch. A stamped buffer that
-/// follows on still reopens once its cycle is [`REOPEN_WAIT`] past the
-/// change's first report, so a change whose new device runs on from the
-/// old one's stamps still opens its epoch; that audio is then timed within
-/// [`LOSS_MIN`] of its stamps either way. An unstamped buffer, or one
-/// whose stamp the session clock can't place, has nothing to compare, and
-/// reopens as the first buffer sent after the report. A loss on the old
-/// device just after the report breaks its run too, and takes the
-/// reopening there. A stream that stalls as it moves breaks its run when
-/// its audio resumes, however long after. A change reported only once the
-/// new device's audio is already flowing (the watch's poll, up to about a
-/// second late) has no break left to wait for, and opens its epoch at the
-/// wait's end rather than at the next buffer.
+/// stamped buffer therefore reopens only where its stamps break from the
+/// old device's run: where its cycle, or its capture stamp, is
+/// [`LOSS_MIN`] or more either side of where the buffer before it puts it.
+/// A switch can show in either. On a private `PipeWire`'s null sinks, which
+/// one driver runs, the cycles ran on across a switch, and the new link's
+/// first buffer was stamped a quantum (43 ms) early, its delay doubled. A
+/// hardware monitor's capture stamp is its cycle (GAI-489), and a new
+/// device brings its own driver, whose cycles needn't follow on from the
+/// old one's. The old device's buffers before the break stay in the old
+/// epoch.
+///
+/// A stamped buffer that follows on still reopens once its cycle is
+/// [`REOPEN_WAIT`] past the change's first report, so a change whose new
+/// device runs on from the old one's stamps still opens its epoch; that
+/// audio is then timed within [`LOSS_MIN`] of its stamps either way. An
+/// unstamped buffer, or one whose stamp the session clock can't place, has
+/// nothing to compare, and reopens as the first buffer sent after the
+/// report.
+///
+/// What else breaks a run takes the reopening where it does: a loss on the
+/// old device just after the report, or its delay stepping as the graph's
+/// quantum changes (see [`nota_core::drift`]). A stream that stalls as it
+/// moves breaks its run when its audio resumes, however long after. A
+/// change reported only once the new device's audio is already flowing
+/// (the watch's poll, up to about a second late) has no break left to wait
+/// for, and opens its epoch at the wait's end rather than at the next
+/// buffer.
 ///
 /// A node made again under the default's own name may leave the metadata
 /// as it was; then only the watch reports it, from the registry, as the
@@ -557,7 +568,9 @@ struct Reroutes {
     /// Where the last buffer sent puts the next one's cycle: its own cycle
     /// plus its length, in session nanoseconds, or [`NONE`] if it had no
     /// stamp the session clock could place.
-    next: AtomicU64,
+    next_cycle: AtomicU64,
+    /// Where it puts the next one's capture stamp, as [`Self::next_cycle`].
+    next_capture: AtomicU64,
 }
 
 /// How far apart the stream's and the watch's reports of one change may
@@ -573,7 +586,7 @@ const SAME_CHANGE: Duration = Duration::from_secs(2);
 const REOPEN_WAIT: Duration = Duration::from_millis(200);
 
 /// No time held: no report waiting to be paired, no change waiting for its
-/// reopening, or no stamped buffer to follow on from. No cycle is ever
+/// reopening, or no stamped buffer to follow on from. No stamp is ever
 /// within [`LOSS_MIN`] of it, so a buffer after an unstamped one breaks
 /// from it.
 const NONE: u64 = u64::MAX;
@@ -584,43 +597,46 @@ impl Default for Reroutes {
             stream: AtomicU64::new(NONE),
             watch: AtomicU64::new(NONE),
             due: AtomicU64::new(NONE),
-            next: AtomicU64::new(NONE),
+            next_cycle: AtomicU64::new(NONE),
+            next_capture: AtomicU64::new(NONE),
         }
     }
 }
 
-/// A stamped buffer as [`Reroutes`] reads it: the stream's cycle that
-/// delivered it, and how long its samples last, in session nanoseconds.
+/// A stamped buffer as [`Reroutes`] reads it, in session nanoseconds: the
+/// stream's cycle that delivered it, when its first sample was captured,
+/// and how long its samples last.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct BufferCycle {
+struct BufferStamps {
     /// The cycle's time.
-    at: u64,
+    cycle: u64,
+    /// The capture stamp: the cycle's time less the stream's delay.
+    capture: u64,
     /// The buffer's length.
     length: u64,
 }
 
-impl BufferCycle {
+impl BufferStamps {
     /// The buffer of `len` samples at `rate` delivered by the cycle at
-    /// `at`, the session clock's elapsed time; `None` if either won't fit
-    /// in nanoseconds.
-    fn new(at: Duration, len: usize, rate: SampleRate) -> Option<Self> {
+    /// `cycle` and captured at `capture`, both the session clock's elapsed
+    /// time; `None` if any won't fit in nanoseconds.
+    fn new(cycle: Duration, capture: Duration, len: usize, rate: SampleRate) -> Option<Self> {
+        let nanos = |d: Duration| u64::try_from(d.as_nanos()).ok();
         let length = SampleCount::new(u64::try_from(len).ok()?).duration_at(rate)?;
         Some(Self {
-            at: u64::try_from(at.as_nanos()).ok()?,
-            length: u64::try_from(length.as_nanos()).ok()?,
+            cycle: nanos(cycle)?,
+            capture: nanos(capture)?,
+            length: nanos(length)?,
         })
     }
 
-    /// Where this buffer puts the next one's cycle.
-    const fn next(self) -> u64 {
-        self.at.saturating_add(self.length)
-    }
-
-    /// Whether this buffer's cycle breaks from the run the buffer before
-    /// it, putting it at `expected`, belongs to.
-    fn breaks_from(self, expected: u64) -> bool {
-        let jump = u128::from(self.at.abs_diff(expected));
-        jump >= LOSS_MIN.as_nanos()
+    /// Whether this buffer breaks from the run the buffer before it,
+    /// putting its cycle at `cycle` and its capture stamp at `capture`,
+    /// belongs to.
+    fn breaks_from(self, cycle: u64, capture: u64) -> bool {
+        let jumps =
+            |at: u64, expected: u64| u128::from(at.abs_diff(expected)) >= LOSS_MIN.as_nanos();
+        jumps(self.cycle, cycle) || jumps(self.capture, capture)
     }
 }
 
@@ -657,24 +673,34 @@ impl Reroutes {
         }
     }
 
-    /// Whether the buffer about to be sent, stamped by `cycle` if it is,
+    /// Whether the buffer about to be sent, stamped by `stamps` if it is,
     /// reopens for a new change; it then has. See the type's docs.
-    fn take(&self, cycle: Option<BufferCycle>) -> bool {
-        let expected = self
-            .next
-            .swap(cycle.map_or(NONE, BufferCycle::next), Ordering::SeqCst);
+    fn take(&self, stamps: Option<BufferStamps>) -> bool {
+        let next =
+            |at: fn(BufferStamps) -> u64| stamps.map_or(NONE, |s| at(s).saturating_add(s.length));
+        let cycle = self.next_cycle.swap(next(|s| s.cycle), Ordering::SeqCst);
+        let capture = self
+            .next_capture
+            .swap(next(|s| s.capture), Ordering::SeqCst);
         let due = self.due.load(Ordering::SeqCst);
         if due == NONE {
             return false;
         }
         let wait = u64::try_from(REOPEN_WAIT.as_nanos()).unwrap_or(u64::MAX);
-        let reopens = cycle.is_none_or(|cycle| {
-            cycle.breaks_from(expected) || cycle.at >= due.saturating_add(wait)
+        let reopens = stamps.is_none_or(|stamps| {
+            stamps.breaks_from(cycle, capture) || stamps.cycle >= due.saturating_add(wait)
         });
+        // A change reported while this runs is taken with it, as one
+        // reported just before is: two moves that close are one.
         if reopens {
-            self.due.store(NONE, Ordering::SeqCst);
+            self.reopened();
         }
         reopens
+    }
+
+    /// Takes the change due, if any, as reopened for.
+    fn reopened(&self) {
+        self.due.store(NONE, Ordering::SeqCst);
     }
 }
 
@@ -732,8 +758,9 @@ impl CaptureSender {
             return;
         }
         let delivery = delivery.and_then(|delivery| self.place(delivery));
-        let cycle = delivery.and_then(|d| BufferCycle::new(d.cycle, samples.len(), self.rate));
-        let reopened = self.reopened(cycle);
+        let stamps =
+            delivery.and_then(|d| BufferStamps::new(d.cycle, d.capture, samples.len(), self.rate));
+        let reopened = self.reopened(stamps);
         self.progress.sent(samples.len());
         let Held { settling, reopens } = &mut *held;
         if reopened {
@@ -778,11 +805,12 @@ impl CaptureSender {
         }
         // Checked on every buffer, the first too, so a suspend before it
         // isn't taken for one after it.
-        let cycle = captured.and_then(|stamp| {
-            let at = stamp.at.elapsed().checked_add(stamp.delay)?;
-            BufferCycle::new(at, samples.len(), self.rate)
+        let stamps = captured.and_then(|stamp| {
+            let capture = stamp.at.elapsed();
+            let cycle = capture.checked_add(stamp.delay)?;
+            BufferStamps::new(cycle, capture, samples.len(), self.rate)
         });
-        let reopened = self.reopened(cycle);
+        let reopened = self.reopened(stamps);
         // Counted before it's queued, so it's never missed.
         self.progress.sent(samples.len());
         self.queue_audio(samples, captured, reopened);
@@ -812,18 +840,19 @@ impl CaptureSender {
     /// suspended since its last audio, or it's the new device's after a
     /// route change ([`Reroutes`]). A suspend is reported here, as a
     /// [`CaptureNotice::Suspended`].
-    fn reopened(&self, cycle: Option<BufferCycle>) -> bool {
+    fn reopened(&self, stamps: Option<BufferStamps>) -> bool {
         let asleep = u64::try_from(self.clock.suspended().as_nanos()).unwrap_or(u64::MAX);
         let before = self.asleep.swap(asleep, Ordering::SeqCst);
         let slept = Duration::from_nanos(asleep.saturating_sub(before)) >= MIN_SUSPEND;
+        // Read on every buffer, so the next is compared with this one.
+        let rerouted = self.reroutes.take(stamps);
         if slept {
             self.notice(CaptureNotice::Suspended);
+            // The suspend's reopening is a change's too. Its buffer
+            // usually breaks from the run anyway, but not if it was placed
+            // before the clock counted the suspend.
+            self.reroutes.reopened();
         }
-        // Read on every buffer, so the next is compared with this one. A
-        // stamped buffer after a suspend breaks from the run before it,
-        // its stamp placed past the time suspended, so a change due is
-        // reopened for with the suspend, not again later.
-        let rerouted = self.reroutes.take(cycle);
         slept || rerouted
     }
 
@@ -1418,8 +1447,8 @@ impl std::error::Error for RecordError {
 /// for a stream that doesn't stamp its buffers when the overrun was
 /// reported, and the epoch is reported (see the module docs). So it does
 /// at the new device's first audio after a route change, and the first
-/// audio after a suspend, starting when that audio was captured, and when a stamped stream's drift needs
-/// correcting.
+/// audio after a suspend, starting when that audio was captured, and when
+/// a stamped stream's drift needs correcting.
 ///
 /// Journals are fsync'd as audio arrives, and also when it stops arriving,
 /// so durable stays within about

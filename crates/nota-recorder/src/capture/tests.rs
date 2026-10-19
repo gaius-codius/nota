@@ -1140,6 +1140,9 @@ fn a_reopening_stamped_before_the_old_audio_ends_starts_at_its_end() {
     let fs = FakeFs::with_dirs([dir()]);
     let script = vec![
         Step::TimedAudio(samples(0, 500), Duration::ZERO),
+        // Reported as the old audio ends, so it's the stamps' break that
+        // reopens, not the wait.
+        Step::Advance(Duration::from_millis(500)),
         Step::Notice(CaptureNotice::RouteChanged),
         // Stamped 84 ms before the old audio's end at 500 ms.
         Step::TimedAudio(samples(500, 100), Duration::from_millis(416)),
@@ -1234,12 +1237,25 @@ fn a_route_change_with_no_stamp_break_opens_its_epoch_after_the_wait() {
     assert_eq!(journal_epochs(&fs, &journals), [(0, 0, 300), (1, 300, 500)]);
 }
 
-/// A 20 ms buffer delivered by the cycle at `at_ms` plus `nanos`.
-fn cycle_at(at_ms: u64, nanos: u64) -> BufferCycle {
-    BufferCycle {
-        at: at_ms * 1_000_000 + nanos,
+/// A 20 ms buffer delivered by the cycle at `at_ms` plus `nanos`, with no
+/// delay: captured at its cycle, as a monitor's buffers are.
+fn cycle_at(at_ms: u64, nanos: u64) -> BufferStamps {
+    let at = at_ms * 1_000_000 + nanos;
+    BufferStamps {
+        cycle: at,
+        capture: at,
         length: 20_000_000,
     }
+}
+
+/// Whether a buffer stamped `stamps` takes the reopening for a change
+/// reported at 90 ms, after a 20 ms buffer at 80 ms with no delay: a run
+/// that puts the next cycle and capture stamp at 100 ms.
+fn after_run(stamps: BufferStamps) -> bool {
+    let reroutes = Reroutes::default();
+    assert!(!reroutes.take(Some(cycle_at(80, 0))));
+    reroutes.stream_moved(SessionTime::from_nanos(90_000_000));
+    reroutes.take(Some(stamps))
 }
 
 /// A cycle [`LOSS_MIN`] or more either side of where its run puts it
@@ -1248,18 +1264,27 @@ fn cycle_at(at_ms: u64, nanos: u64) -> BufferCycle {
 #[test]
 fn a_cycle_breaks_from_its_run_at_loss_min_either_way() {
     let loss_min = u64::try_from(LOSS_MIN.as_nanos()).unwrap();
-    let after_run = |at_ms: u64, nanos: u64| {
-        let reroutes = Reroutes::default();
-        assert!(!reroutes.take(Some(cycle_at(80, 0))));
-        reroutes.stream_moved(SessionTime::from_nanos(90_000_000));
-        reroutes.take(Some(cycle_at(at_ms, nanos)))
+    assert!(!after_run(cycle_at(100, 0)));
+    assert!(!after_run(cycle_at(100, loss_min - 1)));
+    assert!(after_run(cycle_at(100, loss_min)));
+    assert!(!after_run(cycle_at(96, 1)));
+    assert!(after_run(cycle_at(96, 0)));
+}
+
+/// A capture stamp [`LOSS_MIN`] or more either side of where its run puts
+/// it breaks from the run, though the cycles run on, as a delay that steps
+/// shows; one a nanosecond closer doesn't.
+#[test]
+fn a_capture_stamp_breaks_from_its_run_at_loss_min_either_way() {
+    let loss_min = u64::try_from(LOSS_MIN.as_nanos()).unwrap();
+    let captured = |capture: u64| BufferStamps {
+        capture,
+        ..cycle_at(100, 0)
     };
-    // The run puts the next cycle at 100 ms.
-    assert!(!after_run(100, 0));
-    assert!(!after_run(100, loss_min - 1));
-    assert!(after_run(100, loss_min));
-    assert!(!after_run(96, 1));
-    assert!(after_run(96, 0));
+    assert!(!after_run(captured(100_000_000 + loss_min - 1)));
+    assert!(after_run(captured(100_000_000 + loss_min)));
+    assert!(!after_run(captured(100_000_000 - loss_min + 1)));
+    assert!(after_run(captured(100_000_000 - loss_min)));
 }
 
 /// Two changes before the audio reopens are waited for from the first:
@@ -2679,8 +2704,9 @@ fn a_reopening_sends_what_was_held_before_it() {
 
 /// On the `PipeWire` path, the old device's buffers after a route change's
 /// report are sent in the old epoch, not held; the new device's first,
-/// delivered by a cycle 40 ms early with no delay measured yet, opens the
-/// new one, held and dated as a stream's first buffers are.
+/// delivered by a cycle 60 ms before where the run puts it, with no delay
+/// measured yet, opens the new one, held and dated as a stream's first
+/// buffers are.
 #[test]
 fn a_delivered_buffer_reopens_only_where_its_cycle_breaks_from_the_run() {
     let clock = Arc::new(FakeClock::new(SessionTime::from_nanos(110_000_000)));
@@ -2688,8 +2714,8 @@ fn a_delivered_buffer_reopens_only_where_its_cycle_breaks_from_the_run() {
     // 20 ms buffers at 16 kHz, settled from the first.
     sender.audio_delivered(&[1; 320], Some(delivered(100, 80)));
     sender.notice(CaptureNotice::RouteChanged);
-    // The old device's last three buffers, about 40 ms of its audio and a
-    // cycle 1 ms off, as hardware delivered after a report.
+    // The old device's last three buffers, 60 ms of its audio and a cycle
+    // 1 ms off, more than hardware delivered after a report.
     sender.audio_delivered(&[2; 320], Some(delivered(120, 100)));
     sender.audio_delivered(&[3; 320], Some(delivered(141, 121)));
     sender.audio_delivered(&[4; 320], Some(delivered(160, 140)));
@@ -2718,6 +2744,67 @@ fn a_delivered_buffer_reopens_only_where_its_cycle_breaks_from_the_run() {
             (6, ms(120)),
         ]
     );
+}
+
+/// The same on one driver's null sinks, as a private `PipeWire` delivered
+/// them across a switch: the cycles run on, and the new link's first
+/// buffer is stamped a quantum early, its delay doubled. It opens the new
+/// epoch; the old device's buffer before it, whose stamps run on, doesn't.
+#[test]
+fn a_delivered_buffer_reopens_where_its_capture_stamp_breaks_from_the_run() {
+    let clock = Arc::new(FakeClock::new(SessionTime::from_nanos(130_000_000)));
+    let (sender, rx) = test_sender(MIC, Arc::clone(&clock) as Arc<dyn Clock>);
+    // 40 ms buffers at 16 kHz, a quantum's delay each.
+    sender.audio_delivered(&[1; 640], Some(delivered(100, 60)));
+    sender.notice(CaptureNotice::RouteChanged);
+    sender.audio_delivered(&[2; 640], Some(delivered(140, 100)));
+    sender.audio_delivered(&[3; 640], Some(delivered(180, 100)));
+    sender.audio_delivered(&[4; 640], Some(delivered(220, 140)));
+    let events = queued(&rx);
+    let ms = |ms: u64| SessionTime::from_nanos(ms * 1_000_000);
+    let firsts: Vec<_> = events
+        .iter()
+        .map(|e| match e {
+            CaptureEvent::Reopened { at } => (0, *at),
+            CaptureEvent::Notice { .. } => (-1, SessionTime::ZERO),
+            e => timed(e).map(|(s, stamp)| (s[0], stamp.at)).unwrap(),
+        })
+        .collect();
+    assert_eq!(
+        firsts,
+        [
+            (1, ms(60)),
+            (-1, SessionTime::ZERO),
+            (2, ms(100)),
+            (0, ms(100)),
+            (3, ms(100)),
+            (4, ms(140)),
+        ]
+    );
+}
+
+/// A suspend reopens for a change due as well, even when its buffer's
+/// stamps run on from the run before, as one placed before the clock
+/// counted the suspend would: the change doesn't open a second epoch once
+/// the wait has passed.
+#[test]
+fn a_suspend_takes_a_change_due_with_it() {
+    let clock = Arc::new(FakeClock::new(SessionTime::from_nanos(2_000_000_000)));
+    let (sender, rx) = test_sender(MIC, Arc::clone(&clock) as Arc<dyn Clock>);
+    let ms = Duration::from_millis;
+    sender.audio_captured(&[0; 320], ms(2_000), Duration::ZERO);
+    sender.notice(CaptureNotice::RouteChanged);
+    clock.suspend(ms(1_000));
+    // Placed 1 s on by the suspend, these run on from the buffer before,
+    // past the wait.
+    for n in 0..15 {
+        sender.audio_captured(&[0; 320], ms(1_020 + n * 20), Duration::ZERO);
+    }
+    let reopenings = queued(&rx)
+        .iter()
+        .filter(|e| matches!(e, CaptureEvent::Reopened { .. }))
+        .count();
+    assert_eq!(reopenings, 1);
 }
 
 /// A track started first opens its epoch when its stream was asked to
