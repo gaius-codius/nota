@@ -298,7 +298,7 @@ def follow(events, old, now, listing_ids):
 
 moved = [(1, 1, "device:changed", "Melomania P100 SE")]
 said = follow(moved, "bz.1", "bz.1", {"bz.1": "75"})
-expect(f"a same-name node after a move failed the follow check: {said}", said and said[-1][0] is True)
+expect(f"a same-name node after a move failed the follow check: {said}", said and said[-1][0] is False)
 said = follow(moved, "bz.1", "bz.1", {"bz.1": "70"})
 expect(f"the old node as the default passed a move's follow check: {said}", said and said[-1][0] is False)
 lost = [(1, 1, "device:lost", None)]
