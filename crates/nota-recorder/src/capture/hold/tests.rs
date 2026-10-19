@@ -1,6 +1,7 @@
 use super::*;
 
-/// Nanoseconds on `CLOCK_MONOTONIC`.
+/// Nanoseconds of the session clock's elapsed time, as the sender places
+/// a stream's stamps before the hold sees them.
 fn at(nanos: u64) -> Duration {
     Duration::from_nanos(nanos)
 }
@@ -446,7 +447,7 @@ fn a_cycle_earlier_than_its_buffer_is_placed_at_the_clocks_start() {
 }
 
 /// A stream's first buffers as `PipeWire` delivered them on a private
-/// instance's null sink, its monitor started 18.9 ms into the session:
+/// instance's null sink's monitor, the first 18.9 ms into the session:
 /// (length, cycle, capture stamp), on the session clock. Seven with no
 /// delay, an eighth at a new quantum with one shorter than itself, and a
 /// ninth settled. Its stamp puts the first held sample 22 ms before the
@@ -499,6 +500,42 @@ fn held_buffers_dated_back_past_the_clocks_start_run_on_from_it() {
     assert_eq!(sent.0[0].1, Some((Duration::ZERO, at(EARLY_BUFFERS[0].1))));
     let (_, cycle, capture) = EARLY_BUFFERS[8];
     assert_eq!(sent.0[8].1, Some((at(capture), at(cycle - capture))));
+}
+
+/// A held buffer run on from a floored start past the cycle that
+/// delivered it begins at that cycle, and so keeps it.
+#[test]
+fn a_held_buffer_run_on_past_its_cycle_begins_at_it() {
+    let mut settling = Settling::new(SampleRate::SPEECH);
+    let mut sent = Sent::default();
+    // 20 ms delivered 10 ms into the session, then two 40 ms buffers
+    // whose delays (10 ms) fall short of them, 10 ms apart; then one
+    // settled. Floored at zero, the third runs on from 60 ms, past its
+    // cycle at 30 ms.
+    for (first, len, cycle, capture) in [
+        (0, 320, 10, 10),
+        (320, 640, 20, 10),
+        (960, 640, 30, 20),
+        (1_600, 640, 70, 30),
+    ] {
+        let ms = |n: u64| n * 1_000_000;
+        feed(
+            &mut settling,
+            &mut sent,
+            first,
+            len,
+            Some(stamp(ms(cycle), ms(capture))),
+        );
+    }
+    assert_eq!(
+        sent.timings(),
+        [
+            Some((Duration::ZERO, at(10_000_000))),
+            Some((at(20_000_000), Duration::ZERO)),
+            Some((at(30_000_000), Duration::ZERO)),
+            Some((at(30_000_000), at(40_000_000))),
+        ]
+    );
 }
 
 /// A stream with no delay whose first cycle comes before its first

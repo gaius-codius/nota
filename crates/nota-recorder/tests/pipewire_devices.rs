@@ -53,7 +53,9 @@ mod linux {
 
     /// The most a switch's epoch may start late by: the new sink's first
     /// buffer is stamped tens of milliseconds before the old sink's audio
-    /// ends (40–90 ms measured on `PipeWire` 1.6).
+    /// ends (40–90 ms measured on `PipeWire` 1.6), and the monitor's first
+    /// epoch, whose first audio its stamps date before the session started,
+    /// starts at zero, about 22 ms late (GAI-491): 60–69 ms in all.
     const MOST_LATE: Duration = Duration::from_millis(250); // check-bound
 
     /// The longest the test waits for anything before failing.

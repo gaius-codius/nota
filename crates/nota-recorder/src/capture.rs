@@ -430,8 +430,10 @@ pub enum CaptureEvent {
     /// The stream was stopped; nothing follows.
     Stopped,
     /// The stream's first audio follows. Its first sample was captured at
-    /// about `at`: when the first buffer arrived, less the time its samples
-    /// span. A track that joins the recorder opens its first epoch here.
+    /// about `at`: as its stamp dates it, or for a stream that doesn't
+    /// stamp its buffers, when the first buffer arrived, less the time its
+    /// samples span. A track that joins the recorder opens its first epoch
+    /// here.
     Began {
         /// When the first sample was captured, by the session clock.
         at: SessionTime,

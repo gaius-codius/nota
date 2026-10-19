@@ -13,18 +13,21 @@
 //!
 //! So [`Settling`] holds a stream's first buffers back until one is
 //! settled, and dates them back from it: the buffers held run on, one
-//! after another, to the settled buffer's stamp. A track's first epoch
+//! after another, to the settled buffer's stamp (or from session time
+//! zero, as below). A track's first epoch
 //! opens at the first of them. Each buffer keeps its cycle's time: it's
 //! sent with a delay that much longer, so the drift meter, which reads
 //! the cycles, sees no difference.
 //!
 //! A stream started with the session can have its first audio dated
-//! before the session clock's start: on a private `PipeWire`'s null sink,
-//! the settled stamp put a monitor's first sample 22 ms before it
-//! (GAI-491). Session time has nothing before its start, so that audio
-//! is placed at the start, late by as much: the held buffers run on from
-//! it, and a buffer dated by its own stamp ([`stamped`]) starts there.
-//! Each still keeps its cycle.
+//! before session time zero: on a private `PipeWire`'s null sink, the
+//! settled stamp put a monitor's first sample 22 ms before it (GAI-491).
+//! Session time has nothing before zero, so that audio is placed at zero,
+//! late by as much: the held buffers run on from it, past the settled
+//! buffer's stamp by as much, and a buffer dated by its own stamp
+//! ([`stamped`]) starts there. Each still keeps its cycle: a held buffer
+//! run on past its cycle begins at it. A resumed clock, which starts
+//! above zero, isn't floored at its start.
 //!
 //! A run of buffers with no delay after the stream had one is held and
 //! dated the same way, should `PipeWire` measure the delay again (it
@@ -182,8 +185,8 @@ impl Settling {
     }
 
     /// Sends what's held, dated back from `settled`, the stamp of the
-    /// buffer that follows it, and stops holding. If they can't be dated,
-    /// as [`Self::release`].
+    /// buffer that follows it, and stops holding. If they can't be dated
+    /// (a length overflows), as [`Self::release`].
     fn date_from(&mut self, settled: Delivery, send: &mut dyn FnMut(&[i16], Timed)) {
         let Some(start) = self.start(settled) else {
             self.release(send);
@@ -196,7 +199,12 @@ impl Settling {
                 .and_then(|offset| start.checked_add(offset))
                 .map_or_else(
                     || stamped(stamp, len, self.rate),
-                    |at| Some((at, stamp.cycle.saturating_sub(at))),
+                    |at| {
+                        // Run on from a floored start, a buffer can pass
+                        // its cycle; its audio began by then at the latest.
+                        let at = at.min(stamp.cycle);
+                        Some((at, stamp.cycle.saturating_sub(at)))
+                    },
                 );
             send(&self.samples[from..to], timed);
             from = to;
@@ -207,7 +215,7 @@ impl Settling {
     /// When the first held sample was captured: the samples held before
     /// `settled`'s buffer, back from its stamp, or earlier if that would
     /// put a held buffer's audio after the cycle that delivered it; but no
-    /// earlier than the session clock's start (see the module docs).
+    /// earlier than session time zero (see the module docs).
     /// `None` only if a length overflows.
     fn start(&self, settled: Delivery) -> Option<Duration> {
         let back = settled
@@ -238,8 +246,8 @@ fn length(len: usize, rate: SampleRate) -> Option<Duration> {
 /// it, unless its delay is none. A capture stream's audio comes before
 /// the cycle that delivers it, so a delay of none is one `PipeWire` hasn't
 /// measured; the buffer is then taken as ending at its cycle, captured its
-/// length before, or at the session clock's start if that's later (see
-/// the module docs). `None` only if the length overflows.
+/// length before, or at session time zero if that's later (see the
+/// module docs). `None` only if the length overflows.
 fn stamped(stamp: Delivery, len: usize, rate: SampleRate) -> Timed {
     let delay = stamp.delay();
     if !delay.is_zero() {
