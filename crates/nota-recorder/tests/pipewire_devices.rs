@@ -504,11 +504,10 @@ mod linux {
     }
 
     /// The switch reported only once B's tone was already recorded. Now
-    /// and then a private instance forwards none of its `default`
-    /// metadata's changes to the clients bound to it (1 of 118 fresh
-    /// instances in one loop, GAI-496), so neither the stream nor the
-    /// watch's events hear of the switch, and the watch's poll reports it
-    /// up to a second late. With no break in the stamps left to wait for, the recorder
+    /// and then a fresh private instance forwards none of its `default`
+    /// metadata's changes to the clients bound to it (GAI-496), so neither
+    /// the stream nor the watch's events hear of the switch, and the
+    /// watch's poll reports it up to a second late. With no break in the stamps left to wait for, the recorder
     /// opens the epoch at the first buffer whose cycle is [`REOPEN_WAIT`]
     /// past the report, as `Reroutes` documents, and B's audio before it
     /// stays in A's epoch, timed by its stamps. So the epoch starts after
