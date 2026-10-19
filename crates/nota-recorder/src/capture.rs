@@ -517,25 +517,30 @@ impl Held {
 /// last one if that isn't already paired and was stamped no more than
 /// [`SAME_CHANGE`] before it, or after it (its thread read the clock later
 /// but got there first); otherwise it's a new change, and the audio
-/// reopens for it. A change both report opens one epoch, in either order.
-/// A change only one reports opens one too, unless the other source
-/// reported a different change alone within [`SAME_CHANGE`] before it:
-/// pairing counts reports and can't tell changes apart, so it takes the
-/// two for one, and the second opens no epoch.
+/// reopens for it. A change both report opens one epoch, in either order,
+/// and a change only one reports opens one too, as long as no report from
+/// the other source is left unpaired within [`SAME_CHANGE`]. Pairing counts reports and
+/// can't tell changes apart: once a change only one source reports leaves
+/// a report unpaired, the other source's next report within the window
+/// pairs with it, whichever change that one is for. So when changes only
+/// one source reports come within 2 s of others, one of them may open no
+/// epoch.
 ///
 /// The stream's callback and the watch's thread report one switch of the
 /// default at nearly the same moment (9 µs apart on a private `PipeWire`,
-/// GAI-494), so the two reports can run at once. Each reads the other
-/// source's last report, stores its own and, for a new change, sets the
-/// reopening due, all under one lock. So whichever takes the lock second
-/// pairs with the first, however the threads interleave, and the change is
-/// due before either report returns: the stream's next buffer can't miss
-/// it, and a late second report can't make it due again. It's due from the
-/// stamp of the report that took the lock first, which may be a moment
-/// after the other's. Two reports left unpaired would each pair with one of
-/// the next change's within [`SAME_CHANGE`], and that change would open no
-/// epoch (GAI-495). Only a report takes the lock, never a buffer:
-/// [`Self::take`] reads nothing it guards.
+/// GAI-494), so the two reports can run at once. Under one lock, a report
+/// either takes the other source's last unpaired report, pairing with it,
+/// or stores its own and sets the reopening due. So two reports at once
+/// end as they would one after the other, in the order they took the
+/// lock, however the threads interleave: the second sees the first. A new
+/// change is due before its report returns, so the stream's next buffer
+/// can't miss it, and the other source's report of it, pairing, can't make
+/// it due again. It's due from the stamp of the report that took the lock
+/// first, which may be a moment after the other's. Two reports of one
+/// change left unpaired would each pair with one of the next change's
+/// within [`SAME_CHANGE`], and that change would open no epoch (GAI-495).
+/// Only a report takes the lock, never a buffer: [`Self::take`] reads
+/// nothing it guards.
 ///
 /// When the default switches, both reports come from the server's
 /// `default` metadata, which the session manager changes before it moves
@@ -582,8 +587,9 @@ impl Held {
 struct Reroutes {
     /// Each source's last report the other hasn't paired, under the lock
     /// that makes pairing one step. The stream's report may take it on the
-    /// stream's real-time thread; it's held only to compare and store two
-    /// stamps, and the report takes the event queue's lock right after.
+    /// stream's real-time thread; it's held only to pair or store a stamp
+    /// and set the change due, and the report takes the event queue's lock
+    /// right after.
     unpaired: Mutex<Unpaired>,
     /// When the first change the audio hasn't reopened for yet was
     /// reported, in session nanoseconds, or [`NONE`].
