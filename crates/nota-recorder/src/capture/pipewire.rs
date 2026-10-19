@@ -28,7 +28,7 @@
 //! delay, as `PipeWire` hasn't measured one yet, so their stamps are when
 //! their audio ended: they're held back until a buffer's delay settles,
 //! and dated back from it ([`CaptureSender::audio_delivered`]), so a track's first epoch starts
-//! when its audio did. The delay steps when the graph's quantum changes;
+//! when its audio did, or at session time zero if that was before it. The delay steps when the graph's quantum changes;
 //! the cycle's time steps only when the graph does.
 
 use std::sync::Arc;

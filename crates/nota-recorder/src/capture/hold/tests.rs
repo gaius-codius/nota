@@ -1,6 +1,7 @@
 use super::*;
 
-/// Nanoseconds on `CLOCK_MONOTONIC`.
+/// Nanoseconds of the session clock's elapsed time, as the sender places
+/// a stream's stamps before the hold sees them.
 fn at(nanos: u64) -> Duration {
     Duration::from_nanos(nanos)
 }
@@ -433,12 +434,132 @@ fn a_buffer_with_a_delay_keeps_its_stamp() {
     );
 }
 
-/// A cycle that comes before its buffer's length can't be placed, and the
-/// buffer is sent unstamped.
+/// A cycle that comes before its buffer's length would put the buffer's
+/// start before the session clock's, so the buffer starts at the clock's
+/// start, and keeps its cycle.
 #[test]
-fn a_cycle_earlier_than_its_buffer_is_unstamped() {
+fn a_cycle_earlier_than_its_buffer_is_placed_at_the_clocks_start() {
+    // 320 samples, 20 ms, delivered 10 ms into the session.
     assert_eq!(
         stamped(stamp(10_000_000, 10_000_000), 320, SampleRate::SPEECH),
-        None
+        Some((Duration::ZERO, at(10_000_000)))
     );
+}
+
+/// A stream's first buffers as `PipeWire` delivered them on a private
+/// instance's null sink's monitor, the first 18.9 ms into the session:
+/// (length, cycle, capture stamp), on the session clock. Seven with no
+/// delay, an eighth at a new quantum with one shorter than itself, and a
+/// ninth settled. Its stamp puts the first held sample 22 ms before the
+/// session started.
+const EARLY_BUFFERS: [(usize, u64, u64); 9] = [
+    (314, 18_899_088, 18_899_088),
+    (341, 40_232_421, 40_232_421),
+    (342, 61_565_754, 61_565_754),
+    (341, 82_899_087, 82_899_087),
+    (341, 104_232_420, 104_232_420),
+    (342, 125_565_753, 125_565_753),
+    (341, 146_899_086, 146_899_086),
+    (683, 168_232_419, 146_899_086),
+    (682, 210_899_085, 168_232_419),
+];
+
+/// Held buffers that the settled stamp dates back past the session
+/// clock's start run on from that start instead, one after another, each
+/// keeping its cycle; the settled buffer keeps its stamp.
+#[test]
+fn held_buffers_dated_back_past_the_clocks_start_run_on_from_it() {
+    let mut settling = Settling::new(SampleRate::SPEECH);
+    let mut sent = Sent::default();
+    let mut fed = 0;
+    // The ninth settles, and its stamp less the 3,045 samples held is
+    // before the start.
+    for &(len, cycle, capture) in &EARLY_BUFFERS {
+        feed(
+            &mut settling,
+            &mut sent,
+            fed,
+            len,
+            Some(stamp(cycle, capture)),
+        );
+        fed += len;
+    }
+
+    assert_eq!(sent.0.len(), EARLY_BUFFERS.len());
+    let mut end = Duration::ZERO;
+    for ((samples, timed), &(len, cycle, _)) in sent.0.iter().zip(&EARLY_BUFFERS[..8]) {
+        let (began, delay) = timed.unwrap();
+        assert_eq!(samples.len(), len);
+        assert_eq!(began + delay, at(cycle), "a buffer keeps its cycle");
+        assert!(
+            began.abs_diff(end) <= Duration::from_nanos(1),
+            "{began:?} after {end:?}"
+        );
+        end = began + length(len, SampleRate::SPEECH).unwrap();
+    }
+    assert_eq!(sent.0[0].1, Some((Duration::ZERO, at(EARLY_BUFFERS[0].1))));
+    let (_, cycle, capture) = EARLY_BUFFERS[8];
+    assert_eq!(sent.0[8].1, Some((at(capture), at(cycle - capture))));
+}
+
+/// A held buffer run on from a floored start past the cycle that
+/// delivered it begins at that cycle, and so keeps it.
+#[test]
+fn a_held_buffer_run_on_past_its_cycle_begins_at_it() {
+    let mut settling = Settling::new(SampleRate::SPEECH);
+    let mut sent = Sent::default();
+    // 20 ms delivered 10 ms into the session, then two 40 ms buffers
+    // whose delays (10 ms) fall short of them, 10 ms apart; then one
+    // settled. Floored at zero, the third runs on from 60 ms, past its
+    // cycle at 30 ms.
+    for (first, len, cycle, capture) in [
+        (0, 320, 10, 10),
+        (320, 640, 20, 10),
+        (960, 640, 30, 20),
+        (1_600, 640, 70, 30),
+    ] {
+        let ms = |n: u64| n * 1_000_000;
+        feed(
+            &mut settling,
+            &mut sent,
+            first,
+            len,
+            Some(stamp(ms(cycle), ms(capture))),
+        );
+    }
+    assert_eq!(
+        sent.timings(),
+        [
+            Some((Duration::ZERO, at(10_000_000))),
+            Some((at(20_000_000), Duration::ZERO)),
+            Some((at(30_000_000), Duration::ZERO)),
+            Some((at(30_000_000), at(40_000_000))),
+        ]
+    );
+}
+
+/// A stream with no delay whose first cycle comes before its first
+/// buffer's length is held to the limit, then sent with that buffer at the
+/// session clock's start, not unstamped.
+#[test]
+fn a_first_buffer_sent_unsettled_from_before_the_clocks_start_starts_at_it() {
+    let mut settling = Settling::new(SampleRate::SPEECH);
+    let mut sent = Sent::default();
+    // 26 buffers of 20 ms, the first delivered 10 ms into the session.
+    let cycle = |n: u64| 10_000_000 + n * 20_000_000;
+    for n in 0..26 {
+        feed(
+            &mut settling,
+            &mut sent,
+            0,
+            320,
+            Some(stamp(cycle(n), cycle(n))),
+        );
+    }
+    let ended = |n| Some((at(cycle(n) - 20_000_000), at(20_000_000)));
+    // Only the first, whose 20 ms would begin before the session, is
+    // moved: it begins at the start.
+    let mut expected = vec![Some((Duration::ZERO, at(cycle(0))))];
+    expected.extend((1..26).map(ended));
+    assert_eq!(sent.timings(), expected);
 }
