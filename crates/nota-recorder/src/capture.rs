@@ -514,10 +514,33 @@ impl Held {
 /// failed watch of its own as a warning), late (the watch's poll catches
 /// what its events missed about a second after), or report a change the
 /// other doesn't. So a report is the same change as the other source's
-/// last one if that came within [`SAME_CHANGE`] before it and isn't
-/// already paired; otherwise it's a new change, and the audio reopens for
-/// it. A change both report opens one epoch, in either order, and a change
-/// only one reports opens one too.
+/// last one if that isn't already paired and was stamped no more than
+/// [`SAME_CHANGE`] before it, or after it (its thread read the clock later
+/// but got there first); otherwise it's a new change, and the audio
+/// reopens for it. A change both report opens one epoch, in either order,
+/// and a change only one reports opens one too, as long as no report from
+/// the other source is left unpaired within [`SAME_CHANGE`]. Pairing counts reports and
+/// can't tell changes apart: once a change only one source reports leaves
+/// a report unpaired, the other source's next report within the window
+/// pairs with it, whichever change that one is for. So when changes only
+/// one source reports come within 2 s of others, one of them may open no
+/// epoch.
+///
+/// The stream's callback and the watch's thread report one switch of the
+/// default at nearly the same moment (9 µs apart on a private `PipeWire`,
+/// GAI-494), so the two reports can run at once. Under one lock, a report
+/// either takes the other source's last unpaired report, pairing with it,
+/// or stores its own and sets the reopening due. So two reports at once
+/// end as they would one after the other, in the order they took the
+/// lock, however the threads interleave: the second sees the first. A new
+/// change is due before its report returns, so the stream's next buffer
+/// can't miss it, and the other source's report of it, pairing, can't make
+/// it due again. It's due from the stamp of the report that took the lock
+/// first, which may be a moment after the other's. Two reports of one
+/// change left unpaired would each pair with one of the next change's
+/// within [`SAME_CHANGE`], and that change would open no epoch (GAI-495).
+/// Only a report takes the lock, never a buffer: [`Self::take`] reads
+/// nothing it guards.
 ///
 /// When the default switches, both reports come from the server's
 /// `default` metadata, which the session manager changes before it moves
@@ -562,12 +585,12 @@ impl Held {
 /// stream's first epoch was misdated, not where this one starts.
 #[derive(Debug)]
 struct Reroutes {
-    /// When the stream last reported a change the watch hasn't, in session
-    /// nanoseconds, or [`NONE`] if there's none.
-    stream: AtomicU64,
-    /// When the watch last reported a change the stream hasn't, as
-    /// [`Self::stream`].
-    watch: AtomicU64,
+    /// Each source's last report the other hasn't paired, under the lock
+    /// that makes pairing one step. The stream's report may take it on the
+    /// stream's real-time thread; it's held only to pair or store a stamp
+    /// and set the change due, and the report takes the event queue's lock
+    /// right after.
+    unpaired: Mutex<Unpaired>,
     /// When the first change the audio hasn't reopened for yet was
     /// reported, in session nanoseconds, or [`NONE`].
     due: AtomicU64,
@@ -591,8 +614,8 @@ const SAME_CHANGE: Duration = Duration::from_secs(2);
 /// moves the audio by under [`LOSS_MIN`].
 const REOPEN_WAIT: Duration = Duration::from_millis(200);
 
-/// No time held: no report waiting to be paired, no change waiting for its
-/// reopening, or no stamped buffer to follow on from. No stamp is ever
+/// No time held: no change waiting for its reopening, or no stamped buffer
+/// to follow on from. No stamp is ever
 /// within [`LOSS_MIN`] of it, so a buffer after an unstamped one breaks
 /// from it.
 const NONE: u64 = u64::MAX;
@@ -600,8 +623,7 @@ const NONE: u64 = u64::MAX;
 impl Default for Reroutes {
     fn default() -> Self {
         Self {
-            stream: AtomicU64::new(NONE),
-            watch: AtomicU64::new(NONE),
+            unpaired: Mutex::new(Unpaired::default()),
             due: AtomicU64::new(NONE),
             next_cycle: AtomicU64::new(NONE),
             next_capture: AtomicU64::new(NONE),
@@ -646,33 +668,64 @@ impl BufferStamps {
     }
 }
 
+/// When each source last reported a change the other hasn't, in session
+/// nanoseconds, if it has.
+#[derive(Debug, Default)]
+struct Unpaired {
+    /// The stream's last report the watch hasn't paired.
+    stream: Option<u64>,
+    /// The watch's last report the stream hasn't paired.
+    watch: Option<u64>,
+}
+
+/// Which of a stream's two sources reported a change.
+#[derive(Debug, Clone, Copy)]
+enum Reporter {
+    /// The stream itself ([`CaptureNotice::RouteChanged`]).
+    Stream,
+    /// The backend's watch on the audio server ([`DeviceChange::Changed`]).
+    Watch,
+}
+
+impl Unpaired {
+    /// `from`'s last unpaired report, then the other source's.
+    fn slots(&mut self, from: Reporter) -> (&mut Option<u64>, &mut Option<u64>) {
+        match from {
+            Reporter::Stream => (&mut self.stream, &mut self.watch),
+            Reporter::Watch => (&mut self.watch, &mut self.stream),
+        }
+    }
+}
+
 impl Reroutes {
     /// Takes in a route change the stream reported at `at`.
     fn stream_moved(&self, at: SessionTime) {
-        self.reported(&self.stream, &self.watch, at);
+        self.reported(Reporter::Stream, at);
     }
 
     /// Takes in a new device the watch reported at `at`.
     fn watch_moved(&self, at: SessionTime) {
-        self.reported(&self.watch, &self.stream, at);
+        self.reported(Reporter::Watch, at);
     }
 
-    /// Takes in a change one source reported at `at`, `mine` being when
-    /// it last reported one unpaired and `other` the other source's: the
-    /// same change as `other`'s, which pairs them, or a new one, due a
-    /// reopening.
-    fn reported(&self, mine: &AtomicU64, other: &AtomicU64, at: SessionTime) {
+    /// Takes in a change `from` reported at `at`: the same change as the
+    /// other source's last unpaired report, which pairs them, or a new
+    /// one, due a reopening.
+    fn reported(&self, from: Reporter, at: SessionTime) {
         let at = at.as_nanos();
         let window = u64::try_from(SAME_CHANGE.as_nanos()).unwrap_or(u64::MAX);
+        // One lock over the read, the store and setting the change due:
+        // two reports of one change at the same moment can't each miss the
+        // other, nor the second return before the first has made it due.
+        let mut unpaired = self.unpaired.lock().unwrap_or_else(PoisonError::into_inner);
+        let (mine, other) = unpaired.slots(from);
         // The other's report may be stamped a moment after this one: its
         // thread read the clock later but got here first.
         let paired = other
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |was| {
-                (was != NONE && at.saturating_sub(was) <= window).then_some(NONE)
-            })
-            .is_ok();
+            .take_if(|was| at.saturating_sub(*was) <= window)
+            .is_some();
         if !paired {
-            mine.store(at, Ordering::SeqCst);
+            *mine = Some(at);
             // A change before the audio reopened for the last is reopened
             // for with it, and waited for from the first.
             self.due.fetch_min(at, Ordering::SeqCst);
@@ -874,11 +927,12 @@ impl CaptureSender {
 
     /// Reports something that doesn't stop the stream, stamped with the
     /// session time now. After a [`CaptureNotice::RouteChanged`], the
-    /// new device's audio opens a new epoch, unless a
-    /// [`DeviceChange::Changed`] reported within 2 s before is the same
-    /// change: a change both report opens one epoch, and a change only one
-    /// reports opens one too. Which buffer is the new device's is as the
-    /// module docs say.
+    /// new device's audio opens a new epoch, unless it pairs with a
+    /// [`DeviceChange::Changed`] not yet paired, stamped up to 2 s before
+    /// it or at any time after: a change both report opens one epoch, even
+    /// when the two reports come at the same moment, and a change only one
+    /// reports opens one too, but for the case `Reroutes` names. Which
+    /// buffer is the new device's is as the module docs say.
     pub fn notice(&self, notice: CaptureNotice) {
         let at = self.clock.now();
         if notice == CaptureNotice::RouteChanged {
@@ -892,8 +946,9 @@ impl CaptureSender {
     /// with the session time now. Nothing is sent once the stream has
     /// failed (its track has ended), and a loss only once until another
     /// device follows. After a [`DeviceChange::Changed`], the new device's
-    /// audio opens a new epoch, unless a [`CaptureNotice::RouteChanged`]
-    /// already did for the same change, as [`Self::notice`] says.
+    /// audio opens a new epoch, unless it pairs with a
+    /// [`CaptureNotice::RouteChanged`] for the same change, as
+    /// [`Self::notice`] says.
     pub fn device(&self, change: DeviceChange) {
         self.device_at(change, self.clock.now());
     }

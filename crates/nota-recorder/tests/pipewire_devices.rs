@@ -643,9 +643,9 @@ mod linux {
     /// How long the remade-sink test waits after a detour through the
     /// stand-in sink before it tries again: past the 2 s within which the
     /// recorder takes one source's report as the same change as the
-    /// other's last, so the detour's reports can't pair with the next
-    /// try's, and past the half second the hold keeps the detour's
-    /// reopened audio and its epochs.
+    /// other's last, so a detour's change only one source reported can't
+    /// pair with the next try's, and past the half second the hold keeps
+    /// the detour's reopened audio and its epochs.
     const DETOUR_SETTLES: Duration = Duration::from_millis(2_500);
 
     /// GAI-487 on the private instance: the followed default sink removed

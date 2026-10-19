@@ -3,7 +3,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
@@ -1318,6 +1318,128 @@ fn an_unstamped_buffer_reopens_at_once_and_leaves_no_run() {
     assert!(!reroutes.take(None));
     reroutes.stream_moved(SessionTime::from_nanos(130_000_000));
     assert!(reroutes.take(Some(cycle_at(140, 0))));
+}
+
+/// How many times [`one_change_reported_from_both_at_once_pairs`]
+/// releases one change's two reports together. Before the reports paired
+/// under a lock, about 1 in 70 rounds lost the second change's epoch on a
+/// desktop; this leaves room for a busy machine that lines the two threads
+/// up far less often.
+const RACES: usize = 20_000;
+
+/// One of a stream's two sources reporting a change at a time:
+/// [`Reroutes::stream_moved`] or [`Reroutes::watch_moved`].
+type Moved = fn(&Reroutes, SessionTime);
+
+/// Sets its flag if dropped while its thread panics, so a thread waiting
+/// on that thread can stop waiting.
+struct PanicFlag<'a>(&'a AtomicBool);
+
+impl Drop for PanicFlag<'_> {
+    fn drop(&mut self) {
+        if thread::panicking() {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+/// One change's two reports, from the stream and the watch at the same
+/// moment on two threads, pair with each other under any interleaving:
+/// the change is due by the time either report returns, it opens an
+/// epoch, and the next change half a second later still opens its own.
+/// Both reports left unpaired would each pair with one of the next
+/// change's, which then would open none (GAI-495).
+#[test]
+fn one_change_reported_from_both_at_once_pairs() {
+    let first = SessionTime::from_nanos(1_000_000_000);
+    let all: Vec<Reroutes> = (0..RACES).map(|_| Reroutes::default()).collect();
+    let arrived = AtomicUsize::new(0);
+    let panicked = AtomicBool::new(false);
+    // Both threads spin until the other has arrived, so each pair of
+    // reports starts within a few nanoseconds; a parked thread would
+    // wake microseconds after the other had finished. A thread that
+    // panicked never arrives, so the other stops waiting for it.
+    let together = |round: usize| {
+        arrived.fetch_add(1, Ordering::SeqCst);
+        while arrived.load(Ordering::SeqCst) < 2 * (round + 1) && !panicked.load(Ordering::SeqCst) {
+            thread::yield_now();
+        }
+    };
+    // The rounds in which the change wasn't yet due when `moved` returned.
+    let report = |moved: Moved| {
+        let _flag = PanicFlag(&panicked);
+        let mut undue = Vec::new();
+        for (round, reroutes) in all.iter().enumerate() {
+            together(round);
+            moved(reroutes, first);
+            if reroutes.due.load(Ordering::SeqCst) == NONE {
+                undue.push(round);
+            }
+        }
+        undue
+    };
+    let (watch_undue, stream_undue) = thread::scope(|scope| {
+        let watch = scope.spawn(|| report(Reroutes::watch_moved));
+        let stream = report(Reroutes::stream_moved);
+        (watch.join().unwrap(), stream)
+    });
+    assert_eq!((watch_undue, stream_undue), (vec![], vec![]));
+    let second = SessionTime::from_nanos(1_500_000_000);
+    let unopened: Vec<usize> = (0..RACES)
+        .filter(|&round| {
+            let reroutes = &all[round];
+            let first_opened = reroutes.take(None);
+            reroutes.stream_moved(second);
+            reroutes.watch_moved(second);
+            !(first_opened && reroutes.take(None))
+        })
+        .collect();
+    // Each round names itself, so a failure shows how often it raced.
+    assert!(
+        unopened.is_empty(),
+        "{} of {RACES} rounds had a change that opened no epoch: {unopened:?}",
+        unopened.len()
+    );
+}
+
+/// A report pairs with the other source's last one up to [`SAME_CHANGE`]
+/// after it, and a nanosecond later is a change of its own, whichever
+/// source reports first.
+#[test]
+fn a_report_pairs_up_to_same_change_after_the_other() {
+    let window = u64::try_from(SAME_CHANGE.as_nanos()).unwrap();
+    let reopens_after = |earlier: Moved, later: Moved, gap: u64| {
+        let reroutes = Reroutes::default();
+        earlier(&reroutes, SessionTime::from_nanos(1_000_000_000));
+        assert!(reroutes.take(None));
+        later(&reroutes, SessionTime::from_nanos(1_000_000_000 + gap));
+        reroutes.take(None)
+    };
+    let orders: [(Moved, Moved); 2] = [
+        (Reroutes::watch_moved, Reroutes::stream_moved),
+        (Reroutes::stream_moved, Reroutes::watch_moved),
+    ];
+    for (earlier, later) in orders {
+        assert!(!reopens_after(earlier, later, window));
+        assert!(reopens_after(earlier, later, window + 1));
+    }
+}
+
+/// A report stamped a moment before the other source's, but taken in
+/// after it, pairs with it: the change is due from the stamp taken in
+/// first, and a run that never breaks reopens once, 200 ms after that.
+#[test]
+fn a_report_stamped_before_the_other_still_pairs_with_it() {
+    let reroutes = Reroutes::default();
+    assert!(!reroutes.take(Some(cycle_at(980, 0))));
+    reroutes.watch_moved(SessionTime::from_nanos(1_001_000_000));
+    // The stream's thread read the clock first but got here second.
+    reroutes.stream_moved(SessionTime::from_nanos(1_000_000_000));
+    let reopened: Vec<u64> = (50..70)
+        .map(|n| n * 20)
+        .filter(|&ms| reroutes.take(Some(cycle_at(ms, 0))))
+        .collect();
+    assert_eq!(reopened, [1_220]);
 }
 
 /// The same from a stream that doesn't stamp its buffers, reopened after
