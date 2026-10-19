@@ -513,48 +513,52 @@ impl Held {
 /// ([`DeviceChange::Changed`]). Either may be missing (cpal reports a
 /// failed watch of its own as a warning), late (the watch's poll catches
 /// what its events missed about a second after), or report a change the
-/// other doesn't. So a report is the same change as the other source's
-/// last one if that isn't already paired and was stamped no more than a
+/// other doesn't. So a report is the same change as the last report not
+/// yet paired if that was the other source's, stamped no more than a
 /// window before it, or after it (its thread read the clock later but got
 /// there first); otherwise it's a new change, and the audio reopens for
 /// it. The window is the watch's report's ([`Heard::window`]): one its
 /// events heard as the change happened pairs within [`HEARD_AT_ONCE`]
 /// (200 ms), and one that may be late, as the poll's is, within
 /// [`SAME_CHANGE`] (2 s). A change both report opens one epoch, in either
-/// order, and a change only one reports opens one too, as long as no
-/// report from the other source is left unpaired within the window.
+/// order, and a change only one reports opens one too, as long as the
+/// other source's report of the next change doesn't come within the
+/// window.
+///
+/// Only the last report not yet paired is kept: a report that doesn't
+/// pair with it is of a newer change, and the change the last one was for
+/// can't be reported again. The watch reports a device once, and the
+/// graph its poll reads has moved on; the stream reports a change as it
+/// hears of it, at the latest on its next cycle.
 ///
 /// Pairing counts reports and can't tell changes apart, as the stream's
-/// report names no device. So once a change only one source reports leaves
-/// a report unpaired, the other source's next report within the window
-/// pairs with it, whichever change that one is for. Only a watch report
-/// that may be late has 2 s for that; one heard at once has 200 ms. So a
-/// sink made again that only the watch's events report, and a switch a
-/// second later that only the stream reports, each open an epoch, as does
-/// a change only the watch's events report a second after another
-/// change's leftover stream report (GAI-500). A source's leftover report
-/// is dropped once a later report of its own pairs, as the other source
-/// can no longer report that change. What's left: a change only one
-/// source reports still pairs with the other source's report of the next
-/// change if that comes within 2 s and is the poll's (a change only the
-/// stream reports, then one only the poll reports, is what the poll's late
-/// report of the first looks like; the other way round, the same), or
-/// within 200 ms from the watch's events. Then the second change opens no
-/// epoch.
+/// report names no device. So a change only one source reports pairs with
+/// the other source's report of the next change if that comes within the
+/// window, whichever change it's for, and the next change opens no epoch.
+/// Only a watch report that may be late has 2 s for that; one heard at
+/// once has 200 ms. So a sink made again that only the watch's events
+/// report, and a switch a second later that only the stream reports, each
+/// open an epoch, as does a change only the watch's events report a
+/// second after another change both reported, the watch first (GAI-500).
+/// What's left is a change only one source reports followed by one only
+/// the other reports: within 2 s if the watch's report is the poll's (a
+/// change only the stream reports, then one only the poll reports, is what
+/// the poll's late report of the first looks like), and within 200 ms
+/// otherwise.
 ///
 /// The stream's callback and the watch's thread report one switch of the
 /// default at nearly the same moment (9 µs apart on a private `PipeWire`,
 /// GAI-494), so the two reports can run at once. Under one lock, a report
-/// either takes the other source's last unpaired report, pairing with it,
-/// or stores its own and sets the reopening due. So two reports at once
+/// takes the last one not yet paired, pairing with it or not, and if not
+/// stores its own and sets the reopening due. So two reports at once
 /// end as they would one after the other, in the order they took the
 /// lock, however the threads interleave: the second sees the first. A new
 /// change is due before its report returns, so the stream's next buffer
 /// can't miss it, and the other source's report of it, pairing, can't make
 /// it due again. It's due from the stamp of the report that took the lock
 /// first, which may be a moment after the other's. Two reports of one
-/// change left unpaired would each pair with one of the next change's
-/// within the window, and that change would open no epoch (GAI-495).
+/// change left unpaired would shift the pairs of the changes after, and a
+/// later change one source alone reports could open no epoch (GAI-495).
 /// Only a report takes the lock, never a buffer: [`Self::take`] reads
 /// nothing it guards.
 ///
@@ -606,12 +610,12 @@ impl Held {
 /// stream's first epoch was misdated, not where this one starts.
 #[derive(Debug)]
 struct Reroutes {
-    /// Each source's last report the other hasn't paired, under the lock
-    /// that makes pairing one step. The stream's report may take it on the
+    /// The last report not yet paired, if any, under the lock that makes
+    /// pairing one step. The stream's report may take it on the
     /// stream's real-time thread; it's held only to pair or store a stamp
     /// and set the change due, and the report takes the event queue's lock
     /// right after.
-    unpaired: Mutex<Unpaired>,
+    unpaired: Mutex<Option<Unpaired>>,
     /// When the first change the audio hasn't reopened for yet was
     /// reported, in session nanoseconds, or [`NONE`].
     due: AtomicU64,
@@ -636,6 +640,16 @@ const SAME_CHANGE: Duration = Duration::from_secs(2);
 /// on hardware (T4). A Bluetooth profile change through the session
 /// manager's stand-in sink makes two changes about 500 ms apart (GAI-487),
 /// which this keeps apart.
+///
+/// Each report is stamped when its thread takes it in, so the two can come
+/// further apart than the server sent them: the stream's thread runs at
+/// real-time priority, but a busy machine can keep the watch's waiting
+/// (cpal holds its own report back by a cycle at most). And a client other
+/// than the session manager may name a default before its node is in the
+/// graph, which the watch reports only once the node appears. Two reports
+/// of one change more than 200 ms apart don't pair, and the change opens a
+/// second epoch, where its stamps run on: the cost taken here for not
+/// losing another change's epoch.
 const HEARD_AT_ONCE: Duration = Duration::from_millis(200);
 
 /// How long after a change's first report a stamped buffer that follows on
@@ -654,7 +668,7 @@ const NONE: u64 = u64::MAX;
 impl Default for Reroutes {
     fn default() -> Self {
         Self {
-            unpaired: Mutex::new(Unpaired::default()),
+            unpaired: Mutex::new(None),
             due: AtomicU64::new(NONE),
             next_cycle: AtomicU64::new(NONE),
             next_capture: AtomicU64::new(NONE),
@@ -699,15 +713,30 @@ impl BufferStamps {
     }
 }
 
-/// When each source last reported a change the other hasn't, in session
-/// nanoseconds, if it has.
-#[derive(Debug, Default)]
+/// A report of a change not yet paired with the other source's.
+#[derive(Debug, Clone, Copy)]
 struct Unpaired {
-    /// The stream's last report the watch hasn't paired.
-    stream: Option<u64>,
-    /// The watch's last report the stream hasn't paired, and how the watch
-    /// heard of it.
-    watch: Option<(u64, Heard)>,
+    /// Who reported it.
+    from: Reporter,
+    /// When, in session nanoseconds.
+    at: u64,
+}
+
+impl Unpaired {
+    /// Whether `from`'s report at `at` nanoseconds is the same change as
+    /// this one: it's the other source's, stamped within the watch's
+    /// report's window after this one, or before it (its thread read the
+    /// clock first but got here second).
+    fn pairs_with(self, from: Reporter, at: u64) -> bool {
+        let heard = match (self.from, from) {
+            (Reporter::Stream, Reporter::Watch(heard))
+            | (Reporter::Watch(heard), Reporter::Stream) => heard,
+            (Reporter::Stream, Reporter::Stream) | (Reporter::Watch(_), Reporter::Watch(_)) => {
+                return false;
+            }
+        };
+        at.saturating_sub(self.at) <= heard.window()
+    }
 }
 
 /// How the backend's watch on the audio server heard of a change, which
@@ -757,36 +786,22 @@ impl Reroutes {
     }
 
     /// Takes in a change `from` reported at `at`: the same change as the
-    /// other source's last unpaired report, within the window the watch's
-    /// report sets, which pairs them, or a new one, due a reopening.
+    /// last report not yet paired, which pairs them, or a new one, due a
+    /// reopening.
     fn reported(&self, from: Reporter, at: SessionTime) {
         let at = at.as_nanos();
-        // The other's report may be stamped a moment after this one: its
-        // thread read the clock later but got here first.
-        let same = |was: u64, heard: Heard| at.saturating_sub(was) <= heard.window();
         // One lock over the read, the store and setting the change due:
         // two reports of one change at the same moment can't each miss the
         // other, nor the second return before the first has made it due.
         let mut unpaired = self.unpaired.lock().unwrap_or_else(PoisonError::into_inner);
-        let Unpaired { stream, watch } = &mut *unpaired;
-        let paired = match from {
-            Reporter::Stream => watch
-                .take_if(|&mut (was, heard)| same(was, heard))
-                .is_some(),
-            Reporter::Watch(heard) => stream.take_if(|&mut was| same(was, heard)).is_some(),
-        };
-        // Once a report pairs, its source's older report left unpaired is
-        // for a change the device has since moved on from: the other
-        // source can't report that change any more, the poll included, as
-        // the graph it reads has moved on too. Kept, it could pair with a
-        // later change's report.
-        match (from, paired) {
-            (Reporter::Stream, true) => *stream = None,
-            (Reporter::Watch(_), true) => *watch = None,
-            (Reporter::Stream, false) => *stream = Some(at),
-            (Reporter::Watch(heard), false) => *watch = Some((at, heard)),
-        }
+        // Taken either way: one this report doesn't pair with is for a
+        // change that can't be reported again, and kept, it could pair
+        // with a later change's report.
+        let paired = unpaired
+            .take()
+            .is_some_and(|last| last.pairs_with(from, at));
         if !paired {
+            *unpaired = Some(Unpaired { from, at });
             // A change before the audio reopened for the last is reopened
             // for with it, and waited for from the first.
             self.due.fetch_min(at, Ordering::SeqCst);

@@ -1269,9 +1269,41 @@ fn a_change_only_the_poll_reports_after_a_shifted_pair_opens_an_epoch() {
     assert_eq!(epoch_firsts(&run.timeline), [0, 100, 200, 300]);
 }
 
-/// The limit that's left: a change only the poll reports, within 2 s of
-/// a change only the stream reported, pairs with it and opens no epoch,
-/// as the poll's late report of the first change would.
+/// A change only the stream reports, then one only the watch's events
+/// report a second later, then one only the poll reports 1.8 s after the
+/// first: the poll can't report the first change once the watch has
+/// reported the second, so the stream's leftover report is dropped, and
+/// each change opens an epoch.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_change_only_the_poll_reports_after_two_single_reports_opens_an_epoch() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let script = vec![
+        Step::Audio(samples(0, 100)),
+        Step::Advance(secs(1)),
+        Step::Notice(CaptureNotice::RouteChanged),
+        Step::Audio(samples(100, 100)),
+        Step::Advance(secs(1)),
+        watched("B", at(2), Heard::AtOnce),
+        Step::Audio(samples(200, 100)),
+        // Within the 2 s a late report of the first change could come in.
+        Step::Advance(Duration::from_millis(800)),
+        watched(
+            "C",
+            SessionTime::from_nanos(2_800_000_000),
+            Heard::MaybeLate,
+        ),
+        Step::Audio(samples(300, 100)),
+    ];
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    assert_eq!(epoch_firsts(&run.timeline), [0, 100, 200, 300]);
+}
+
+/// A known limit, pinned so a change to it is seen: a change only the
+/// poll reports, within 2 s of a change only the stream reported, pairs
+/// with it and opens no epoch, as the poll's late report of the first
+/// change would.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_change_only_the_poll_reports_soon_after_one_only_the_stream_reports_opens_none() {
@@ -1519,9 +1551,9 @@ impl Drop for PanicFlag<'_> {
 /// One change's two reports, from the stream and the watch at the same
 /// moment on two threads, pair with each other under any interleaving:
 /// the change is due by the time either report returns, it opens an
-/// epoch, and the next change half a second later still opens its own.
-/// Both reports left unpaired would each pair with one of the next
-/// change's, which then would open none (GAI-495).
+/// epoch, and neither report is left waiting to pair. Both left unpaired
+/// would shift the pairs of the changes after, and a later change one
+/// source alone reports could then open no epoch (GAI-495).
 #[test]
 fn one_change_reported_from_both_at_once_pairs() {
     let first = SessionTime::from_nanos(1_000_000_000);
@@ -1557,21 +1589,18 @@ fn one_change_reported_from_both_at_once_pairs() {
         (watch.join().unwrap(), stream)
     });
     assert_eq!((watch_undue, stream_undue), (vec![], vec![]));
-    let second = SessionTime::from_nanos(1_500_000_000);
-    let unopened: Vec<usize> = (0..RACES)
+    let unpaired: Vec<usize> = (0..RACES)
         .filter(|&round| {
             let reroutes = &all[round];
-            let first_opened = reroutes.take(None);
-            reroutes.stream_moved(second);
-            watch_at_once(reroutes, second);
-            !(first_opened && reroutes.take(None))
+            let opened = reroutes.take(None);
+            !opened || reroutes.unpaired.lock().unwrap().is_some()
         })
         .collect();
     // Each round names itself, so a failure shows how often it raced.
     assert!(
-        unopened.is_empty(),
-        "{} of {RACES} rounds had a change that opened no epoch: {unopened:?}",
-        unopened.len()
+        unpaired.is_empty(),
+        "{} of {RACES} rounds opened no epoch or left a report unpaired: {unpaired:?}",
+        unpaired.len()
     );
 }
 

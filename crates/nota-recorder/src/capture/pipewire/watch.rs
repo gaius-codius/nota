@@ -93,8 +93,9 @@ impl Drop for Watch {
 }
 
 /// Starts watching which device `source` is on, reporting changes through
-/// `events`: [`CaptureSender::device`], and for a pinned device that went
-/// away, [`CaptureSender::failed`] too, which ends the track.
+/// `events` ([`report`]), with how the watch heard of each, and for a
+/// pinned device that went away, [`CaptureSender::failed`] too, which ends
+/// the track.
 pub(super) fn watch(source: Source, events: CaptureSender) -> Watch {
     let (quit, quit_rx) = pw::channel::channel::<()>();
     let warn = events.clone();
