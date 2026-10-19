@@ -1,11 +1,12 @@
 //! The recorder's device events against real `PipeWire`, in the private
 //! instance `scripts/pipewire-devices.sh` starts: a followed default output
 //! switched is `Changed` and opens an epoch that starts with the new
-//! sink's audio, a pinned sink removed is `Lost` and ends its track, within
-//! 2 s each, and a followed sink removed and made again under its name is
-//! `Changed` and opens one epoch (tried again if the session manager names
-//! its stand-in sink in between). And the device snapshot, which Setup lists, names the
-//! instance's sinks and sources, and its defaults, as they come and go.
+//! sink's audio, a pinned sink removed is `Lost` and ends its track, a
+//! followed sink removed and made again under its name is `Changed` and
+//! opens one epoch (tried again if the session manager names its stand-in
+//! sink in between), within 2 s each. And the device snapshot, which Setup
+//! lists, names the instance's sinks and sources, and its defaults, as
+//! they come and go.
 //! Skips (and says so) unless the script runs it: switching a default
 //! anywhere else would change the user's (AGENTS.md section 8). The script
 //! runs the tests one at a time, since each sets the defaults.
@@ -57,12 +58,12 @@ mod linux {
     /// buffer is stamped a quantum early (43 ms, the graph's quantum while
     /// the test's tones play), and the monitor's first epoch, whose first
     /// audio its stamps date before the session started, starts at zero,
-    /// about 22 ms late (GAI-491). 55–69 ms in all over 95 runs of the
+    /// about 22 ms late (GAI-491). 55–69 ms in all over 94 runs of the
     /// script (GAI-494); the bound leaves a quantum more above that.
     const MOST_LATE: Duration = Duration::from_millis(120); // check-bound
 
     /// The most the remade sink's epoch may start late by: how far the
-    /// monitor's first epoch was misdated, 20–24 ms over 95 runs of the
+    /// monitor's first epoch was misdated, 20–24 ms over 94 runs of the
     /// script, and after a detour through the stand-in sink, whose epochs
     /// add their own, 34–44 ms over 7 (GAI-494). The bound leaves about a
     /// quantum (21 ms, the graph's quantum with no tone playing) above
@@ -721,8 +722,8 @@ mod linux {
     /// default. The session manager sometimes names its stand-in sink in
     /// between all the same, and the recorder rightly tells a change to it
     /// and then back: that's another path than a node made again, so the
-    /// test checks the detour's epochs opened and tries again, up to
-    /// [`REMAKE_TRIES`] times in all.
+    /// test checks the recorder refused none of the detour's epochs and
+    /// tries again, up to [`REMAKE_TRIES`] times in all.
     fn remake_sink(
         heard: &mut Heard,
         fixtures: &mut Fixtures,
