@@ -745,6 +745,13 @@ impl Unpaired {
 enum Heard {
     /// As it happened, from the server's events: the stream hears of a
     /// change both report at the same moment.
+    #[cfg_attr(
+        not(any(target_os = "linux", test)),
+        expect(
+            dead_code,
+            reason = "only the PipeWire watch, on Linux, hears changes as they happen"
+        )
+    )]
     AtOnce,
     /// Perhaps late: from the watch's poll, which reads the graph afresh
     /// about once a second, or from a watch that can't tell.

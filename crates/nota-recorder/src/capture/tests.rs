@@ -1145,6 +1145,7 @@ fn watched(name: &str, at: SessionTime, heard: Heard) -> Step {
 }
 
 /// The first sample of each of `timeline`'s epochs.
+#[cfg(target_os = "linux")]
 fn epoch_firsts(timeline: &TrackTimeline) -> Vec<u64> {
     timeline
         .epochs()
