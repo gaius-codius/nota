@@ -1171,6 +1171,130 @@ fn a_reopening_stamped_before_the_old_audio_ends_starts_at_its_end() {
     assert_eq!(journal_epochs(&fs, &journals), [(0, 0, 500), (1, 500, 700)]);
 }
 
+/// GAI-434: the old device's buffer that follows a route change's report
+/// (the session manager changes the default before it moves the stream)
+/// stays in the old epoch, as its stamps run on from the old device's; the
+/// new device's first buffer, stamped 60 ms early, opens the new one.
+#[test]
+fn an_old_device_s_buffer_after_a_route_change_stays_in_the_old_epoch() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let ms = |ms: u64| Duration::from_millis(ms);
+    let script = vec![
+        Step::TimedAudio(samples(0, 100), ms(0)),
+        Step::TimedAudio(samples(100, 100), ms(100)),
+        Step::Advance(ms(200)),
+        Step::Notice(CaptureNotice::RouteChanged),
+        // The old device's last buffer, after the report.
+        Step::TimedAudio(samples(200, 100), ms(200)),
+        Step::TimedAudio(samples(300, 100), ms(240)),
+        Step::TimedAudio(samples(400, 100), ms(340)),
+    ];
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    let old_end = SessionTime::from_nanos(300_000_000);
+    assert_eq!(
+        reopenings(&run.reported),
+        [
+            ("route", 0, SessionTime::ZERO, 0),
+            ("epoch", 1, old_end, 300)
+        ]
+    );
+    assert_eq!(run.timeline.current().map(Epoch::overrun), Some(ms(60)));
+    let journals = all_journals(run.writer, &run.reported);
+    assert_eq!(journal_epochs(&fs, &journals), [(0, 0, 300), (1, 300, 500)]);
+}
+
+/// A route change whose buffers never break from the old device's run
+/// still opens its epoch, at the first buffer 200 ms after the report: the
+/// change isn't lost, and the audio either side follows straight on.
+#[test]
+fn a_route_change_with_no_stamp_break_opens_its_epoch_after_the_wait() {
+    let fs = FakeFs::with_dirs([dir()]);
+    let ms = |ms: u64| Duration::from_millis(ms);
+    let mut script = vec![
+        Step::TimedAudio(samples(0, 100), ms(0)),
+        Step::Advance(ms(100)),
+        Step::Notice(CaptureNotice::RouteChanged),
+    ];
+    // Each buffer runs on from the one before; the one at 300 ms is the
+    // first the wait lets reopen.
+    script.extend((1..5).map(|n| Step::TimedAudio(samples(n * 100, 100), ms(n * 100))));
+    let run = run(&fs, script, Vec::new(), |_| {});
+    run.result.unwrap();
+    let waited = SessionTime::from_nanos(300_000_000);
+    assert_eq!(
+        reopenings(&run.reported),
+        [
+            ("route", 0, SessionTime::ZERO, 0),
+            ("epoch", 1, waited, 300)
+        ]
+    );
+    assert!(gap_spans(&run.timeline).is_empty());
+    let journals = all_journals(run.writer, &run.reported);
+    assert_eq!(journal_epochs(&fs, &journals), [(0, 0, 300), (1, 300, 500)]);
+}
+
+/// A 20 ms buffer delivered by the cycle at `at_ms` plus `nanos`.
+fn cycle_at(at_ms: u64, nanos: u64) -> BufferCycle {
+    BufferCycle {
+        at: at_ms * 1_000_000 + nanos,
+        length: 20_000_000,
+    }
+}
+
+/// A cycle [`LOSS_MIN`] or more either side of where its run puts it
+/// breaks from the run and takes a change's reopening; one a nanosecond
+/// closer doesn't.
+#[test]
+fn a_cycle_breaks_from_its_run_at_loss_min_either_way() {
+    let loss_min = u64::try_from(LOSS_MIN.as_nanos()).unwrap();
+    let after_run = |at_ms: u64, nanos: u64| {
+        let reroutes = Reroutes::default();
+        assert!(!reroutes.take(Some(cycle_at(80, 0))));
+        reroutes.stream_moved(SessionTime::from_nanos(90_000_000));
+        reroutes.take(Some(cycle_at(at_ms, nanos)))
+    };
+    // The run puts the next cycle at 100 ms.
+    assert!(!after_run(100, 0));
+    assert!(!after_run(100, loss_min - 1));
+    assert!(after_run(100, loss_min));
+    assert!(!after_run(96, 1));
+    assert!(after_run(96, 0));
+}
+
+/// Two changes before the audio reopens are waited for from the first:
+/// a run that never breaks reopens at the first cycle 200 ms after it,
+/// once, and not again for the second.
+#[test]
+fn the_wait_runs_from_the_first_change_not_reopened_for() {
+    let reroutes = Reroutes::default();
+    assert!(!reroutes.take(Some(cycle_at(80, 0))));
+    reroutes.stream_moved(SessionTime::from_nanos(100_000_000));
+    // A second report from the same source: a change of its own.
+    reroutes.stream_moved(SessionTime::from_nanos(150_000_000));
+    let reopened: Vec<u64> = (5..20)
+        .map(|n| n * 20)
+        .filter(|&ms| reroutes.take(Some(cycle_at(ms, 0))))
+        .collect();
+    assert_eq!(reopened, [300]);
+}
+
+/// An unstamped buffer takes a change's reopening at once, and the
+/// stamped buffer after it, having no run to follow on from, would too.
+#[test]
+fn an_unstamped_buffer_reopens_at_once_and_leaves_no_run() {
+    let reroutes = Reroutes::default();
+    assert!(!reroutes.take(None));
+    reroutes.stream_moved(SessionTime::from_nanos(100_000_000));
+    assert!(reroutes.take(None));
+    assert!(!reroutes.take(None));
+    assert!(!reroutes.take(Some(cycle_at(120, 0))));
+    // The run is broken again by an unstamped buffer.
+    assert!(!reroutes.take(None));
+    reroutes.stream_moved(SessionTime::from_nanos(130_000_000));
+    assert!(reroutes.take(Some(cycle_at(140, 0))));
+}
+
 /// The same from a stream that doesn't stamp its buffers, reopened after
 /// a suspend: audio the clock times before the old audio's end (here the
 /// old audio ran ahead of the clock, which a real stream's does by much
@@ -2551,6 +2675,49 @@ fn a_reopening_sends_what_was_held_before_it() {
     assert_eq!((samples[0], stamp.at), (2, ms(asleep + 95)));
     let (samples, stamp) = timed(&events[4]).unwrap();
     assert_eq!((samples[0], stamp.at), (3, ms(asleep + 115)));
+}
+
+/// On the `PipeWire` path, the old device's buffers after a route change's
+/// report are sent in the old epoch, not held; the new device's first,
+/// delivered by a cycle 40 ms early with no delay measured yet, opens the
+/// new one, held and dated as a stream's first buffers are.
+#[test]
+fn a_delivered_buffer_reopens_only_where_its_cycle_breaks_from_the_run() {
+    let clock = Arc::new(FakeClock::new(SessionTime::from_nanos(110_000_000)));
+    let (sender, rx) = test_sender(MIC, Arc::clone(&clock) as Arc<dyn Clock>);
+    // 20 ms buffers at 16 kHz, settled from the first.
+    sender.audio_delivered(&[1; 320], Some(delivered(100, 80)));
+    sender.notice(CaptureNotice::RouteChanged);
+    // The old device's last three buffers, about 40 ms of its audio and a
+    // cycle 1 ms off, as hardware delivered after a report.
+    sender.audio_delivered(&[2; 320], Some(delivered(120, 100)));
+    sender.audio_delivered(&[3; 320], Some(delivered(141, 121)));
+    sender.audio_delivered(&[4; 320], Some(delivered(160, 140)));
+    sender.audio_delivered(&[5; 320], Some(delivered(120, 120)));
+    sender.audio_delivered(&[6; 320], Some(delivered(140, 120)));
+    let events = queued(&rx);
+    let ms = |ms: u64| SessionTime::from_nanos(ms * 1_000_000);
+    let firsts: Vec<_> = events
+        .iter()
+        .map(|e| match e {
+            CaptureEvent::Reopened { at } => (0, *at),
+            CaptureEvent::Notice { .. } => (-1, SessionTime::ZERO),
+            e => timed(e).map(|(s, stamp)| (s[0], stamp.at)).unwrap(),
+        })
+        .collect();
+    assert_eq!(
+        firsts,
+        [
+            (1, ms(80)),
+            (-1, SessionTime::ZERO),
+            (2, ms(100)),
+            (3, ms(121)),
+            (4, ms(140)),
+            (0, ms(100)),
+            (5, ms(100)),
+            (6, ms(120)),
+        ]
+    );
 }
 
 /// A track started first opens its epoch when its stream was asked to

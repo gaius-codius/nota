@@ -32,7 +32,7 @@
 //! A stream that stamps its buffers ([`CaptureSender::audio_captured`], as
 //! [`PipeWireBackend`] does with the audio server's timestamps) is timed by
 //! those stamps, read through each track's [`DriftMeter`]:
-//! - A buffer captured at least [`LOSS_MIN`](nota_core::drift::LOSS_MIN)
+//! - A buffer captured at least [`LOSS_MIN`]
 //!   later than the buffer before it puts it opens a new epoch where it
 //!   came, whether or not an overrun was reported (cpal drops a
 //!   report it can't deliver at once). An overrun after which the stream's
@@ -74,7 +74,11 @@
 //! the track's sample count carries on as if nothing was missed. So the
 //! first audio after either opens a new epoch, at the time that audio was
 //! captured ([`CaptureEvent::Reopened`]): the stretch with no audio is a
-//! gap between epochs, as it is after an overrun. The new device's stamps
+//! gap between epochs, as it is after an overrun. A route change is
+//! reported before the stream moves, so the old device's last buffers may
+//! still follow the report: from a stamped stream, the new device's audio
+//! is the first buffer whose stamps break from the old run, or failing
+//! that the first 200 ms after the report (see `Reroutes`). The new device's stamps
 //! don't carry on from the old one's, and may put that audio before the
 //! old audio's end (on `PipeWire`, tens of milliseconds before, after a
 //! default switch): the epoch then starts where the old audio ends, late
@@ -231,7 +235,7 @@ use std::time::Duration;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nota_core::drift::Reading;
+use nota_core::drift::{LOSS_MIN, Reading};
 use nota_core::messages::AudioChunk;
 use nota_core::recorder::{DeviceChange, WarningState};
 use nota_core::{
@@ -355,8 +359,10 @@ pub enum CaptureNotice {
     /// stamps its buffers, only if its next buffer shows a loss (see the
     /// module docs).
     Overrun,
-    /// The default device changed and the stream followed it. Its next
-    /// audio opens a new epoch ([`CaptureEvent::Reopened`]).
+    /// The default device changed and the stream followed it. The new
+    /// device's first audio opens a new epoch ([`CaptureEvent::Reopened`]):
+    /// from a stamped stream, the first buffer whose stamps break from the
+    /// old device's run, or one 200 ms on.
     RouteChanged,
     /// The machine was suspended while the stream ran. Reported with the
     /// first audio after it, which opens a new epoch
@@ -510,26 +516,48 @@ impl Held {
 /// it. A change both report opens one epoch, in either order, and a change
 /// only one reports opens one too.
 ///
-/// The reopening is the first buffer sent after the first report: the old
-/// device's buffers sent before stay in the old epoch. When the default
-/// switches, both reports come from the server's `default` metadata,
-/// which the session manager changes before it moves the stream; on
-/// `PipeWire`, the next buffer is the new device's
-/// (`scripts/pipewire-devices.sh` checks it). A node made again under the
-/// default's own name may leave the metadata as it was; then only the
-/// watch reports it, from the registry, as the new node appears. Which
-/// buffer comes next is then up to the session manager: the script checks
-/// that the change opens one epoch, not where it starts.
+/// When the default switches, both reports come from the server's
+/// `default` metadata, which the session manager changes before it moves
+/// the stream, so the old device's buffers can still follow the report: on
+/// hardware, about 40 ms of them did in 1 of 11 switches (GAI-434). A
+/// stamped buffer therefore reopens only where its stream's cycle breaks
+/// from the old device's run: by [`LOSS_MIN`] or more from where the
+/// buffer before it puts it, as the drift meter reads a run (the new
+/// device's first buffer came 40 to 90 ms early). The old device's
+/// buffers before that stay in the old epoch. A stamped buffer that
+/// follows on still reopens once its cycle is [`REOPEN_WAIT`] past the
+/// change's first report, so a change whose new device runs on from the
+/// old one's stamps still opens its epoch; that audio is then timed within
+/// [`LOSS_MIN`] of its stamps either way. An unstamped buffer, or one
+/// whose stamp the session clock can't place, has nothing to compare, and
+/// reopens as the first buffer sent after the report. A loss on the old
+/// device just after the report breaks its run too, and takes the
+/// reopening there. A stream that stalls as it moves breaks its run when
+/// its audio resumes, however long after. A change reported only once the
+/// new device's audio is already flowing (the watch's poll, up to about a
+/// second late) has no break left to wait for, and opens its epoch at the
+/// wait's end rather than at the next buffer.
+///
+/// A node made again under the default's own name may leave the metadata
+/// as it was; then only the watch reports it, from the registry, as the
+/// new node appears. Which buffer comes next is then up to the session
+/// manager: `scripts/pipewire-devices.sh` checks that the change opens one
+/// epoch, not where it starts.
 #[derive(Debug)]
 struct Reroutes {
     /// When the stream last reported a change the watch hasn't, in session
-    /// nanoseconds, or [`UNPAIRED`] if there's none.
+    /// nanoseconds, or [`NONE`] if there's none.
     stream: AtomicU64,
     /// When the watch last reported a change the stream hasn't, as
     /// [`Self::stream`].
     watch: AtomicU64,
-    /// Set by a new change, until the audio reopens for it.
-    due: AtomicBool,
+    /// When the first change the audio hasn't reopened for yet was
+    /// reported, in session nanoseconds, or [`NONE`].
+    due: AtomicU64,
+    /// Where the last buffer sent puts the next one's cycle: its own cycle
+    /// plus its length, in session nanoseconds, or [`NONE`] if it had no
+    /// stamp the session clock could place.
+    next: AtomicU64,
 }
 
 /// How far apart the stream's and the watch's reports of one change may
@@ -537,16 +565,62 @@ struct Reroutes {
 /// a second, and a change must show within 2 s (development plan, T4).
 const SAME_CHANGE: Duration = Duration::from_secs(2);
 
-/// No report waiting to be paired.
-const UNPAIRED: u64 = u64::MAX;
+/// How long after a change's first report a stamped buffer that follows on
+/// from the old device's run still reopens for it: 200 ms, five times the
+/// old device's audio seen after a report on hardware (GAI-434). Past it,
+/// the stamps can't tell the devices apart, so where the epoch opens
+/// moves the audio by under [`LOSS_MIN`].
+const REOPEN_WAIT: Duration = Duration::from_millis(200);
+
+/// No time held: no report waiting to be paired, no change waiting for its
+/// reopening, or no stamped buffer to follow on from. No cycle is ever
+/// within [`LOSS_MIN`] of it, so a buffer after an unstamped one breaks
+/// from it.
+const NONE: u64 = u64::MAX;
 
 impl Default for Reroutes {
     fn default() -> Self {
         Self {
-            stream: AtomicU64::new(UNPAIRED),
-            watch: AtomicU64::new(UNPAIRED),
-            due: AtomicBool::new(false),
+            stream: AtomicU64::new(NONE),
+            watch: AtomicU64::new(NONE),
+            due: AtomicU64::new(NONE),
+            next: AtomicU64::new(NONE),
         }
+    }
+}
+
+/// A stamped buffer as [`Reroutes`] reads it: the stream's cycle that
+/// delivered it, and how long its samples last, in session nanoseconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BufferCycle {
+    /// The cycle's time.
+    at: u64,
+    /// The buffer's length.
+    length: u64,
+}
+
+impl BufferCycle {
+    /// The buffer of `len` samples at `rate` delivered by the cycle at
+    /// `at`, the session clock's elapsed time; `None` if either won't fit
+    /// in nanoseconds.
+    fn new(at: Duration, len: usize, rate: SampleRate) -> Option<Self> {
+        let length = SampleCount::new(u64::try_from(len).ok()?).duration_at(rate)?;
+        Some(Self {
+            at: u64::try_from(at.as_nanos()).ok()?,
+            length: u64::try_from(length.as_nanos()).ok()?,
+        })
+    }
+
+    /// Where this buffer puts the next one's cycle.
+    const fn next(self) -> u64 {
+        self.at.saturating_add(self.length)
+    }
+
+    /// Whether this buffer's cycle breaks from the run the buffer before
+    /// it, putting it at `expected`, belongs to.
+    fn breaks_from(self, expected: u64) -> bool {
+        let jump = u128::from(self.at.abs_diff(expected));
+        jump >= LOSS_MIN.as_nanos()
     }
 }
 
@@ -572,19 +646,35 @@ impl Reroutes {
         // thread read the clock later but got here first.
         let paired = other
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |was| {
-                (was != UNPAIRED && at.saturating_sub(was) <= window).then_some(UNPAIRED)
+                (was != NONE && at.saturating_sub(was) <= window).then_some(NONE)
             })
             .is_ok();
         if !paired {
             mine.store(at, Ordering::SeqCst);
-            self.due.store(true, Ordering::SeqCst);
+            // A change before the audio reopened for the last is reopened
+            // for with it, and waited for from the first.
+            self.due.fetch_min(at, Ordering::SeqCst);
         }
     }
 
-    /// Whether the audio about to be sent is due to reopen for a new
-    /// change; it then has.
-    fn take(&self) -> bool {
-        self.due.swap(false, Ordering::SeqCst)
+    /// Whether the buffer about to be sent, stamped by `cycle` if it is,
+    /// reopens for a new change; it then has. See the type's docs.
+    fn take(&self, cycle: Option<BufferCycle>) -> bool {
+        let expected = self
+            .next
+            .swap(cycle.map_or(NONE, BufferCycle::next), Ordering::SeqCst);
+        let due = self.due.load(Ordering::SeqCst);
+        if due == NONE {
+            return false;
+        }
+        let wait = u64::try_from(REOPEN_WAIT.as_nanos()).unwrap_or(u64::MAX);
+        let reopens = cycle.is_none_or(|cycle| {
+            cycle.breaks_from(expected) || cycle.at >= due.saturating_add(wait)
+        });
+        if reopens {
+            self.due.store(NONE, Ordering::SeqCst);
+        }
+        reopens
     }
 }
 
@@ -641,8 +731,9 @@ impl CaptureSender {
         if samples.is_empty() || self.failed.load(Ordering::SeqCst) {
             return;
         }
-        let reopened = self.reopened();
         let delivery = delivery.and_then(|delivery| self.place(delivery));
+        let cycle = delivery.and_then(|d| BufferCycle::new(d.cycle, samples.len(), self.rate));
+        let reopened = self.reopened(cycle);
         self.progress.sent(samples.len());
         let Held { settling, reopens } = &mut *held;
         if reopened {
@@ -687,7 +778,11 @@ impl CaptureSender {
         }
         // Checked on every buffer, the first too, so a suspend before it
         // isn't taken for one after it.
-        let reopened = self.reopened();
+        let cycle = captured.and_then(|stamp| {
+            let at = stamp.at.elapsed().checked_add(stamp.delay)?;
+            BufferCycle::new(at, samples.len(), self.rate)
+        });
+        let reopened = self.reopened(cycle);
         // Counted before it's queued, so it's never missed.
         self.progress.sent(samples.len());
         self.queue_audio(samples, captured, reopened);
@@ -712,18 +807,23 @@ impl CaptureSender {
         );
     }
 
-    /// Whether the audio about to be sent follows a stretch the stream
-    /// didn't capture: it followed a new device since its last audio, or
-    /// the machine was suspended since. A suspend is reported here, as a
+    /// Whether the audio about to be sent, stamped by `cycle` if it is,
+    /// follows a stretch the stream didn't capture: the machine was
+    /// suspended since its last audio, or it's the new device's after a
+    /// route change ([`Reroutes`]). A suspend is reported here, as a
     /// [`CaptureNotice::Suspended`].
-    fn reopened(&self) -> bool {
+    fn reopened(&self, cycle: Option<BufferCycle>) -> bool {
         let asleep = u64::try_from(self.clock.suspended().as_nanos()).unwrap_or(u64::MAX);
         let before = self.asleep.swap(asleep, Ordering::SeqCst);
         let slept = Duration::from_nanos(asleep.saturating_sub(before)) >= MIN_SUSPEND;
         if slept {
             self.notice(CaptureNotice::Suspended);
         }
-        let rerouted = self.reroutes.take();
+        // Read on every buffer, so the next is compared with this one. A
+        // stamped buffer after a suspend breaks from the run before it,
+        // its stamp placed past the time suspended, so a change due is
+        // reopened for with the suspend, not again later.
+        let rerouted = self.reroutes.take(cycle);
         slept || rerouted
     }
 
@@ -739,10 +839,11 @@ impl CaptureSender {
 
     /// Reports something that doesn't stop the stream, stamped with the
     /// session time now. After a [`CaptureNotice::RouteChanged`], the
-    /// stream's next audio opens a new epoch, unless a
+    /// new device's audio opens a new epoch, unless a
     /// [`DeviceChange::Changed`] reported within 2 s before is the same
     /// change: a change both report opens one epoch, and a change only one
-    /// reports opens one too.
+    /// reports opens one too. Which buffer is the new device's is as the
+    /// module docs say.
     pub fn notice(&self, notice: CaptureNotice) {
         let at = self.clock.now();
         if notice == CaptureNotice::RouteChanged {
@@ -755,10 +856,9 @@ impl CaptureSender {
     /// Reports something that happened to the stream's device, stamped
     /// with the session time now. Nothing is sent once the stream has
     /// failed (its track has ended), and a loss only once until another
-    /// device follows. After a [`DeviceChange::Changed`], the stream's
-    /// next audio opens a new epoch, unless a
-    /// [`CaptureNotice::RouteChanged`] already did for the same change, as
-    /// [`Self::notice`] says.
+    /// device follows. After a [`DeviceChange::Changed`], the new device's
+    /// audio opens a new epoch, unless a [`CaptureNotice::RouteChanged`]
+    /// already did for the same change, as [`Self::notice`] says.
     pub fn device(&self, change: DeviceChange) {
         self.device_at(change, self.clock.now());
     }
@@ -1317,8 +1417,8 @@ impl std::error::Error for RecordError {
 /// `writer` alike, starting when the audio after the loss was captured, or
 /// for a stream that doesn't stamp its buffers when the overrun was
 /// reported, and the epoch is reported (see the module docs). So it does
-/// at the first audio after a route change or a suspend, starting when
-/// that audio was captured, and when a stamped stream's drift needs
+/// at the new device's first audio after a route change, and the first
+/// audio after a suspend, starting when that audio was captured, and when a stamped stream's drift needs
 /// correcting.
 ///
 /// Journals are fsync'd as audio arrives, and also when it stops arriving,
