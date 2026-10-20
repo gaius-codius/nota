@@ -128,7 +128,7 @@ if [[ $KERNEL -eq 1 ]]; then
   [[ $LIMIT =~ ^[1-9][0-9]*$ ]] || usage "--limit takes whole seconds, not $LIMIT"
   # Sizes go to truncate and mkfs.ext4; nothing else is passed on.
   for size in "${SIZES[@]}"; do
-    [[ $size =~ ^[1-9][0-9]*[kmg]$ ]] || usage "a size is a number and k, m or g, not $size"
+    [[ $size =~ ^[1-9][0-9]*[kKmMgG]$ ]] || usage "a size is a number and k, m or g, not $size"
   done
   [[ $IMAGES == /* ]] || IMAGES=$start/$IMAGES
   [[ -z $RESULT || $RESULT == /* ]] || RESULT=$start/$RESULT
@@ -179,10 +179,12 @@ app_summary() {
 
 # --- The root half of --kernel-ext4 ------------------------------------------
 
-# report LINE...: to the terminal and the result file.
+# report LINE...: to the terminal and the result file. A terminal that has
+# gone (a hangup) or a pipe whose reader has (Ctrl-C reaching a `| tee`)
+# doesn't stop it, nor the clean-up that reports.
 report() {
-  printf '%s\n' "$@" >&3
-  [[ $DRY -eq 1 ]] || printf '%s\n' "$@" >> "$RESULT"
+  printf '%s\n' "$@" >&3 2> /dev/null || true
+  [[ $DRY -eq 1 ]] || printf '%s\n' "$@" >> "$RESULT" || true
 }
 
 # as_user CMD...: runs CMD as the user who started the script, with a clean
@@ -226,7 +228,7 @@ kernel_mount() {
   CUR_IMAGE=$RUN_DIR/$2.img
   CUR_MNT=$RUN_DIR/$2
   as_user truncate -s "$1" "$CUR_IMAGE" || return 1
-  as_user mkfs.ext4 -q -F -E root_owner="$RUN_UID:$RUN_GID" "$CUR_IMAGE" || return 1
+  as_user "$MKFS" -q -F -E root_owner="$RUN_UID:$RUN_GID" "$CUR_IMAGE" || return 1
   as_user mkdir "$CUR_MNT" || return 1
   if [[ $DRY -eq 1 ]]; then
     as_root losetup --find --show --nooverlap "$CUR_IMAGE"
@@ -378,9 +380,10 @@ on_signal() {
 }
 
 # cleanup_leftovers: unmounts and detaches every loop device on a file under
-# --images, and removes the run directories nothing is mounted in.
+# --images, and removes the run directories nothing is mounted in and no
+# device is still on (a lazy unmount leaves the device until it's let go).
 cleanup_leftovers() {
-  local name file dir status=0
+  local name file dir left status=0
   while read -r name file; do
     [[ -n $name ]] || continue
     as_root losetup --detach "$name" || status=1
@@ -389,18 +392,29 @@ cleanup_leftovers() {
     fi
     report "cleanup: unmounted and detached $name ($file)"
   done < <(if [[ $DRY -eq 1 ]]; then echo "/dev/loopN $IMAGES/run.XXXXXX/disk1.img"; else leftovers; fi)
-  [[ $DRY -eq 1 ]] || sleep 1
+  # The kernel detaches an unmounted device shortly after: wait for it.
+  left=
+  if [[ $DRY -eq 0 ]]; then
+    for _ in $(seq 50); do
+      left=$(leftovers)
+      [[ -n $left ]] || break
+      sleep 0.1
+    done
+  fi
   for dir in "$IMAGES"/run.*; do
     [[ -d $dir ]] || continue
     if [[ $DRY -eq 0 ]] && findmnt -rn -o TARGET | grep -F "$dir/" > /dev/null; then
       report "cleanup: $dir still has a mount; kept"
       status=1
+    elif [[ $left == *" $dir/"* ]]; then
+      report "cleanup: $dir still has a device on it; kept"
+      status=1
     else
       as_user rm -r --one-file-system "$dir" || status=1
     fi
   done
-  if [[ $DRY -eq 0 && -n $(leftovers) ]]; then
-    report "cleanup: still attached:" "$(leftovers)"
+  if [[ -n $left ]]; then
+    report "cleanup: still attached:" "$left"
     status=1
   fi
   [[ $status -eq 1 ]] || report "cleanup: nothing left"
@@ -416,6 +430,11 @@ logged() {
 # kernel_root_half: the runs, as root. Checks what the user half passed.
 kernel_root_half() {
   exec 3>&1
+  # Clean-up must outlive a reader that has gone; report says nothing then.
+  trap '' PIPE
+  # By root's PATH (sudo's secure_path has the sbin directories), as the
+  # user's from setpriv may not.
+  MKFS=$(command -v mkfs.ext4) || MKFS=mkfs.ext4
   if [[ $DRY -eq 0 ]]; then
     [[ $(id -u) -eq 0 ]] || { echo "disk-full: --as-root runs as root" >&2; exit 2; }
     [[ $RUN_UID =~ ^[1-9][0-9]*$ && $RUN_GID =~ ^[0-9]+$ ]] || {
@@ -609,7 +628,11 @@ ext4_run() {
   truncate -s "$size" "$image" || return 1
   mkfs.ext4 -q -F "$image" || return 1
   "$FUSE2FS" "$image" "$dir" -o fakeroot > "$image.log" 2>&1 || { cat "$image.log" >&2; return 1; }
-  mountpoint -q "$dir" || { echo "disk-full: $dir isn't a mount point" >&2; return 1; }
+  mountpoint -q "$dir" || {
+    cat "$image.log" >&2
+    echo "disk-full: $dir isn't a mount point" >&2
+    return 1
+  }
   "$@" || status=$?
   return "$status"
 }

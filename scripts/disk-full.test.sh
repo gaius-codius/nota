@@ -20,9 +20,11 @@
 #      mount that fails, or leaves something else on the mount point,
 #      detaches its device and records nothing.
 #   6. Ctrl-C (SIGINT to the process group), SIGTERM and SIGHUP stop the run
-#      in progress, leave no device, mount or process, and say so.
+#      in progress, leave no device, mount or process, and say so; Ctrl-C
+#      too when the output goes to a pipe whose reader has gone.
 #   7. --cleanup unmounts and detaches what a killed run left, and removes
-#      its directory.
+#      its directory; a directory a device is still on, after a lazy
+#      unmount of a busy mount, is kept and reported.
 #
 # DISK_FULL_SH names the script to test (default: disk-full.sh next to this
 # one), so a deliberately broken copy can be checked to fail.
@@ -62,8 +64,10 @@ chmod +x "$repo/scripts/disk-full.sh"
 : > "$FAKE_STATE/mounts"
 # How the stand-ins behave: the disk_full example (ok, fail or hang), an
 # automounter that mounts each device a second time, a mount that fails, and
-# one that says it worked but left another filesystem on the mount point.
-export FAKE_DISK=ok FAKE_AUTOMOUNT='' FAKE_MOUNT_FAIL='' FAKE_MOUNT_WRONG=''
+# one that says it worked but left another filesystem on the mount point;
+# a mount that's busy, so only a lazy unmount takes it, and its device
+# stays until whatever holds it lets go.
+export FAKE_DISK=ok FAKE_AUTOMOUNT='' FAKE_MOUNT_FAIL='' FAKE_MOUNT_WRONG='' FAKE_BUSY=''
 
 stub() {
   printf '#!/usr/bin/env bash\nset -euo pipefail\n%s\n' "$2" > "$bin/$1"
@@ -127,6 +131,10 @@ stub umount "$root"'
 [[ $1 == --all-targets ]] || { echo "umount: unexpected $*" >&2; exit 97; }
 dev=${!#}
 grep -q "^$dev " "$FAKE_STATE/mounts" || { echo "umount: $dev: not mounted" >&2; exit 32; }
+if [[ -n $FAKE_BUSY ]]; then
+  [[ $2 == --lazy ]] || { echo "umount: target is busy" >&2; exit 32; }
+  rm -f "$FAKE_STATE/loops/${dev#/dev/fake}.autoclear"
+fi
 grep -v "^$dev " "$FAKE_STATE/mounts" > "$FAKE_STATE/mounts.new" || true
 mv "$FAKE_STATE/mounts.new" "$FAKE_STATE/mounts"
 name=${dev#/dev/fake}
@@ -183,7 +191,7 @@ reset() {
   rm -rf "$FAKE_STATE"/loops/* "$images"
   rm -f "$FAKE_STATE"/{root,sudo,mkfs,cargo,hang.pid}
   : > "$FAKE_STATE/mounts"
-  export FAKE_DISK=ok FAKE_AUTOMOUNT='' FAKE_MOUNT_FAIL='' FAKE_MOUNT_WRONG=''
+  export FAKE_DISK=ok FAKE_AUTOMOUNT='' FAKE_MOUNT_FAIL='' FAKE_MOUNT_WRONG='' FAKE_BUSY=''
 }
 
 # check_left CASE: no device, mount or run directory left, and no stand-in
@@ -225,7 +233,7 @@ if grep '^\[root\]' "$dir/out" | grep -vqE '^\[root\] (losetup|mount|umount) '; 
   fail "dry run: root runs more than losetup, mount and umount: $(grep '^\[root\]' "$dir/out")"
 fi
 expect "dry run" "$dir/out" '^\[you\] sudo -- '
-expect "dry run" "$dir/out" '^\[you\] mkfs.ext4 .*root_owner='
+expect "dry run" "$dir/out" '^\[you\] [^ ]*mkfs.ext4 -q -F -E root_owner='
 expect "dry run" "$dir/out" '^\[you\] timeout --kill-after=10 1800 .*/disk_full '
 
 # 3. A run that passes.
@@ -297,22 +305,33 @@ check_left "wrong mount"
 
 # 6. Signals, while disk_full runs. The script starts in a session of its
 # own with SIGINT at its default (a background job's is ignored), as from a
-# terminal.
-for sig in INT TERM HUP; do
+# terminal. INT-pipe: the output goes to a pipe whose reader (a `| tee`,
+# say) goes once the runs have started, so the script's reports after it
+# meet a closed pipe.
+for case in INT TERM HUP INT-pipe; do
+  sig=${case%-pipe}
   reset
   export FAKE_DISK=hang
+  out=$dir/out
+  if [[ $case == *-pipe ]]; then
+    rm -f "$dir/pipe"
+    mkfifo "$dir/pipe"
+    (while read -r line; do [[ $line != *"sudo is for"* ]] || exit 0; done) < "$dir/pipe" &
+    out=$dir/pipe
+  fi
   python3 -I -c 'import os, signal, sys
 signal.signal(signal.SIGINT, signal.SIG_DFL)
 os.setsid()
 os.execvp(sys.argv[1], sys.argv[1:])' "$repo/scripts/disk-full.sh" --kernel-ext4 --images "$images" \
-    --result "$result" 22m 23m > "$dir/out" 2>&1 &
+    --result "$result" 22m 23m > "$out" 2>&1 &
   pid=$!
+  : > "$dir/out"
   for _ in $(seq 100); do
     [[ -s $FAKE_STATE/hang.pid ]] && break
     sleep 0.1
   done
   if [[ ! -s $FAKE_STATE/hang.pid ]]; then
-    fail "SIG$sig: disk_full never started: $(cat "$dir/out")"
+    fail "$case: disk_full never started: $(cat "$dir/out")"
     kill -9 "$pid" 2> /dev/null || true
     continue
   fi
@@ -323,17 +342,17 @@ os.execvp(sys.argv[1], sys.argv[1:])' "$repo/scripts/disk-full.sh" --kernel-ext4
     sleep 0.1
   done
   if kill -0 "$pid" 2> /dev/null; then
-    fail "SIG$sig: still running 15 s after the signal"
+    fail "$case: still running 15 s after the signal"
     kill -9 "$pid" 2> /dev/null || true
   fi
   if wait "$pid"; then code=0; else code=$?; fi
   case $sig in INT) want=130 ;; TERM) want=143 ;; HUP) want=129 ;; esac
-  [[ $code -eq $want ]] || fail "SIG$sig: expected status $want, got $code: $(cat "$dir/out")"
-  expect "SIG$sig" "$result" "^interrupted by SIG$sig"
-  expect "SIG$sig" "$result" '^cleanup: no loop device or mount left$'
-  expect "SIG$sig" "$result" '^result: INTERRUPTED$'
-  [[ $(grep -c '^mount ' "$FAKE_STATE/root") -eq 1 ]] || fail "SIG$sig: went on to another run"
-  check_left "SIG$sig"
+  [[ $code -eq $want ]] || fail "$case: expected status $want, got $code: $(cat "$dir/out")"
+  expect "$case" "$result" "^interrupted by SIG$sig"
+  expect "$case" "$result" '^cleanup: no loop device or mount left$'
+  expect "$case" "$result" '^result: INTERRUPTED$'
+  [[ $(grep -c '^mount ' "$FAKE_STATE/root") -eq 1 ]] || fail "$case: went on to another run"
+  check_left "$case"
 done
 
 # 7. --cleanup after a run that was killed: a device on an image under
@@ -355,5 +374,20 @@ expect cleanup "$result" '^cleanup: nothing left$'
 [[ -e $FAKE_STATE/loops/loop2 ]] || fail "cleanup: detached a device on another file"
 rm -f "$FAKE_STATE/loops/loop2"
 check_left cleanup
+
+reset
+export FAKE_BUSY=1
+mkdir -p "$images/run.old/disk1"
+images_real=$(cd "$images" && pwd -P)
+echo "$images_real/run.old/disk1.img" > "$FAKE_STATE/loops/loop0"
+touch "$images/run.old/disk1.img"
+echo "/dev/fakeloop0 /run/media/someone/fakeloop0" > "$FAKE_STATE/mounts"
+if run --cleanup --result "$result" > "$dir/out" 2>&1; then code=0; else code=$?; fi
+[[ $code -eq 1 ]] || fail "cleanup, busy: expected status 1, got $code: $(cat "$dir/out")"
+expect "cleanup, busy" "$result" "^cleanup: $images_real/run.old still has a device on it; kept$"
+expect "cleanup, busy" "$result" '^cleanup: still attached:'
+[[ -e $images/run.old/disk1.img ]] || fail "cleanup, busy: removed the image a device is still on"
+[[ ! -s $FAKE_STATE/mounts ]] || fail "cleanup, busy: the mount wasn't unmounted, even lazily"
+rm -rf "$FAKE_STATE"/loops/* "$images"
 
 exit "$status"
