@@ -35,6 +35,10 @@
 //! The mode prints each track's first buffers and then its whole delay
 //! profile, as runs of buffers with the same length and delay, so the
 //! profile of a default move or a resume can be read off the same run.
+//! The backend also notes when the stream reports a route change, and for
+//! each report the mode prints the buffers around it, their raw stamps and
+//! which stamp broke from the old device's run (`first_epoch/switches.rs`,
+//! GAI-492).
 
 use std::collections::BTreeMap;
 use std::io::{self, Write as _};
@@ -55,6 +59,10 @@ use nota_recorder::segment::SegmentLength;
 use nota_recorder::session::{SessionDir, SessionLock, SessionWriter, Syncing};
 
 use super::{Args, RATE, Res, SESSION, ms, wait};
+
+mod switches;
+
+use switches::Report;
 
 /// How far short of its buffer's length a delay can be and still be
 /// settled: the same judgment as the hold's `SETTLED_WITHIN`.
@@ -96,8 +104,21 @@ struct Raw {
     placed: Option<Delivery>,
 }
 
-/// One track's buffers, as the stream's callback notes them.
-type Buffers = Arc<Mutex<Vec<Raw>>>;
+/// The most route changes noted for each track.
+const REPORT_CAP: usize = 1_000;
+
+/// What one stream's callbacks noted: its buffers, and the route changes
+/// it reported.
+#[derive(Debug, Clone, Default)]
+struct Tapped {
+    /// Its buffers, in the order they came.
+    buffers: Vec<Raw>,
+    /// Its reports of a route change, in the order they came.
+    reports: Vec<Report>,
+}
+
+/// One track's [`Tapped`], as the stream's callbacks note it.
+type Tap = Arc<Mutex<Tapped>>;
 
 /// Captures through cpal's `PipeWire` host as `PipeWireBackend` does, and
 /// notes each buffer's length and stamps before it goes to the sender.
@@ -108,7 +129,7 @@ struct StampBackend {
     /// The buffers noted for each stream started, in the order they were
     /// started: the order the tracks were asked for, since the starter
     /// opens them one after another.
-    taps: Mutex<Vec<Buffers>>,
+    taps: Mutex<Vec<Tap>>,
 }
 
 impl StampBackend {
@@ -120,8 +141,8 @@ impl StampBackend {
         }
     }
 
-    /// The buffers noted for each stream, in the order they started.
-    fn taps(&self) -> Vec<Buffers> {
+    /// What was noted for each stream, in the order they started.
+    fn taps(&self) -> Vec<Tap> {
         self.taps
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -157,13 +178,17 @@ impl CaptureBackend for StampBackend {
             sample_rate: rate.hz(),
             buffer_size: BufferSize::Default,
         };
-        let tap: Buffers = Arc::new(Mutex::new(Vec::with_capacity(PROFILE_CAP)));
+        let tap: Tap = Arc::new(Mutex::new(Tapped {
+            buffers: Vec::with_capacity(PROFILE_CAP),
+            reports: Vec::new(),
+        }));
         self.taps
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(Arc::clone(&tap));
         let errors = events.clone();
         let clock = Arc::clone(&self.clock);
+        let (reported, report_clock) = (Arc::clone(&tap), Arc::clone(&self.clock));
         let backend = |e: cpal::Error| CaptureError::Backend(format!("{source}: {e}"));
         let stream = device
             .build_input_stream::<i16, _, _>(
@@ -175,7 +200,12 @@ impl CaptureBackend for StampBackend {
                 },
                 move |error: cpal::Error| match error.kind() {
                     ErrorKind::Xrun => errors.notice(CaptureNotice::Overrun),
-                    ErrorKind::DeviceChanged => errors.notice(CaptureNotice::RouteChanged),
+                    ErrorKind::DeviceChanged => {
+                        // Noted before the sender takes it in, as it reads
+                        // the clock for its own wait a moment later.
+                        note_report(&reported, &*report_clock);
+                        errors.notice(CaptureNotice::RouteChanged);
+                    }
                     _ => errors.notice(CaptureNotice::Warning(error.to_string())),
                 },
                 None,
@@ -202,7 +232,7 @@ fn delivery_of(info: &cpal::InputCallbackInfo) -> Option<Delivery> {
 
 /// Notes a buffer of `len` samples stamped `stamp`, if there's room, with
 /// the stamps placed on `clock` now.
-fn note(tap: &Buffers, clock: &dyn Clock, len: usize, stamp: Option<Delivery>) {
+fn note(tap: &Tap, clock: &dyn Clock, len: usize, stamp: Option<Delivery>) {
     if len == 0 {
         return;
     }
@@ -214,8 +244,22 @@ fn note(tap: &Buffers, clock: &dyn Clock, len: usize, stamp: Option<Delivery>) {
         })
     });
     let mut seen = tap.lock().unwrap_or_else(PoisonError::into_inner);
-    if seen.len() < PROFILE_CAP {
-        seen.push(Raw { len, stamp, placed });
+    if seen.buffers.len() < PROFILE_CAP {
+        seen.buffers.push(Raw { len, stamp, placed });
+    }
+}
+
+/// Notes a route change the stream reported now, on `clock`, with how many
+/// buffers had come before it, if there's room.
+fn note_report(tap: &Tap, clock: &dyn Clock) {
+    // Under the lock, so no buffer is noted between the count and the time.
+    let mut seen = tap.lock().unwrap_or_else(PoisonError::into_inner);
+    let report = Report {
+        at: clock.now().elapsed(),
+        next: seen.buffers.len(),
+    };
+    if seen.reports.len() < REPORT_CAP {
+        seen.reports.push(report);
     }
 }
 
@@ -561,16 +605,21 @@ pub(super) fn command(args: &Args) -> Res<bool> {
     reported
 }
 
-/// Prints each track's profile and its first epoch's outcome, and the
-/// result line. `true` if every track's first epoch holds.
-fn report(tracks: &[TrackId], taps: &[Buffers], noted: &[Noted]) -> Res<bool> {
+/// Prints each track's profile and its first epoch's outcome, what the
+/// recorder noted, the stamps around each route change the stream
+/// reported, and the result line. `true` if every track's first epoch
+/// holds.
+fn report(tracks: &[TrackId], taps: &[Tap], noted: &[Noted]) -> Res<bool> {
     let mut out = io::stdout();
     let starts = first_starts(noted);
     let mut ok = true;
-    for (&track, tap) in tracks.iter().zip(taps) {
-        let buffers = tap.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        print_profile(&mut out, track, &buffers)?;
-        let expected = settled(&buffers, RATE).map(|s| {
+    let tapped: Vec<Tapped> = taps
+        .iter()
+        .map(|tap| tap.lock().unwrap_or_else(PoisonError::into_inner).clone())
+        .collect();
+    for (&track, Tapped { buffers, .. }) in tracks.iter().zip(&tapped) {
+        print_profile(&mut out, track, buffers)?;
+        let expected = settled(buffers, RATE).map(|s| {
             let at = s
                 .start
                 .and_then(|start| u64::try_from(start.as_nanos()).ok());
@@ -581,12 +630,36 @@ fn report(tracks: &[TrackId], taps: &[Buffers], noted: &[Noted]) -> Res<bool> {
         writeln!(out, "track {} {}", track.get(), describe(found))?;
     }
     print_noted(&mut out, noted)?;
+    for (&track, Tapped { buffers, reports }) in tracks.iter().zip(&tapped) {
+        switches::print(
+            &mut out,
+            track,
+            buffers,
+            reports,
+            &later_starts(noted, track),
+        )?;
+    }
     writeln!(
         out,
         "result {} first epochs against the settled stamps",
         if ok { "ok" } else { "FAIL" }
     )?;
     Ok(ok)
+}
+
+/// The starts of `track`'s epochs after its first, in nanoseconds on the
+/// session clock, in the order they were noted.
+fn later_starts(noted: &[Noted], track: TrackId) -> Vec<u64> {
+    noted
+        .iter()
+        .filter_map(|item| match item {
+            Noted::Epoch {
+                track: t, start, ..
+            } if *t == track => Some(*start),
+            _ => None,
+        })
+        .skip(1)
+        .collect()
 }
 
 /// Prints what the recorder noted, in order, on the session clock.
