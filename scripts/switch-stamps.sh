@@ -46,9 +46,16 @@
 #                that is saved first and put back as it was, or deleted if
 #                there was none. The script says so if it had to put either
 #                back, and fails if it couldn't.
+#                WirePlumber also adds --other-sink to its list of outputs
+#                chosen before (`default.configured.audio.sink.0` in
+#                ~/.local/state/wireplumber/default-nodes), as a switch by
+#                hand does, and this can't be undone from outside it. The
+#                list is read only when the chosen output is missing:
+#                WirePlumber then falls back to the latest one there.
 #              - with --tone, a quiet tone (about -35 dBFS before the
-#                sink's volume: 500 Hz into the current default, 1500 Hz
-#                into the other) plays for the run, so both outputs carry
+#                sink's volume, and any volume WirePlumber restores for
+#                `pw-play`'s streams: 500 Hz into the current default,
+#                1500 Hz into the other) plays for the run, so both outputs carry
 #                audio as in GAI-492's first hardware run. Without it, play
 #                something yourself (music will do): a monitor with nothing
 #                playing shows little of the delay.
@@ -58,8 +65,11 @@
 #            printed at the start, to set by hand.
 #
 # Exit status: 0 when the stream reported at least --switches route
-# changes, 1 when it reported fewer (or a default couldn't be put back),
-# 2 for a usage or set-up error.
+# changes and each was measured; 1 when it reported fewer, or a report's
+# buffers ran out before its reopening (the run ended, or the harness's
+# cap of 60,000 buffers was reached), or a default couldn't be put back;
+# 2 for a usage or set-up error. More reports than switches is said, not
+# failed: a switch reported twice shows as two `switch` lines.
 #
 # Not run in CI: it needs PipeWire 1.x, WirePlumber 0.5 (private),
 # pipewire-pulse, `pactl`, `pw-play`, `pw-link`, `pw-metadata` (real) and
@@ -69,8 +79,10 @@
 #          [--other-sink NODE] [--allow-default-switch] [--tone] [--out DIR]
 #   --switches N   default-output switches (default 8; even ends where it
 #                  started)
-#   --gap S        seconds between switches (default 3, at least 2: the
-#                  recorder pairs one change's reports within 2 s)
+#   --gap S        seconds between switches (default 3, at least 2, so each
+#                  switch's reopening (200 ms at most) and the hold of the
+#                  new device's first buffers (500 ms at most) are over
+#                  before the next)
 #   --other-sink   real: the sink to switch to (a name from
 #                  `pactl list short sinks`); the current default is the
 #                  other one
@@ -240,6 +252,10 @@ start_private() {
   # display).
   unset PIPEWIRE_REMOTE PIPEWIRE_RUNTIME_DIR PULSE_SERVER PULSE_RUNTIME_PATH \
     DISPLAY WAYLAND_DISPLAY
+  # Nor may a config directory set elsewhere take the place of the
+  # no-hardware config written below.
+  unset WIREPLUMBER_CONFIG_DIR WIREPLUMBER_DATA_DIR PIPEWIRE_CONFIG_DIR \
+    PIPEWIRE_CONFIG_PREFIX PIPEWIRE_CONFIG_NAME
   export DBUS_SESSION_BUS_ADDRESS=disabled:
   mkdir -p -m 700 "$XDG_RUNTIME_DIR" "$XDG_CONFIG_HOME/wireplumber/wireplumber.conf.d" \
     "$XDG_STATE_HOME" "$XDG_DATA_HOME"
@@ -323,7 +339,8 @@ EOF
     pw-link -o | grep -x "$name:output_MONO" >/dev/null && break
     sleep 0.05
   done
-  ports=$(pw-link -i | grep "^$sink:playback_" || true)
+  # The sink's name is matched as it is: ALSA names hold dots.
+  ports=$(pw-link -i | awk -v p="$sink:playback_" 'index($0, p) == 1')
   [[ -n $ports ]] || die "$sink has no playback ports to play a tone into"
   while read -r port; do
     pw-link "$name:output_MONO" "$port"
@@ -341,6 +358,7 @@ else
   pactl info >/dev/null 2>&1 || die "no PipeWire (pipewire-pulse) to talk to"
   [[ -t 0 ]] || die "real mode needs a terminal: it asks before it changes anything"
   first=$(pactl get-default-sink)
+  [[ -n $first ]] || die "there is no default output to switch from"
   sink_names | grep -x "$other" >/dev/null || die "no sink named $other: see 'pactl list short sinks'"
   [[ $other != "$first" ]] || die "$other is already the default output: name the other sink"
   saved_sink=$first
@@ -404,8 +422,15 @@ echo "Output: $file"
 # 0 and 1 are a finished run (1 is the first-epoch check, not this one).
 [[ $status -le 1 ]] || { echo "switch-stamps: the recorder failed (exit $status)" >&2; exit 1; }
 reported=$(grep -c '^switch 0 ' "$work/out.txt" || true)
+unmeasured=$(grep '^switch 0 ' "$work/out.txt" | grep -c 'no reopening' || true)
 if [[ $reported -lt $switches ]]; then
   echo "switch-stamps: the stream reported $reported route changes for $switches switches" >&2
   exit 1
 fi
+if [[ $unmeasured -gt 0 ]]; then
+  echo "switch-stamps: $unmeasured of the reports ran out of buffers before their reopening" >&2
+  exit 1
+fi
+[[ $reported -eq $switches ]] ||
+  echo "switch-stamps: more reports than switches: a switch was reported twice (see the switch lines in $file)" >&2
 echo "switch-stamps: $reported route changes reported for $switches switches"
