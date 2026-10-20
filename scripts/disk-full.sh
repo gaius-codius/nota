@@ -31,16 +31,20 @@
 # With --kernel-ext4, they're made on the kernel's own ext4, journal commits
 # and delayed allocation included: each image (`mkfs.ext4` defaults) is
 # attached to a loop device and mounted, which needs root. Run it as
-# yourself, not with sudo: it builds as you, then asks for sudo once, and
-# as root it runs only losetup, mount and umount. The rest, mkfs.ext4 and
-# the runs included, runs as you (through setpriv), so ext4's reserved
-# blocks are kept from the recorder as they are from nota. The images,
-# mount points and logs go in a directory of their own under --images, on
-# a disk rather than in memory, and it's removed at the end. Each loop
-# device is told to detach itself once it's unmounted, and every mount of
-# it (an automounter's too) is unmounted on every way out: the end, a
-# failure, Ctrl-C, SIGTERM or SIGHUP. After a kill -9 or a power cut,
-# `--kernel-ext4 --cleanup` removes what's left. A slow disk fills slowly,
+# yourself, not with sudo: it builds as you, then asks for sudo once. The
+# script itself then runs as root, but of what it starts only losetup,
+# mount and umount run as root (it reads the mount table and its logs
+# itself); the rest, mkfs.ext4, the recorder and nota, runs as you (through
+# setpriv), so ext4's reserved blocks are kept from the recorder as they
+# are from nota. The images, mount points and logs go in a directory of
+# their own under --images, on a disk rather than in memory, and it's
+# removed at the end. Each loop device is told to detach itself once it's
+# unmounted, and every mount of it (an automounter's too) is unmounted on
+# every way out: the end, a failure, Ctrl-C, SIGTERM or SIGHUP, once what
+# was recording onto it has stopped (nota is given 30 s to finish its
+# segments, as it does on Ctrl-C). After a kill -9 or a power cut,
+# `--kernel-ext4 --cleanup` removes what's left of runs that have ended,
+# and leaves a run that's still going alone. A slow disk fills slowly,
 # so each run has a time limit (--limit); a run that reaches it is reported
 # as timed out, not passed. The app run is on an 8 MiB image, as with
 # --ext4. The results go to the terminal and to --result, with how long
@@ -155,9 +159,12 @@ fi
 
 # The app run's shell: makes the 1 MiB ballast in $1, records with nota ($2)
 # until it stops, and counts the journals it left. Its output is the log.
+# nota's process ID goes to $3: `script` starts it in a session of its own,
+# where a signal to the run's process group doesn't reach it. `script` runs
+# the command with $SHELL, so that's sh, whatever the user's shell is.
 # shellcheck disable=SC2016 # expanded by that shell
 app_run='head -c 1048576 /dev/urandom > "$1/ballast-1048576" &&
-  script -qec "$(printf "%q " "$2" record --tone yes --title Full --data "$1")" /dev/null
+  SHELL=/bin/sh script -qec "echo \$\$ > $(printf %q "$3"); exec $(printf "%q " "$2" record --tone yes --title Full --data "$1")" /dev/null
   echo "journals left: $(find "$1" -name "journal-*" | wc -l)"'
 
 # app_summary LOG DIR: the app run's verdict from its log; fails if it
@@ -218,6 +225,7 @@ CUR_IMAGE=
 CUR_LOOP=
 CUR_MNT=
 CUR_CHILD=
+CUR_PIDFILE=
 
 # kernel_mount SIZE NAME: makes a fresh ext4 of SIZE as the user, at
 # $RUN_DIR/NAME.img, owned by them; attaches it to a loop device and mounts
@@ -263,8 +271,10 @@ attached() {
 kernel_unmount() {
   local loop target status=0
   [[ -z $CUR_CHILD ]] || stop_child
+  stop_app
   [[ -n $CUR_IMAGE ]] || return 0
   if [[ $DRY -eq 1 ]]; then
+    as_root losetup --detach "$CUR_LOOP"
     as_root umount --all-targets "$CUR_LOOP"
   else
     # Only the devices on this run's image: by now the device kernel_mount
@@ -276,7 +286,7 @@ kernel_unmount() {
       while read -r target; do
         [[ -z $target || $target == "$CUR_MNT" ]] ||
           report "  ($loop was also mounted on $target, by something else; unmounting it)"
-      done < <(findmnt -rn -o TARGET --source "$loop" || true)
+      done < <(findmnt -ln -o TARGET --source "$loop" || true)
       if findmnt --source "$loop" > /dev/null; then
         as_root umount --all-targets "$loop" || as_root umount --all-targets --lazy "$loop" || status=1
       fi
@@ -316,6 +326,35 @@ stop_child() {
   CUR_CHILD=
 }
 
+# is_nota PID: whether PID is a nota of the user's, still running.
+is_nota() {
+  [[ $(cat "/proc/$1/comm" 2> /dev/null) == nota &&
+    $(stat -c %u "/proc/$1" 2> /dev/null) == "$RUN_UID" &&
+    $(sed 's/.*) //' "/proc/$1/stat" 2> /dev/null | cut -d' ' -f1) != Z ]]
+}
+
+# stop_app: stops the app run's nota, if it's still going (it's out of
+# timeout's reach): SIGTERM, which it takes as Ctrl-C, 30 s to finish its
+# segments, then SIGKILL.
+stop_app() {
+  local pid
+  [[ -n $CUR_PIDFILE ]] || return 0
+  pid=$(cat "$CUR_PIDFILE" 2> /dev/null) || true
+  CUR_PIDFILE=
+  [[ $pid =~ ^[1-9][0-9]*$ ]] && is_nota "$pid" || return 0
+  kill -TERM "$pid" 2> /dev/null || true
+  for _ in $(seq 300); do
+    is_nota "$pid" || return 0
+    sleep 0.1
+  done
+  report "  (nota didn't stop in 30 s; killing it)"
+  kill -KILL "$pid" 2> /dev/null || true
+  for _ in $(seq 50); do
+    is_nota "$pid" || return 0
+    sleep 0.1
+  done
+}
+
 # limited LOG CMD...: runs CMD as the user, in the background so a signal
 # reaches this script's traps at once, with LOG as its output, for at most
 # the time limit. Returns its status: 124 if it ran out of time.
@@ -331,17 +370,24 @@ limited() {
   CUR_CHILD=$!
   wait "$CUR_CHILD" || status=$?
   CUR_CHILD=
+  stop_app
   return "$status"
 }
 
-# leftovers: the loop devices on files under --images, one per line, as
-# NAME FILE.
+# leftovers [DIR]: the loop devices on this script's images, under DIR
+# (default: any run's under --images), one per line, as NAME FILE.
 leftovers() {
-  local name file
+  local name file under=${1:-$IMAGES/run.*}
   { losetup --list --noheadings --output NAME,BACK-FILE 2> /dev/null || true; } |
     while read -r name file; do
-      [[ $file != "$IMAGES"/* ]] || echo "$name $file"
+      # shellcheck disable=SC2053 # $under is a pattern
+      [[ $file != $under/*.img* ]] || echo "$name $file"
     done
+}
+
+# live DIR: whether a run that's still going holds DIR, its run directory.
+live() {
+  ! flock --nonblock "$1" true 2> /dev/null
 }
 
 # finish: ends the run in progress, checks that no loop device or mount of
@@ -351,10 +397,12 @@ LEFT=0
 finish() {
   [[ $FINISHED -eq 0 ]] || return 0
   FINISHED=1
+  # Nothing interrupts the clean-up, nor reports an interrupt after it.
+  trap '' INT TERM HUP
   kernel_unmount || LEFT=1
   [[ $DRY -eq 0 ]] || { as_user rm -r --one-file-system "$RUN_DIR"; return 0; }
   local left
-  left=$(leftovers)
+  left=$(leftovers "$RUN_DIR")
   if [[ -n $left ]]; then
     LEFT=1
     report "cleanup: LEFT attached (scripts/disk-full.sh --kernel-ext4 --cleanup removes them):" \
@@ -379,31 +427,45 @@ on_signal() {
   exit "$2"
 }
 
-# cleanup_leftovers: unmounts and detaches every loop device on a file under
-# --images, and removes the run directories nothing is mounted in and no
-# device is still on (a lazy unmount leaves the device until it's let go).
+# cleanup_leftovers: unmounts and detaches every loop device on an image of
+# a run that has ended, and removes the run directories nothing is mounted
+# in and no device is still on (a lazy unmount leaves the device until it's
+# let go). A run that's still going is left alone.
 cleanup_leftovers() {
-  local name file dir left status=0
+  local name file dir left ok status=0
+  for dir in "$IMAGES"/run.*; do
+    [[ $DRY -eq 1 || ! -d $dir ]] || ! live "$dir" || report "cleanup: $dir is a run that's still going; left alone"
+  done
   while read -r name file; do
     [[ -n $name ]] || continue
-    as_root losetup --detach "$name" || status=1
+    dir=${file%/*}
+    [[ $DRY -eq 1 ]] || ! live "$dir" || continue
+    ok=1
+    as_root losetup --detach "$name" || ok=0
     if [[ $DRY -eq 1 ]] || findmnt --source "$name" > /dev/null; then
-      as_root umount --all-targets "$name" || as_root umount --all-targets --lazy "$name" || status=1
+      as_root umount --all-targets "$name" || as_root umount --all-targets --lazy "$name" || ok=0
     fi
-    report "cleanup: unmounted and detached $name ($file)"
+    if [[ $ok -eq 1 ]]; then
+      report "cleanup: unmounted and detached $name ($file)"
+    else
+      report "cleanup: couldn't unmount or detach $name ($file)"
+      status=1
+    fi
   done < <(if [[ $DRY -eq 1 ]]; then echo "/dev/loopN $IMAGES/run.XXXXXX/disk1.img"; else leftovers; fi)
   # The kernel detaches an unmounted device shortly after: wait for it.
   left=
   if [[ $DRY -eq 0 ]]; then
     for _ in $(seq 50); do
-      left=$(leftovers)
+      left=$(leftovers | while read -r name file; do live "${file%/*}" || echo "$name $file"; done)
       [[ -n $left ]] || break
       sleep 0.1
     done
   fi
   for dir in "$IMAGES"/run.*; do
-    [[ -d $dir ]] || continue
-    if [[ $DRY -eq 0 ]] && findmnt -rn -o TARGET | grep -F "$dir/" > /dev/null; then
+    # Only what this script made, and not a run that's still going.
+    [[ -d $dir && -e $dir/.disk-full-run ]] || continue
+    [[ $DRY -eq 1 ]] || ! live "$dir" || continue
+    if [[ $DRY -eq 0 ]] && findmnt -ln -o TARGET | grep -F "$dir/" > /dev/null; then
       report "cleanup: $dir still has a mount; kept"
       status=1
     elif [[ $left == *" $dir/"* ]]; then
@@ -460,6 +522,11 @@ kernel_root_half() {
       exit 2
     }
   fi
+  # Held while the run goes, so --cleanup can tell it from one that's ended.
+  if [[ $DRY -eq 0 ]]; then
+    exec 9< "$RUN_DIR"
+    flock --nonblock 9 || { echo "disk-full: $RUN_DIR is another run's" >&2; exit 2; }
+  fi
   trap 'on_signal INT 130' INT
   trap 'on_signal TERM 143' TERM
   trap 'on_signal HUP 129' HUP
@@ -511,7 +578,8 @@ kernel_root_half() {
     status=0
     # 8 MiB: ext4's journal and tables take part of what tmpfs gives whole.
     if logged kernel_mount 8m app; then
-      limited "$log" bash -c "$app_run" bash "$CUR_MNT" "$NOTA" || status=$?
+      [[ $DRY -eq 1 ]] || CUR_PIDFILE=$RUN_DIR/app.pid
+      limited "$log" bash -c "$app_run" bash "$CUR_MNT" "$NOTA" "$RUN_DIR/app.pid" || status=$?
     else
       status=-1
     fi
@@ -550,7 +618,7 @@ kernel_user_half() {
     echo "disk-full: run --kernel-ext4 as yourself, not with sudo: it builds as you, then asks for sudo for the loop devices and mounts" >&2
     exit 2
   }
-  local tool tools=(setpriv losetup mount umount findmnt mkfs.ext4 truncate timeout script stat)
+  local tool tools=(setpriv losetup mount umount findmnt flock mkfs.ext4 truncate timeout script stat)
   [[ $DRY -eq 1 ]] || tools+=(sudo)
   for tool in "${tools[@]}"; do
     command -v "$tool" > /dev/null || { echo "disk-full: no $tool" >&2; exit 2; }
@@ -586,7 +654,11 @@ kernel_user_half() {
   fi
   mkdir -p "$IMAGES"
   IMAGES=$(cd "$IMAGES" && pwd -P)
-  [[ $CLEANUP -eq 1 ]] || run_dir=$(mktemp -d "$IMAGES/run.XXXXXX")
+  if [[ $CLEANUP -eq 0 ]]; then
+    run_dir=$(mktemp -d "$IMAGES/run.XXXXXX")
+    # Marks it as this script's, for --cleanup.
+    : > "$run_dir/.disk-full-run"
+  fi
   RESULT=${RESULT:-$IMAGES/result-$(date +%Y%m%d-%H%M%S).txt}
   : > "$RESULT"
   {
@@ -672,12 +744,12 @@ if [[ $APP -eq 1 ]]; then
   trap 'rmdir "$dir" 2>/dev/null; rm -f "$log"' EXIT
   if [[ $EXT4 -eq 1 ]]; then
     # 8 MiB: ext4's journal and tables take part of what tmpfs gives whole.
-    ext4_run 8m "$dir" bash -c "$app_run" bash "$dir" "$target/debug/nota" > "$log" 2>&1 ||
+    ext4_run 8m "$dir" bash -c "$app_run" bash "$dir" "$target/debug/nota" /dev/null > "$log" 2>&1 ||
       echo "(the mount or nota failed: $?)" >> "$log"
   else
     # shellcheck disable=SC2016 # expanded by that shell
     unshare --user --map-root-user --mount sh -c 'mount -t tmpfs -o size=4m tmpfs "$1" && shift && exec bash -c "$@"' \
-      sh "$dir" "$app_run" bash "$dir" "$target/debug/nota" > "$log" 2>&1 ||
+      sh "$dir" "$app_run" bash "$dir" "$target/debug/nota" /dev/null > "$log" 2>&1 ||
       echo "(the namespace or nota failed: $?)" >> "$log"
   fi
   app_summary "$log" "$dir" || failed=1
