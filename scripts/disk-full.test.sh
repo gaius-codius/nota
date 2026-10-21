@@ -20,7 +20,8 @@
 #   5. A run that never fills is stopped at the time limit and reported as
 #      timed out, not passed; a failing run is reported with its output; a
 #      mount that fails, or leaves something else on the mount point,
-#      detaches its device and records nothing.
+#      detaches its device and records nothing; an app run that fails with
+#      no summary shows the end of its screen.
 #   6. Ctrl-C (SIGINT to the process group), SIGTERM and SIGHUP stop the run
 #      in progress, leave no device, mount or process, and say so; Ctrl-C
 #      too when the output goes to a pipe whose reader has gone. In the app
@@ -73,7 +74,8 @@ cp "$script" "$repo/scripts/disk-full.sh"
 chmod +x "$repo/scripts/disk-full.sh"
 : > "$FAKE_STATE/mounts"
 # How the stand-ins behave: the disk_full example (ok, fail or hang), nota
-# (FAKE_APP: ok, or hang until a SIGTERM or SIGHUP, then finish), an
+# (FAKE_APP: ok, silent (fails with no summary), or hang until a SIGTERM or
+# SIGHUP, then finish), an
 # automounter that mounts each device a second time, a mount that fails, and
 # one that says it worked but left another filesystem on the mount point;
 # a mount that's busy, so only a lazy unmount takes it, and its device
@@ -168,9 +170,13 @@ esac'
 stub mkfs.ext4 '[[ $1 == -V ]] && { echo "mkfs.ext4 0.0 (stand-in)"; exit 0; }
 [[ ${FAKE_ROOT-} != 1 ]] || { echo "mkfs.ext4: run as root" >&2; exit 99; }
 echo "mkfs.ext4 $*" >> "$FAKE_STATE/mkfs"'
-# script -qec CMD FILE: runs CMD in a session of its own, as script does,
-# and waits for it.
-stub script 'exec setsid --fork --wait bash -c "$2"'
+# script -qec CMD FILE: runs CMD in a session of its own and waits for it;
+# a SIGTERM or SIGHUP is passed on to CMD, which is killed 2 s later, as
+# util-linux's script does.
+stub script 'setsid bash -c "$2" &
+child=$!
+trap '"'"'kill -TERM "$child" 2> /dev/null; sleep 2; kill -KILL "$child" 2> /dev/null; exit 1'"'"' TERM HUP
+wait "$child"'
 
 # The stand-ins for `disk_full DIR` and `nota record ... --data DIR`: each
 # fails unless it runs as the user, on a stand-in mount.
@@ -190,12 +196,17 @@ data=$7
 [[ -z ${FAKE_ROOT-} ]] || { echo "ran as root"; exit 3; }
 grep -q " $data\$" "$FAKE_STATE/mounts" || { echo "not on a mount: $data"; exit 3; }
 [[ -e $data/ballast-1048576 ]] || { echo "no ballast"; exit 3; }
+if [[ $FAKE_APP == silent ]]; then
+  echo "Error: --tone is only for nota's tests"
+  exit 1
+fi
 if [[ $FAKE_APP == hang ]]; then
   # Named as the real one is (a script's process is its interpreter's).
   printf nota > "/proc/$$/comm"
   echo "recording to the disk"
   echo $$ > "$FAKE_STATE/nota.pid"
-  trap 'sleep 1; touch "$FAKE_STATE/nota.finished"; exit 0' TERM HUP
+  # Longer than `script` waits before it kills it.
+  trap 'sleep 3; touch "$FAKE_STATE/nota.finished"; exit 0' TERM HUP
   sleep 1000 &
   wait
 fi
@@ -257,9 +268,10 @@ if grep '^\[root\]' "$dir/out" | grep -vqE '^\[root\] (losetup|mount|umount) '; 
   fail "dry run: root runs more than losetup, mount and umount: $(grep '^\[root\]' "$dir/out")"
 fi
 expect "dry run" "$dir/out" '^\[you\] sudo -- '
-expect "dry run" "$dir/out" '^\[you\] [^ ]*mkfs.ext4 -q -F -T default -E root_owner='
-expect "dry run" "$dir/out" '^\[you\] timeout --kill-after=10 1800 .*/disk_full '
-expect "dry run" "$dir/out" '^\[you\] timeout --kill-after=10 600 bash -c '
+expect "dry run" "$dir/out" '^\[you\] [^ ]*mkfs.ext4 -q -F -T default -b 4096 -E root_owner='
+# The limits are kept by the script; timeout is a backstop a minute later.
+expect "dry run" "$dir/out" '^\[you\] timeout --kill-after=10 1860 .*/disk_full '
+expect "dry run" "$dir/out" '^\[you\] timeout --kill-after=10 660 bash -c '
 # The default sizes: 23m to 48m, the sizes a 4 KiB-block ext4 has room
 # for the ballast in.
 run --dry-run --no-app > "$dir/out" 2>&1 || fail "default sizes: dry run failed: $(cat "$dir/out")"
@@ -277,7 +289,7 @@ for line in '^22m: filled at session/journal-1: ok \([0-9]+ s\)$' '^23m: ' \
   '^cleanup: no loop device or mount left$' '^result: PASSED$' '^sizes: 22m 23m; limit 1800 s'; do
   expect pass "$result" "$line"
 done
-[[ $(grep -c -- '-T default -E root_owner='"$(id -u):$(id -g)" "$FAKE_STATE/mkfs") -eq 3 ]] || fail "pass: mkfs.ext4 not run with 4 KiB blocks and the user's root_owner: $(cat "$FAKE_STATE/mkfs")"
+[[ $(grep -c -- '-T default -b 4096 -E root_owner='"$(id -u):$(id -g)" "$FAKE_STATE/mkfs") -eq 3 ]] || fail "pass: mkfs.ext4 not run with 4 KiB blocks and the user's root_owner: $(cat "$FAKE_STATE/mkfs")"
 [[ $(grep -c '^mount ' "$FAKE_STATE/root") -eq 3 ]] || fail "pass: expected 3 mounts: $(cat "$FAKE_STATE/root")"
 if grep -vqE '^(losetup|mount|umount) ' "$FAKE_STATE/root"; then
   fail "pass: root ran more than losetup, mount and umount: $(cat "$FAKE_STATE/root")"
@@ -410,6 +422,15 @@ expect "app timeout" "$result" '^  screen: recording to the disk$'
 expect "app timeout" "$result" '^cleanup: no loop device or mount left$'
 [[ -e $FAKE_STATE/nota.finished ]] || fail "app timeout: nota wasn't let finish"
 check_left "app timeout"
+
+# An app run that fails with no summary shows the end of its screen.
+reset
+export FAKE_APP=silent
+if run --result "$result" 22m > "$dir/out" 2>&1; then code=0; else code=$?; fi
+[[ $code -eq 1 ]] || fail "app silent: expected status 1, got $code: $(cat "$dir/out")"
+expect "app silent" "$result" '^nota record: FAILED$'
+expect "app silent" "$result" "^  screen: Error: --tone is only for nota's tests$"
+check_left "app silent"
 
 # 7. A busy mount during a run.
 reset

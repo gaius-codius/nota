@@ -30,8 +30,8 @@
 #
 # With --kernel-ext4, they're made on the kernel's own ext4, journal commits
 # and delayed allocation included: each image is made as mkfs.ext4 makes
-# any filesystem of 512 MiB or more (`-T default`: 4 KiB blocks, where its
-# defaults for a small one give 1 KiB), attached to a loop device and
+# any filesystem of 512 MiB or more (`-T default -b 4096`: 4 KiB blocks,
+# where its defaults for a small one give 1 KiB), attached to a loop device and
 # mounted, which needs root. Blocks smaller than a memory page change how
 # a full disk fails: SQLite maps its write-ahead log's index into memory,
 # and on 1 KiB blocks a page of it can find no room on a full disk, which
@@ -52,9 +52,10 @@
 # and leaves a run that's still going alone. A slow disk fills slowly,
 # so each run has a time limit (--limit); a run that reaches it is reported
 # as timed out, not passed. The app run is on an 8 MiB image, as with
-# --ext4, with a limit of its own, 600 s or --limit if that's less (nota
-# fills it in about a minute); if it runs out, the result keeps what nota
-# was doing, how full the disk was, and the end of its screen. The
+# --ext4 (its 4 KiB blocks and 4 MiB journal leave about 3 MiB), with a
+# limit of its own, 600 s or --limit if that's less (nota fills it in
+# about a minute); if it runs out, the result keeps how full the disk was
+# and what nota was doing at the limit, and the end of its screen. The
 # results go to the terminal and to --result, with how long
 # each run took. --dry-run prints every command and who would run it (you
 # or root), and runs nothing.
@@ -178,7 +179,8 @@ app_run='head -c 1048576 /dev/urandom > "$1/ballast-1048576" &&
   echo "journals left: $(find "$1" -name "journal-*" | wc -l)"'
 
 # app_summary LOG DIR: the app run's verdict from its log; fails if it
-# didn't stop on a full disk with no journal left.
+# didn't stop on a full disk with no journal left, showing its summary, or
+# without one, the end of its screen.
 app_summary() {
   local summary
   # The screen's output goes to the log; the summary is its last lines.
@@ -189,23 +191,19 @@ app_summary() {
     echo "nota record: $(head -1 <<<"$summary" | sed "s|$2/||")"
   else
     echo "nota record: FAILED"
+    # No summary at all: the end of the screen says what happened instead.
+    [[ -n $summary ]] || summary=$(screen_end "$1")
     awk '{print "  " $0}' <<<"$summary"
     return 1
   fi
 }
 
-# app_stuck LOG DIR: what an app run that ran out of time left, for the
-# result: how full its disk DIR is, every mount of that filesystem, what
-# nota was doing when it was stopped (APP_STATE), and the end of its
-# screen (LOG).
-app_stuck() {
-  local source line
-  as_user df -k --output=used,avail "$2" | awk 'NR == 2 { print "disk: " $1 " KiB used, " $2 " KiB free" }' || true
-  source=$(findmnt -rn -o SOURCE,FSTYPE --mountpoint "$2" | cut -d' ' -f1) || true
-  [[ -z $source ]] || findmnt -ln -o TARGET --source "$source" | sed 's/^/mounted on: /' || true
-  if [[ -z $APP_STATE ]]; then echo "nota: not running at the limit"; fi
-  [[ -z $APP_STATE ]] || while IFS= read -r line; do echo "nota: $line"; done <<<"$APP_STATE"
-  tr -d '\r' < "$1" | sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g' | grep -v '^[[:space:]]*$' | tail -n 15 | sed 's/^/screen: /' || true
+# screen_end LOG: the end of the app run's screen, from its log, for the
+# result. nota draws by moving the cursor, not with newlines: each move
+# starts a line here, and each line is cut to 200 characters.
+screen_end() {
+  tr -d '\r' < "$1" | sed -E 's/\x1b\[[0-9;]*[Hf]/\n/g; s/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\x1b[()][A-Za-z0-9]//g' |
+    grep -v '^[[:space:]]*$' | tail -n 15 | cut -c1-200 | sed 's/^/screen: /' || true
 }
 
 # --- The root half of --kernel-ext4 ------------------------------------------
@@ -250,8 +248,8 @@ CUR_LOOP=
 CUR_MNT=
 CUR_CHILD=
 CUR_PIDFILE=
-# What stop_app found the app run's nota doing.
-APP_STATE=
+# The app run at its limit (app_snapshot).
+APP_STUCK=()
 
 # kernel_mount SIZE NAME: makes a fresh ext4 of SIZE as the user, at
 # $RUN_DIR/NAME.img, owned by them, with 4 KiB blocks; attaches it to a loop device and mounts
@@ -262,7 +260,7 @@ kernel_mount() {
   CUR_IMAGE=$RUN_DIR/$2.img
   CUR_MNT=$RUN_DIR/$2
   as_user truncate -s "$1" "$CUR_IMAGE" || return 1
-  as_user "$MKFS" -q -F -T default -E root_owner="$RUN_UID:$RUN_GID" "$CUR_IMAGE" || return 1
+  as_user "$MKFS" -q -F -T default -b 4096 -E root_owner="$RUN_UID:$RUN_GID" "$CUR_IMAGE" || return 1
   as_user mkdir "$CUR_MNT" || return 1
   if [[ $DRY -eq 1 ]]; then
     as_root losetup --find --show --nooverlap "$CUR_IMAGE"
@@ -296,8 +294,9 @@ attached() {
 # of kernel_mount. Fails, saying what's left, if a mount or device is.
 kernel_unmount() {
   local loop target status=0
-  [[ -z $CUR_CHILD ]] || stop_child
+  # nota first: its `script` would kill it 2 s after the group's SIGTERM.
   stop_app
+  [[ -z $CUR_CHILD ]] || stop_child
   [[ -n $CUR_IMAGE ]] || return 0
   if [[ $DRY -eq 1 ]]; then
     as_root losetup --detach "$CUR_LOOP"
@@ -361,18 +360,15 @@ is_nota() {
 
 # stop_app: stops the app run's nota, if it's still going (it's out of
 # timeout's reach): SIGTERM, which it takes as Ctrl-C, 30 s to finish its
-# segments, then SIGKILL. What it was doing first goes in APP_STATE: its
-# threads, and the processes it started.
+# segments, then SIGKILL. Called before anything signals the `script` that
+# runs it: util-linux's script passes a SIGTERM on to nota and kills it
+# 2 s later.
 stop_app() {
   local pid
   [[ -n $CUR_PIDFILE ]] || return 0
   pid=$(cat "$CUR_PIDFILE" 2> /dev/null) || true
   CUR_PIDFILE=
   [[ $pid =~ ^[1-9][0-9]*$ ]] && is_nota "$pid" || return 0
-  APP_STATE=$({
-    ps -L -o tid=,stat=,wchan:32=,comm= -p "$pid" || true
-    ps -o pid=,stat=,wchan:32=,args= --ppid "$pid" || true
-  } 2> /dev/null)
   kill -TERM "$pid" 2> /dev/null || true
   for _ in $(seq 300); do
     is_nota "$pid" || return 0
@@ -387,22 +383,65 @@ stop_app() {
 }
 
 # limited SECONDS LOG CMD...: runs CMD as the user, in the background so a
-# signal reaches this script's traps at once, with LOG as its output, for
-# at most SECONDS. Returns its status: 124 if it ran out of time.
+# signal reaches this script's traps within a moment, with LOG as its
+# output, for at most SECONDS. Returns its status: 124 if it ran out of
+# time. The limit is kept here, so the app run's nota is looked at
+# (app_snapshot) and stopped (stop_app) before its `script` is signalled;
+# timeout, a minute later, is the backstop.
 limited() {
-  local limit=$1 log=$2 status=0
+  local limit=$1 log=$2 status=0 started=$SECONDS
   shift 2
   if [[ $DRY -eq 1 ]]; then
-    as_user timeout --kill-after=10 "$limit" "$@"
+    as_user timeout --kill-after=10 "$((limit + 60))" "$@"
     return 0
   fi
   setpriv --reuid="$RUN_UID" --regid="$RUN_GID" --init-groups --reset-env -- \
-    timeout --kill-after=10 "$limit" "$@" >> "$log" 2>&1 &
+    timeout --kill-after=10 "$((limit + 60))" "$@" >> "$log" 2>&1 &
   CUR_CHILD=$!
-  wait "$CUR_CHILD" || status=$?
+  while running "$CUR_CHILD" && ((SECONDS - started < limit)); do
+    sleep 0.2
+  done
+  if running "$CUR_CHILD"; then
+    [[ -z $CUR_PIDFILE ]] || app_snapshot
+    stop_app
+    stop_child
+    status=124
+  else
+    wait "$CUR_CHILD" || status=$?
+  fi
   CUR_CHILD=
   stop_app
   return "$status"
+}
+
+# running PID: whether PID is still running (a zombie isn't).
+running() {
+  local state
+  state=$(sed 's/.*) //' "/proc/$1/stat" 2> /dev/null | cut -d' ' -f1) || true
+  [[ -n $state && $state != Z ]]
+}
+
+# app_snapshot: the app run at its limit, before anything stops it, in
+# APP_STUCK for the result: how full its disk is, every mount of that
+# filesystem, and what nota's threads and the processes it started are
+# doing.
+app_snapshot() {
+  local pid source
+  pid=$(cat "$CUR_PIDFILE" 2> /dev/null) || true
+  mapfile -t APP_STUCK < <(
+    as_user df -k --output=used,avail "$CUR_MNT" |
+      awk 'NR == 2 { print "disk: " $1 " KiB used, " $2 " KiB free" }' || true
+    source=$(findmnt -rn -o SOURCE,FSTYPE --mountpoint "$CUR_MNT" | cut -d' ' -f1) || true
+    [[ -z $source ]] || findmnt -ln -o TARGET --source "$source" | sed 's/^/mounted on: /' || true
+    if [[ $pid =~ ^[1-9][0-9]*$ ]] && is_nota "$pid"; then
+      {
+        ps -L -o tid=,stat=,wchan:32=,comm= -p "$pid" || true
+        ps -o pid=,stat=,wchan:32=,args= --ppid "$pid" || true
+      } 2> /dev/null | sed 's/^/nota: /'
+    else
+      echo "nota: not running at the limit"
+    fi
+  )
 }
 
 # leftovers [DIR]: the loop devices on this script's images, under DIR
@@ -607,7 +646,7 @@ kernel_root_half() {
     [[ $DRY -eq 1 ]] || as_user touch "$log"
     started=$SECONDS
     status=0
-    # 8 MiB: ext4's journal and tables take part of what tmpfs gives whole.
+    # 8 MiB: ext4's 4 MiB journal and its tables leave about 3 MiB.
     local app_limit=$((LIMIT < APP_LIMIT ? LIMIT : APP_LIMIT)) timed_out=0
     if logged kernel_mount 8m app; then
       [[ $DRY -eq 1 ]] || CUR_PIDFILE=$RUN_DIR/app.pid
@@ -618,13 +657,13 @@ kernel_root_half() {
     [[ $status -eq 0 || $DRY -eq 1 ]] || echo "(the mount or nota failed: $status)" >> "$log"
     [[ $status -ne 124 && $status -ne 137 ]] || timed_out=1
     local mnt=$CUR_MNT stuck=()
-    # What a run that ran out of time left, before the unmount takes it.
-    [[ $timed_out -eq 0 || $DRY -eq 1 ]] || mapfile -t stuck < <(app_stuck "$log" "$mnt")
+    [[ $timed_out -eq 0 || $DRY -eq 1 ]] || mapfile -t stuck < <(screen_end "$log")
     logged kernel_unmount || { failed=1; LEFT=1; }
     if [[ $DRY -eq 0 ]]; then
       if [[ $timed_out -eq 1 ]]; then
         failed=1
-        report "nota record: TIMED OUT: it didn't stop in ${app_limit} s" "${stuck[@]/#/  }"
+        report "nota record: TIMED OUT: it didn't stop in ${app_limit} s" \
+          "${APP_STUCK[@]/#/  }" "${stuck[@]/#/  }"
       elif out=$(app_summary "$log" "$mnt"); then
         report "$out ($((SECONDS - started)) s)"
       else
@@ -653,7 +692,7 @@ kernel_user_half() {
     echo "disk-full: run --kernel-ext4 as yourself, not with sudo: it builds as you, then asks for sudo for the loop devices and mounts" >&2
     exit 2
   }
-  local tool tools=(setpriv losetup mount umount findmnt flock mkfs.ext4 truncate timeout script stat)
+  local tool tools=(setpriv losetup mount umount findmnt flock mkfs.ext4 truncate timeout script stat ps df)
   [[ $DRY -eq 1 ]] || tools+=(sudo)
   for tool in "${tools[@]}"; do
     command -v "$tool" > /dev/null || { echo "disk-full: no $tool" >&2; exit 2; }
