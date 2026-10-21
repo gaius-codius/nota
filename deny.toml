@@ -9,12 +9,14 @@ all-features = true
 # they're direct dependencies of a workspace crate.
 unmaintained = "workspace"
 yanked = "deny"
-# zip 2.4.2, through sherpa-onnx-sys's build script only. Remove these when
-# sherpa-onnx-sys moves to zip >= 9.0.0.
+# zip 2.4.2 and webpki-roots 0.26.11, through sherpa-onnx-sys's build script
+# only. Remove the zip ones when sherpa-onnx-sys moves to zip >= 9.0.0, and
+# the webpki-roots one when it moves to ureq 3 (webpki-roots 1.x).
 ignore = [
   { id = "RUSTSEC-2026-0367", reason = "zip 2.x is only a build dependency of sherpa-onnx-sys 1.13.8 (the latest release, which requires zip ^2); its build script uses zip only for iOS .xcframework.zip archives, and nota's targets unpack .tar.bz2. No patched zip 2.x exists (the fix is >= 9.0.0). Revisit when sherpa-onnx-sys moves to zip >= 9." },
   { id = "RUSTSEC-2026-0368", reason = "zip 2.x is only a build dependency of sherpa-onnx-sys 1.13.8 (the latest release, which requires zip ^2); its build script uses zip only for iOS .xcframework.zip archives, and nota's targets unpack .tar.bz2. No patched zip 2.x exists (the fix is >= 9.0.0). Revisit when sherpa-onnx-sys moves to zip >= 9." },
   { id = "RUSTSEC-2026-0369", reason = "zip 2.x is only a build dependency of sherpa-onnx-sys 1.13.8 (the latest release, which requires zip ^2); its build script uses zip only for iOS .xcframework.zip archives, and nota's targets unpack .tar.bz2. No patched zip 2.x exists (the fix is >= 9.0.0). Revisit when sherpa-onnx-sys moves to zip >= 9." },
+  { id = "RUSTSEC-2026-0381", reason = "webpki-roots 0.26.11 is only reached through ureq 2.12.1, a build dependency of sherpa-onnx-sys 1.13.8 (the latest release, which requires ureq ^2 with no feature to drop it). It is used at build time only, to download sherpa-onnx archives that scripts/sherpa-onnx.sh checksum-pins, and is not in the shipped binary. No fixed 0.26 exists (the fix is >= 1.0.10). Revisit when sherpa-onnx-sys moves to ureq 3." },
 ]
 
 [licenses]
