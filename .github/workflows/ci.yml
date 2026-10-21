@@ -22,7 +22,7 @@ jobs:
     # rust-ci; their checks are "rust / lint", "rust / test", "rust / deps",
     # "rust / workflows" and "rust / secrets". nota's own steps go in through
     # the inputs.
-    uses: gaius-codius/rust-ci/.github/workflows/rust.yml@bf67168107f62374cc23a379249c0892fb37ef27 # v4.0.0
+    uses: gaius-codius/rust-ci/.github/workflows/rust.yml@41d21ad47d40540d976178548e3e258bd93a7038 # v4.1.0
     with:
       # The native build dependencies (after which the package lists are
       # fresh), and the sherpa-onnx libraries from the archive pinned by
