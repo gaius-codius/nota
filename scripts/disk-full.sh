@@ -55,7 +55,8 @@
 # --ext4 (its 4 KiB blocks and 4 MiB journal leave about 3 MiB), with a
 # limit of its own, 600 s or --limit if that's less (nota fills it in
 # about a minute); if it runs out, the result keeps how full the disk was
-# and what nota was doing at the limit, and the end of its screen. The
+# and what nota was doing at the limit, every process the run started
+# (state, open files, kernel stack), and the end of its screen. The
 # results go to the terminal and to --result, with how long
 # each run took. --dry-run prints every command and who would run it (you
 # or root), and runs nothing.
@@ -248,8 +249,10 @@ CUR_LOOP=
 CUR_MNT=
 CUR_CHILD=
 CUR_PIDFILE=
-# The app run at its limit (app_snapshot).
+# The app run at its limit (app_snapshot), and its disk just after the
+# mount.
 APP_STUCK=()
+APP_DISK=
 
 # kernel_mount SIZE NAME: makes a fresh ext4 of SIZE as the user, at
 # $RUN_DIR/NAME.img, owned by them, with 4 KiB blocks; attaches it to a loop device and mounts
@@ -422,17 +425,19 @@ running() {
 }
 
 # app_snapshot: the app run at its limit, before anything stops it, in
-# APP_STUCK for the result: how full its disk is, every mount of that
-# filesystem, and what nota's threads and the processes it started are
-# doing.
+# APP_STUCK for the result: how full its disk is (and was at the start,
+# APP_DISK), every mount of that filesystem, what nota's threads and the
+# processes it started are doing, and every process the run started
+# (run_processes), whatever it's called.
 app_snapshot() {
   local pid source
   pid=$(cat "$CUR_PIDFILE" 2> /dev/null) || true
   mapfile -t APP_STUCK < <(
-    as_user df -k --output=used,avail "$CUR_MNT" |
-      awk 'NR == 2 { print "disk: " $1 " KiB used, " $2 " KiB free" }' || true
+    echo "disk at the start: $APP_DISK"
+    disk_use "$CUR_MNT" | sed 's/^/disk: /'
     source=$(findmnt -rn -o SOURCE,FSTYPE --mountpoint "$CUR_MNT" | cut -d' ' -f1) || true
     [[ -z $source ]] || findmnt -ln -o TARGET --source "$source" | sed 's/^/mounted on: /' || true
+    echo "pid file: ${pid:-empty or missing}"
     if [[ $pid =~ ^[1-9][0-9]*$ ]] && is_nota "$pid"; then
       {
         ps -L -o tid=,stat=,wchan:32=,comm= -p "$pid" || true
@@ -441,7 +446,38 @@ app_snapshot() {
     else
       echo "nota: not running at the limit"
     fi
+    run_processes "$CUR_CHILD"
   )
+}
+
+# disk_use DIR: how full DIR's filesystem is, as "X KiB used, Y KiB free".
+disk_use() {
+  as_user df -k --output=used,avail "$1" | awk 'NR == 2 { print $1 " KiB used, " $2 " KiB free" }' || true
+}
+
+# run_processes PID: PID and every process under it, for a run that ran
+# out of time: each one's state ("stopped" for a T, which a terminal's
+# job control causes), what it waits in, its command, the owner and
+# tracer from /proc, its open files, and the top of its kernel stack.
+run_processes() {
+  local p line
+  for p in $(ps -e -o pid=,ppid= | awk -v root="$1" '
+      { kids[$2] = kids[$2] " " $1 }
+      END {
+        queue = root
+        while (queue != "") {
+          n = split(queue, q, " "); queue = ""
+          for (i = 1; i <= n; i++) { print q[i]; queue = queue kids[q[i]] }
+        }
+      }'); do
+    line=$(ps -o pid=,stat=,wchan:32=,args= -p "$p" 2> /dev/null | cut -c1-200) || continue
+    [[ -n $line ]] || continue
+    [[ $(ps -o stat= -p "$p" 2> /dev/null) != T* ]] || line+=" (stopped)"
+    echo "process: $line"
+    grep -E '^(Uid|TracerPid):' "/proc/$p/status" 2> /dev/null | tr -s '\t' ' ' | sed 's/^/  /' || true
+    find "/proc/$p/fd" -mindepth 1 -maxdepth 1 -printf '  fd %f -> %l\n' 2> /dev/null | head -n 12 || true
+    head -n 6 "/proc/$p/stack" 2> /dev/null | sed 's/^/  stack: /' || true
+  done
 }
 
 # leftovers [DIR]: the loop devices on this script's images, under DIR
@@ -650,6 +686,7 @@ kernel_root_half() {
     local app_limit=$((LIMIT < APP_LIMIT ? LIMIT : APP_LIMIT)) timed_out=0
     if logged kernel_mount 8m app; then
       [[ $DRY -eq 1 ]] || CUR_PIDFILE=$RUN_DIR/app.pid
+      [[ $DRY -eq 1 ]] || APP_DISK=$(disk_use "$CUR_MNT")
       limited "$app_limit" "$log" bash -c "$app_run" bash "$CUR_MNT" "$NOTA" "$RUN_DIR/app.pid" || status=$?
     else
       status=-1

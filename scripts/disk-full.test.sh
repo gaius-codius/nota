@@ -415,6 +415,13 @@ if run --result "$result" --limit 1 22m > "$dir/out" 2>&1; then code=0; else cod
 [[ $code -eq 1 ]] || fail "app timeout: expected status 1, got $code: $(cat "$dir/out")"
 expect "app timeout" "$result" "^nota record: TIMED OUT: it didn't stop in 1 s$"
 expect "app timeout" "$result" '^  disk: [0-9]+ KiB used, [0-9]+ KiB free$'
+expect "app timeout" "$result" '^  disk at the start: [0-9]+ KiB used, [0-9]+ KiB free$'
+expect "app timeout" "$result" '^  pid file: [1-9][0-9]*$'
+# Every process the run started, by name and with its open files.
+expect "app timeout" "$result" '^  process: +[0-9]+ [A-Z][^ ]* .*timeout --kill-after=10 '
+expect "app timeout" "$result" '^  process: +[0-9]+ [A-Z][^ ]* .*sleep 1000$'
+expect "app timeout" "$result" '^    Uid: [0-9 ]+$'
+expect "app timeout" "$result" '^    fd 1 -> .*/app\.log$'
 expect "app timeout" "$result" '^  mounted on: .*/app$'
 expect "app timeout" "$result" '^  nota: +[0-9]+ [A-Z][^ ]* .* nota$'
 expect "app timeout" "$result" '^  nota: +[0-9]+ [A-Z][^ ]* .* sleep 1000$'
