@@ -10,9 +10,11 @@
 #   1. Bad options fail with status 2 before sudo, and so does running it
 #      with sudo (as root).
 #   2. A dry run prints every command; as root, only losetup, mount and
-#      umount; and runs none of them, nor sudo.
+#      umount; and runs none of them, nor sudo. The default sizes are 23m
+#      to 48m.
 #   3. A run passes: sudo once, each run as the user on its own mounted
-#      ext4 (mkfs'd as the user, root owned by them), every device and
+#      ext4 (mkfs'd as the user with 4 KiB blocks, root owned by them),
+#      every device and
 #      mount gone, the run directory removed, and the result file says so.
 #   4. A mount an automounter adds is unmounted too, and reported.
 #   5. A run that never fills is stopped at the time limit and reported as
@@ -23,7 +25,9 @@
 #      in progress, leave no device, mount or process, and say so; Ctrl-C
 #      too when the output goes to a pipe whose reader has gone. In the app
 #      run, Ctrl-C and the time limit let nota, which `script` puts in a
-#      session of its own, finish before the unmount.
+#      session of its own, finish before the unmount. The app run's limit
+#      is 600 s at most, and one that runs out reports what nota was doing,
+#      how full its disk was, and the end of its screen.
 #   7. A mount that's busy is unmounted lazily, its device reported as left
 #      and the run directory kept, and no further run starts.
 #   8. --cleanup unmounts and detaches what a killed run left (a kill -9
@@ -189,6 +193,7 @@ grep -q " $data\$" "$FAKE_STATE/mounts" || { echo "not on a mount: $data"; exit 
 if [[ $FAKE_APP == hang ]]; then
   # Named as the real one is (a script's process is its interpreter's).
   printf nota > "/proc/$$/comm"
+  echo "recording to the disk"
   echo $$ > "$FAKE_STATE/nota.pid"
   trap 'sleep 1; touch "$FAKE_STATE/nota.finished"; exit 0' TERM HUP
   sleep 1000 &
@@ -252,8 +257,14 @@ if grep '^\[root\]' "$dir/out" | grep -vqE '^\[root\] (losetup|mount|umount) '; 
   fail "dry run: root runs more than losetup, mount and umount: $(grep '^\[root\]' "$dir/out")"
 fi
 expect "dry run" "$dir/out" '^\[you\] sudo -- '
-expect "dry run" "$dir/out" '^\[you\] [^ ]*mkfs.ext4 -q -F -E root_owner='
+expect "dry run" "$dir/out" '^\[you\] [^ ]*mkfs.ext4 -q -F -T default -E root_owner='
 expect "dry run" "$dir/out" '^\[you\] timeout --kill-after=10 1800 .*/disk_full '
+expect "dry run" "$dir/out" '^\[you\] timeout --kill-after=10 600 bash -c '
+# The default sizes: 23m to 48m, the sizes a 4 KiB-block ext4 has room
+# for the ballast in.
+run --dry-run --no-app > "$dir/out" 2>&1 || fail "default sizes: dry run failed: $(cat "$dir/out")"
+[[ $(grep -oE '^\[you\] truncate -s [0-9]+m' "$dir/out" | awk '{ print $4 }' | tr '\n' ' ') == "$(seq -f %gm -s ' ' 23 48) " ]] ||
+  fail "default sizes: not 23m to 48m: $(grep truncate "$dir/out")"
 
 # 3. A run that passes.
 reset
@@ -266,7 +277,7 @@ for line in '^22m: filled at session/journal-1: ok \([0-9]+ s\)$' '^23m: ' \
   '^cleanup: no loop device or mount left$' '^result: PASSED$' '^sizes: 22m 23m; limit 1800 s'; do
   expect pass "$result" "$line"
 done
-[[ $(grep -c 'root_owner='"$(id -u):$(id -g)" "$FAKE_STATE/mkfs") -eq 3 ]] || fail "pass: mkfs.ext4 not run with the user's root_owner: $(cat "$FAKE_STATE/mkfs")"
+[[ $(grep -c -- '-T default -E root_owner='"$(id -u):$(id -g)" "$FAKE_STATE/mkfs") -eq 3 ]] || fail "pass: mkfs.ext4 not run with 4 KiB blocks and the user's root_owner: $(cat "$FAKE_STATE/mkfs")"
 [[ $(grep -c '^mount ' "$FAKE_STATE/root") -eq 3 ]] || fail "pass: expected 3 mounts: $(cat "$FAKE_STATE/root")"
 if grep -vqE '^(losetup|mount|umount) ' "$FAKE_STATE/root"; then
   fail "pass: root ran more than losetup, mount and umount: $(cat "$FAKE_STATE/root")"
@@ -391,6 +402,11 @@ export FAKE_APP=hang
 if run --result "$result" --limit 1 22m > "$dir/out" 2>&1; then code=0; else code=$?; fi
 [[ $code -eq 1 ]] || fail "app timeout: expected status 1, got $code: $(cat "$dir/out")"
 expect "app timeout" "$result" "^nota record: TIMED OUT: it didn't stop in 1 s$"
+expect "app timeout" "$result" '^  disk: [0-9]+ KiB used, [0-9]+ KiB free$'
+expect "app timeout" "$result" '^  mounted on: .*/app$'
+expect "app timeout" "$result" '^  nota: +[0-9]+ [A-Z][^ ]* .* nota$'
+expect "app timeout" "$result" '^  nota: +[0-9]+ [A-Z][^ ]* .* sleep 1000$'
+expect "app timeout" "$result" '^  screen: recording to the disk$'
 expect "app timeout" "$result" '^cleanup: no loop device or mount left$'
 [[ -e $FAKE_STATE/nota.finished ]] || fail "app timeout: nota wasn't let finish"
 check_left "app timeout"

@@ -11,7 +11,11 @@
 //! every 50 ms too, so a check may notice first. It publishes each finished
 //! journal as it goes, keeping what fails for the next try, as the
 //! publisher does: recording in real time, the publisher keeps up, so no
-//! more than a window a track waits for it. The ballast is scaled down
+//! more than a window a track waits for it. It never runs more than a
+//! window ahead of a track's durable audio either: recording in real time
+//! on a disk that keeps up, no track is; recording as fast as it can on a
+//! slow disk, it would be, and the audio waiting in memory for an fsync
+//! would outgrow the ballast when it stops. The ballast is scaled down
 //! from nota's 256 MB, but kept larger than what SQLite's write-ahead log
 //! grows to before its first checkpoint (about 4 MB). Once the disk is full
 //! it stops, as `nota record` does, and checks:
@@ -31,6 +35,7 @@ use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::Duration;
 
 use nota_core::{
@@ -53,10 +58,13 @@ const TRACKS: [TrackId; 2] = [TrackId::new(0), TrackId::new(1)];
 const CHUNK: u64 = 1_600;
 /// The ballast: 8 MiB.
 const BALLAST: u64 = 8 << 20;
+/// A window's samples: two seconds, so segments publish often. Also how
+/// far a track may run ahead of its durable audio.
+const WINDOW: u64 = 32_000;
 
-/// Two-second windows, so segments publish often.
+/// Windows of [`WINDOW`] samples.
 fn length() -> Res<SegmentLength> {
-    SegmentLength::new(SampleCount::new(32_000)).ok_or_else(|| "bad length".into())
+    SegmentLength::new(SampleCount::new(WINDOW)).ok_or_else(|| "bad length".into())
 }
 
 /// Noise, so FLAC can't shrink it: distinct per track and position.
@@ -201,6 +209,13 @@ fn record(watch: &Arc<DiskWatch<StdFs>>, session_dir: &Path, store: Store) -> Re
     let mut failures = Vec::new();
     let mut rounds = 0_u64;
     while watch.full().is_none() {
+        keep_pace(
+            &mut writer,
+            watch,
+            &mut pending,
+            &mut publish,
+            &mut failures,
+        )?;
         for track in TRACKS {
             let from = writer.next_sample(track).ok_or("track not started")?.get();
             let audio: Vec<i16> = (from..from + CHUNK).map(|i| sample(track, i)).collect();
@@ -248,6 +263,42 @@ fn record(watch: &Arc<DiskWatch<StdFs>>, session_dir: &Path, store: Store) -> Re
         errors,
         left: pending.len(),
         finishing,
+    })
+}
+
+/// Waits until no track is more than a window ahead of its durable audio,
+/// or the disk is full, taking fsyncs as they complete and publishing the
+/// journals they finish: as recording in real time on a disk that keeps up
+/// does. A disk that never catches up runs into the script's time limit.
+fn keep_pace<S: Fs>(
+    writer: &mut SessionWriter<S>,
+    watch: &DiskWatch<StdFs>,
+    pending: &mut Vec<FinishedJournal>,
+    publish: &mut impl FnMut(&mut Vec<FinishedJournal>) -> Res<()>,
+    failures: &mut Vec<String>,
+) -> Res<()> {
+    while ahead(writer) && watch.full().is_none() {
+        if let Err(e) = writer.sync_if_due() {
+            failures.push(e.to_string());
+        }
+        let finished = writer.take_finished();
+        if !finished.is_empty() {
+            pending.extend(finished);
+            publish(pending)?;
+        }
+        // An fsync is running on a track's thread; let it.
+        thread::yield_now();
+    }
+    Ok(())
+}
+
+/// Whether some track is more than a window ahead of its durable audio.
+/// Between journals a track has none waiting for an fsync.
+fn ahead<S: Fs>(writer: &SessionWriter<S>) -> bool {
+    TRACKS.iter().any(|&track| {
+        let next = writer.next_sample(track).map_or(0, SampleIndex::get);
+        let durable = writer.durable(track).map_or(next, |d| d.end().get());
+        next.saturating_sub(durable) > WINDOW
     })
 }
 
