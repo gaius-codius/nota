@@ -393,8 +393,10 @@ stop_app() {
 # timeout, a minute later, is the backstop. Its input is /dev/null, never
 # sudo's terminal: timeout runs it in a process group of its own, in the
 # terminal's background, where `script` setting up a terminal on its
-# input is stopped (SIGTTOU) and never starts nota. bash gives a command
-# run with & /dev/null only in some cases, so it's said here.
+# input is stopped (SIGTTOU) and never starts nota. bash doesn't always
+# give a command run with & /dev/null: after a `while ... done < <(...)`
+# (kernel_unmount has one), it gets the shell's own input. The dry run
+# prints the command, not its redirections.
 limited() {
   local limit=$1 log=$2 status=0 started=$SECONDS
   shift 2
@@ -464,7 +466,7 @@ disk_use() {
 # job control causes), what it waits in, its command, the owner and
 # tracer from /proc, its open files, and the top of its kernel stack.
 run_processes() {
-  local p line
+  local p line state
   for p in $(ps -e -o pid=,ppid= | awk -v root="$1" '
       { kids[$2] = kids[$2] " " $1 }
       END {
@@ -476,7 +478,8 @@ run_processes() {
       }'); do
     line=$(ps -o pid=,stat=,wchan:32=,args= -p "$p" 2> /dev/null | cut -c1-200) || continue
     [[ -n $line ]] || continue
-    [[ $(ps -o stat= -p "$p" 2> /dev/null) != T* ]] || line+=" (stopped)"
+    read -r _ state _ <<< "$line"
+    [[ $state != T* ]] || line+=" (stopped)"
     echo "process: $line"
     grep -E '^(Uid|TracerPid):' "/proc/$p/status" 2> /dev/null | tr -s '\t' ' ' | sed 's/^/  /' || true
     find "/proc/$p/fd" -mindepth 1 -maxdepth 1 -printf '  fd %f -> %l\n' 2> /dev/null | head -n 12 || true

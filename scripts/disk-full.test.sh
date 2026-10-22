@@ -28,7 +28,11 @@
 #      run, Ctrl-C and the time limit let nota, which `script` puts in a
 #      session of its own, finish before the unmount. The app run's limit
 #      is 600 s at most, and one that runs out reports what nota was doing,
-#      how full its disk was, and the end of its screen.
+#      how full its disk was at the start and at the limit, the pid file,
+#      every process under the run (a stopped one marked so, with its input
+#      and open files), and the end of its screen. Every run's input is
+#      /dev/null, though the script's own input stands in for a terminal:
+#      the stand-in `script` refuses any other, as the real one stops.
 #   7. A mount that's busy is unmounted lazily, its device reported as left
 #      and the run directory kept, and no further run starts.
 #   8. --cleanup unmounts and detaches what a killed run left (a kill -9
@@ -210,7 +214,12 @@ if [[ $FAKE_APP == hang ]]; then
   echo "recording to the disk"
   echo $$ > "$FAKE_STATE/nota.pid"
   # Longer than `script` waits before it kills it.
-  trap 'sleep 3; touch "$FAKE_STATE/nota.finished"; exit 0' TERM HUP
+  # And one stopped, as a process a terminal stopped would be (perhaps
+  # before it runs sleep: what matters is that it's stopped).
+  sleep 1001 &
+  stopped=$!
+  kill -STOP "$stopped"
+  trap 'kill -KILL "$stopped"; sleep 3; touch "$FAKE_STATE/nota.finished"; exit 0' TERM HUP
   sleep 1000 &
   wait
 fi
@@ -427,7 +436,9 @@ expect "app timeout" "$result" '^  pid file: [1-9][0-9]*$'
 expect "app timeout" "$result" '^  process: +[0-9]+ [A-Z][^ ]* .*timeout --kill-after=10 '
 expect "app timeout" "$result" '^  process: +[0-9]+ [A-Z][^ ]* .*sleep 1000$'
 expect "app timeout" "$result" '^    Uid: [0-9 ]+$'
+expect "app timeout" "$result" '^    fd 0 -> /dev/null$'
 expect "app timeout" "$result" '^    fd 1 -> .*/app\.log$'
+expect "app timeout" "$result" '^  process: +[0-9]+ T[^ ]* .* \(stopped\)$'
 expect "app timeout" "$result" '^  mounted on: .*/app$'
 expect "app timeout" "$result" '^  nota: +[0-9]+ [A-Z][^ ]* .* nota$'
 expect "app timeout" "$result" '^  nota: +[0-9]+ [A-Z][^ ]* .* sleep 1000$'
