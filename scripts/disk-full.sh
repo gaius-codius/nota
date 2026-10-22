@@ -390,7 +390,11 @@ stop_app() {
 # output, for at most SECONDS. Returns its status: 124 if it ran out of
 # time. The limit is kept here, so the app run's nota is looked at
 # (app_snapshot) and stopped (stop_app) before its `script` is signalled;
-# timeout, a minute later, is the backstop.
+# timeout, a minute later, is the backstop. Its input is /dev/null, never
+# sudo's terminal: timeout runs it in a process group of its own, in the
+# terminal's background, where `script` setting up a terminal on its
+# input is stopped (SIGTTOU) and never starts nota. bash gives a command
+# run with & /dev/null only in some cases, so it's said here.
 limited() {
   local limit=$1 log=$2 status=0 started=$SECONDS
   shift 2
@@ -399,7 +403,7 @@ limited() {
     return 0
   fi
   setpriv --reuid="$RUN_UID" --regid="$RUN_GID" --init-groups --reset-env -- \
-    timeout --kill-after=10 "$((limit + 60))" "$@" >> "$log" 2>&1 &
+    timeout --kill-after=10 "$((limit + 60))" "$@" < /dev/null >> "$log" 2>&1 &
   CUR_CHILD=$!
   while running "$CUR_CHILD" && ((SECONDS - started < limit)); do
     sleep 0.2

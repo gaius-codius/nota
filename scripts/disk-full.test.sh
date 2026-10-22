@@ -172,8 +172,12 @@ stub mkfs.ext4 '[[ $1 == -V ]] && { echo "mkfs.ext4 0.0 (stand-in)"; exit 0; }
 echo "mkfs.ext4 $*" >> "$FAKE_STATE/mkfs"'
 # script -qec CMD FILE: runs CMD in a session of its own and waits for it;
 # a SIGTERM or SIGHUP is passed on to CMD, which is killed 2 s later, as
-# util-linux's script does.
-stub script 'setsid bash -c "$2" &
+# util-linux's script does. Its input must be /dev/null: the real one, in
+# the background of a terminal it has as input, is stopped and never
+# starts CMD.
+stub script 'input=$(readlink /proc/$$/fd/0)
+[[ $input == /dev/null ]] || { echo "script: input is $input, not /dev/null: it would stop" >&2; exit 98; }
+setsid bash -c "$2" &
 child=$!
 trap '"'"'kill -TERM "$child" 2> /dev/null; sleep 2; kill -KILL "$child" 2> /dev/null; exit 1'"'"' TERM HUP
 wait "$child"'
@@ -216,7 +220,9 @@ EOF
 chmod +x "$target/debug/examples/disk_full" "$target/debug/nota"
 
 export PATH=$bin:$PATH
-run() { "$repo/scripts/disk-full.sh" --kernel-ext4 --images "$images" "$@"; }
+# Its input stands in for the terminal sudo runs it from.
+: > "$dir/terminal"
+run() { "$repo/scripts/disk-full.sh" --kernel-ext4 --images "$images" "$@" < "$dir/terminal"; }
 
 # reset: no devices, mounts, logs or images from an earlier case.
 reset() {
