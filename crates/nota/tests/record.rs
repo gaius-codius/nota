@@ -1693,6 +1693,21 @@ fn jobs(data: &Path) -> Vec<(u64, JobState)> {
         .collect()
 }
 
+/// Whether `session` is being recorded as Home sees one: it has journals
+/// and its directory is locked. The journals are looked for first, so the
+/// lock is tried only once the recording holds it, never in its way.
+fn seen_recording(data: &Path, session: u64) -> bool {
+    let audio = data
+        .join("sessions")
+        .join(session.to_string())
+        .join("audio");
+    let dir = SessionDir::new(SessionId::new(session), StdFs, &audio);
+    needs_salvage(&dir).unwrap_or(false)
+        && dir
+            .lock()
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::WouldBlock)
+}
+
 /// The session's final-pass text covers each of its published samples
 /// once, on every track, and says how many samples each chunk held (the
 /// stand-in engine's text).
@@ -1763,6 +1778,13 @@ fn the_final_pass_runs_after_the_stop_and_never_during_a_recording() {
     assert_eq!(jobs(&tmp.0), [(1, JobState::Waiting(None))]);
 
     let mut second = recording(&tmp.0);
+    // Its screen shows before its first journal is made, and until then
+    // Home doesn't see it: Home must start once it would.
+    assert!(
+        wait_until(Duration::from_secs(60), || seen_recording(&tmp.0, 2)),
+        "{}",
+        second.output()
+    );
     let home_dir = tmp.0.to_str().unwrap();
     let mut home = Running::start_command(
         &["--tone", "yes", "--fake-engine", "yes"],
@@ -1772,8 +1794,11 @@ fn the_final_pass_runs_after_the_stop_and_never_during_a_recording() {
         &[("HOME", home_dir)],
     );
     assert!(home.shows_after(0, "R last settings"), "{}", home.output());
-    // Capture first: nothing runs while the other nota records.
+    // Capture first: nothing runs while the other nota records. Home
+    // shows nothing when its runner looks, so this waits a while for a
+    // job that mustn't start, and checks the other nota still records.
     pause(Duration::from_secs(3));
+    assert!(seen_recording(&tmp.0, 2));
     assert_eq!(jobs(&tmp.0), [(1, JobState::Waiting(None))]);
     let store = Store::open(&tmp.0.join("library.db")).unwrap();
     assert!(store.final_texts(SessionId::new(1)).unwrap().is_empty());
