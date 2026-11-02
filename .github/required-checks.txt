@@ -1,0 +1,17 @@
+# The checks ruleset A requires on the default branch, one per line, as
+# GitHub names them. csp doctor fails when A requires a check not listed here,
+# or lacks one that is. Change it with the CI job it names; the ruleset itself
+# is changed by the repository's admin (docs/install.md, "The forge recipe").
+Weakened checks are explained
+No recordings or large files
+rust / lint
+rust / test
+rust / deps
+rust / workflows
+Build (macos-latest)
+Build (windows-latest)
+No GPL in the release binary (Linux)
+Mutation testing (changed code)
+Fuzz targets build
+Script tests
+rust / secrets
