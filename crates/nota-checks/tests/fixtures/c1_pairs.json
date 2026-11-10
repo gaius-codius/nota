@@ -1,0 +1,3244 @@
+{
+ "about": "C1 letter similarity: lowercase, keep a-z and 0-9, then Python difflib SequenceMatcher(None, a, b).ratio(). Term pairs the bench scored, each string at most 32 characters and 4 words, and invented edge cases (null where a side has more than 199 letters and digits, which nota refuses). `kept` is Python's score >= 0.6, the bench's filter. Written by the research bench's fixtures/export.py; don't edit by hand.",
+ "edge_cases": [
+  {
+   "a": "",
+   "b": "",
+   "score": 1.0
+  },
+  {
+   "a": "",
+   "b": "amlodipine",
+   "score": 0.0
+  },
+  {
+   "a": "amlodipine",
+   "b": "",
+   "score": 0.0
+  },
+  {
+   "a": "!!",
+   "b": "--",
+   "score": 1.0
+  },
+  {
+   "a": "Amlo-Dipine!",
+   "b": "amlodipine",
+   "score": 1.0
+  },
+  {
+   "a": "AMLODIPINE",
+   "b": "amlodipine",
+   "score": 1.0
+  },
+  {
+   "a": "GLP-1",
+   "b": "glp1",
+   "score": 1.0
+  },
+  {
+   "a": "abc",
+   "b": "xyz",
+   "score": 0.0
+  },
+  {
+   "a": "a",
+   "b": "a",
+   "score": 1.0
+  },
+  {
+   "a": "a",
+   "b": "b",
+   "score": 0.0
+  },
+  {
+   "a": "xy",
+   "b": "yx",
+   "score": 0.5
+  },
+  {
+   "a": "abcd",
+   "b": "dcba",
+   "score": 0.25
+  },
+  {
+   "a": "aaaa",
+   "b": "aa",
+   "score": 0.6666666666666666
+  },
+  {
+   "a": "abab",
+   "b": "baba",
+   "score": 0.75
+  },
+  {
+   "a": "abcabc",
+   "b": "cbacba",
+   "score": 0.5
+  },
+  {
+   "a": "xabcyabcz",
+   "b": "abc",
+   "score": 0.5
+  },
+  {
+   "a": "abcxyzabc",
+   "b": "xyzabcxyz",
+   "score": 0.6666666666666666
+  },
+  {
+   "a": "qabxcdyefz",
+   "b": "abcdef",
+   "score": 0.75
+  },
+  {
+   "a": "aaa",
+   "b": "aaba",
+   "score": 0.8571428571428571
+  },
+  {
+   "a": "aba",
+   "b": "bca",
+   "score": 0.3333333333333333
+  },
+  {
+   "a": "bca",
+   "b": "aba",
+   "score": 0.6666666666666666
+  },
+  {
+   "a": "metformin 500",
+   "b": "metformin 1000",
+   "score": 0.88
+  },
+  {
+   "a": "2 diabetes",
+   "b": "type 2 diabetes",
+   "score": 0.8181818181818182
+  },
+  {
+   "a": "Kelvin",
+   "b": "kelvin",
+   "score": 1.0
+  },
+  {
+   "a": "İbuprofen",
+   "b": "ibuprofen",
+   "score": 1.0
+  },
+  {
+   "a": "café",
+   "b": "cafe",
+   "score": 0.8571428571428571
+  },
+  {
+   "a": "naïve",
+   "b": "naive",
+   "score": 0.8888888888888888
+  },
+  {
+   "a": "ß",
+   "b": "ss",
+   "score": 0.0
+  },
+  {
+   "a": "abcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabca",
+   "b": "abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababa",
+   "score": 0.6683417085427136
+  },
+  {
+   "a": "abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
+   "b": "ab",
+   "score": null
+  },
+  {
+   "a": "ab",
+   "b": "abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
+   "score": null
+  },
+  {
+   "a": "a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b a-b ",
+   "b": "ab",
+   "score": null
+  }
+ ],
+ "pairs": [
+  {
+   "a": "15",
+   "b": "safety netting",
+   "kept": false,
+   "score": 0.0,
+   "sources": [
+    "propose:hw15",
+    "propose:hw20",
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "50 meters",
+   "b": "50 metres",
+   "kept": true,
+   "score": 0.875,
+   "sources": [
+    "fixlog:q4-fx-none"
+   ]
+  },
+  {
+   "a": "7067-year-old",
+   "b": "70-67-year-old",
+   "kept": true,
+   "score": 1.0,
+   "sources": [
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:q9-fx-none",
+    "fixlog:t-fx-gloss"
+   ]
+  },
+  {
+   "a": "ACI",
+   "b": "ACEI",
+   "kept": true,
+   "score": 0.8571428571428571,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "ACI",
+   "b": "ACEi",
+   "kept": true,
+   "score": 0.8571428571428571,
+   "sources": [
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss"
+   ]
+  },
+  {
+   "a": "Administering work",
+   "b": "Adherence work",
+   "kept": true,
+   "score": 0.6,
+   "sources": [
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "CPD",
+   "b": "COPD",
+   "kept": true,
+   "score": 0.8571428571428571,
+   "sources": [
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q9-fx-gloss",
+    "fixlog:t-fx-gloss"
+   ]
+  },
+  {
+   "a": "Continue almen's",
+   "b": "Continue medicines",
+   "kept": true,
+   "score": 0.7741935483870968,
+   "sources": [
+    "fixlog:q9-fx-both"
+   ]
+  },
+  {
+   "a": "Continue almen's like normal",
+   "b": "Continue amlodipine like normal",
+   "kept": true,
+   "score": 0.8076923076923077,
+   "sources": [
+    "fixlog:q4-fx-gloss",
+    "fixlog:q5-fx-gloss",
+    "fixlog:t-fx-gloss"
+   ]
+  },
+  {
+   "a": "DED",
+   "b": "ED",
+   "kept": true,
+   "score": 0.8,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "DLP one",
+   "b": "DLP",
+   "kept": true,
+   "score": 0.6666666666666666,
+   "sources": [
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "DLP one",
+   "b": "DLP pen",
+   "kept": true,
+   "score": 0.6666666666666666,
+   "sources": [
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss"
+   ]
+  },
+  {
+   "a": "DLP one",
+   "b": "DPI one",
+   "kept": true,
+   "score": 0.8333333333333334,
+   "sources": [
+    "fixlog:c-fx-both",
+    "fixlog:c-fx-gloss",
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "GLP 1",
+   "b": "GLP-1",
+   "kept": true,
+   "score": 1.0,
+   "sources": [
+    "fixlog:q9-fx-gloss",
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "Hinailer",
+   "b": "inhaler",
+   "kept": true,
+   "score": 0.8,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:q9-fx-none",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "I don't know",
+   "b": "I'd like",
+   "kept": false,
+   "score": 0.4,
+   "sources": [
+    "fixlog:c-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss"
+   ]
+  },
+  {
+   "a": "I don't know",
+   "b": "I'd like to",
+   "kept": false,
+   "score": 0.35294117647058826,
+   "sources": [
+    "fixlog:c-fx-gloss",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "I don't know",
+   "b": "let's say",
+   "kept": false,
+   "score": 0.125,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-lookup"
+   ]
+  },
+  {
+   "a": "I normally are stable",
+   "b": "I normally am stable",
+   "kept": true,
+   "score": 0.9142857142857143,
+   "sources": [
+    "fixlog:q4-fx-none"
+   ]
+  },
+  {
+   "a": "I will it's definitely",
+   "b": "I'll definitely",
+   "kept": true,
+   "score": 0.8387096774193549,
+   "sources": [
+    "fixlog:c-fx-both",
+    "fixlog:c-fx-gloss"
+   ]
+  },
+  {
+   "a": "I will it's definitely",
+   "b": "I'll it's definitely",
+   "kept": true,
+   "score": 0.9411764705882353,
+   "sources": [
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "I will it's definitely",
+   "b": "it's definitely",
+   "kept": true,
+   "score": 0.8387096774193549,
+   "sources": [
+    "fixlog:q4-fx-gloss",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss"
+   ]
+  },
+  {
+   "a": "I2",
+   "b": "ICD",
+   "kept": false,
+   "score": 0.4,
+   "sources": [
+    "fixlog:q4-fx-lookup"
+   ]
+  },
+  {
+   "a": "I2",
+   "b": "leading",
+   "kept": false,
+   "score": 0.2222222222222222,
+   "sources": [
+    "fixlog:q4-fx-both"
+   ]
+  },
+  {
+   "a": "I2 diagnosis",
+   "b": "ICD diagnosis",
+   "kept": true,
+   "score": 0.8695652173913043,
+   "sources": [
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "Inhale",
+   "b": "Inhaled",
+   "kept": true,
+   "score": 0.9230769230769231,
+   "sources": [
+    "fixlog:q9-fx-both"
+   ]
+  },
+  {
+   "a": "Inhale",
+   "b": "inhaler",
+   "kept": true,
+   "score": 0.9230769230769231,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "Inhale and increase",
+   "b": "Inhaled and increased",
+   "kept": true,
+   "score": 0.9444444444444444,
+   "sources": [
+    "fixlog:q9-fx-gloss",
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "Inhale and increase",
+   "b": "Inhaled corticosteroids",
+   "kept": false,
+   "score": 0.5641025641025641,
+   "sources": [
+    "fixlog:q4-fx-gloss",
+    "fixlog:q5-fx-gloss",
+    "fixlog:t-fx-gloss"
+   ]
+  },
+  {
+   "a": "Medicine satisfy evidence",
+   "b": "Medicine safety evidence",
+   "kept": true,
+   "score": 0.8888888888888888,
+   "sources": [
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "Medicine satisfy evidence",
+   "b": "Medicine satisfies evidence",
+   "kept": true,
+   "score": 0.9166666666666666,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "NSA.",
+   "b": "NSAID.",
+   "kept": true,
+   "score": 0.75,
+   "sources": [
+    "propose:hw15",
+    "propose:hw20",
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "Narancos",
+   "b": "Naranjo",
+   "kept": true,
+   "score": 0.8,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:q9-fx-none",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "Owner",
+   "b": "owner",
+   "kept": true,
+   "score": 1.0,
+   "sources": [
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss"
+   ]
+  },
+  {
+   "a": "Present",
+   "b": "Preventer",
+   "kept": true,
+   "score": 0.75,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-lookup"
+   ]
+  },
+  {
+   "a": "Self care",
+   "b": "self-care",
+   "kept": true,
+   "score": 1.0,
+   "sources": [
+    "propose:hw15",
+    "propose:hw20",
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "Taxi drivers",
+   "b": "taxi drivers",
+   "kept": true,
+   "score": 1.0,
+   "sources": [
+    "fixlog:q9-fx-gloss"
+   ]
+  },
+  {
+   "a": "Taxi drivers",
+   "b": "type 2 diabetes",
+   "kept": false,
+   "score": 0.3333333333333333,
+   "sources": [
+    "fixlog:q9-fx-both"
+   ]
+  },
+  {
+   "a": "Unavailable",
+   "b": "Inhaled",
+   "kept": false,
+   "score": 0.4444444444444444,
+   "sources": [
+    "fixlog:q9-fx-gloss"
+   ]
+  },
+  {
+   "a": "Unavailable",
+   "b": "Unavailability",
+   "kept": true,
+   "score": 0.8,
+   "sources": [
+    "fixlog:q5-fx-gloss"
+   ]
+  },
+  {
+   "a": "a blody pine",
+   "b": "amlodipine",
+   "kept": true,
+   "score": 0.8,
+   "sources": [
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "acid.",
+   "b": "asthma.",
+   "kept": false,
+   "score": 0.2,
+   "sources": [
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "after one",
+   "b": "amiodarone",
+   "kept": false,
+   "score": 0.5555555555555556,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-lookup"
+   ]
+  },
+  {
+   "a": "again a",
+   "b": "again",
+   "kept": true,
+   "score": 0.9090909090909091,
+   "sources": [
+    "fixlog:q4-fx-lookup"
+   ]
+  },
+  {
+   "a": "again a",
+   "b": "again a couple of",
+   "kept": true,
+   "score": 0.6,
+   "sources": [
+    "fixlog:q4-fx-both"
+   ]
+  },
+  {
+   "a": "again a",
+   "b": "again at",
+   "kept": true,
+   "score": 0.9230769230769231,
+   "sources": [
+    "fixlog:q4-fx-lookup"
+   ]
+  },
+  {
+   "a": "again a",
+   "b": "again with",
+   "kept": true,
+   "score": 0.6666666666666666,
+   "sources": [
+    "fixlog:q4-fx-both"
+   ]
+  },
+  {
+   "a": "almen's",
+   "b": "allopurinol",
+   "kept": false,
+   "score": 0.35294117647058826,
+   "sources": [
+    "fixlog:q4-fx-lookup",
+    "named"
+   ]
+  },
+  {
+   "a": "almen's",
+   "b": "almonds",
+   "kept": true,
+   "score": 0.7692307692307693,
+   "sources": [
+    "fixlog:q9-fx-gloss",
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "almen's",
+   "b": "amlodipine",
+   "kept": false,
+   "score": 0.375,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "almen's",
+   "b": "medicines",
+   "kept": false,
+   "score": 0.5333333333333333,
+   "sources": [
+    "fixlog:q9-fx-both"
+   ]
+  },
+  {
+   "a": "amylo diping",
+   "b": "amlodipine",
+   "kept": true,
+   "score": 0.8571428571428571,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss",
+    "fixlog:t-fx-lookup",
+    "named"
+   ]
+  },
+  {
+   "a": "amylo diping",
+   "b": "amyloid oedema",
+   "kept": false,
+   "score": 0.5,
+   "sources": [
+    "fixlog:q9-fx-gloss"
+   ]
+  },
+  {
+   "a": "amylo diping",
+   "b": "amyloidosis",
+   "kept": true,
+   "score": 0.6363636363636364,
+   "sources": [
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "amylo diping",
+   "b": "diltiazem",
+   "kept": false,
+   "score": 0.3,
+   "sources": [
+    "fixlog:q4-fx-gloss",
+    "fixlog:q5-fx-gloss",
+    "fixlog:t-fx-gloss"
+   ]
+  },
+  {
+   "a": "amylo edema",
+   "b": "amlodipine oedema",
+   "kept": true,
+   "score": 0.6923076923076923,
+   "sources": [
+    "fixlog:q9-fx-both"
+   ]
+  },
+  {
+   "a": "amylo edema",
+   "b": "amyloid edema",
+   "kept": true,
+   "score": 0.9090909090909091,
+   "sources": [
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "amylo edema",
+   "b": "amyloid oedema",
+   "kept": true,
+   "score": 0.8695652173913043,
+   "sources": [
+    "fixlog:q9-fx-gloss"
+   ]
+  },
+  {
+   "a": "amylo edema",
+   "b": "anatomical edema",
+   "kept": true,
+   "score": 0.64,
+   "sources": [
+    "fixlog:q4-fx-none"
+   ]
+  },
+  {
+   "a": "amylo edema",
+   "b": "ankle oedema",
+   "kept": true,
+   "score": 0.7619047619047619,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-lookup",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "amylo edema",
+   "b": "bilateral oedema",
+   "kept": true,
+   "score": 0.64,
+   "sources": [
+    "fixlog:q4-fx-gloss",
+    "fixlog:q5-fx-gloss",
+    "fixlog:t-fx-gloss"
+   ]
+  },
+  {
+   "a": "amylo edema",
+   "b": "oedema",
+   "kept": true,
+   "score": 0.75,
+   "sources": [
+    "fixlog:q5-fx-lookup-nofacts"
+   ]
+  },
+  {
+   "a": "amylodian",
+   "b": "amlodipine",
+   "kept": true,
+   "score": 0.7368421052631579,
+   "sources": [
+    "propose:hw15",
+    "propose:hw20",
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "amylodiping",
+   "b": "amlodipine",
+   "kept": true,
+   "score": 0.8571428571428571,
+   "sources": [
+    "propose:hw15",
+    "propose:hw20",
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "amylodyping.",
+   "b": "amlodipine",
+   "kept": true,
+   "score": 0.7619047619047619,
+   "sources": [
+    "propose:hw20",
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "amyloidipin",
+   "b": "amlodipine",
+   "kept": true,
+   "score": 0.8571428571428571,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:q9-fx-none",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "anemia",
+   "b": "anaemia",
+   "kept": true,
+   "score": 0.9230769230769231,
+   "sources": [
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "anemia",
+   "b": "asthma",
+   "kept": false,
+   "score": 0.5,
+   "sources": [
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q9-fx-gloss",
+    "fixlog:t-fx-gloss"
+   ]
+  },
+  {
+   "a": "anemia case",
+   "b": "anaemia case",
+   "kept": true,
+   "score": 0.9523809523809523,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q9-fx-both",
+    "fixlog:t-fx-both"
+   ]
+  },
+  {
+   "a": "anemia case",
+   "b": "anemia",
+   "kept": true,
+   "score": 0.75,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss"
+   ]
+  },
+  {
+   "a": "anemia case",
+   "b": "anemia cases",
+   "kept": true,
+   "score": 0.9523809523809523,
+   "sources": [
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "anemia risk",
+   "b": "anaemia risk",
+   "kept": true,
+   "score": 0.9523809523809523,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q5-fx-both",
+    "fixlog:t-fx-both"
+   ]
+  },
+  {
+   "a": "ankle swelling",
+   "b": "bilateral ankle oedema",
+   "kept": false,
+   "score": 0.36363636363636365,
+   "sources": [
+    "fixlog:q5-fx-both"
+   ]
+  },
+  {
+   "a": "ankyl",
+   "b": "ankle",
+   "kept": true,
+   "score": 0.8,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q9-fx-both",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "ankyl",
+   "b": "ankylotic",
+   "kept": true,
+   "score": 0.7142857142857143,
+   "sources": [
+    "fixlog:q5-fx-lookup-nofacts"
+   ]
+  },
+  {
+   "a": "ankyl",
+   "b": "bilateral ankle",
+   "kept": false,
+   "score": 0.42105263157894735,
+   "sources": [
+    "fixlog:q4-fx-gloss",
+    "fixlog:q5-fx-gloss",
+    "fixlog:t-fx-gloss"
+   ]
+  },
+  {
+   "a": "ankyl edema",
+   "b": "ankle edema",
+   "kept": true,
+   "score": 0.9,
+   "sources": [
+    "fixlog:q4-fx-lookup",
+    "fixlog:q4-fx-none",
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "ankyl edema",
+   "b": "ankle oedema",
+   "kept": true,
+   "score": 0.8571428571428571,
+   "sources": [
+    "fixlog:q9-fx-gloss"
+   ]
+  },
+  {
+   "a": "anormal",
+   "b": "abnormal",
+   "kept": true,
+   "score": 0.9333333333333333,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "as two",
+   "b": "asthma",
+   "kept": false,
+   "score": 0.5454545454545454,
+   "sources": [
+    "fixlog:q4-fx-gloss",
+    "fixlog:q5-fx-gloss",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss"
+   ]
+  },
+  {
+   "a": "as two is",
+   "b": "asthma is",
+   "kept": true,
+   "score": 0.6666666666666666,
+   "sources": [
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "asis",
+   "b": "anaemia",
+   "kept": false,
+   "score": 0.36363636363636365,
+   "sources": [
+    "fixlog:q9-fx-gloss"
+   ]
+  },
+  {
+   "a": "asis",
+   "b": "anemia",
+   "kept": false,
+   "score": 0.4,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q5-fx-both",
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-none",
+    "fixlog:t-fx-both"
+   ]
+  },
+  {
+   "a": "asis",
+   "b": "asthma",
+   "kept": false,
+   "score": 0.4,
+   "sources": [
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q5-fx-gloss",
+    "fixlog:t-fx-gloss"
+   ]
+  },
+  {
+   "a": "aspects",
+   "b": "aspirin",
+   "kept": false,
+   "score": 0.42857142857142855,
+   "sources": [
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "atolvastatin",
+   "b": "atorvastatin",
+   "kept": true,
+   "score": 0.9166666666666666,
+   "sources": [
+    "propose:hw15",
+    "propose:hw20",
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "atropastatin",
+   "b": "atorvastatin",
+   "kept": true,
+   "score": 0.8333333333333334,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:q9-fx-none",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "baricus",
+   "b": "varicose",
+   "kept": true,
+   "score": 0.6666666666666666,
+   "sources": [
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "baricus veins",
+   "b": "varicose veins",
+   "kept": true,
+   "score": 0.8,
+   "sources": [
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:q9-fx-both",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "better reading",
+   "b": "better sleeping",
+   "kept": true,
+   "score": 0.7407407407407407,
+   "sources": [
+    "fixlog:q4-fx-lookup"
+   ]
+  },
+  {
+   "a": "better reading all day",
+   "b": "better all day",
+   "kept": true,
+   "score": 0.7741935483870968,
+   "sources": [
+    "fixlog:c-fx-both",
+    "fixlog:c-fx-gloss",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss"
+   ]
+  },
+  {
+   "a": "better reading all day",
+   "b": "better sleeping all day",
+   "kept": true,
+   "score": 0.8205128205128205,
+   "sources": [
+    "fixlog:q4-fx-none"
+   ]
+  },
+  {
+   "a": "blody pine",
+   "b": "blood",
+   "kept": false,
+   "score": 0.5714285714285714,
+   "sources": [
+    "propose:hw15"
+   ]
+  },
+  {
+   "a": "bloody pine",
+   "b": "amlodipine",
+   "kept": true,
+   "score": 0.7,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q5-fx-both",
+    "fixlog:q9-fx-both",
+    "fixlog:t-fx-both"
+   ]
+  },
+  {
+   "a": "bloody pine",
+   "b": "beta blocker",
+   "kept": false,
+   "score": 0.38095238095238093,
+   "sources": [
+    "named"
+   ]
+  },
+  {
+   "a": "bloody pine",
+   "b": "blood pressure",
+   "kept": true,
+   "score": 0.6086956521739131,
+   "sources": [
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:q9-fx-gloss",
+    "fixlog:q9-fx-none",
+    "fixlog:t-fx-gloss",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "bradycadia, spirometer.",
+   "b": "bradycardia, spirometry.",
+   "kept": true,
+   "score": 0.926829268292683,
+   "sources": [
+    "propose:hw15",
+    "propose:hw20"
+   ]
+  },
+  {
+   "a": "breadliness",
+   "b": "breathlessness",
+   "kept": true,
+   "score": 0.72,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:q9-fx-none",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "breadness",
+   "b": "breathlessness",
+   "kept": true,
+   "score": 0.6956521739130435,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "breadness",
+   "b": "broadness",
+   "kept": true,
+   "score": 0.8888888888888888,
+   "sources": [
+    "fixlog:q4-fx-none",
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "cardiovascular one",
+   "b": "cardiovascular disease",
+   "kept": true,
+   "score": 0.7894736842105263,
+   "sources": [
+    "fixlog:q4-fx-none"
+   ]
+  },
+  {
+   "a": "challenge point",
+   "b": "checklist point",
+   "kept": false,
+   "score": 0.5714285714285714,
+   "sources": [
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "challenge point",
+   "b": "dechallenge point",
+   "kept": true,
+   "score": 0.9333333333333333,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss"
+   ]
+  },
+  {
+   "a": "chronic condition programs",
+   "b": "chronic care programs",
+   "kept": true,
+   "score": 0.7441860465116279,
+   "sources": [
+    "fixlog:c-fx-gloss",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q5-fx-gloss",
+    "fixlog:t-fx-gloss"
+   ]
+  },
+  {
+   "a": "chronic conditions",
+   "b": "chronic kidney disease",
+   "kept": false,
+   "score": 0.5945945945945946,
+   "sources": [
+    "fixlog:c-fx-both",
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "confuser",
+   "b": "confuse",
+   "kept": true,
+   "score": 0.9333333333333333,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss"
+   ]
+  },
+  {
+   "a": "confuser",
+   "b": "confused",
+   "kept": true,
+   "score": 0.875,
+   "sources": [
+    "fixlog:q4-fx-none"
+   ]
+  },
+  {
+   "a": "confuser",
+   "b": "confusing",
+   "kept": true,
+   "score": 0.7058823529411765,
+   "sources": [
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "console",
+   "b": "consult",
+   "kept": true,
+   "score": 0.7142857142857143,
+   "sources": [
+    "fixlog:c-fx-both",
+    "fixlog:c-fx-gloss",
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "console",
+   "b": "consultation",
+   "kept": false,
+   "score": 0.5263157894736842,
+   "sources": [
+    "fixlog:q4-fx-none"
+   ]
+  },
+  {
+   "a": "console double day.",
+   "b": "cultural",
+   "kept": false,
+   "score": 0.3333333333333333,
+   "sources": [
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "console there",
+   "b": "COPD",
+   "kept": false,
+   "score": 0.25,
+   "sources": [
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "console there",
+   "b": "consult there",
+   "kept": true,
+   "score": 0.8333333333333334,
+   "sources": [
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "control",
+   "b": "course",
+   "kept": false,
+   "score": 0.46153846153846156,
+   "sources": [
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "control.",
+   "b": "COPD.",
+   "kept": false,
+   "score": 0.36363636363636365,
+   "sources": [
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "could actually",
+   "b": "COPD",
+   "kept": false,
+   "score": 0.35294117647058826,
+   "sources": [
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "could be confuser",
+   "b": "could be confused",
+   "kept": true,
+   "score": 0.9333333333333333,
+   "sources": [
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "couple more",
+   "b": "couple more weeks",
+   "kept": true,
+   "score": 0.8,
+   "sources": [
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "course we got it",
+   "b": "COPD",
+   "kept": false,
+   "score": 0.23529411764705882,
+   "sources": [
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "decondition",
+   "b": "deconditioning",
+   "kept": true,
+   "score": 0.88,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:q9-fx-gloss",
+    "fixlog:q9-fx-none",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "did not anormal this",
+   "b": "did not have abnormal",
+   "kept": true,
+   "score": 0.7428571428571429,
+   "sources": [
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "differentials the positive",
+   "b": "differential",
+   "kept": true,
+   "score": 0.6666666666666666,
+   "sources": [
+    "propose:hw20"
+   ]
+  },
+  {
+   "a": "edema",
+   "b": "asthma",
+   "kept": false,
+   "score": 0.36363636363636365,
+   "sources": [
+    "fixlog:q4-fx-gloss",
+    "fixlog:q5-fx-gloss",
+    "fixlog:t-fx-gloss"
+   ]
+  },
+  {
+   "a": "edema",
+   "b": "epinephrine",
+   "kept": false,
+   "score": 0.25,
+   "sources": [
+    "fixlog:q4-fx-none"
+   ]
+  },
+  {
+   "a": "edema",
+   "b": "inhaled",
+   "kept": false,
+   "score": 0.3333333333333333,
+   "sources": [
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "edema",
+   "b": "inhaler",
+   "kept": false,
+   "score": 0.16666666666666666,
+   "sources": [
+    "fixlog:q4-fx-lookup"
+   ]
+  },
+  {
+   "a": "edema",
+   "b": "oedema",
+   "kept": true,
+   "score": 0.9090909090909091,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:q9-fx-both",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "electoral",
+   "b": "electrolyte",
+   "kept": true,
+   "score": 0.7,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q4-fx-none"
+   ]
+  },
+  {
+   "a": "electoral levels",
+   "b": "electrolyte levels",
+   "kept": true,
+   "score": 0.8125,
+   "sources": [
+    "fixlog:q4-fx-gloss",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:q9-fx-none",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "end side",
+   "b": "NSAID",
+   "kept": true,
+   "score": 0.6666666666666666,
+   "sources": [
+    "propose:hw15",
+    "propose:hw20"
+   ]
+  },
+  {
+   "a": "end side fluid",
+   "b": "NSAID flu",
+   "kept": true,
+   "score": 0.7,
+   "sources": [
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "endside",
+   "b": "end-stage",
+   "kept": true,
+   "score": 0.6666666666666666,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q9-fx-none",
+    "fixlog:t-fx-gloss"
+   ]
+  },
+  {
+   "a": "endside",
+   "b": "indapamide",
+   "kept": false,
+   "score": 0.5882352941176471,
+   "sources": [
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q9-fx-both",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "endside",
+   "b": "indside",
+   "kept": true,
+   "score": 0.8571428571428571,
+   "sources": [
+    "fixlog:q5-fx-lookup-nofacts"
+   ]
+  },
+  {
+   "a": "endside",
+   "b": "peripheral",
+   "kept": false,
+   "score": 0.35294117647058826,
+   "sources": [
+    "fixlog:q9-fx-gloss"
+   ]
+  },
+  {
+   "a": "especially",
+   "b": "aspirin in",
+   "kept": false,
+   "score": 0.3157894736842105,
+   "sources": [
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "especially something going on",
+   "b": "especially something going wrong",
+   "kept": true,
+   "score": 0.9454545454545454,
+   "sources": [
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "exceptional breathliness",
+   "b": "exertional breathlessness",
+   "kept": true,
+   "score": 0.851063829787234,
+   "sources": [
+    "propose:hw15"
+   ]
+  },
+  {
+   "a": "extension",
+   "b": "exertion",
+   "kept": true,
+   "score": 0.7058823529411765,
+   "sources": [
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:q9-fx-gloss",
+    "fixlog:q9-fx-none",
+    "fixlog:t-fx-gloss",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "extension",
+   "b": "exertional breathlessness",
+   "kept": false,
+   "score": 0.36363636363636365,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q5-fx-both",
+    "fixlog:q9-fx-both",
+    "fixlog:t-fx-both"
+   ]
+  },
+  {
+   "a": "fluid overload",
+   "b": "fluid accumulation",
+   "kept": false,
+   "score": 0.4,
+   "sources": [
+    "fixlog:q4-fx-both"
+   ]
+  },
+  {
+   "a": "full blood test",
+   "b": "full blood count",
+   "kept": true,
+   "score": 0.7407407407407407,
+   "sources": [
+    "fixlog:q9-fx-gloss",
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "generate this in",
+   "b": "generate these in",
+   "kept": true,
+   "score": 0.896551724137931,
+   "sources": [
+    "fixlog:q4-fx-both"
+   ]
+  },
+  {
+   "a": "glycata",
+   "b": "glycated",
+   "kept": true,
+   "score": 0.8,
+   "sources": [
+    "fixlog:q4-fx-none"
+   ]
+  },
+  {
+   "a": "glycata hemoglobin",
+   "b": "glycated haemoglobin",
+   "kept": true,
+   "score": 0.8888888888888888,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "glycata hemoglobin",
+   "b": "glycated hemoglobin",
+   "kept": true,
+   "score": 0.9142857142857143,
+   "sources": [
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "gonna",
+   "b": "going to",
+   "kept": false,
+   "score": 0.5,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:q9-fx-both",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "got it",
+   "b": "got them",
+   "kept": true,
+   "score": 0.6666666666666666,
+   "sources": [
+    "fixlog:q4-fx-none"
+   ]
+  },
+  {
+   "a": "half a square",
+   "b": "half a block",
+   "kept": false,
+   "score": 0.47619047619047616,
+   "sources": [
+    "fixlog:c-fx-gloss",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:q9-fx-none",
+    "fixlog:t-fx-gloss"
+   ]
+  },
+  {
+   "a": "have diabetes",
+   "b": "have type 2 diabetes",
+   "kept": true,
+   "score": 0.8275862068965517,
+   "sources": [
+    "fixlog:q4-fx-both"
+   ]
+  },
+  {
+   "a": "haven't",
+   "b": "have",
+   "kept": true,
+   "score": 0.8,
+   "sources": [
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "he inaler",
+   "b": "inhaler",
+   "kept": true,
+   "score": 0.8,
+   "sources": [
+    "propose:hw15",
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "hideo",
+   "b": "video",
+   "kept": true,
+   "score": 0.8,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "hideo bottom",
+   "b": "hideout",
+   "kept": true,
+   "score": 0.6666666666666666,
+   "sources": [
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "hydrochlorothiacy",
+   "b": "hydrochlorothiazide",
+   "kept": true,
+   "score": 0.8333333333333334,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-none",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "hydrochlorothiacy,",
+   "b": "hydrochlorothiazide,",
+   "kept": true,
+   "score": 0.8333333333333334,
+   "sources": [
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "hyperprofen",
+   "b": "NSAID",
+   "kept": false,
+   "score": 0.125,
+   "sources": [
+    "fixlog:q9-fx-gloss"
+   ]
+  },
+  {
+   "a": "hyperprofen",
+   "b": "NSAIDs",
+   "kept": false,
+   "score": 0.11764705882352941,
+   "sources": [
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "hyperprofen",
+   "b": "hydrochlorothiazide",
+   "kept": false,
+   "score": 0.3333333333333333,
+   "sources": [
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-gloss",
+    "fixlog:t-fx-gloss",
+    "named"
+   ]
+  },
+  {
+   "a": "hyperprofen",
+   "b": "ibuprofen",
+   "kept": true,
+   "score": 0.6,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:q9-fx-both",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-lookup",
+    "named"
+   ]
+  },
+  {
+   "a": "hypertherylism",
+   "b": "hyperlipidemia",
+   "kept": false,
+   "score": 0.5714285714285714,
+   "sources": [
+    "fixlog:q4-fx-none"
+   ]
+  },
+  {
+   "a": "hypertherylism",
+   "b": "hyperthyroidism",
+   "kept": true,
+   "score": 0.7586206896551724,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:q9-fx-none",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "hypertherylism.",
+   "b": "hyperthyroidism.",
+   "kept": true,
+   "score": 0.7586206896551724,
+   "sources": [
+    "propose:hw15",
+    "propose:hw20",
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "in other",
+   "b": "in other regions",
+   "kept": true,
+   "score": 0.6666666666666666,
+   "sources": [
+    "fixlog:q4-fx-both"
+   ]
+  },
+  {
+   "a": "in their",
+   "b": "inhaler",
+   "kept": true,
+   "score": 0.7142857142857143,
+   "sources": [
+    "fixlog:q4-fx-lookup"
+   ]
+  },
+  {
+   "a": "in-help",
+   "b": "inhaler",
+   "kept": true,
+   "score": 0.6153846153846154,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:q9-fx-none",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "inaler",
+   "b": "inhaler",
+   "kept": true,
+   "score": 0.9230769230769231,
+   "sources": [
+    "propose:hw20"
+   ]
+  },
+  {
+   "a": "inhale and",
+   "b": "inhaler",
+   "kept": true,
+   "score": 0.75,
+   "sources": [
+    "propose:hw20"
+   ]
+  },
+  {
+   "a": "insulin there",
+   "b": "insulin detemir",
+   "kept": true,
+   "score": 0.7692307692307693,
+   "sources": [
+    "fixlog:q4-fx-both"
+   ]
+  },
+  {
+   "a": "insulin there",
+   "b": "insulin in",
+   "kept": true,
+   "score": 0.6666666666666666,
+   "sources": [
+    "fixlog:q4-fx-lookup"
+   ]
+  },
+  {
+   "a": "it doesn't use",
+   "b": "it doesn't usually use",
+   "kept": true,
+   "score": 0.7586206896551724,
+   "sources": [
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "kidney function",
+   "b": "liver function",
+   "kept": true,
+   "score": 0.7407407407407407,
+   "sources": [
+    "fixlog:q4-fx-lookup"
+   ]
+  },
+  {
+   "a": "last documented bowl",
+   "b": "last documented baseline",
+   "kept": true,
+   "score": 0.8,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q5-fx-gloss",
+    "fixlog:t-fx-gloss"
+   ]
+  },
+  {
+   "a": "last documented bowl",
+   "b": "last documented goal",
+   "kept": true,
+   "score": 0.8888888888888888,
+   "sources": [
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "last documented bowl",
+   "b": "last documented value",
+   "kept": true,
+   "score": 0.8108108108108109,
+   "sources": [
+    "fixlog:c-fx-both",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:t-fx-both"
+   ]
+  },
+  {
+   "a": "last documented bowl",
+   "b": "last documented walk",
+   "kept": true,
+   "score": 0.8888888888888888,
+   "sources": [
+    "fixlog:c-fx-gloss",
+    "fixlog:q4-fx-none"
+   ]
+  },
+  {
+   "a": "like two.",
+   "b": "type 2.",
+   "kept": false,
+   "score": 0.16666666666666666,
+   "sources": [
+    "propose:hw20"
+   ]
+  },
+  {
+   "a": "living",
+   "b": "leading",
+   "kept": true,
+   "score": 0.6153846153846154,
+   "sources": [
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "new medication maybe",
+   "b": "new medication may be",
+   "kept": true,
+   "score": 1.0,
+   "sources": [
+    "fixlog:c-fx-both",
+    "fixlog:c-fx-gloss",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss"
+   ]
+  },
+  {
+   "a": "no studying",
+   "b": "no nystatin",
+   "kept": true,
+   "score": 0.6,
+   "sources": [
+    "fixlog:q4-fx-lookup"
+   ]
+  },
+  {
+   "a": "no studying",
+   "b": "no statin",
+   "kept": true,
+   "score": 0.6666666666666666,
+   "sources": [
+    "fixlog:q4-fx-both"
+   ]
+  },
+  {
+   "a": "no studying associated",
+   "b": "no statin associated",
+   "kept": true,
+   "score": 0.8421052631578947,
+   "sources": [
+    "fixlog:q9-fx-both"
+   ]
+  },
+  {
+   "a": "nodes",
+   "b": "notes",
+   "kept": true,
+   "score": 0.8,
+   "sources": [
+    "fixlog:q4-fx-gloss",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss"
+   ]
+  },
+  {
+   "a": "normal hygiene process",
+   "b": "hygiene practices",
+   "kept": true,
+   "score": 0.6666666666666666,
+   "sources": [
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "normal hygiene process",
+   "b": "normal hygiene practices",
+   "kept": true,
+   "score": 0.8571428571428571,
+   "sources": [
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss"
+   ]
+  },
+  {
+   "a": "not control",
+   "b": "under control",
+   "kept": true,
+   "score": 0.7272727272727273,
+   "sources": [
+    "fixlog:c-fx-both",
+    "fixlog:c-fx-gloss",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "objectivize",
+   "b": "objectify",
+   "kept": true,
+   "score": 0.7,
+   "sources": [
+    "fixlog:q9-fx-both"
+   ]
+  },
+  {
+   "a": "objectivize",
+   "b": "objectivise",
+   "kept": true,
+   "score": 0.9090909090909091,
+   "sources": [
+    "fixlog:c-fx-gloss",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q9-fx-gloss",
+    "fixlog:q9-fx-none",
+    "fixlog:t-fx-gloss"
+   ]
+  },
+  {
+   "a": "octognea",
+   "b": "oedema",
+   "kept": false,
+   "score": 0.42857142857142855,
+   "sources": [
+    "fixlog:q4-fx-lookup",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:q9-fx-none",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "octognea",
+   "b": "orthopnoea",
+   "kept": true,
+   "score": 0.6666666666666666,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:t-fx-gloss"
+   ]
+  },
+  {
+   "a": "only ankle swelling",
+   "b": "only ankle oedema",
+   "kept": true,
+   "score": 0.625,
+   "sources": [
+    "fixlog:t-fx-both"
+   ]
+  },
+  {
+   "a": "optopnea",
+   "b": "dyspnoea",
+   "kept": false,
+   "score": 0.5,
+   "sources": [
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "optopnea",
+   "b": "orthopnea",
+   "kept": true,
+   "score": 0.8235294117647058,
+   "sources": [
+    "fixlog:q4-fx-none"
+   ]
+  },
+  {
+   "a": "optopnea",
+   "b": "orthopnoea",
+   "kept": true,
+   "score": 0.7777777777777778,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "orthopny",
+   "b": "orthopnea",
+   "kept": true,
+   "score": 0.8235294117647058,
+   "sources": [
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "orthopny",
+   "b": "orthopnoea",
+   "kept": true,
+   "score": 0.7777777777777778,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "other conditions the patient",
+   "b": "oxycodone",
+   "kept": false,
+   "score": 0.4117647058823529,
+   "sources": [
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "over 100",
+   "b": "over 100 mmHg",
+   "kept": true,
+   "score": 0.7777777777777778,
+   "sources": [
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "over 100",
+   "b": "over 180",
+   "kept": true,
+   "score": 0.8571428571428571,
+   "sources": [
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "part number four",
+   "b": "part four",
+   "kept": true,
+   "score": 0.7272727272727273,
+   "sources": [
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss"
+   ]
+  },
+  {
+   "a": "partial recovery,",
+   "b": "paracetamol",
+   "kept": false,
+   "score": 0.46153846153846156,
+   "sources": [
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "patient",
+   "b": "spacer",
+   "kept": false,
+   "score": 0.46153846153846156,
+   "sources": [
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "patient in",
+   "b": "patient is",
+   "kept": true,
+   "score": 0.8888888888888888,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-lookup"
+   ]
+  },
+  {
+   "a": "prevented",
+   "b": "preventer",
+   "kept": true,
+   "score": 0.8888888888888888,
+   "sources": [
+    "fixlog:q4-fx-gloss",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q9-fx-gloss",
+    "fixlog:t-fx-gloss"
+   ]
+  },
+  {
+   "a": "prevented use",
+   "b": "preventer use",
+   "kept": true,
+   "score": 0.9166666666666666,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "pulmonary edema",
+   "b": "pulmonary oedema",
+   "kept": true,
+   "score": 0.9655172413793104,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss"
+   ]
+  },
+  {
+   "a": "pulmonary findings",
+   "b": "pulmonary oedema",
+   "kept": true,
+   "score": 0.625,
+   "sources": [
+    "fixlog:q9-fx-gloss"
+   ]
+  },
+  {
+   "a": "reach the chops",
+   "b": "reach the 50 meters",
+   "kept": true,
+   "score": 0.6206896551724138,
+   "sources": [
+    "fixlog:q4-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts"
+   ]
+  },
+  {
+   "a": "reach the chops",
+   "b": "reach the chair",
+   "kept": true,
+   "score": 0.7692307692307693,
+   "sources": [
+    "fixlog:c-fx-gloss",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q5-fx-gloss",
+    "fixlog:t-fx-gloss"
+   ]
+  },
+  {
+   "a": "reach the chops",
+   "b": "reach the shops",
+   "kept": true,
+   "score": 0.9230769230769231,
+   "sources": [
+    "fixlog:q4-fx-none",
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "really severe",
+   "b": "relieve",
+   "kept": true,
+   "score": 0.631578947368421,
+   "sources": [
+    "fixlog:q4-fx-lookup"
+   ]
+  },
+  {
+   "a": "rechalling",
+   "b": "re-challenge",
+   "kept": true,
+   "score": 0.8571428571428571,
+   "sources": [
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "rechalling",
+   "b": "rechallenge",
+   "kept": true,
+   "score": 0.8571428571428571,
+   "sources": [
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss"
+   ]
+  },
+  {
+   "a": "rechalling part",
+   "b": "re-challenging part",
+   "kept": true,
+   "score": 0.9032258064516129,
+   "sources": [
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "rechalling part",
+   "b": "rechallenge part",
+   "kept": true,
+   "score": 0.896551724137931,
+   "sources": [
+    "fixlog:q5-fx-both",
+    "fixlog:t-fx-both"
+   ]
+  },
+  {
+   "a": "reconnect it",
+   "b": "reconnect them",
+   "kept": true,
+   "score": 0.8333333333333334,
+   "sources": [
+    "fixlog:c-fx-gloss",
+    "fixlog:q5-fx-gloss"
+   ]
+  },
+  {
+   "a": "regulator vaccination",
+   "b": "regimen vaccination",
+   "kept": true,
+   "score": 0.7368421052631579,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "regulator vaccination use",
+   "b": "atorvastatin use",
+   "kept": true,
+   "score": 0.6842105263157895,
+   "sources": [
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss"
+   ]
+  },
+  {
+   "a": "regulator vaccination use",
+   "b": "regular medication use",
+   "kept": true,
+   "score": 0.7441860465116279,
+   "sources": [
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "regulatory",
+   "b": "regular adverse in",
+   "kept": false,
+   "score": 0.5384615384615384,
+   "sources": [
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "rely like",
+   "b": "reliever",
+   "kept": true,
+   "score": 0.625,
+   "sources": [
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "residual diagnosis",
+   "b": "residual diagnoses",
+   "kept": true,
+   "score": 0.9411764705882353,
+   "sources": [
+    "fixlog:q4-fx-none"
+   ]
+  },
+  {
+   "a": "respiratory red",
+   "b": "respiratory rate",
+   "kept": true,
+   "score": 0.896551724137931,
+   "sources": [
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "respiratory red",
+   "b": "respiratory red flags",
+   "kept": true,
+   "score": 0.8484848484848485,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q9-fx-gloss",
+    "fixlog:t-fx-both"
+   ]
+  },
+  {
+   "a": "say, Okay,",
+   "b": "safety",
+   "kept": false,
+   "score": 0.46153846153846156,
+   "sources": [
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "self care",
+   "b": "self-care",
+   "kept": true,
+   "score": 1.0,
+   "sources": [
+    "propose:hw15",
+    "propose:hw20",
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "self care. GLP one",
+   "b": "self-care. GLP-1",
+   "kept": true,
+   "score": 0.8461538461538461,
+   "sources": [
+    "propose:hw15",
+    "propose:hw20",
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "semaglal",
+   "b": "semaglutide",
+   "kept": true,
+   "score": 0.631578947368421,
+   "sources": [
+    "fixlog:c-fx-gloss",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-gloss",
+    "fixlog:t-fx-gloss"
+   ]
+  },
+  {
+   "a": "semaglal diet",
+   "b": "semaglutide",
+   "kept": true,
+   "score": 0.6956521739130435,
+   "sources": [
+    "fixlog:c-fx-both",
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:q9-fx-none",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "semaglotide",
+   "b": "semaglutide",
+   "kept": true,
+   "score": 0.9090909090909091,
+   "sources": [
+    "fixlog:c-fx-both",
+    "fixlog:c-fx-gloss",
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-lookup",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:q9-fx-none",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "semi diet",
+   "b": "semaglutide",
+   "kept": true,
+   "score": 0.631578947368421,
+   "sources": [
+    "propose:hw15",
+    "propose:hw20",
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "side effects",
+   "b": "side effect",
+   "kept": true,
+   "score": 0.9523809523809523,
+   "sources": [
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "so could",
+   "b": "SGLT2",
+   "kept": false,
+   "score": 0.3333333333333333,
+   "sources": [
+    "fixlog:q4-fx-lookup"
+   ]
+  },
+  {
+   "a": "some nodes",
+   "b": "some notes",
+   "kept": true,
+   "score": 0.8888888888888888,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-lookup"
+   ]
+  },
+  {
+   "a": "some nodes",
+   "b": "some nurses",
+   "kept": true,
+   "score": 0.7368421052631579,
+   "sources": [
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "stalls",
+   "b": "stints",
+   "kept": false,
+   "score": 0.5,
+   "sources": [
+    "fixlog:q5-fx-lookup-nofacts"
+   ]
+  },
+  {
+   "a": "step down",
+   "b": "step-down",
+   "kept": true,
+   "score": 1.0,
+   "sources": [
+    "fixlog:q4-fx-none"
+   ]
+  },
+  {
+   "a": "store the data",
+   "b": "store the drug",
+   "kept": true,
+   "score": 0.75,
+   "sources": [
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "studying",
+   "b": "statutory",
+   "kept": false,
+   "score": 0.47058823529411764,
+   "sources": [
+    "fixlog:q4-fx-gloss",
+    "fixlog:q5-fx-gloss",
+    "fixlog:t-fx-gloss"
+   ]
+  },
+  {
+   "a": "studying associated",
+   "b": "statin associated",
+   "kept": true,
+   "score": 0.8235294117647058,
+   "sources": [
+    "fixlog:q9-fx-gloss",
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "technically,",
+   "b": "tachycardia day,",
+   "kept": false,
+   "score": 0.48,
+   "sources": [
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "technically, thank you,",
+   "b": "technique leading",
+   "kept": false,
+   "score": 0.45714285714285713,
+   "sources": [
+    "propose:hw15",
+    "propose:hw20"
+   ]
+  },
+  {
+   "a": "that's a magnetite,",
+   "b": "at semaglutide, uh,",
+   "kept": true,
+   "score": 0.6,
+   "sources": [
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "the pharmacy",
+   "b": "the clinical records",
+   "kept": false,
+   "score": 0.41379310344827586,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-lookup"
+   ]
+  },
+  {
+   "a": "themselves, they",
+   "b": "them self-care",
+   "kept": true,
+   "score": 0.6153846153846154,
+   "sources": [
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "they didn't",
+   "b": "insulin detemir",
+   "kept": false,
+   "score": 0.2608695652173913,
+   "sources": [
+    "fixlog:q9-fx-both"
+   ]
+  },
+  {
+   "a": "to check",
+   "b": "MedsCheck",
+   "kept": true,
+   "score": 0.625,
+   "sources": [
+    "fixlog:q4-fx-lookup"
+   ]
+  },
+  {
+   "a": "too badly",
+   "b": "too bad",
+   "kept": true,
+   "score": 0.8571428571428571,
+   "sources": [
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "two I2 diagnosis",
+   "b": "two ICD diagnosis",
+   "kept": true,
+   "score": 0.896551724137931,
+   "sources": [
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "two meters long",
+   "b": "two meters tall",
+   "kept": true,
+   "score": 0.7692307692307693,
+   "sources": [
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "two meters long",
+   "b": "two metres long",
+   "kept": true,
+   "score": 0.9230769230769231,
+   "sources": [
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "under control",
+   "b": "uncontrolled",
+   "kept": true,
+   "score": 0.75,
+   "sources": [
+    "fixlog:q9-fx-gloss"
+   ]
+  },
+  {
+   "a": "varycous",
+   "b": "varicose",
+   "kept": true,
+   "score": 0.75,
+   "sources": [
+    "propose:hw15",
+    "propose:hw20",
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "venus",
+   "b": "venous",
+   "kept": true,
+   "score": 0.9090909090909091,
+   "sources": [
+    "propose:hw15",
+    "propose:hw20",
+    "propose:hw30"
+   ]
+  },
+  {
+   "a": "volume of",
+   "b": "BMI of",
+   "kept": false,
+   "score": 0.46153846153846156,
+   "sources": [
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "walk-intolerance",
+   "b": "walk intolerance",
+   "kept": true,
+   "score": 1.0,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q9-fx-both",
+    "fixlog:q9-fx-gloss",
+    "fixlog:q9-fx-none",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss"
+   ]
+  },
+  {
+   "a": "walking leaders",
+   "b": "walking aids",
+   "kept": true,
+   "score": 0.8,
+   "sources": [
+    "fixlog:q9-fx-none"
+   ]
+  },
+  {
+   "a": "walking leaders",
+   "b": "walking levels",
+   "kept": true,
+   "score": 0.8148148148148148,
+   "sources": [
+    "fixlog:q9-fx-gloss"
+   ]
+  },
+  {
+   "a": "walks to",
+   "b": "takes",
+   "kept": false,
+   "score": 0.5,
+   "sources": [
+    "fixlog:q4-fx-lookup"
+   ]
+  },
+  {
+   "a": "weight is",
+   "b": "wheeze is",
+   "kept": false,
+   "score": 0.5,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-lookup"
+   ]
+  },
+  {
+   "a": "weight the patient",
+   "b": "weigh the patient",
+   "kept": true,
+   "score": 0.967741935483871,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:q9-fx-none",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "weight them",
+   "b": "weigh them",
+   "kept": true,
+   "score": 0.9473684210526315,
+   "sources": [
+    "fixlog:q4-fx-both",
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:q9-fx-none",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "without that",
+   "b": "without it",
+   "kept": true,
+   "score": 0.8,
+   "sources": [
+    "fixlog:q4-fx-gloss",
+    "fixlog:q4-fx-none",
+    "fixlog:q5-fx-both",
+    "fixlog:q5-fx-gloss",
+    "fixlog:q5-fx-lookup",
+    "fixlog:q5-fx-lookup-nofacts",
+    "fixlog:t-fx-both",
+    "fixlog:t-fx-gloss",
+    "fixlog:t-fx-lookup"
+   ]
+  },
+  {
+   "a": "you do",
+   "b": "do",
+   "kept": false,
+   "score": 0.5714285714285714,
+   "sources": [
+    "fixlog:q4-fx-lookup"
+   ]
+  }
+ ],
+ "span_limit": {
+  "max_chars": 32,
+  "max_words": 4
+ }
+}
