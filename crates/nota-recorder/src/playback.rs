@@ -24,7 +24,9 @@
 //! keeps both until the [`Playback`] is dropped:
 //!
 //! - The library's recording lock, exclusively ([`Recordings::quiet`]).
-//!   Every recording holds it shared, in this process or another, so
+//!   Every recording nota starts holds it shared, in this process or
+//!   another (a [`SessionWriter`](crate::session::SessionWriter) alone
+//!   doesn't take it), so
 //!   playing while any session records is refused with
 //!   [`PlaybackError::Recording`], before the session is looked at. While
 //!   a moment plays, no recording of any session can start, and no other
@@ -133,9 +135,7 @@ impl fmt::Display for PlaybackError {
             Self::RecordingLock(e) => {
                 write!(f, "couldn't check whether a session is recording: {e}")
             }
-            Self::Busy => f.write_str(
-                "can't play now: the session is being recorded or repaired, or already playing",
-            ),
+            Self::Busy => f.write_str("can't play now: the session is being repaired or recorded"),
             Self::Session(e) => write!(f, "couldn't open the session to play it: {e}"),
             Self::Store(e) => write!(f, "couldn't read the session from the library: {e}"),
             Self::Timeline(e) => write!(f, "the session's timing is not usable: {e}"),

@@ -1271,7 +1271,7 @@ mod startup_tests {
     #[test]
     fn startup_doesnt_retry_a_recording_in_use() {
         let error = PublishError::InUse(Use::Recording);
-        // The recording lock stays held regardless of free space.
+        // The session's lock stays held regardless of free space.
         assert!(!startup_space_error::<FakeStore>(&error));
     }
 

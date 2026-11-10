@@ -1906,3 +1906,26 @@ fn a_recording_doesnt_start_while_a_moment_plays() {
     let mut nota = recording(&tmp.0);
     stop_with_keys(&mut nota);
 }
+
+/// A recording lock that can't be taken for another reason (here a file
+/// where its directory goes) stops the start with that reason, not with
+/// "a moment is playing", and leaves no session behind.
+#[test]
+fn a_recording_lock_that_cant_be_taken_stops_the_start_with_its_reason() {
+    let tmp = TestDir::new("record-lock-file");
+    let _in_the_way = StdFs.create(&tmp.0.join("recording.lock")).unwrap();
+    let mut nota = Running::start_with(&tmp.0, &[]);
+    let status = nota.exits().expect("nota didn't give up");
+    assert!(!status.success(), "{status:?}");
+    let said = visible(&nota.output.lock().unwrap());
+    let lock = tmp.0.join("recording.lock");
+    assert!(
+        said.contains(&format!(
+            "the library's recording lock {} can't be taken: lock_dir needs a directory",
+            lock.display()
+        )),
+        "{said}"
+    );
+    assert!(!said.contains("a moment of a session is playing"), "{said}");
+    assert!(StdFs.list(&tmp.0.join("sessions")).unwrap().is_empty());
+}

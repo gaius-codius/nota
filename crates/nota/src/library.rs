@@ -148,11 +148,11 @@ impl Library {
         })
     }
 
-    /// The library's recording lock: held shared by every recording, and
-    /// exclusively by a moment playing (see
+    /// The library's recording lock, on `fs`: held shared by every
+    /// recording, and exclusively by a moment playing (see
     /// [`nota_recorder::session::Recordings`]).
-    pub(crate) fn recordings(&self) -> Recordings<StdFs> {
-        Recordings::new(StdFs, &self.root)
+    pub(crate) fn recordings_on<S: Fs>(&self, fs: S) -> Recordings<S> {
+        Recordings::new(fs, &self.root)
     }
 
     /// The library database's file.

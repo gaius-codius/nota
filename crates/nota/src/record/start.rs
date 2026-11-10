@@ -77,9 +77,6 @@ pub(super) struct Started<B: CaptureBackend> {
     pub(super) library: Library,
     pub(super) session: SessionId,
     pub(super) lock: SessionLock<RecordFs>,
-    /// Counts this recording in the library, so no moment plays while it
-    /// runs; let go with the session's lock.
-    pub(super) recording: RecordingLock<StdFs>,
     pub(super) captures: Vec<Capture<B::Stream>>,
     /// Keeps the machine from sleeping, if logind gave the lock; dropped
     /// once recording has ended.
@@ -92,6 +89,10 @@ pub(super) struct Started<B: CaptureBackend> {
     pub(super) live: JoinHandle<LiveEnd>,
     pub(super) saver: Saver,
     pub(super) recorder: JoinHandle<Recorded>,
+    /// Counts this recording in the library, so no moment plays while it
+    /// runs. Last, so that if it's dropped whole (a panic), the streams
+    /// have closed before a moment can play.
+    pub(super) recording: RecordingLock<RecordFs>,
 }
 
 /// The recorder thread's result.
@@ -166,9 +167,9 @@ fn start_with_notes<B: CaptureBackend>(
         None => Screen::enter(draws.clone().map(|d| (d, Arc::clone(clock))))?,
     };
 
-    let (library, recording) = open_library(library, &args.data)?;
+    let library = library.map_or_else(|| Library::open(&args.data), Ok)?;
     show_recovering(&mut screen);
-    let watch = recover(&library, args, notes)?;
+    let (watch, recording) = recover(&library, args, notes)?;
     if let Some(why) = stop_asked(&ui, &ui_events) {
         return Err(why.into());
     }
@@ -258,8 +259,8 @@ fn start_with_notes<B: CaptureBackend>(
         library,
         session: session.id,
         lock,
-        recording,
         captures: streams.captures,
+        recording,
         sleep,
         disk,
         publisher,
@@ -670,12 +671,13 @@ fn startup_failure(error: BoxError, notes: Vec<String>) -> BoxError {
     }
 }
 
-/// Recovers earlier sessions, then watches the disk for this start.
+/// Recovers earlier sessions, then watches the disk for this start and
+/// counts it in the library (see [`count_recording`]).
 fn recover(
     library: &Library,
     args: &RecordArgs,
     notes: &mut Vec<String>,
-) -> Result<Arc<DiskWatch<StdFs>>, BoxError> {
+) -> Result<(Arc<DiskWatch<StdFs>>, RecordingLock<RecordFs>), BoxError> {
     let ballast_len = ballast_length(args);
     // A ballast cut short by a crash at the last stop left its temp file:
     // it would take this recording's room until the next stop.
@@ -688,7 +690,9 @@ fn recover(
     }
     // Recovery has its own watch: a full disk it got past mustn't stop
     // the new recording. Hold whatever ballast is still there.
-    Ok(startup_watch(&StdFs, &args.data, ballast_len)?)
+    let watch = startup_watch(&StdFs, &args.data, ballast_len)?;
+    let recording = count_recording(library, &watch)?;
+    Ok((watch, recording))
 }
 
 /// A space failure rejects this start; other title failures remain notes.
@@ -761,23 +765,54 @@ fn start_error(error: std::io::Error) -> BoxError {
     }
 }
 
-/// The library in `data`, unless one was `handed` over, and the recording
-/// counted in it for as long as it runs, so no moment of any session plays
-/// meanwhile. It's counted before anything is made or salvaged, so a start
-/// refused while a moment plays leaves nothing behind.
-fn open_library(
-    handed: Option<Library>,
-    data: &std::path::Path,
-) -> Result<(Library, RecordingLock<StdFs>), BoxError> {
-    let library = handed.map_or_else(|| Library::open(data), Ok)?;
-    let recording = library.recordings().record().map_err(|e| -> BoxError {
+/// Counts the recording in `library` for as long as it runs, so no moment
+/// of any session plays meanwhile; refused while one is playing. It comes
+/// before the session is made, so a refused start leaves none behind, and
+/// after recovery, whose watch frees the ballast if the lock's directory
+/// (made the first time) finds the disk full.
+fn count_recording(
+    library: &Library,
+    watch: &Arc<DiskWatch<StdFs>>,
+) -> Result<RecordingLock<RecordFs>, BoxError> {
+    let recordings = library.recordings_on(watch.fs());
+    retry_start(recordings.record(), watch, || recordings.record()).map_err(|e| {
         if e.kind() == std::io::ErrorKind::WouldBlock {
             "a moment of a session is playing: stop it, then record".into()
+        } else if is_disk_full(&e) {
+            start_error(e)
         } else {
-            format!("couldn't check whether a moment is playing: {e}").into()
+            Box::new(LockRefused {
+                dir: recordings.dir().to_path_buf(),
+                source: e,
+            })
         }
-    })?;
-    Ok((library, recording))
+    })
+}
+
+/// The library's recording lock couldn't be taken, for another reason than
+/// a moment playing: what's at its directory, and why.
+#[derive(Debug)]
+struct LockRefused {
+    /// The lock's directory, for the user to look at.
+    dir: PathBuf,
+    source: std::io::Error,
+}
+
+impl std::fmt::Display for LockRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the library's recording lock {} can't be taken: {}",
+            self.dir.display(),
+            self.source
+        )
+    }
+}
+
+impl std::error::Error for LockRefused {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
 }
 
 /// Opens the new writer before any track can record audio.
@@ -2007,7 +2042,7 @@ mod salvage_note_tests {
         writer.start_track(MIC, &epoch).unwrap();
         writer.append(MIC, &[7; 50]).unwrap();
         writer.finish().unwrap();
-        // Release the recording lock so startup can salvage, rather than report in use.
+        // Release the session's lock so startup can salvage, rather than report in use.
         drop(lock);
         StdFs
             .create_dir(&session.audio().join("seg-t0-000000000000.flac"))

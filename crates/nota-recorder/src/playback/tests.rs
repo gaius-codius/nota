@@ -397,7 +397,7 @@ fn playing_is_refused_while_another_session_records() {
         "can't play now: a session is being recorded, or another moment is playing"
     );
     assert!(output.started.lock().unwrap().is_empty());
-    // Refused before the session was touched: it isn't left locked.
+    // The refusal doesn't leave the session locked.
     assert!(scene.session.lock().is_ok());
     // Once the recording is over the same call plays.
     drop(recording);
@@ -471,7 +471,7 @@ fn playing_is_refused_while_a_recording_runs() {
     assert!(matches!(refused, PlaybackError::Busy), "{refused}");
     assert_eq!(
         refused.to_string(),
-        "can't play now: the session is being recorded or repaired, or already playing"
+        "can't play now: the session is being repaired or recorded"
     );
     assert!(output.started.lock().unwrap().is_empty());
     // Once the recording is over the same call plays.
@@ -754,7 +754,7 @@ fn every_failure_has_a_message_for_the_card() {
         ),
         (
             PlaybackError::Busy,
-            "can't play now: the session is being recorded or repaired, or already playing",
+            "can't play now: the session is being repaired or recorded",
         ),
         (
             PlaybackError::Session(io()),
