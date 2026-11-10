@@ -19,8 +19,11 @@ required-features = ["fake-server"]
 
 [dependencies]
 nota-core = { path = "../nota-core" }
-# The requests to llama-server and its replies, as JSON.
-serde_json.workspace = true
+# The requests to llama-server and its replies, as JSON. With its keys in
+# the order written: llama-server's grammar follows the schema's order, so
+# a sorted schema makes the model answer before it names the candidate,
+# which changes its answers. Brings in indexmap, already in the tree.
+serde_json = { workspace = true, features = ["preserve_order"] }
 
 [dev-dependencies]
 nota-core = { path = "../nota-core", features = ["fake-clock"] }

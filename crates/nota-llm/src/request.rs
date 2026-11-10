@@ -104,6 +104,21 @@ mod tests {
         );
     }
 
+    /// The schema names the candidate before its answer, as the bench's
+    /// did: llama-server's grammar follows the schema's order, and a model
+    /// made to answer first answers differently.
+    #[test]
+    fn the_schema_names_the_candidate_before_its_answer() {
+        let sent = String::from_utf8(body(&English::new(None), &question(1))).unwrap();
+        let items = &sent[sent.find(r#""items""#).unwrap()..];
+        let (id, apply) = (
+            items.find(r#""id""#).unwrap(),
+            items.find(r#""apply""#).unwrap(),
+        );
+        assert!(id < apply, "{items}");
+        assert!(sent.starts_with(r#"{"temperature":0,"#), "{sent}");
+    }
+
     /// A question too big for the bench's 200 tokens is given more.
     #[test]
     fn a_big_question_is_given_more_tokens() {

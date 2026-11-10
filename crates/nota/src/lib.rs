@@ -8,7 +8,10 @@
 //!   for how it stops safely);
 //! - `nota engine asr`: the speech engine child, which `nota record`
 //!   starts and talks to over stdin and stdout, and the app starts for the
-//!   final pass after each recording (see `jobs` and `final_pass`).
+//!   final pass after each recording (see `jobs` and `final_pass`);
+//! - `nota engine llama-server PROGRAM ARGS…`: starts the local decider's
+//!   llama-server tied to the nota that ran it, so it ends when nota does
+//!   (see `nota_llm::lifeline`).
 //!
 //! The binary's `main` only calls [`main`]; the code is here so its tests
 //! can turn on the `fake-capture` feature.
@@ -47,7 +50,8 @@ const USAGE: &str = "\
 usage: nota [--data DIR] [--parakeet DIR --vad FILE]
        nota record [--title TEXT] [--data DIR] [--parakeet DIR --vad FILE]
                    [--mic NODE] [--system NODE]
-       nota engine asr --parakeet DIR --vad FILE [--threads N] [--pass live|final]";
+       nota engine asr --parakeet DIR --vad FILE [--threads N] [--pass live|final]
+       nota engine llama-server PROGRAM [ARGS...]";
 
 /// What was asked for.
 #[derive(Debug)]
@@ -56,6 +60,8 @@ enum Command {
     App(RecordArgs),
     Record(RecordArgs),
     EngineAsr(ModelPaths, ChunkerConfig),
+    /// `nota engine llama-server`: the server program and its arguments.
+    EngineLlama(Vec<OsString>),
     /// `nota engine fake`: the engine child with stand-in models (tests
     /// only).
     #[cfg(feature = "fake-capture")]
@@ -87,6 +93,11 @@ pub fn main(args: &[OsString]) -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => fail(&format!("nota engine asr: {err}"), 1),
         },
+        // Returns only if the server couldn't be started in its place.
+        Command::EngineLlama(server) => {
+            let err = nota_llm::lifeline::exec_tied(&server);
+            fail(&format!("nota engine llama-server: {err}"), 1)
+        }
         #[cfg(feature = "fake-capture")]
         Command::EngineFake(chunking) => match fake_engine::run(chunking) {
             Ok(()) => ExitCode::SUCCESS,
@@ -132,6 +143,12 @@ fn parse(args: &[OsString]) -> Result<Command, String> {
         Some("engine") if words.next().and_then(|a| a.to_str()) == Some("asr") => {
             parse_engine(words.as_slice())
                 .map(|(paths, chunking)| Command::EngineAsr(paths, chunking))
+        }
+        Some("engine") if args.get(1).and_then(|a| a.to_str()) == Some("llama-server") => {
+            match args.get(2..) {
+                Some(server) if !server.is_empty() => Ok(Command::EngineLlama(server.to_vec())),
+                _ => Err("nota engine llama-server needs the server's program".into()),
+            }
         }
         #[cfg(feature = "fake-capture")]
         Some("engine") if args.get(1).and_then(|a| a.to_str()) == Some("fake") => {
