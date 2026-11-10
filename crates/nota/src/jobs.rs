@@ -242,7 +242,8 @@ struct Loop<W, C, R> {
     shared: Arc<Shared>,
     /// The app's clock, used to space engine retries.
     clock: Arc<dyn Clock>,
-    /// When each job last stopped because its engine could not start.
+    /// When each job last stopped because its engine couldn't start or
+    /// stopped working, or it had none.
     retry_after: BTreeMap<JobId, SessionTime>,
 }
 
@@ -274,8 +275,10 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
     fn next(&self) -> Result<Option<Job>, StoreError> {
         let jobs = self.db.with(|db| db.jobs())?;
         for job in jobs {
-            let JobState::Waiting(waits) = job.state else {
-                continue;
+            let waits = match &job.state {
+                JobState::Waiting(waits) => *waits,
+                JobState::EngineDown(_) => Some(Wait::Engine),
+                _ => continue,
             };
             if self.retry_after.get(&job.id).is_some_and(|at| {
                 self.clock
@@ -291,8 +294,11 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
             if waits == Some(Wait::Space) && !self.room.room() {
                 continue;
             }
+            // A job whose engine failed, lacking one now, is rewritten
+            // too: nota has no engine this time, so the old reason is
+            // stale.
             if let Some(lacks) = self.worker.lacks(&job) {
-                if waits != Some(lacks) && waits != Some(Wait::Space) {
+                if job.state != JobState::Waiting(Some(lacks)) && waits != Some(Wait::Space) {
                     self.db
                         .with(|db| db.end_job(job.id, &JobEnd::Waiting(Some(lacks))))?;
                 }
@@ -314,7 +320,10 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
         if !self.note_end(job.id, &end) {
             return;
         }
-        if end == JobEnd::Waiting(Some(Wait::Engine)) {
+        if matches!(
+            end,
+            JobEnd::EngineDown(_) | JobEnd::Waiting(Some(Wait::Engine))
+        ) {
             self.retry_after.insert(job.id, self.clock.now());
         } else {
             self.retry_after.remove(&job.id);

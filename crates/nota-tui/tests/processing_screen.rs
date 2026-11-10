@@ -79,6 +79,88 @@ fn processing_transcript() {
     insta::assert_snapshot!(draw(&mut screen, 62, 20));
 }
 
+/// A pass waiting after its engine failed says why under its step.
+#[test]
+fn processing_engine_down() {
+    let mut screen = screen();
+    // A reason long enough to wrap, as an engine's error output can be.
+    screen.set_jobs(vec![
+        job("Recording saved", ProcessingState::Done),
+        job(
+            "Final transcript",
+            ProcessingState::Waiting {
+                reason: ProcessingWait::EngineDown(
+                    "the transcriber stopped working: exited (exit status: 1): \
+                     nota engine asr: the model file is not a model"
+                        .into(),
+                ),
+                progress: 30,
+            },
+        ),
+    ]);
+    insta::assert_snapshot!(draw(&mut screen, 62, 20));
+}
+
+/// A pass running again after its engine failed keeps the reason in view.
+#[test]
+fn processing_retrying() {
+    let mut screen = screen();
+    // The retry has made no progress yet, so the reason still applies.
+    screen.set_jobs(vec![
+        job("Recording saved", ProcessingState::Done),
+        job(
+            "Final transcript",
+            ProcessingState::Retrying {
+                progress: 30,
+                reason: "the transcriber stopped working: couldn't start: \
+                         No such file or directory (os error 2)"
+                    .into(),
+            },
+        ),
+    ]);
+    insta::assert_snapshot!(draw(&mut screen, 62, 20));
+}
+
+/// A reason longer than three lines is cut so the steps stay in view.
+#[test]
+fn an_engine_failure_reason_takes_at_most_three_lines() {
+    let mut screen = Processing::new("Test".into(), "engine".into(), Theme::no_color());
+    // Forty words of 9 columns each wrap to far more than three lines.
+    let reason = ["overlong"; 40].join(" ");
+    screen.set_jobs(vec![job(
+        "Transcript",
+        ProcessingState::Retrying {
+            progress: 0,
+            reason,
+        },
+    )]);
+    let output = draw(&mut screen, 62, 20);
+    let lines = output.lines().filter(|l| l.contains("overlong")).count();
+    assert_eq!(lines, 3, "{output}");
+}
+
+/// Final text from two tracks, interleaved in session order under each
+/// run's track name.
+#[test]
+fn processing_final_transcript_interleaved() {
+    let mut screen = screen();
+    // Invented text; the app supplies the lines already in session order.
+    screen.set_transcript(
+        [
+            "Microphone · final pass",
+            "Mark the face side first.",
+            "System audio · final pass",
+            "The clip from last week shows the jig.",
+            "Microphone · final pass",
+            "Now plane it flat.",
+        ]
+        .map(Into::into)
+        .to_vec(),
+    );
+    press(&mut screen, KeyCode::Tab);
+    insta::assert_snapshot!(draw(&mut screen, 62, 20));
+}
+
 /// A finished step uses a tick and plain words.
 #[test]
 fn done_is_visible_without_colour() {

@@ -7,7 +7,9 @@ use super::{
 use nota_recorder::fs::StdFs;
 use nota_recorder::segment::needs_salvage;
 use nota_recorder::session::SessionDir;
-use nota_store::{FinalText, Job, JobKind, JobState, SessionState, StoreError, TrackKind, Wait};
+use nota_store::{
+    FinalLine, Job, JobKind, JobState, RevisionNumber, SessionState, StoreError, TrackKind, Wait,
+};
 use nota_tui::{
     Processing, ProcessingAction, ProcessingFailure, ProcessingJob, ProcessingState, ProcessingWait,
 };
@@ -146,7 +148,12 @@ impl Data<'_> {
     fn read(&self) -> Result<SessionView, StoreError> {
         self.library.db().with(|db| {
             let session = db.session(self.id)?.ok_or(StoreError::NoSession(self.id))?;
-            let final_text = db.final_texts(self.id)?;
+            let final_text = match db.revision(self.id, RevisionNumber::FINAL) {
+                Ok(lines) => lines,
+                // There's no final text until the pass stores its first.
+                Err(StoreError::NoRevision(..)) => Vec::new(),
+                Err(e) => return Err(e),
+            };
             let heard = db
                 .utterances(self.id)?
                 .into_iter()
@@ -182,7 +189,7 @@ impl Data<'_> {
         &self,
         state: SessionState,
         jobs: Vec<Job>,
-        final_text: &[FinalText],
+        final_text: &[FinalLine],
     ) -> Vec<ProcessingJob> {
         let mut steps = vec![ProcessingJob {
             name: "Recording saved".into(),
@@ -191,7 +198,8 @@ impl Data<'_> {
         }];
         let engine = final_text
             .first()
-            .map(|text| format!("{} · {}", text.heard_by.engine, text.heard_by.model));
+            .map(|line| &line.heard.heard_by)
+            .map(|by| format!("{} · {}", by.engine, by.model));
         let engine = engine.as_deref().unwrap_or_else(|| self.engines.label());
         steps.extend(jobs.into_iter().map(|job| step(job, engine)));
         steps
@@ -206,12 +214,14 @@ fn waiting(reason: ProcessingWait) -> ProcessingState {
     }
 }
 
-/// The live record has session times; final rows have only track-local samples.
-/// Keep the chronological heard transcript. If none exists, label final text
-/// by track rather than suggesting that sample indices align across tracks.
+/// The heard text, in session order, or if nothing was heard live the final
+/// pass's text, as revision 0 gives it: in session order across tracks,
+/// with chunks it can't place in time after the rest. Each run of one
+/// track's text is headed by the track's name, since the tracks
+/// interleave. Audio the engine couldn't transcribe has no line.
 fn transcript(
     heard: Vec<String>,
-    final_text: &[FinalText],
+    final_text: &[FinalLine],
     tracks: &[nota_store::Track],
 ) -> Vec<String> {
     if !heard.is_empty() {
@@ -219,13 +229,14 @@ fn transcript(
     }
     let mut lines = Vec::new();
     let mut previous = None;
-    for text in final_text {
-        let Some(words) = &text.text else {
+    for line in final_text {
+        let Some(words) = &line.text else {
             continue;
         };
-        if previous != Some(text.track) {
-            lines.push(format!("{} · final pass", track_name(text.track, tracks)));
-            previous = Some(text.track);
+        let track = line.heard.track;
+        if previous != Some(track) {
+            lines.push(format!("{} · final pass", track_name(track, tracks)));
+            previous = Some(track);
         }
         lines.push(words.clone());
     }
@@ -256,7 +267,12 @@ fn step(job: Job, engine: &str) -> ProcessingJob {
             },
             progress,
         },
+        JobState::EngineDown(reason) => ProcessingState::Waiting {
+            reason: ProcessingWait::EngineDown(reason),
+            progress,
+        },
         JobState::Running => ProcessingState::Running { progress },
+        JobState::Retrying(reason) => ProcessingState::Retrying { progress, reason },
         JobState::Done => ProcessingState::Done,
         JobState::Failed(reason) => ProcessingState::Failed {
             reason: ProcessingFailure::new(reason),
@@ -285,9 +301,17 @@ fn progress(progress: nota_store::Progress) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nota_core::{FakeClock, SampleCount, SampleIndex, SampleRange, TrackId, Utterance};
+    use nota_core::{
+        Drift, EpochAnchor, EpochId, FakeClock, SampleCount, SampleIndex, SampleRange, SampleRate,
+        TrackId, Utterance,
+    };
     use nota_recorder::fs::Fs as _;
-    use nota_store::{Heard, HeardBy, JobEnd, NewSession, Progress, Track};
+    use nota_store::{
+        FinalText, Heard, HeardBy, JobEnd, NewSession, Progress, SegmentRow, Sha256Digest, Track,
+    };
+
+    const MIC: TrackId = TrackId::new(0);
+    const SYSTEM: TrackId = TrackId::new(1);
 
     /// A library with one session, kept until each test ends.
     struct Fixture {
@@ -301,6 +325,16 @@ mod tests {
 
     impl Fixture {
         fn new(name: &str) -> Self {
+            Self::create(name, Vec::new())
+        }
+
+        /// A session recorded on the microphone and system tracks.
+        fn with_tracks(name: &str) -> Self {
+            Self::create(name, tracks())
+        }
+
+        /// A session titled "Joinery" with `tracks`.
+        fn create(name: &str, tracks: Vec<Track>) -> Self {
             let dir = crate::app::tests::TestDir::new(name);
             let library = Library::open(&dir.0).unwrap();
             let paths = library.create().unwrap();
@@ -309,6 +343,7 @@ mod tests {
                 .with(|db| {
                     db.create_session(&NewSession {
                         title: Some("Joinery".into()),
+                        tracks,
                         ..NewSession::bare(paths.id)
                     })
                 })
@@ -489,42 +524,183 @@ mod tests {
         assert_eq!(fixture.read().transcript, ["Keep the board flat."]);
     }
 
-    /// Final-only words stay grouped by track, not by their sample numbers.
-    #[test]
-    fn final_only_text_is_grouped_by_track_without_assuming_aligned_clocks() {
-        // The later track has a smaller sample number on its own clock.
-        let tracks = [
+    /// The microphone and system tracks, named as the library stores them.
+    fn tracks() -> Vec<Track> {
+        vec![
             Track {
-                track: TrackId::new(0),
+                track: MIC,
                 kind: TrackKind::Microphone,
                 source: None,
             },
             Track {
-                track: TrackId::new(1),
+                track: SYSTEM,
                 kind: TrackKind::System,
                 source: None,
             },
-        ];
-        let finals = [
-            text(
-                TrackId::new(0),
-                SampleIndex::new(4800),
-                "earlier mic speech",
-            ),
-            text(
-                TrackId::new(1),
-                SampleIndex::new(1600),
-                "later system speech",
-            ),
-        ];
+        ]
+    }
+
+    /// `track`'s first epoch, from its sample `first`, starting `secs`
+    /// seconds into the session.
+    fn anchor(first: u64, secs: u64) -> EpochAnchor {
+        EpochAnchor {
+            id: EpochId::new(0),
+            start: SessionTime::from_nanos(secs * 1_000_000_000),
+            first_sample: SampleIndex::new(first),
+            rate: SampleRate::SPEECH,
+            drift: Drift::ZERO,
+        }
+    }
+
+    /// Publishes `track`'s audio from `a` to `b` in its first epoch.
+    fn segment(fixture: &Fixture, track: TrackId, a: u64, b: u64) {
+        let row = SegmentRow::new(
+            track,
+            EpochId::new(0),
+            SampleRange::new(SampleIndex::new(a), SampleIndex::new(b)).unwrap(),
+            Sha256Digest::new([0; 32]),
+        )
+        .unwrap();
+        fixture
+            .library
+            .db()
+            .with(|db| db.insert_segment(fixture.id, &row))
+            .unwrap();
+    }
+
+    /// Stores `texts` as `track`'s final text, each 100 samples long.
+    fn finals(fixture: &Fixture, track: TrackId, texts: &[(u64, &str)]) {
+        let rows: Vec<FinalText> = texts
+            .iter()
+            .map(|&(start, words)| text(track, SampleIndex::new(start), words))
+            .collect();
+        fixture
+            .library
+            .db()
+            .with(|db| db.add_final_text(fixture.id, track, SampleIndex::new(100_000), &rows))
+            .unwrap();
+    }
+
+    /// Acceptance: final-only text from two tracks reads in session order,
+    /// the tracks interleaved, each run headed by its track's name.
+    #[test]
+    fn final_only_text_interleaves_its_tracks_in_session_order() {
+        let fixture = Fixture::with_tracks("final_only_text_interleaves");
+        // The system track's samples start later on its own clock, so
+        // sample order alone would put it first or last, never between.
+        for (track, epoch) in [(MIC, anchor(0, 1)), (SYSTEM, anchor(16_000, 2))] {
+            fixture
+                .library
+                .db()
+                .with(|db| db.insert_epoch(fixture.id, track, &epoch))
+                .unwrap();
+        }
+        segment(&fixture, MIC, 0, 100_000);
+        segment(&fixture, SYSTEM, 16_000, 100_000);
+        finals(
+            &fixture,
+            MIC,
+            &[(0, "mark the face side"), (48_000, "now plane it")],
+        );
+        finals(
+            &fixture,
+            SYSTEM,
+            &[(32_000, "the clip from the last session")],
+        );
         assert_eq!(
-            transcript(vec![], &finals, &tracks),
+            fixture.read().transcript,
             [
                 "Microphone · final pass",
-                "earlier mic speech",
+                "mark the face side",
                 "System audio · final pass",
-                "later system speech"
+                "the clip from the last session",
+                "Microphone · final pass",
+                "now plane it",
             ]
+        );
+    }
+
+    /// Acceptance: a chunk whose epoch has no anchor reads after the timed
+    /// ones, though its samples come first.
+    #[test]
+    fn final_text_without_a_session_time_reads_last() {
+        let fixture = Fixture::with_tracks("final_text_without_a_session_time");
+        // Only the system track's epoch is anchored.
+        fixture
+            .library
+            .db()
+            .with(|db| db.insert_epoch(fixture.id, SYSTEM, &anchor(0, 5)))
+            .unwrap();
+        segment(&fixture, MIC, 0, 100_000);
+        segment(&fixture, SYSTEM, 0, 100_000);
+        finals(&fixture, MIC, &[(0, "said first, but untimed")]);
+        finals(&fixture, SYSTEM, &[(16_000, "placed in time")]);
+        assert_eq!(
+            fixture.read().transcript,
+            [
+                "System audio · final pass",
+                "placed in time",
+                "Microphone · final pass",
+                "said first, but untimed",
+            ]
+        );
+    }
+
+    /// A stopped session the final pass hasn't stored text for yet reads
+    /// with no transcript, not as an error.
+    #[test]
+    fn a_session_without_final_text_reads_empty() {
+        let fixture = Fixture::new("a_session_without_final_text_reads_empty");
+        // Stopped, so the pass is queued but has stored nothing.
+        fixture.finish();
+        assert!(fixture.read().transcript.is_empty());
+    }
+
+    /// Acceptance: a pass waiting after its engine failed shows why.
+    #[test]
+    fn an_engine_failure_shows_its_reason_while_waiting() {
+        let fixture = Fixture::new("an_engine_failure_shows_its_reason");
+        let job = fixture.finish();
+        // The pass ran and its engine couldn't start.
+        fixture
+            .library
+            .db()
+            .with(|db| {
+                db.start_job(job)?;
+                db.end_job(job, &JobEnd::EngineDown("couldn't start: gone".into()))
+            })
+            .unwrap();
+        assert_eq!(
+            fixture.read().jobs[1].state,
+            ProcessingState::Waiting {
+                reason: ProcessingWait::EngineDown("couldn't start: gone".into()),
+                progress: 0
+            }
+        );
+    }
+
+    /// The retry after an engine failure keeps showing the reason while
+    /// it runs.
+    #[test]
+    fn a_retry_after_an_engine_failure_shows_the_reason() {
+        let fixture = Fixture::new("a_retry_after_an_engine_failure");
+        let job = fixture.finish();
+        // Failed once, now running again.
+        fixture
+            .library
+            .db()
+            .with(|db| {
+                db.start_job(job)?;
+                db.end_job(job, &JobEnd::EngineDown("exited: no model".into()))?;
+                db.start_job(job)
+            })
+            .unwrap();
+        assert_eq!(
+            fixture.read().jobs[1].state,
+            ProcessingState::Retrying {
+                progress: 0,
+                reason: "exited: no model".into()
+            }
         );
     }
 

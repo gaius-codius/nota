@@ -138,13 +138,15 @@ fn final_pass(
     pass_end(ended)
 }
 
-/// Engine failures keep committed text and wait for a working engine.
+/// Engine failures keep committed text and wait for a working engine,
+/// with the reason the pass gives, so Processing can tell a nota that
+/// can't be started from a model that doesn't load.
 fn pass_end(ended: PassEnd<StoreError>) -> JobEnd {
     match ended {
         PassEnd::Done => JobEnd::Done,
         PassEnd::Stopped => JobEnd::Waiting(None),
         PassEnd::Sink(e) => stored(&e),
-        PassEnd::Stalled(_) | PassEnd::Engine(_) => JobEnd::Waiting(Some(Wait::Engine)),
+        down @ (PassEnd::Stalled(_) | PassEnd::Engine(_)) => JobEnd::EngineDown(down.to_string()),
     }
 }
 
