@@ -435,6 +435,14 @@ fn an_engine_back_up_no_longer_gives_its_old_reason() {
     // never confirms anything.
     let marker = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("pass-back-up-{}", std::process::id()));
+    // One left by a run killed between the two starts would skip the
+    // first failure.
+    let cleared = std::process::Command::new("/bin/rm")
+        .arg("-f")
+        .arg(&marker)
+        .status()
+        .unwrap();
+    assert!(cleared.success());
     let mut config = config(&[]);
     config.engine.command.program = PathBuf::from("/bin/sh");
     config.engine.command.args = [
@@ -450,8 +458,10 @@ fn an_engine_back_up_no_longer_gives_its_old_reason() {
         OsString::from(env!("CARGO_BIN_EXE_nota-fake-engine")),
     ])
     .collect();
-    config.engine.request_timeout = Duration::from_secs(30);
-    config.stall = Duration::from_secs(2);
+    // The stall must outlast both starts, and come long before the second
+    // engine's request times out.
+    config.engine.request_timeout = Duration::from_secs(60);
+    config.stall = Duration::from_secs(5);
     let mut sink = Committed::default();
     match run(&config, &mut sink, &|| false) {
         PassEnd::Stalled(None) => {}

@@ -57,8 +57,8 @@ impl ProcessingWait {
 }
 
 impl ProcessingState {
-    /// Why the speech engine failed on the step's last try, if it's
-    /// waiting for, or trying, the engine again.
+    /// Why the speech engine failed, on an earlier try or the one running
+    /// now, if it's waiting for, or trying, the engine again.
     fn engine_failure(&self) -> Option<&str> {
         match self {
             Self::Waiting {
@@ -605,7 +605,7 @@ impl Processing {
         ))
     }
 
-    /// Why the engine failed on the step's last try, under the step,
+    /// Why the engine failed, on an earlier try or now, under the step,
     /// wrapped and cut to [`MAX_REASON_LINES`]; none for any other state.
     fn reason_lines(&self, state: &ProcessingState, width: usize) -> Vec<Line<'static>> {
         let Some(reason) = state.engine_failure() else {

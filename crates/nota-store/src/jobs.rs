@@ -111,7 +111,7 @@ pub enum JobState {
     /// A runner is running it, and its engine has failed, for the reason
     /// given: in an earlier run, until this run's engine answers, or in
     /// this run, until the engine comes back. Either way the engine is
-    /// being tried again. The reason goes when the run ends.
+    /// being tried again. The run's end replaces it.
     Retrying(String),
     /// Finished.
     Done,
