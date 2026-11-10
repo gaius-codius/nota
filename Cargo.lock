@@ -1788,6 +1788,7 @@ dependencies = [
  "nota-core",
  "proptest",
  "rusqlite",
+ "sha2",
  "unicode-normalization",
 ]
 
