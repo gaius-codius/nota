@@ -344,6 +344,49 @@ fn a_pass_that_gets_no_answers_gives_up() {
     assert!(sink.texts.is_empty());
 }
 
+/// An engine program that's gone stalls the pass with the reason the
+/// spawn gave, not a guess.
+#[test]
+fn a_missing_engine_program_stalls_with_why() {
+    let mut config = config(&["echo"]);
+    config.engine.command.program = PathBuf::from("/nonexistent/nota-engine");
+    config.stall = Duration::from_secs(2);
+    let mut sink = Committed::default();
+    match run(&config, &mut sink, &|| false) {
+        PassEnd::Stalled(Some(why)) => assert_eq!(
+            why,
+            format!("couldn't start: {}", std::io::Error::from_raw_os_error(2))
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert!(sink.texts.is_empty());
+}
+
+/// An engine that exits at start (a model that doesn't load) stalls the
+/// pass with the last line it wrote to stderr.
+#[test]
+fn an_engine_that_exits_at_start_stalls_with_its_last_error() {
+    let mut config = config(&[]);
+    config.engine.command.program = PathBuf::from("/bin/sh");
+    config.engine.command.args = [
+        "-c",
+        "echo loading >&2; echo 'nota engine asr: no model at /m' >&2; exit 1",
+    ]
+    .iter()
+    .map(OsString::from)
+    .collect();
+    config.stall = Duration::from_secs(2);
+    let mut sink = Committed::default();
+    match run(&config, &mut sink, &|| false) {
+        PassEnd::Stalled(Some(why)) => assert_eq!(
+            why,
+            "exited (exit status: 1): nota engine asr: no model at /m"
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert!(sink.texts.is_empty());
+}
+
 /// A segment that can't be read is skipped, once everything before it is
 /// confirmed, and the rest of the session is transcribed as before.
 #[test]

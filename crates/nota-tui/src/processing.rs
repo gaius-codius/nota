@@ -48,7 +48,7 @@ impl ProcessingWait {
                 format!("saved audio can't be checked: {}", drawn(reason))
             }
             Self::Engine => "waiting for a working speech engine".into(),
-            Self::EngineDown(_) => "engine failed · retrying soon".into(),
+            Self::EngineDown(_) => "engine failed".into(),
             Self::Audio => "waiting for audio to be saved".into(),
             Self::Space => "waiting for free space".into(),
             Self::Queued => "queued or paused for a recording".into(),
@@ -120,7 +120,7 @@ pub enum ProcessingState {
         /// How far the step got, in percent, limited to 100 when drawn.
         progress: u8,
         /// Why the engine failed last time, shown under the step until
-        /// this run ends.
+        /// the engine answers.
         reason: String,
     },
     /// Finished successfully.
@@ -583,7 +583,7 @@ impl Processing {
             ProcessingState::Retrying { progress, .. } => (
                 "◐",
                 self.theme.gold,
-                format!("{}% · retrying the engine", progress.min(&100)),
+                format!("{}% · retrying", progress.min(&100)),
             ),
             ProcessingState::Done => ("✓", self.theme.green, "done".to_owned()),
             ProcessingState::Failed { reason, .. } => (

@@ -272,6 +272,9 @@ BEGIN SELECT RAISE(ABORT, 'a revision is never added to'); END;
 /// the session still has journals to publish); a session has at most one
 /// job of each kind. Sessions stopped before version 5 get no jobs from
 /// it: their audio has no final pass unless one is queued for them.
+/// `detail`, a failed job's reason, also holds why the engine failed for
+/// a job waiting for `engine` after a run, and for its retry while it runs
+/// (no schema change: see [`crate::jobs`]).
 ///
 /// The final pass's text is kept apart from the heard text: its own rows,
 /// located by track and sample as the engine gives them, not in

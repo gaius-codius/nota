@@ -478,29 +478,32 @@ fn an_engine_startup_failure_does_not_hold_up_other_sessions() {
     assert_eq!(worker.ran(), [S1, S2]);
 }
 
-/// Wakes cannot retry an engine until the supplied clock reaches the limit.
+/// Wakes cannot retry an engine until the supplied clock reaches the limit,
+/// whether the run found its engine down or found it had none.
 #[test]
 fn engine_startup_retries_wait_one_idle_interval_and_then_finish() {
-    // Keep time still so waking the runner cannot shorten the wait.
-    let (_dir, db) = library("engine-retry", &[(S1, None)]);
-    let worker = Fake::default();
-    worker.script(S1, &[Then::EngineDown("couldn't start"), Then::Done]);
-    let clock = Arc::new(nota_core::FakeClock::new(SessionTime::ZERO));
-    let mut runner = loop_with_clock(&db, &worker, &clock);
-    let job = runner.next().unwrap().unwrap();
-    runner.run_one(&job);
-    for _ in 0..10 {
-        runner.shared.wake();
+    for first in [Then::EngineDown("couldn't start"), Then::NoEngine] {
+        // Keep time still so waking the runner cannot shorten the wait.
+        let (_dir, db) = library("engine-retry", &[(S1, None)]);
+        let worker = Fake::default();
+        worker.script(S1, &[first, Then::Done]);
+        let clock = Arc::new(nota_core::FakeClock::new(SessionTime::ZERO));
+        let mut runner = loop_with_clock(&db, &worker, &clock);
+        let job = runner.next().unwrap().unwrap();
+        runner.run_one(&job);
+        for _ in 0..10 {
+            runner.shared.wake();
+            assert!(runner.next().unwrap().is_none());
+        }
+        // Check both sides of the limit, to the nanosecond.
+        clock.advance(Duration::from_nanos(4_999_999_999));
         assert!(runner.next().unwrap().is_none());
+        clock.advance(Duration::from_nanos(1));
+        let job = runner.next().unwrap().unwrap();
+        runner.run_one(&job);
+        assert_eq!(states(&db), [(S1, JobState::Done)]);
+        assert_eq!(worker.ran(), [S1, S1]);
     }
-    // Check both sides of the limit, to the nanosecond.
-    clock.advance(Duration::from_nanos(4_999_999_999));
-    assert!(runner.next().unwrap().is_none());
-    clock.advance(Duration::from_nanos(1));
-    let job = runner.next().unwrap().unwrap();
-    runner.run_one(&job);
-    assert_eq!(states(&db), [(S1, JobState::Done)]);
-    assert_eq!(worker.ran(), [S1, S1]);
 }
 
 /// A runner loop using time the test can advance.

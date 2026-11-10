@@ -20,8 +20,9 @@
 //! is kept in the row's `detail` (as a failed job's is) and goes with the
 //! job into its next run ([`JobState::Retrying`]), and back to waiting if
 //! that runner dies, so the Processing screen can say why while the
-//! engine is tried again. Whatever that run ends with replaces it: a
-//! finished run clears it, and so does any other end.
+//! engine is tried again. It goes once that run's engine answers
+//! ([`Store::engine_answered`]), and whatever the run ends with replaces
+//! it: a finished run clears it, and so does any other end.
 //!
 //! The Processing screen shows what this holds.
 
@@ -102,7 +103,8 @@ pub enum JobState {
     /// A runner is running it.
     Running,
     /// A runner is running it again after its engine failed, for the
-    /// reason given: the reason stays until this run ends.
+    /// reason given: the reason stays until this run's engine answers or
+    /// the run ends.
     Retrying(String),
     /// Finished.
     Done,
@@ -339,6 +341,22 @@ impl Store {
         self.conn.execute(
             "UPDATE job SET progress = ?2, total = ?3 WHERE id = ?1 AND state = 'running'",
             params![id.0, to_i64(progress.done)?, to_i64(progress.total)?],
+        )?;
+        Ok(())
+    }
+
+    /// Notes that a running job's engine has answered, so an earlier
+    /// engine failure no longer says anything: a
+    /// [`JobState::Retrying`] job is [`JobState::Running`] from now. Any
+    /// other job is left as it is.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] for any SQLite failure.
+    pub fn engine_answered(&mut self, id: JobId) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE job SET detail = NULL WHERE id = ?1 AND state = 'running'",
+            [id.0],
         )?;
         Ok(())
     }

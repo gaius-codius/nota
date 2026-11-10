@@ -53,6 +53,9 @@ pub(crate) struct Running<'a> {
     pub(crate) stop: &'a dyn Fn() -> bool,
     /// Notes how far it has got, for the Processing screen.
     pub(crate) progress: &'a dyn Fn(Progress),
+    /// Notes that its engine has answered, so the reason an earlier run's
+    /// engine failed no longer shows.
+    pub(crate) answered: &'a dyn Fn(),
 }
 
 /// What runs the jobs.
@@ -294,9 +297,9 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
             if waits == Some(Wait::Space) && !self.room.room() {
                 continue;
             }
-            // A job whose engine failed, lacking one now, is rewritten
-            // too: nota has no engine this time, so the old reason is
-            // stale.
+            // A job whose engine failed is rewritten too when it lacks
+            // anything now (no engine this time, or audio to publish):
+            // the old reason no longer says why it waits.
             if let Some(lacks) = self.worker.lacks(&job) {
                 if job.state != JobState::Waiting(Some(lacks)) && waits != Some(Wait::Space) {
                     self.db
@@ -342,15 +345,23 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
         let stop = move || shared.stopping() || capture.recording();
         let db = self.db.clone();
         let id = job.id;
-        let progress = move |progress: Progress| {
-            // Only shown; a progress that can't be noted is shown late.
-            let _ = db.with(|db| db.job_progress(id, progress));
+        let progress = {
+            let db = db.clone();
+            move |progress: Progress| {
+                // Only shown; a progress that can't be noted is shown late.
+                let _ = db.with(|db| db.job_progress(id, progress));
+            }
+        };
+        let answered = move || {
+            // Only shown too: the reason goes at the run's end anyway.
+            let _ = db.with(|db| db.engine_answered(id));
         };
         self.worker.run(
             job,
             &Running {
                 stop: &stop,
                 progress: &progress,
+                answered: &answered,
             },
         )
     }

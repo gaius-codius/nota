@@ -125,6 +125,7 @@ fn confirmed_text_is_stored_with_its_progress() {
     let running = Running {
         stop: &stop,
         progress: &report,
+        answered: &|| {},
     };
     let mut sink = Stored::new(db.clone(), SESSION, heard_by(), &tracks, &running);
     assert_eq!(
@@ -173,6 +174,32 @@ fn confirmed_text_is_stored_with_its_progress() {
     );
 }
 
+/// The runner hears once that the engine answered, at the first audio the
+/// engine itself confirms; audio skipped without it says nothing.
+#[test]
+fn the_first_engine_confirmation_says_the_engine_answered() {
+    let dir = TestDir::new("answered");
+    let db = db(&dir);
+    let tracks = tracks(vec![row(MIC, 0, 300)], &BTreeMap::new());
+    let told = RefCell::new(0);
+    let answered = || *told.borrow_mut() += 1;
+    let stop = || false;
+    let running = Running {
+        stop: &stop,
+        progress: &|_| {},
+        answered: &answered,
+    };
+    let mut sink = Stored::new(db, SESSION, heard_by(), &tracks, &running);
+    // Skipped audio (unreadable, or dropped while the engine was down)
+    // proves nothing about the engine.
+    sink.confirmed(MIC, s(100), vec![], vec![range(0, 100)])
+        .unwrap();
+    assert_eq!(*told.borrow(), 0);
+    sink.confirmed(MIC, s(200), vec![], vec![]).unwrap();
+    sink.confirmed(MIC, s(300), vec![], vec![]).unwrap();
+    assert_eq!(*told.borrow(), 1);
+}
+
 /// Acceptance: a final pass run again over a session's stored chunks (its
 /// progress lost, so from the start) leaves them, and the session's one
 /// revision, unchanged: the same text again stores nothing, and other text
@@ -187,6 +214,7 @@ fn a_rerun_over_stored_chunks_leaves_them_unchanged() {
     let running = Running {
         stop: &stop,
         progress: &report,
+        answered: &|| {},
     };
     let heard = |text: &str| Transcript::new(MIC, range(0, 80), text.into()).unwrap();
     Stored::new(db.clone(), SESSION, heard_by(), &tracks, &running)
@@ -234,6 +262,7 @@ fn without_an_engine_the_final_pass_waits_for_one() {
     let running = Running {
         stop: &stop,
         progress: &progress,
+        answered: &|| {},
     };
     assert_eq!(
         jobs.run(&job, &running),

@@ -187,6 +187,10 @@ struct Stored<'a> {
     /// Each track's published samples, and how far the pass has got.
     tracks: BTreeMap<TrackId, (Vec<SampleRange>, SampleIndex)>,
     report: &'a dyn Fn(Progress),
+    /// Tells the runner the engine has answered.
+    answered: &'a dyn Fn(),
+    /// Whether it has been told yet: once is enough.
+    told: bool,
 }
 
 impl<'a> Stored<'a> {
@@ -209,6 +213,8 @@ impl<'a> Stored<'a> {
                 })
                 .collect(),
             report: running.progress,
+            answered: running.answered,
+            told: false,
         }
     }
 
@@ -237,6 +243,9 @@ impl PassSink for Stored<'_> {
         texts: Vec<Transcript>,
         skipped: Vec<SampleRange>,
     ) -> Result<(), StoreError> {
+        // With nothing skipped, the engine itself confirmed this audio:
+        // it works, whatever stopped an earlier run.
+        let engine_answered = skipped.is_empty();
         let heard = texts.into_iter().map(|text| {
             let range = text.range();
             let (text, words) = text.into_text_and_words();
@@ -269,6 +278,10 @@ impl PassSink for Stored<'_> {
             *done = (*done).max(up_to);
         }
         (self.report)(self.progress());
+        if engine_answered && !self.told {
+            (self.answered)();
+            self.told = true;
+        }
         Ok(())
     }
 }

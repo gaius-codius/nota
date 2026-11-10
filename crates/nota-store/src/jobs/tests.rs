@@ -258,6 +258,28 @@ fn an_engine_failure_keeps_its_reason_until_the_next_run_ends() {
     assert_eq!(states(&store), [(S1, JobState::Done)]);
 }
 
+/// A retry whose engine answers drops the old reason at once, not at
+/// the end of a long run; only a running job is touched.
+#[test]
+fn an_engine_that_answers_clears_the_old_reason() {
+    let (_dir, mut store) = store("engine-answered");
+    store.finish_recording(S1, None).unwrap();
+    let id = store.jobs().unwrap()[0].id;
+    assert!(store.start_job(id).unwrap());
+    store
+        .end_job(id, &JobEnd::EngineDown("couldn't start".into()))
+        .unwrap();
+    // Waiting, the reason still says why the last run stopped.
+    store.engine_answered(id).unwrap();
+    assert_eq!(
+        states(&store),
+        [(S1, JobState::EngineDown("couldn't start".into()))]
+    );
+    assert!(store.start_job(id).unwrap());
+    store.engine_answered(id).unwrap();
+    assert_eq!(states(&store), [(S1, JobState::Running)]);
+}
+
 /// Any end other than an engine failure clears the kept reason, so a
 /// run paused for a recording starts its next run without it.
 #[test]
