@@ -1761,6 +1761,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nota-llm"
+version = "0.0.0"
+dependencies = [
+ "nota-core",
+ "nota-llm",
+ "proptest",
+ "rustix",
+ "serde_json",
+]
+
+[[package]]
 name = "nota-recorder"
 version = "0.0.0"
 dependencies = [

@@ -1,0 +1,35 @@
+[package]
+name = "nota-llm"
+description = "nota's model adapters: the decider on a supervised llama-server, and the prompts they send."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# `nota-fake-llama-server`, a stand-in for llama-server that the supervision
+# tests start, kill and hang. Turned on by the self dev-dependency below, so
+# it's built only with nota-llm's tests.
+fake-server = []
+
+[[bin]]
+name = "nota-fake-llama-server"
+required-features = ["fake-server"]
+
+[dependencies]
+nota-core = { path = "../nota-core" }
+# The requests to llama-server and its replies, as JSON.
+serde_json.workspace = true
+
+[dev-dependencies]
+nota-core = { path = "../nota-core", features = ["fake-clock"] }
+nota-llm = { path = ".", features = ["fake-server"] }
+proptest.workspace = true
+
+# Signals for the tests that kill the stand-in server by its process id.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+rustix = { workspace = true, features = ["process"] }
+
+[lints]
+workspace = true
