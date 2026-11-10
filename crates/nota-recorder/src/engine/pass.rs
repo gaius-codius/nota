@@ -178,23 +178,22 @@ const POLL: Duration = Duration::from_millis(100);
 /// odd exit may not. Three, as decided on #237.
 pub const EXITS_BEFORE_HELLO: u32 = 3;
 
-/// Whether the engine has ever started in this pass, judged from the
-/// supervisor's reports, so the pass can give up on one that can't.
+/// How the pass's engines have started, judged from the supervisor's
+/// reports, so the pass can give up on an engine that can't start.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct Starts {
     /// The engine running now has said hello.
     hello: bool,
-    /// The engines that exited before saying hello since the last one
-    /// that said it, or since some other failure.
+    /// The engines in a row that exited before saying hello: since the
+    /// last failure of any other kind.
     exits: u32,
 }
 
 impl Starts {
-    /// Notes an engine that said hello: it started, so earlier exits no
-    /// longer count.
+    /// Notes an engine that said hello: it started, so its failure,
+    /// whatever it is, breaks the run of exits before hello.
     fn online(&mut self) {
         self.hello = true;
-        self.exits = 0;
     }
 
     /// Notes the engine going down for `why`, and whether that ends the
