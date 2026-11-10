@@ -56,6 +56,10 @@ pub(crate) struct Running<'a> {
     /// Notes that its engine has answered, so the reason an earlier run's
     /// engine failed no longer shows.
     pub(crate) answered: &'a dyn Fn(),
+    /// Notes why its engine is down now (`Some`), for the Processing
+    /// screen to show while the run goes on, or that it's back (`None`),
+    /// so it no longer shows.
+    pub(crate) engine_down: &'a dyn Fn(Option<&str>),
 }
 
 /// What runs the jobs.
@@ -352,9 +356,19 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
                 let _ = db.with(|db| db.job_progress(id, progress));
             }
         };
-        let answered = move || {
-            // Only shown too: the reason goes at the run's end anyway.
-            let _ = db.with(|db| db.engine_answered(id));
+        let answered = {
+            let db = db.clone();
+            move || {
+                // Only shown too: the reason goes at the run's end anyway.
+                let _ = db.with(|db| db.engine_answered(id));
+            }
+        };
+        let engine_down = move |why: Option<&str>| {
+            // Only shown too: the run's end says why it stopped.
+            let _ = db.with(|db| match why {
+                Some(why) => db.engine_down(id, why),
+                None => db.engine_answered(id),
+            });
         };
         self.worker.run(
             job,
@@ -362,6 +376,7 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
                 stop: &stop,
                 progress: &progress,
                 answered: &answered,
+                engine_down: &engine_down,
             },
         )
     }

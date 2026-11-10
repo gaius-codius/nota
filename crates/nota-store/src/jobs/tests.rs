@@ -280,6 +280,54 @@ fn an_engine_that_answers_clears_the_old_reason() {
     assert_eq!(states(&store), [(S1, JobState::Running)]);
 }
 
+/// A first run whose engine goes down says why at once, while it runs,
+/// and stops saying it once the engine is back; a newer reason replaces
+/// an older one.
+#[test]
+fn a_running_job_keeps_why_its_engine_is_down_now() {
+    let (_dir, mut store) = store("engine-down-live");
+    store.finish_recording(S1, None).unwrap();
+    let id = store.jobs().unwrap()[0].id;
+    assert!(store.start_job(id).unwrap());
+    store.engine_down(id, "couldn't start: gone").unwrap();
+    assert_eq!(
+        states(&store),
+        [(S1, JobState::Retrying("couldn't start: gone".into()))]
+    );
+    store.engine_down(id, "exited: no model").unwrap();
+    assert_eq!(
+        states(&store),
+        [(S1, JobState::Retrying("exited: no model".into()))]
+    );
+    store.engine_answered(id).unwrap();
+    assert_eq!(states(&store), [(S1, JobState::Running)]);
+    // Down again, and the runner dies: it waits for an engine, with why.
+    store.engine_down(id, "stopped answering").unwrap();
+    assert_eq!(store.recover_jobs(3).unwrap(), 1);
+    assert_eq!(
+        states(&store),
+        [(S1, JobState::EngineDown("stopped answering".into()))]
+    );
+}
+
+/// A reason noted after the run has ended (or before it starts) changes
+/// nothing, so no row is left with a reason its state can't have.
+#[test]
+fn an_engine_down_note_only_touches_a_running_job() {
+    let (_dir, mut store) = store("engine-down-late");
+    store.finish_recording(S1, None).unwrap();
+    store.finish_recording(S2, None).unwrap();
+    let ids: Vec<JobId> = store.jobs().unwrap().iter().map(|j| j.id).collect();
+    store.engine_down(ids[0], "too early").unwrap();
+    assert!(store.start_job(ids[1]).unwrap());
+    store.end_job(ids[1], &JobEnd::Done).unwrap();
+    store.engine_down(ids[1], "too late").unwrap();
+    assert_eq!(
+        states(&store),
+        [(S1, JobState::Waiting(None)), (S2, JobState::Done)]
+    );
+}
+
 /// Any end other than an engine failure clears the kept reason, so a
 /// run paused for a recording starts its next run without it.
 #[test]
