@@ -1,0 +1,18 @@
+[package]
+name = "nota-checks"
+description = "nota's code checks: the deterministic rules that decide what a model's proposal may change."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+proptest.workspace = true
+# Reads the JSON fixtures exported from the research bench.
+serde_json.workspace = true
+
+[lints]
+workspace = true

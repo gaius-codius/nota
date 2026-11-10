@@ -1735,6 +1735,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nota-checks"
+version = "0.0.0"
+dependencies = [
+ "proptest",
+ "serde_json",
+]
+
+[[package]]
 name = "nota-core"
 version = "0.0.0"
 dependencies = [
