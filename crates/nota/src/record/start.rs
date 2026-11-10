@@ -1270,7 +1270,7 @@ mod tests {
     fn the_saver_stores_text_and_annotations_in_the_session() {
         use nota_core::Utterance;
         use nota_core::recorder::Mark;
-        use nota_store::{Annotation, RevisionNumber};
+        use nota_store::Annotation;
 
         let root = std::env::temp_dir().join(format!("nota-saving-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -1303,11 +1303,11 @@ mod tests {
                     db.session(id)?,
                     db.utterances(id)?,
                     db.annotations(id)?,
-                    db.revision(id, RevisionNumber::HEARD)?,
+                    db.revisions(id)?,
                 ))
             })
             .unwrap();
-        let (session, utterances, annotations, shown) = stored;
+        let (session, utterances, annotations, revisions) = stored;
         assert_eq!(session.unwrap().title.as_deref(), Some("Workshop"));
         assert_eq!(utterances.len(), 1);
         assert_eq!(utterances[0].heard.utterance, heard);
@@ -1315,7 +1315,8 @@ mod tests {
         assert_eq!(utterances[0].heard.model, "parakeet-tdt-0.6b-v3-int8");
         assert!(utterances[0].heard.words.is_empty());
         assert_eq!(annotations, [Annotation::Mark(Mark { at })]);
-        assert_eq!(shown[0].text, "welcome");
+        // Revisions are of the final pass's text: the heard text makes none.
+        assert!(revisions.is_empty(), "{revisions:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

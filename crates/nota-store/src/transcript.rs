@@ -1,21 +1,21 @@
-//! The heard text, and the revisions of the text that's shown.
+//! The heard text, and the revisions of it made before version 8.
 //!
 //! **The heard text is the record.** Each utterance the engine confirmed is
 //! stored once, as it was heard: its track, its span in session time, its
 //! text, its words with their times, and the engine and model that heard
 //! it. Nothing here changes or deletes one, and the schema's triggers
 //! (version 4) refuse an UPDATE, DELETE or replacing INSERT whatever
-//! connection tries.
+//! connection tries. It stays stored beside the final pass's text, and is
+//! the text to show for a session with none of that.
 //!
-//! **The shown text is a revision.** Revision 0 is the heard text itself,
-//! and has no rows of its own. Every later revision is a new row naming
-//! its parent, with a `revision_text` row for each utterance whose text it
-//! changes; an utterance it doesn't change reads as in its parent, back to
-//! the heard text. What a revision changes is never changed or added to
-//! afterwards: a correction is a new revision. An utterance stored after a
-//! revision was made reads in it as heard, since the revision didn't change
-//! it. (The final pass's utterances, M2's GAI-317, will need telling apart
-//! from the live ones before revisions show them.)
+//! **Its revisions are closed.** Term clean-up revises the final pass's
+//! text ([`crate::revisions`]). The revisions of the heard text a library
+//! made before version 8 are kept as they were, in `heard_revision` and
+//! `heard_revision_text`, and read here; nothing adds to them. Revision 0
+//! is the heard text itself, with no rows of its own; every later one
+//! names its parent, with a row for each utterance whose text it changes,
+//! and an utterance it doesn't change reads as in its parent, back to the
+//! heard text.
 
 use std::collections::BTreeMap;
 
@@ -39,11 +39,13 @@ impl UtteranceId {
     }
 }
 
-/// A revision of a session's text. Revision 0 is the heard text.
+/// A revision of the heard text, made before version 8. Revision 0 is the
+/// heard text. Not a [`RevisionNumber`](crate::RevisionNumber): the two
+/// number different texts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RevisionNumber(u32);
+pub struct HeardRevision(u32);
 
-impl RevisionNumber {
+impl HeardRevision {
     /// The heard text.
     pub const HEARD: Self = Self(0);
 
@@ -77,7 +79,7 @@ pub struct StoredUtterance {
     pub heard: Heard,
 }
 
-/// One utterance as a revision shows it.
+/// One utterance as a heard revision shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Line {
     /// The utterance.
@@ -188,11 +190,11 @@ fn same_utterance(conn: &Connection, key: i64, heard: &Heard) -> Result<Option<i
         .find(|id| words.remove(id).unwrap_or_default() == heard.words))
 }
 
-/// Whether the session has revision `number`.
+/// Whether the session has heard revision `number`.
 fn revision_exists(conn: &Connection, key: i64, number: u32) -> Result<bool, StoreError> {
     Ok(conn
         .query_row(
-            "SELECT 1 FROM revision WHERE session_id = ?1 AND number = ?2",
+            "SELECT 1 FROM heard_revision WHERE session_id = ?1 AND number = ?2",
             params![key, i64::from(number)],
             |_| Ok(()),
         )
@@ -231,8 +233,7 @@ fn utterances_in(conn: &Connection, key: i64) -> Result<Vec<StoredUtterance>, St
 impl Store {
     /// Stores `heard` as one of the session's utterances, with its words,
     /// in one transaction committed before returning, and gives its
-    /// number. The session's revision 0, the heard text, is added with its
-    /// first utterance. An utterance stored exactly as `heard` already
+    /// number. An utterance stored exactly as `heard` already
     /// (the same track, span, text, engine, model and words: a write retried
     /// after its answer was lost) isn't stored twice; its number comes back.
     ///
@@ -285,12 +286,6 @@ impl Store {
                 params![id, position, text, start, end],
             )?;
         }
-        if !revision_exists(&tx, key, RevisionNumber::HEARD.0)? {
-            tx.execute(
-                "INSERT INTO revision (session_id, number, parent) VALUES (?1, 0, NULL)",
-                [key],
-            )?;
-        }
         tx.commit()?;
         Ok(UtteranceId(id))
     }
@@ -310,17 +305,18 @@ impl Store {
         utterances_in(&tx, key)
     }
 
-    /// The session's revisions, in number order: none before its first
-    /// utterance, then revision 0, the heard text, and each made since.
+    /// The session's heard revisions, in number order: those its library
+    /// made before version 8, revision 0 (the heard text) among them; none
+    /// for a session stored since.
     ///
     /// # Errors
     ///
     /// [`StoreError::Corrupt`] if a number doesn't parse, and
     /// [`StoreError::Sqlite`] for any SQLite failure.
-    pub fn revisions(&self, session: SessionId) -> Result<Vec<RevisionNumber>, StoreError> {
+    pub fn heard_revisions(&self, session: SessionId) -> Result<Vec<HeardRevision>, StoreError> {
         let mut stmt = self
             .conn
-            .prepare("SELECT number FROM revision WHERE session_id = ?1 ORDER BY number")?;
+            .prepare("SELECT number FROM heard_revision WHERE session_id = ?1 ORDER BY number")?;
         let numbers = stmt
             .query_map([session_key(session)?], |r| r.get::<_, i64>(0))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -328,87 +324,25 @@ impl Store {
             .into_iter()
             .map(|n| {
                 u32::try_from(n)
-                    .map(RevisionNumber)
+                    .map(HeardRevision)
                     .map_err(|_| StoreError::Corrupt(format!("revision number {n}")))
             })
             .collect()
     }
 
-    /// Adds a revision of the session's text: `parent` with each of
-    /// `changes`' utterances showing its new text. Gives the new
-    /// revision's number, one past the session's highest. Committed before
-    /// returning.
-    ///
-    /// # Errors
-    ///
-    /// [`StoreError::NoRevision`] if `parent` isn't one of the session's
-    /// revisions, [`StoreError::NoUtterance`] if a change names an
-    /// utterance of another session, and [`StoreError::Sqlite`] for any
-    /// SQLite failure, including two changes to one utterance. Nothing is
-    /// added then.
-    pub fn add_revision(
-        &mut self,
-        session: SessionId,
-        parent: RevisionNumber,
-        changes: &[(UtteranceId, String)],
-    ) -> Result<RevisionNumber, StoreError> {
-        let key = session_key(session)?;
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if !revision_exists(&tx, key, parent.0)? {
-            return Err(StoreError::NoRevision(session, parent.0));
-        }
-        for (utterance, _) in changes {
-            let ours = tx
-                .query_row(
-                    "SELECT 1 FROM utterance WHERE session_id = ?1 AND id = ?2",
-                    params![key, utterance.0],
-                    |_| Ok(()),
-                )
-                .optional()?
-                .is_some();
-            if !ours {
-                return Err(StoreError::NoUtterance(session, utterance.0));
-            }
-        }
-        let highest: i64 = tx.query_row(
-            "SELECT max(number) FROM revision WHERE session_id = ?1",
-            [key],
-            |r| r.get(0),
-        )?;
-        let number = u32::try_from(highest)
-            .ok()
-            .and_then(|n| n.checked_add(1))
-            .ok_or(StoreError::OutOfRange)?;
-        tx.execute(
-            "INSERT INTO revision (session_id, number, parent) VALUES (?1, ?2, ?3)",
-            params![key, i64::from(number), i64::from(parent.0)],
-        )?;
-        for (utterance, text) in changes {
-            tx.execute(
-                "INSERT INTO revision_text (session_id, revision, utterance_id, text) \
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![key, i64::from(number), utterance.0, text],
-            )?;
-        }
-        tx.commit()?;
-        Ok(RevisionNumber(number))
-    }
-
-    /// The session's text as revision `number` shows it, in session order:
-    /// each utterance's text from the nearest revision back to 0 that
-    /// changes it, or as heard.
+    /// The session's text as heard revision `number` shows it, in session
+    /// order: each utterance's text from the nearest revision back to 0
+    /// that changes it, or as heard.
     ///
     /// # Errors
     ///
     /// [`StoreError::NoRevision`] if the session has no such revision,
     /// [`StoreError::Corrupt`] if a row doesn't parse, and
     /// [`StoreError::Sqlite`] for any SQLite failure.
-    pub fn revision(
+    pub fn heard_revision(
         &self,
         session: SessionId,
-        number: RevisionNumber,
+        number: HeardRevision,
     ) -> Result<Vec<Line>, StoreError> {
         let key = session_key(session)?;
         // One snapshot for the chain, its text and the utterances.
@@ -422,7 +356,7 @@ impl Store {
         let mut at = number.0;
         while let Some(parent) = tx
             .query_row(
-                "SELECT parent FROM revision WHERE session_id = ?1 AND number = ?2",
+                "SELECT parent FROM heard_revision WHERE session_id = ?1 AND number = ?2",
                 params![key, i64::from(at)],
                 |r| r.get::<_, Option<i64>>(0),
             )
@@ -435,7 +369,7 @@ impl Store {
         }
         let mut changed: BTreeMap<i64, String> = BTreeMap::new();
         let mut stmt = tx.prepare(
-            "SELECT utterance_id, text FROM revision_text \
+            "SELECT utterance_id, text FROM heard_revision_text \
              WHERE session_id = ?1 AND revision = ?2",
         )?;
         // Revision 0 is the heard text, with no text of its own.

@@ -7,7 +7,7 @@ use rusqlite::params;
 
 use super::*;
 use crate::test_dir::TestDir;
-use crate::tests::{new_session, raw, row};
+use crate::tests::{new_session, raw, refused, row};
 use crate::{SegmentRow, SessionState};
 
 /// A per-session store at `path`, as M1 made one, holding `rows`.
@@ -39,7 +39,7 @@ fn a_new_file_gets_the_current_schema() {
     let dir = TestDir::new("fresh");
     let store = Store::open(&dir.db()).unwrap();
     assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
-    assert_eq!(STEPS.len(), 6);
+    assert_eq!(STEPS.len(), 7);
     assert_eq!(STEPS.len(), usize::try_from(VERSION - FIRST + 1).unwrap());
     // Opening again changes nothing.
     drop(store);
@@ -49,7 +49,7 @@ fn a_new_file_gets_the_current_schema() {
 
 #[test]
 fn unknown_versions_are_refused_and_left_alone() {
-    for version in [VERSION + 1, 8, -1] {
+    for version in [VERSION + 1, 9, -1] {
         let dir = TestDir::new(&format!("version{version}"));
         raw(&dir.db())
             .pragma_update(None, "user_version", version)
@@ -480,7 +480,7 @@ fn version_6_upgrades_to_7_keeping_its_epochs_with_no_drift() {
         .unwrap();
     }
     let mut store = Store::open(&dir.db()).unwrap();
-    assert_eq!(store.pragma_text("user_version"), "7");
+    assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
     let old = EpochAnchor {
         id: EpochId::new(0),
         start: SessionTime::from_nanos(5),
@@ -502,4 +502,103 @@ fn version_6_upgrades_to_7_keeping_its_epochs_with_no_drift() {
         store.epochs(SessionId::new(1)).unwrap(),
         [(TrackId::new(0), old), (TrackId::new(0), new)]
     );
+}
+
+/// Acceptance: a version 7 library keeps its heard revisions and
+/// proposals, readable and closed; a session with final text gets its
+/// revision 0 and can be revised, and its final text becomes append-only.
+#[test]
+fn version_7_upgrades_to_8_keeping_its_heard_revisions_readable() {
+    let dir = TestDir::new("v7");
+    {
+        let conn = crate::tests::library_at(&dir.db(), 7);
+        // Session 1 has heard text, revised once, and a proposal on it;
+        // session 2 has final text, one chunk with words and one without.
+        conn.execute_batch(
+            "INSERT INTO session (id, state) VALUES (1, 'stopped'), (2, 'stopped');
+             INSERT INTO utterance (id, session_id, track, start_ns, end_ns, text, engine, model)
+             VALUES (1, 1, 0, 0, 10, 'hyperprofen', 'e', 'm');
+             INSERT INTO revision VALUES (1, 0, NULL), (1, 1, 0);
+             INSERT INTO revision_text VALUES (1, 1, 1, 'ibuprofen');
+             INSERT INTO proposal (id, session_id, revision, utterance_id, heard, replacement,
+                                   source, state)
+             VALUES (1, 1, 0, 1, 'hyperprofen', 'ibuprofen', 'term lookup', 'accepted');
+             INSERT INTO final_text VALUES (2, 0, 0, 100, 'hyper profen', 'e', 'm');
+             INSERT INTO final_word VALUES (2, 0, 0, 0, 'hyper', 0, 50), (2, 0, 0, 1, 'profen', 50, 100);
+             INSERT INTO final_text VALUES (2, 0, 100, 200, NULL, 'e', 'm');",
+        )
+        .unwrap();
+    }
+    let mut store = Store::open(&dir.db()).unwrap();
+    assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
+    let one = SessionId::new(1);
+    let two = SessionId::new(2);
+
+    // The heard revision reads as it did, and isn't a final-text revision.
+    let shown = store
+        .heard_revision(one, crate::HeardRevision::HEARD)
+        .unwrap();
+    assert_eq!(shown[0].text, "hyperprofen");
+    let revised = store.heard_revisions(one).unwrap();
+    assert_eq!(revised.len(), 2);
+    assert_eq!(
+        store.heard_revision(one, revised[1]).unwrap()[0].text,
+        "ibuprofen"
+    );
+    assert!(store.revisions(one).unwrap().is_empty());
+
+    // Session 2's final text is its revision 0, and revises.
+    assert_eq!(
+        store.revisions(two).unwrap(),
+        [crate::RevisionNumber::FINAL]
+    );
+    let fix = crate::Change {
+        chunk: crate::ChunkKey {
+            track: TrackId::new(0),
+            start: SampleIndex::ZERO,
+        },
+        words: crate::WordSpan::new(0, 1).unwrap(),
+        text: "ibuprofen".to_owned(),
+    };
+    let fixed = store
+        .add_revision(two, crate::RevisionNumber::FINAL, &[fix])
+        .unwrap();
+    let lines = store.revision(two, fixed).unwrap();
+    let texts: Vec<_> = lines.iter().map(|l| l.text.as_deref()).collect();
+    assert_eq!(texts, [Some("ibuprofen"), None]);
+    drop(store);
+
+    let conn = raw(&dir.db());
+    let proposal: (String, String) = conn
+        .query_row(
+            "SELECT heard, state FROM heard_proposal WHERE id = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(proposal, ("hyperprofen".to_owned(), "accepted".to_owned()));
+    for sql in [
+        "INSERT INTO heard_revision VALUES (1, 2, 1)",
+        "UPDATE heard_revision SET parent = NULL WHERE number = 1",
+        "DELETE FROM heard_revision",
+        "INSERT INTO heard_revision_text VALUES (1, 0, 1, 'x')",
+        "UPDATE heard_revision_text SET text = 'x'",
+        "DELETE FROM heard_revision_text",
+        "INSERT INTO heard_proposal (session_id, revision, utterance_id, heard, replacement, \
+         source, state) VALUES (1, 1, 1, 'a', 'b', 'c', 'pending')",
+        "UPDATE heard_proposal SET state = 'rejected'",
+        "DELETE FROM heard_proposal",
+        // The final text stored before version 8 is a record too.
+        "UPDATE final_text SET text = 'changed'",
+        "DELETE FROM final_word",
+    ] {
+        assert!(refused(&conn, sql), "{sql} was allowed");
+    }
+    // Every row still names rows that are there.
+    let broken: i64 = conn
+        .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(broken, 0);
 }

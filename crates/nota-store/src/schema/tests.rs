@@ -83,6 +83,9 @@ fn the_schema_has_exactly_these_tables() {
             "final_text",
             "final_word",
             "finding",
+            "heard_proposal",
+            "heard_revision",
+            "heard_revision_text",
             "job",
             "mark",
             "note",
@@ -247,142 +250,140 @@ fn utterances_and_their_words_keep_their_track() {
     );
 }
 
-#[test]
-fn revisions_chain_and_name_their_utterances() {
-    let (_dir, mut store) = store("revision");
-    write(
-        &store,
-        "utterance",
-        "id, session_id, track, start_ns, end_ns, text, engine, model",
-        &[
-            int(1),
-            int(1),
-            int(0),
-            int(0),
-            int(10),
-            text("hyperprofen"),
-            text("e"),
-            text("m"),
-        ],
-    );
-    let columns = "session_id, number, parent";
-    let revisions = [
-        vec![int(1), int(0), Value::Null],
-        vec![int(1), int(1), int(0)],
-    ];
-    for revision in &revisions {
-        write(&store, "revision", columns, revision);
-    }
-    assert_eq!(read(&store, "revision"), revisions);
-    // A parent that isn't earlier, or isn't there.
-    refused(&store, "revision", columns, &[int(1), int(2), int(2)]);
-    refused(&store, "revision", columns, &[int(1), int(3), int(2)]);
-    refused(&store, "revision", columns, &[int(2), int(0), Value::Null]);
-
-    let columns = "session_id, revision, utterance_id, text";
-    let texts = [vec![int(1), int(1), int(1), text("ibuprofen")]];
-    write(&store, "revision_text", columns, &texts[0]);
-    assert_eq!(read(&store, "revision_text"), texts);
-    refused(
-        &store,
-        "revision_text",
-        columns,
-        &[int(1), int(5), int(1), text("x")],
-    );
-    refused(
-        &store,
-        "revision_text",
-        columns,
-        &[int(1), int(1), int(7), text("x")],
-    );
-    // Another session's utterance can't be named.
+/// Session 1's final-text chunk at track 0, sample 0, with words 0 and 1,
+/// and session 2's at the same place, with word 0; and each session's
+/// revision 0.
+fn two_sessions_chunks(store: &mut Store) {
     store
         .create_session(&new_session(SessionId::new(2)))
         .unwrap();
-    write(
-        &store,
-        "utterance",
-        "id, session_id, track, start_ns, end_ns, text, engine, model",
-        &[
-            int(2),
-            int(2),
-            int(0),
-            int(0),
-            int(10),
-            text("theirs"),
-            text("e"),
-            text("m"),
-        ],
-    );
-    refused(
-        &store,
-        "revision_text",
-        columns,
-        &[int(1), int(1), int(2), text("x")],
-    );
+    let chunk = "session_id, track, start_sample, end_sample, text, engine, model";
+    let word = "session_id, track, start_sample, position, text, word_start, word_end";
+    for (session, words) in [(1, 2), (2, 1)] {
+        write(
+            store,
+            "final_text",
+            chunk,
+            &[
+                int(session),
+                int(0),
+                int(0),
+                int(10),
+                text("hyper profen"),
+                text("e"),
+                text("m"),
+            ],
+        );
+        for position in 0..words {
+            write(
+                store,
+                "final_word",
+                word,
+                &[
+                    int(session),
+                    int(0),
+                    int(0),
+                    int(position),
+                    text("w"),
+                    int(position),
+                    int(position + 1),
+                ],
+            );
+        }
+        write(
+            store,
+            "revision",
+            "session_id, number, parent",
+            &[int(session), int(0), Value::Null],
+        );
+    }
 }
 
 #[test]
-fn proposals_name_their_revision_and_sources() {
+fn revisions_chain_and_name_their_final_words() {
+    let (_dir, mut store) = store("revision");
+    two_sessions_chunks(&mut store);
+    let columns = "session_id, number, parent";
+    write(&store, "revision", columns, &[int(1), int(1), int(0)]);
+    assert_eq!(
+        read(&store, "revision"),
+        [
+            vec![int(1), int(0), Value::Null],
+            vec![int(2), int(0), Value::Null],
+            vec![int(1), int(1), int(0)]
+        ]
+    );
+    // A parent that isn't earlier, or isn't there.
+    refused(&store, "revision", columns, &[int(1), int(2), int(2)]);
+    refused(&store, "revision", columns, &[int(1), int(3), int(2)]);
+    refused(&store, "revision", columns, &[int(9), int(0), Value::Null]);
+
+    let columns = "session_id, revision, track, start_sample, first_word, last_word, text";
+    let change = |session, revision, start, first, last| {
+        vec![
+            int(session),
+            int(revision),
+            int(0),
+            int(start),
+            int(first),
+            int(last),
+            text("ibuprofen"),
+        ]
+    };
+    write(&store, "revision_text", columns, &change(1, 1, 0, 0, 1));
+    assert_eq!(read(&store, "revision_text"), [change(1, 1, 0, 0, 1)]);
+    // No such revision; no such chunk; a last word the chunk hasn't; a
+    // run that ends before it starts.
+    refused(&store, "revision_text", columns, &change(1, 5, 0, 0, 0));
+    refused(&store, "revision_text", columns, &change(1, 1, 7, 0, 0));
+    write(
+        &store,
+        "revision",
+        "session_id, number, parent",
+        &[int(2), int(1), int(0)],
+    );
+    refused(&store, "revision_text", columns, &change(2, 1, 0, 0, 1));
+    // Both of session 1's words are there, so only the order refuses it.
+    refused(&store, "revision_text", columns, &change(1, 1, 0, 1, 0));
+    // Session 2's chunk at the same place is its own: its one word is
+    // there to change, though session 1's chunk has a second.
+    write(&store, "revision_text", columns, &change(2, 1, 0, 0, 0));
+}
+
+#[test]
+fn proposals_name_their_revision_and_final_words() {
     let (_dir, mut store) = store("proposal");
-    write(
-        &store,
-        "utterance",
-        "id, session_id, track, start_ns, end_ns, text, engine, model",
-        &[
-            int(1),
-            int(1),
+    two_sessions_chunks(&mut store);
+    let columns = "id, session_id, revision, track, start_sample, first_word, last_word, \
+                   heard, replacement, source, model, pack_version, thresholds, state";
+    let proposal = |id, session, revision, last| {
+        vec![
+            int(id),
+            int(session),
+            int(revision),
             int(0),
             int(0),
-            int(10),
-            text("hyperprofen"),
-            text("e"),
-            text("m"),
-        ],
-    );
-    write(&store, "revision", "session_id, number", &[int(1), int(0)]);
-    let columns = "id, session_id, revision, utterance_id, heard, replacement, source, model, pack_version, thresholds, state";
-    let rows = [vec![
-        int(1),
-        int(1),
-        int(0),
-        int(1),
-        text("hyperprofen"),
-        text("ibuprofen"),
-        text("term lookup"),
-        text("qwen3-4b"),
-        text("pharmacology 3"),
-        text("sim>=0.6"),
-        text("pending"),
-    ]];
-    write(&store, "proposal", columns, &rows[0]);
-    assert_eq!(read(&store, "proposal"), rows);
-    store
-        .create_session(&new_session(SessionId::new(2)))
-        .unwrap();
-    write(
-        &store,
-        "utterance",
-        "id, session_id, track, start_ns, end_ns, text, engine, model",
-        &[
-            int(2),
-            int(2),
             int(0),
-            int(0),
-            int(10),
-            text("theirs"),
-            text("e"),
-            text("m"),
-        ],
-    );
-    let mut theirs = rows[0].clone();
-    theirs[0] = int(3);
-    theirs[3] = int(2);
-    refused(&store, "proposal", columns, &theirs);
-    let mut no_revision = rows[0].clone();
-    no_revision[0] = int(2);
-    no_revision[2] = int(4);
-    refused(&store, "proposal", columns, &no_revision);
+            int(last),
+            text("hyper profen"),
+            text("ibuprofen"),
+            text("term lookup"),
+            text("qwen3-4b"),
+            text("pharmacology 3"),
+            text("sim>=0.6"),
+            text("pending"),
+        ]
+    };
+    write(&store, "proposal", columns, &proposal(1, 1, 0, 1));
+    assert_eq!(read(&store, "proposal"), [proposal(1, 1, 0, 1)]);
+    // Words its chunk hasn't: session 2's chunk has only word 0.
+    refused(&store, "proposal", columns, &proposal(2, 2, 0, 1));
+    // A revision the session hasn't.
+    refused(&store, "proposal", columns, &proposal(3, 1, 4, 1));
+    // A run that ends before it starts, though both its words are there.
+    let mut backwards = proposal(4, 1, 0, 0);
+    backwards[5] = int(1);
+    refused(&store, "proposal", columns, &backwards);
 }
 
 #[test]
@@ -468,10 +469,7 @@ fn final_text_keeps_its_track_and_samples() {
         ]
     };
     write(&store, "final_text", columns, &row(0, 0, 10));
-    write(&store, "final_text", columns, &row(1, 0, 10));
-    for bad in [row(0, 0, 20), row(0, 5, 5), row(0, -1, 2), row(-1, 0, 1)] {
-        refused(&store, "final_text", columns, &bad);
-    }
+    // A chunk's words go in with it, before the next chunk (V8).
     let words = "session_id, track, start_sample, position, text, word_start, word_end";
     write(
         &store,
@@ -479,6 +477,10 @@ fn final_text_keeps_its_track_and_samples() {
         words,
         &[int(1), int(0), int(0), int(0), text("w"), int(2), int(4)],
     );
+    write(&store, "final_text", columns, &row(1, 0, 10));
+    for bad in [row(0, 0, 20), row(0, 5, 5), row(0, -1, 2), row(-1, 0, 1)] {
+        refused(&store, "final_text", columns, &bad);
+    }
     for bad in [
         // No such text.
         [int(1), int(0), int(3), int(0), text("w"), int(2), int(4)],
