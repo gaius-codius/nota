@@ -1,0 +1,53 @@
+# The pharmacy pack: medicine names and spoken-form aliases from sources
+# open for redistribution. Build it with
+#
+#   nota pack build packs/pharmacy --out pharmacy.pack
+#
+# The lists are fetched again with refresh.py (spoken-forms.tsv is written
+# by hand). Not used: PBS (its licence isn't confirmed on data.pbs.gov.au),
+# and never AMT, SNOMED CT-AU, WHO ATC or full DrugBank, which can't be
+# redistributed. WHO INN names have no bulk file; the INNs here come through
+# RxNorm and Wikidata.
+#
+# RxNorm's names and Wikidata's labels count as reviewed by their source;
+# every alias, and every spoken form, is a draft until a person checks it,
+# and a shipped pack offers only reviewed rows. Mark rows `reviewed` in the
+# lists as they're checked.
+
+name = "pharmacy"
+version = "2026.11.3"
+language = "en"
+kind = "shipped"
+
+[[source]]
+id = "rxnorm"
+name = "RxNorm, U.S. National Library of Medicine"
+licence = "public domain"
+url = "https://rxnav.nlm.nih.gov/REST/Prescribe/allconcepts.json?tty=IN"
+attribution = """
+This product uses publicly available data courtesy of the U.S. National \
+Library of Medicine (NLM), National Institutes of Health, Department of \
+Health and Human Services; NLM is not responsible for the product and does \
+not endorse or recommend this or any other product. The names are RxNorm's \
+prescribable ingredient names as fetched in November 2026, and may not be \
+the most current version."""
+lists = ["rxnorm.tsv"]
+
+[[source]]
+id = "wikidata"
+name = "Wikidata"
+licence = "CC0-1.0"
+url = "https://www.wikidata.org"
+attribution = """
+Contains English labels and aliases from Wikidata, released into the \
+public domain under Creative Commons CC0 1.0."""
+lists = ["wikidata.tsv"]
+
+[[source]]
+id = "spoken-forms"
+name = "nota's spoken forms"
+licence = "CC0-1.0"
+attribution = """
+Spoken forms of common acronyms, written for nota by its contributors and \
+released into the public domain under Creative Commons CC0 1.0."""
+lists = ["spoken-forms.tsv"]

@@ -8,6 +8,8 @@
 //! to the bench's decisions (the code checks spec, "Principles").
 //!
 //! - C1, letter similarity: [`letter_similarity`].
+//! - C2, the candidate gate: [`gate()`], whose [`AppliedFix`] is the only way
+//!   a fix is applied.
 //!
 //! ```
 //! use nota_checks::letter_similarity;
@@ -17,6 +19,10 @@
 //! # Ok::<(), nota_checks::TooLong>(())
 //! ```
 
+mod gate;
 mod similarity;
 
+pub use gate::{
+    AppliedFix, Decision, Gated, Offered, Proposal, Rejection, SIMILARITY_MIN, Verdict, gate,
+};
 pub use similarity::{MAX_LETTERS, Similarity, TooLong, letter_similarity};

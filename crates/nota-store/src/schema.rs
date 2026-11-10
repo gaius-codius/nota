@@ -26,6 +26,8 @@
 //! | `final_text`, `final_word`, `final_progress` | the final pass's text, by track and sample, beside the heard text and never in it, never changed (V8); how far it has got on each track (V5) | the final pass ([`crate::final_text`]) |
 //! | `event` | the timeline: warnings raised and cleared, device changes, the transcriber's state, gaps | `nota record`, as each is sent to the screen ([`crate::timeline`]) |
 //! | `finding` | an index of each session's findings file: rows whose file didn't prove them, and rows that don't parse (V6) | the app, from the findings files ([`Store::index_findings`](crate::Store::index_findings)) |
+//! | `session_pack`, `session_packs_chosen` | the term packs a session chose, by name and version, in order, and that it chose; never changed (V9) | Setup, when the session starts ([`Store::record_session_packs`](crate::Store::record_session_packs)) |
+//! | `learned_pair` | each heard span → term the user accepted or rejected, with its session and when; never changed (V9) | the correction card ([`crate::learned`]) |
 //!
 //! Session times are nanoseconds from the session's start
 //! ([`SessionTime`](nota_core::SessionTime)); samples are indices at the
@@ -556,6 +558,84 @@ WHEN EXISTS (
        OR rowid = NEW.rowid
 )
 BEGIN SELECT RAISE(ABORT, 'heard text is never replaced'); END;
+";
+
+/// Version 9: the packs each session chose, and the learned pairs.
+///
+/// **A session's packs** (`session_pack`) are named by the name and
+/// version in each pack's manifest ([`crate::packs`]), in the order the
+/// session chose them. They're recorded once, when the session starts, so
+/// a proposal can say which pack, at which version, its term came from (a
+/// proposal's `source` names the pack, its `pack_version` the version).
+/// `session_packs_chosen` holds a row for each session whose choice is
+/// recorded, so a choice of no packs is recorded too. Triggers refuse an
+/// UPDATE, DELETE or replacing INSERT of a row of either.
+///
+/// **Learned pairs** (`learned_pair`) are the user's choices on a heard
+/// span: a term accepted for it, or a term rejected for it, with the
+/// session it was made in and when (UTC seconds since 1970). `heard` is
+/// the span as heard; `heard_key` and `term_key` are the forms pairs are
+/// matched by ([`crate::learned::match_key`]), kept for the index: reading
+/// keys them again from `heard` and `term`, so a later change to the keys
+/// needs no migration. A pair is a record, never
+/// changed: a later choice on the same span and term is a new row, and
+/// the newest says what holds ([`crate::learned`]).
+///
+/// Deleting a session (M5) will need a migration that lets these rows go
+/// with it, as V4's note says of the heard text.
+pub(crate) const V9: &str = "
+CREATE TABLE session_packs_chosen (
+    session_id INTEGER PRIMARY KEY REFERENCES session(id)
+) STRICT;
+
+CREATE TRIGGER session_packs_chosen_never_updated BEFORE UPDATE ON session_packs_chosen
+BEGIN SELECT RAISE(ABORT, 'a session''s packs are never changed'); END;
+CREATE TRIGGER session_packs_chosen_never_deleted BEFORE DELETE ON session_packs_chosen
+BEGIN SELECT RAISE(ABORT, 'a session''s packs are never deleted'); END;
+CREATE TRIGGER session_packs_chosen_never_replaced BEFORE INSERT ON session_packs_chosen
+WHEN EXISTS (SELECT 1 FROM session_packs_chosen WHERE session_id = NEW.session_id)
+BEGIN SELECT RAISE(ABORT, 'a session''s packs are never replaced'); END;
+
+CREATE TABLE session_pack (
+    session_id INTEGER NOT NULL REFERENCES session(id),
+    position INTEGER NOT NULL CHECK (position >= 0),
+    name TEXT NOT NULL CHECK (name <> ''),
+    version TEXT NOT NULL CHECK (version <> ''),
+    PRIMARY KEY (session_id, name),
+    UNIQUE (session_id, position)
+) STRICT;
+
+CREATE TRIGGER session_pack_never_updated BEFORE UPDATE ON session_pack
+BEGIN SELECT RAISE(ABORT, 'a session''s packs are never changed'); END;
+CREATE TRIGGER session_pack_never_deleted BEFORE DELETE ON session_pack
+BEGIN SELECT RAISE(ABORT, 'a session''s packs are never deleted'); END;
+CREATE TRIGGER session_pack_never_replaced BEFORE INSERT ON session_pack
+WHEN EXISTS (
+    SELECT 1 FROM session_pack
+    WHERE (session_id = NEW.session_id AND (name = NEW.name OR position = NEW.position))
+       OR rowid = NEW.rowid
+)
+BEGIN SELECT RAISE(ABORT, 'a session''s packs are never replaced'); END;
+
+CREATE TABLE learned_pair (
+    id INTEGER PRIMARY KEY,
+    session_id INTEGER NOT NULL REFERENCES session(id),
+    heard TEXT NOT NULL,
+    heard_key TEXT NOT NULL CHECK (heard_key <> ''),
+    term TEXT NOT NULL,
+    term_key TEXT NOT NULL CHECK (term_key <> ''),
+    verdict TEXT NOT NULL CHECK (verdict IN ('accepted', 'rejected')),
+    at INTEGER NOT NULL CHECK (at >= 0)
+) STRICT;
+CREATE INDEX learned_pair_by_heard ON learned_pair (heard_key, term_key);
+
+CREATE TRIGGER learned_pair_never_updated BEFORE UPDATE ON learned_pair
+BEGIN SELECT RAISE(ABORT, 'a learned pair is never changed'); END;
+CREATE TRIGGER learned_pair_never_deleted BEFORE DELETE ON learned_pair
+BEGIN SELECT RAISE(ABORT, 'a learned pair is never deleted'); END;
+CREATE TRIGGER learned_pair_never_replaced BEFORE INSERT ON learned_pair
+WHEN EXISTS (SELECT 1 FROM learned_pair WHERE id = NEW.id)
+BEGIN SELECT RAISE(ABORT, 'a learned pair is never replaced'); END;
 ";
 
 #[cfg(test)]
