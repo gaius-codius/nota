@@ -1,9 +1,8 @@
 use nota_core::{SessionId, SessionTime, TrackId, Utterance};
-use rusqlite::Connection;
 
 use super::*;
 use crate::test_dir::TestDir;
-use crate::tests::{new_session, raw};
+use crate::tests::{new_session, raw, refused};
 
 const S1: SessionId = SessionId::new(1);
 const S2: SessionId = SessionId::new(2);
@@ -83,19 +82,10 @@ fn a_two_track_session_reads_back_in_session_order() {
     );
     assert_eq!(read[0].heard.words.len(), 4);
     assert_eq!(read[0].heard.words[3].text(), "me");
-    // Revision 0 is the heard text.
-    let shown = store.revision(S1, RevisionNumber::HEARD).unwrap();
-    assert_eq!(
-        texts(&shown),
-        [
-            (MIC, "can you hear me"),
-            (SYSTEM, "welcome back"),
-            (SYSTEM, "the second slide"),
-            (MIC, "yes")
-        ]
-    );
-    assert_eq!(shown[1].start, ms(600));
-    assert_eq!(shown[1].end, ms(1_800));
+    // Since version 8 the heard text is never revised: revisions are of
+    // the final pass's text, and this session has none.
+    assert!(store.heard_revisions(S1).unwrap().is_empty());
+    assert!(store.revisions(S1).unwrap().is_empty());
 }
 
 /// Two utterances at the same moment read by end, then track, then the
@@ -178,140 +168,16 @@ fn a_word_never_ends_before_it_starts() {
     assert_eq!((w.text(), w.start(), w.end()), ("x", ms(5), ms(5)));
 }
 
-/// Each revision is its parent with its own changes; the heard text and
-/// every earlier revision read as they did.
-#[test]
-fn revisions_build_on_their_parents_and_never_change_them() {
-    let (_dir, mut store) = store("revisions");
-    let a = store
-        .add_utterance(S1, &heard(MIC, 0, 1_000, "the clam"))
-        .unwrap();
-    let b = store
-        .add_utterance(S1, &heard(MIC, 1_000, 2_000, "holds it"))
-        .unwrap();
-    let one = store
-        .add_revision(S1, RevisionNumber::HEARD, &[(a, "the clamp".to_owned())])
-        .unwrap();
-    assert_eq!(one.get(), 1);
-    let two = store
-        .add_revision(S1, one, &[(b, "holds them".to_owned())])
-        .unwrap();
-    assert_eq!(two.get(), 2);
-    // From the heard text again: revision 1's change isn't in it.
-    let three = store
-        .add_revision(S1, RevisionNumber::HEARD, &[(b, "hold it".to_owned())])
-        .unwrap();
-    assert_eq!(three.get(), 3);
-    // A revision that changes a change.
-    let four = store
-        .add_revision(S1, two, &[(a, "a clamp".to_owned())])
-        .unwrap();
-
-    let read = |store: &Store, n| {
-        store
-            .revision(S1, n)
-            .unwrap()
-            .into_iter()
-            .map(|l| l.text)
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(
-        read(&store, RevisionNumber::HEARD),
-        ["the clam", "holds it"]
-    );
-    assert_eq!(read(&store, one), ["the clamp", "holds it"]);
-    assert_eq!(read(&store, two), ["the clamp", "holds them"]);
-    assert_eq!(read(&store, three), ["the clam", "hold it"]);
-    assert_eq!(read(&store, four), ["a clamp", "holds them"]);
-    // The heard text is as it was.
-    let heard_text: Vec<_> = store
-        .utterances(S1)
-        .unwrap()
-        .into_iter()
-        .map(|u| u.heard.utterance.into_text())
-        .collect();
-    assert_eq!(heard_text, ["the clam", "holds it"]);
-    // Text heard after a revision was made shows in it as heard.
-    store
-        .add_utterance(S1, &heard(MIC, 2_000, 3_000, "later"))
-        .unwrap();
-    assert_eq!(read(&store, one), ["the clamp", "holds it", "later"]);
-}
-
-#[test]
-fn a_revision_needs_its_parent_and_its_own_session_s_utterances() {
-    let (_dir, mut store) = store("revision-refused");
-    // No text yet, so no revision 0.
-    assert!(matches!(
-        store.revision(S1, RevisionNumber::HEARD),
-        Err(StoreError::NoRevision(S1, 0))
-    ));
-    let ours = store.add_utterance(S1, &heard(MIC, 0, 10, "x")).unwrap();
-    let theirs = store.add_utterance(S2, &heard(MIC, 0, 10, "y")).unwrap();
-    assert!(matches!(
-        store.add_revision(S1, RevisionNumber(5), &[(ours, "z".to_owned())]),
-        Err(StoreError::NoRevision(S1, 5))
-    ));
-    assert!(matches!(
-        store.add_revision(S1, RevisionNumber::HEARD, &[(theirs, "z".to_owned())]),
-        Err(StoreError::NoUtterance(S1, id)) if id == theirs.get()
-    ));
-    assert!(matches!(
-        store.revision(S1, RevisionNumber(1)),
-        Err(StoreError::NoRevision(S1, 1))
-    ));
-    // Nothing was added by the refusals: the next is still 1.
-    let next = store
-        .add_revision(S1, RevisionNumber::HEARD, &[(ours, "z".to_owned())])
-        .unwrap();
-    assert_eq!(next.get(), 1);
-    // Two changes to one utterance roll back together.
-    assert!(
-        store
-            .add_revision(
-                S1,
-                RevisionNumber::HEARD,
-                &[(ours, "p".to_owned()), (ours, "q".to_owned())]
-            )
-            .is_err()
-    );
-    assert!(matches!(
-        store.revision(S1, RevisionNumber(2)),
-        Err(StoreError::NoRevision(S1, 2))
-    ));
-}
-
-/// Whether `sql` is refused on `conn`.
-fn refused(conn: &Connection, sql: &str) -> bool {
-    match conn.execute_batch(sql) {
-        Err(e) => {
-            let text = e.to_string();
-            assert!(
-                text.contains("never"),
-                "{sql}: refused, but not by the triggers: {text}"
-            );
-            true
-        }
-        Ok(()) => false,
-    }
-}
-
 /// Acceptance (GAI-310): SQLite itself refuses to change or delete heard
-/// text or a revision, from any connection, including an INSERT OR
-/// REPLACE, which deletes without firing delete triggers.
+/// text, from any connection, including an INSERT OR REPLACE, which
+/// deletes without firing delete triggers.
 #[test]
-fn sqlite_refuses_to_change_or_delete_heard_text_or_a_revision() {
+fn sqlite_refuses_to_change_or_delete_heard_text() {
     let (dir, mut store) = store("append-only");
     let a = store
         .add_utterance(S1, &heard(MIC, 0, 1_000, "as heard"))
         .unwrap();
-    store
-        .add_revision(S1, RevisionNumber::HEARD, &[(a, "as shown".to_owned())])
-        .unwrap();
-    let before = (
-        store.utterances(S1).unwrap(),
-        store.revision(S1, RevisionNumber(1)).unwrap(),
-    );
+    let before = store.utterances(S1).unwrap();
     drop(store);
 
     // A plain connection, with none of the store's settings.
@@ -331,37 +197,26 @@ fn sqlite_refuses_to_change_or_delete_heard_text_or_a_revision() {
             "INSERT OR REPLACE INTO word (utterance_id, position, text, start_ns, end_ns) \
              VALUES ({id}, 0, 'replaced', 0, 1)"
         ),
-        "UPDATE revision SET parent = NULL WHERE number = 1".to_owned(),
-        "DELETE FROM revision WHERE number = 1".to_owned(),
-        "INSERT OR REPLACE INTO revision (session_id, number, parent) VALUES (1, 1, NULL)"
-            .to_owned(),
-        "UPDATE revision_text SET text = 'changed'".to_owned(),
-        "DELETE FROM revision_text".to_owned(),
+        // A stored rowid with a new key (V8): a replace that would delete
+        // the word it takes without firing the delete trigger.
         format!(
-            "INSERT OR REPLACE INTO revision_text (session_id, revision, utterance_id, text) \
-             VALUES (1, 1, {id}, 'replaced')"
+            "INSERT OR REPLACE INTO word (rowid, utterance_id, position, text, start_ns, end_ns) \
+             VALUES (1, {id}, 5, 'replaced', 0, 1)"
         ),
     ] {
         assert!(refused(&conn, &sql), "{sql} was allowed");
     }
-    // Nothing is added to what was heard, or to a revision once made.
-    store_more(&dir);
-    for sql in [
-        format!(
-            "INSERT INTO word (utterance_id, position, text, start_ns, end_ns) \
-             VALUES ({id}, 7, 'added', 0, 1)"
-        ),
-        format!(
-            "INSERT INTO revision_text (session_id, revision, utterance_id, text) \
-             VALUES (1, 0, {id}, 'added')"
-        ),
-        format!(
-            "INSERT INTO revision_text (session_id, revision, utterance_id, text) \
-             VALUES (1, 1, {id}, 'added')"
-        ),
-    ] {
-        assert!(refused(&conn, &sql), "{sql} was allowed");
-    }
+    // Nothing is added to what was heard once a later utterance is stored.
+    let mut store = Store::open(&dir.db()).unwrap();
+    store
+        .add_utterance(S1, &heard(MIC, 2_000, 3_000, "later"))
+        .unwrap();
+    drop(store);
+    let added = format!(
+        "INSERT INTO word (utterance_id, position, text, start_ns, end_ns) \
+         VALUES ({id}, 7, 'added', 0, 1)"
+    );
+    assert!(refused(&conn, &added), "{added} was allowed");
     // Recursive triggers on make no difference.
     conn.execute_batch("PRAGMA recursive_triggers = ON")
         .unwrap();
@@ -372,27 +227,9 @@ fn sqlite_refuses_to_change_or_delete_heard_text_or_a_revision() {
     drop(conn);
 
     let store = Store::open(&dir.db()).unwrap();
-    let mut after_utterances = store.utterances(S1).unwrap();
-    after_utterances.truncate(1);
-    assert_eq!(before.0, after_utterances);
-    let shown = store.revision(S1, RevisionNumber(1)).unwrap();
-    assert_eq!(before.1[0], shown[0]);
-    assert_eq!(
-        store.revision(S1, RevisionNumber(2)).unwrap()[1].text,
-        "fixed"
-    );
-}
-
-/// A later utterance and a revision 2 after it, so revision 1 is no longer
-/// the newest and utterance 1 not the newest utterance.
-fn store_more(dir: &TestDir) {
-    let mut store = Store::open(&dir.db()).unwrap();
-    let later = store
-        .add_utterance(S1, &heard(MIC, 2_000, 3_000, "later"))
-        .unwrap();
-    store
-        .add_revision(S1, RevisionNumber(1), &[(later, "fixed".to_owned())])
-        .unwrap();
+    let mut after = store.utterances(S1).unwrap();
+    after.truncate(1);
+    assert_eq!(before, after);
 }
 
 /// The same utterance with other words is another utterance, not a retry.
@@ -412,16 +249,65 @@ fn the_same_utterance_with_other_words_is_stored_again() {
     assert_eq!(store.add_utterance(S1, &other).unwrap(), second);
 }
 
+/// A version 7 library holding session 1's heard text, "the clam" then
+/// "holds it", with heard revisions 1 to 4 of it, and session 2's,
+/// "elsewhere", with only revision 0, as `add_utterance` and
+/// `add_revision` made them before version 8.
+fn version_7_with_heard_revisions(dir: &TestDir) {
+    let conn = crate::tests::library_at(&dir.db(), 7);
+    conn.execute_batch(
+        "INSERT INTO session (id, state) VALUES (1, 'stopped'), (2, 'stopped');
+         INSERT INTO utterance (id, session_id, track, start_ns, end_ns, text, engine, model)
+         VALUES (1, 1, 0, 0, 1000000000, 'the clam', 'e', 'm'),
+                (2, 1, 1, 1000000000, 2000000000, 'holds it', 'e', 'm'),
+                (3, 2, 0, 0, 10, 'elsewhere', 'e', 'm');
+         INSERT INTO revision VALUES (1, 0, NULL), (2, 0, NULL), (1, 1, 0);
+         INSERT INTO revision_text VALUES (1, 1, 1, 'the clamp');
+         INSERT INTO revision VALUES (1, 2, 1);
+         INSERT INTO revision_text VALUES (1, 2, 2, 'holds them');
+         INSERT INTO revision VALUES (1, 3, 0);
+         INSERT INTO revision_text VALUES (1, 3, 2, 'hold it');
+         INSERT INTO revision VALUES (1, 4, 2);
+         INSERT INTO revision_text VALUES (1, 4, 1, 'a clamp');",
+    )
+    .unwrap();
+}
+
+/// Heard revisions made before version 8 read as they did: each is its
+/// parent with its own changes, back to the heard text, which is as heard.
 #[test]
-fn a_session_s_revisions_are_listed_in_order() {
-    let (_dir, mut store) = store("list-revisions");
+fn heard_revisions_from_before_version_8_read_as_they_did() {
+    let dir = TestDir::new("heard-revisions");
+    version_7_with_heard_revisions(&dir);
+    let store = Store::open(&dir.db()).unwrap();
+    let read = |n| {
+        let lines = store.heard_revision(S1, HeardRevision(n)).unwrap();
+        texts(&lines)
+            .into_iter()
+            .map(|(_, text)| text.to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(read(0), ["the clam", "holds it"]);
+    assert_eq!(read(1), ["the clamp", "holds it"]);
+    assert_eq!(read(2), ["the clamp", "holds them"]);
+    // From the heard text again: revision 1's change isn't in it.
+    assert_eq!(read(3), ["the clam", "hold it"]);
+    // A change to a change: the nearest revision's text wins.
+    assert_eq!(read(4), ["a clamp", "holds them"]);
+    let lines = store.heard_revision(S1, HeardRevision(4)).unwrap();
+    assert_eq!(
+        (lines[1].track, lines[1].start, lines[1].end),
+        (SYSTEM, ms(1_000), ms(2_000))
+    );
+    assert_eq!(
+        store.heard_revisions(S1).unwrap(),
+        (0..=4).map(HeardRevision).collect::<Vec<_>>()
+    );
+    assert_eq!(store.heard_revisions(S2).unwrap(), [HeardRevision::HEARD]);
+    assert!(matches!(
+        store.heard_revision(S1, HeardRevision(5)),
+        Err(StoreError::NoRevision(S1, 5))
+    ));
+    // None of them is a revision of the final text.
     assert!(store.revisions(S1).unwrap().is_empty());
-    let a = store.add_utterance(S1, &heard(MIC, 0, 10, "x")).unwrap();
-    assert_eq!(store.revisions(S1).unwrap(), [RevisionNumber::HEARD]);
-    let one = store
-        .add_revision(S1, RevisionNumber::HEARD, &[(a, "y".to_owned())])
-        .unwrap();
-    store.add_utterance(S2, &heard(MIC, 0, 10, "z")).unwrap();
-    assert_eq!(store.revisions(S1).unwrap(), [RevisionNumber::HEARD, one]);
-    assert_eq!(store.revisions(S2).unwrap(), [RevisionNumber::HEARD]);
 }

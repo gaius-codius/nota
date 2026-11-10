@@ -17,6 +17,7 @@
 //! | 5 | the job queue's progress and waits, and the final pass's text |
 //! | 6 | each segment row's decoded-audio digest, `segment.audio_digest`, and the findings index, `finding` |
 //! | 7 | each epoch's drift, `epoch.drift_ppb` |
+//! | 8 | revisions and proposals on the final pass's text, which becomes append-only; the heard text's revisions kept as `heard_*` |
 //!
 //! # The per-session stores
 //!
@@ -38,7 +39,7 @@ use crate::sessions::{NewSession, SessionState, insert_session, insert_tracks};
 use crate::{Store, StoreError, session_key};
 
 /// The schema version this code writes and understands.
-pub const VERSION: i64 = 7;
+pub const VERSION: i64 = 8;
 
 /// The first library version: what [`STEPS`]' first step makes.
 const FIRST: i64 = 2;
@@ -47,7 +48,7 @@ const FIRST: i64 = 2;
 const PER_SESSION: i64 = 1;
 
 /// The SQL that makes each version from the one before, in order: version
-/// 2 (from an empty file), then 3 to 7. There's no step from 1, which is
+/// 2 (from an empty file), then 3 to 8. There's no step from 1, which is
 /// never a library. [`upgrade`] runs the steps above the file's version.
 const STEPS: &[&str] = &[
     schema::V2,
@@ -56,6 +57,7 @@ const STEPS: &[&str] = &[
     schema::V5,
     schema::V6,
     schema::V7,
+    schema::V8,
 ];
 
 fn version(conn: &Connection) -> Result<i64, StoreError> {

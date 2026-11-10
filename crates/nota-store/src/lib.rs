@@ -2,9 +2,10 @@
 //!
 //! One SQLite database in the data directory holds every session: its
 //! title, tracks and state, the rows for the audio segments the recorder
-//! has published, the heard text and its revisions ([`transcript`]), the
-//! marks and notes made while recording ([`annotations`]), the work queued
-//! after a stop ([`jobs`]) and the final pass's text ([`final_text`]), and
+//! has published, the heard text ([`transcript`]), the marks and notes
+//! made while recording ([`annotations`]), the work queued after a stop
+//! ([`jobs`]), the final pass's text ([`final_text`]) and its revisions
+//! ([`revisions`]), and
 //! the tables later work fills (the timeline). The tables are in [`schema`]; versions
 //! and the import of the per-session stores that came before are in
 //! [`migrate`].
@@ -43,6 +44,7 @@ pub mod final_text;
 mod findings;
 pub mod jobs;
 pub mod migrate;
+pub mod revisions;
 pub mod schema;
 mod segments;
 mod sessions;
@@ -55,10 +57,11 @@ pub use final_text::{FinalText, FinalWord, HeardBy};
 pub use findings::{IndexedFinding, Problem, ReadFailure, Status};
 pub use jobs::{Job, JobEnd, JobId, JobKind, JobState, Progress, Wait};
 pub use migrate::Adopted;
+pub use revisions::{Applied, Change, ChunkKey, FinalLine, RevisionNumber, Timed, WordSpan};
 pub use segments::{AudioDigest, Inserted, RowKey, SegmentRow, Sha256Digest};
 pub use sessions::{NewSession, Session, SessionState, Track, TrackKind};
 pub use timeline::{Happened, TimelineEvent};
-pub use transcript::{Heard, Line, RevisionNumber, StoredUtterance, UtteranceId, Word};
+pub use transcript::{Heard, HeardRevision, Line, StoredUtterance, UtteranceId, Word};
 pub use writer::Writer;
 
 /// How long a write waits for another process's write to finish.
@@ -106,8 +109,16 @@ pub enum StoreError {
     SessionExists(SessionId),
     /// The session has no revision with this number.
     NoRevision(SessionId, u32),
-    /// The session has no utterance with this number.
-    NoUtterance(SessionId, i64),
+    /// A change names words a chunk of the session's final text doesn't
+    /// have, or a chunk it doesn't have. Nothing was stored.
+    NoWords {
+        /// The session.
+        session: SessionId,
+        /// The chunk named.
+        chunk: ChunkKey,
+        /// The words named.
+        words: WordSpan,
+    },
     /// There's no job with this number.
     NoJob(i64),
     /// Final-pass text that overlaps text stored for the track already,
@@ -168,8 +179,24 @@ impl fmt::Display for StoreError {
             Self::NoRevision(id, n) => {
                 write!(f, "session {} has no revision {n}", id.get())
             }
-            Self::NoUtterance(id, n) => {
-                write!(f, "session {} has no utterance {n}", id.get())
+            Self::NoWords {
+                session,
+                chunk,
+                words,
+            } => {
+                let (first, last) = (words.first(), words.last());
+                let named = if first == last {
+                    format!("word {first}")
+                } else {
+                    format!("words {first} to {last}")
+                };
+                write!(
+                    f,
+                    "session {} has no {named} in its final text on track {} at sample {}",
+                    session.get(),
+                    chunk.track.get(),
+                    chunk.start.get()
+                )
             }
             Self::NoJob(id) => write!(f, "there is no job {id}"),
             Self::FinalOverlap { track, start } => write!(

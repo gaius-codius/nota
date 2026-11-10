@@ -458,7 +458,7 @@ fn checks_stop_bad_rows() {
 fn error_display_is_specific() {
     use std::error::Error as _;
     let existing = row(3, 0, 42, 50, 1);
-    let cases: [(StoreError, &str); 11] = [
+    let cases: [(StoreError, &str); 13] = [
         (StoreError::Sqlite(rusqlite::Error::InvalidQuery), "sqlite"),
         (
             StoreError::Create(std::io::Error::other("disk on fire")),
@@ -484,6 +484,28 @@ fn error_display_is_specific() {
             "session 32 is in",
         ),
         (StoreError::Corrupt("bad hash".to_owned()), "bad hash"),
+        (
+            StoreError::NoWords {
+                session: SessionId::new(5),
+                chunk: ChunkKey {
+                    track: TrackId::new(1),
+                    start: SampleIndex::new(800),
+                },
+                words: WordSpan::new(2, 2).unwrap(),
+            },
+            "session 5 has no word 2 in its final text on track 1 at sample 800",
+        ),
+        (
+            StoreError::NoWords {
+                session: SessionId::new(5),
+                chunk: ChunkKey {
+                    track: TrackId::new(1),
+                    start: SampleIndex::new(800),
+                },
+                words: WordSpan::new(2, 4).unwrap(),
+            },
+            "has no words 2 to 4 in",
+        ),
         (
             StoreError::CorruptRow {
                 session: SessionId::new(4),
@@ -518,6 +540,42 @@ fn error_display_is_specific() {
 #[expect(clippy::disallowed_methods, reason = "test scaffolding")]
 pub(crate) fn raw(path: &Path) -> Connection {
     Connection::open(path).unwrap()
+}
+
+/// Whether `sql` is refused on `conn` by the schema's triggers, whose
+/// messages all say what is "never" done; any other refusal fails the test.
+pub(crate) fn refused(conn: &Connection, sql: &str) -> bool {
+    match conn.execute_batch(sql) {
+        Err(e) => {
+            let text = e.to_string();
+            assert!(
+                text.contains("never"),
+                "{sql}: refused, but not by the triggers: {text}"
+            );
+            true
+        }
+        Ok(()) => false,
+    }
+}
+
+/// An empty library at `path` as version `version` (2 to 7) made it, and a
+/// plain connection to it for filling it in by hand.
+pub(crate) fn library_at(path: &Path, version: usize) -> Connection {
+    let steps = [
+        schema::V2,
+        schema::V3,
+        schema::V4,
+        schema::V5,
+        schema::V6,
+        schema::V7,
+    ];
+    let conn = raw(path);
+    for step in &steps[..version - 1] {
+        conn.execute_batch(step).unwrap();
+    }
+    conn.pragma_update(None, "user_version", i64::try_from(version).unwrap())
+        .unwrap();
+    conn
 }
 
 #[test]
