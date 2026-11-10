@@ -104,11 +104,8 @@ fn every_invented_chunk_gets_the_bench_candidates() {
     }
     // The fixture reaches the cap of 6 in 22 of its 250 chunks; a fixture
     // that never reached it couldn't show the cap holds.
-    assert!(
-        chunks.len() >= 250 && full >= 20,
-        "{} chunks, {full} full",
-        chunks.len()
-    ); // check-bound
+    let count = chunks.len();
+    assert!(count >= 250 && full >= 20, "{count} chunks, {full} full"); // check-bound
     assert_eq!(wrong, Vec::<String>::new());
 }
 
@@ -175,10 +172,7 @@ fn every_bench_chunk_gets_the_bench_candidates() {
         }
     }
     // The export holds 74 candidates in 60 chunks (laya/cands.json).
-    assert!(
-        chunks.len() == 60 && offered == 74,
-        "{} chunks, {offered} candidates",
-        chunks.len()
-    ); // check-bound
+    let count = chunks.len();
+    assert!(count == 60 && offered == 74, "{count} chunks, {offered}"); // check-bound
     assert_eq!(wrong, Vec::<String>::new());
 }
