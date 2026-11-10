@@ -20,7 +20,9 @@ use nota_recorder::disk::{
 use nota_recorder::engine::{EngineCommand, EngineConfig, EngineSupervisor};
 use nota_recorder::fs::{Fs, StdFs, is_disk_full};
 use nota_recorder::segment::{PublishQueue, Publisher};
-use nota_recorder::session::{SessionDir, SessionLock, SessionStore, SessionWriter, Syncing};
+use nota_recorder::session::{
+    RecordingLock, SessionDir, SessionLock, SessionStore, SessionWriter, Syncing,
+};
 use nota_store::{Heard, NewSession, Track, TrackKind};
 use nota_tui::Event;
 
@@ -75,6 +77,9 @@ pub(super) struct Started<B: CaptureBackend> {
     pub(super) library: Library,
     pub(super) session: SessionId,
     pub(super) lock: SessionLock<RecordFs>,
+    /// Counts this recording in the library, so no moment plays while it
+    /// runs; let go with the session's lock.
+    pub(super) recording: RecordingLock<StdFs>,
     pub(super) captures: Vec<Capture<B::Stream>>,
     /// Keeps the machine from sleeping, if logind gave the lock; dropped
     /// once recording has ended.
@@ -161,7 +166,7 @@ fn start_with_notes<B: CaptureBackend>(
         None => Screen::enter(draws.clone().map(|d| (d, Arc::clone(clock))))?,
     };
 
-    let library = library.map_or_else(|| Library::open(&args.data), Ok)?;
+    let (library, recording) = open_library(library, &args.data)?;
     show_recovering(&mut screen);
     let watch = recover(&library, args, notes)?;
     if let Some(why) = stop_asked(&ui, &ui_events) {
@@ -253,6 +258,7 @@ fn start_with_notes<B: CaptureBackend>(
         library,
         session: session.id,
         lock,
+        recording,
         captures: streams.captures,
         sleep,
         disk,
@@ -753,6 +759,25 @@ fn start_error(error: std::io::Error) -> BoxError {
     } else {
         error.into()
     }
+}
+
+/// The library in `data`, unless one was `handed` over, and the recording
+/// counted in it for as long as it runs, so no moment of any session plays
+/// meanwhile. It's counted before anything is made or salvaged, so a start
+/// refused while a moment plays leaves nothing behind.
+fn open_library(
+    handed: Option<Library>,
+    data: &std::path::Path,
+) -> Result<(Library, RecordingLock<StdFs>), BoxError> {
+    let library = handed.map_or_else(|| Library::open(data), Ok)?;
+    let recording = library.recordings().record().map_err(|e| -> BoxError {
+        if e.kind() == std::io::ErrorKind::WouldBlock {
+            "a moment of a session is playing: stop it, then record".into()
+        } else {
+            format!("couldn't check whether a moment is playing: {e}").into()
+        }
+    })?;
+    Ok((library, recording))
 }
 
 /// Opens the new writer before any track can record audio.

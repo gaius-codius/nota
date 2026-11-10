@@ -67,7 +67,7 @@ impl<S: Fs> Recordings<S> {
     /// [`io::ErrorKind::WouldBlock`] while a moment plays; any I/O error,
     /// including a missing data folder.
     pub fn record(&self) -> io::Result<RecordingLock<S>> {
-        let guard = self.take(|fs, dir| fs.lock_dir_shared(dir))?;
+        let guard = self.take(S::lock_dir_shared)?;
         Ok(RecordingLock { _guard: guard })
     }
 
@@ -80,7 +80,7 @@ impl<S: Fs> Recordings<S> {
     /// another [`QuietLock`] is held; any I/O error, including a missing
     /// data folder.
     pub fn quiet(&self) -> io::Result<QuietLock<S>> {
-        let guard = self.take(|fs, dir| fs.lock_dir(dir))?;
+        let guard = self.take(S::lock_dir)?;
         Ok(QuietLock { _guard: guard })
     }
 

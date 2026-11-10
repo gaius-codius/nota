@@ -41,7 +41,7 @@ use nota_recorder::segment::{
     Depth, DurableSegment, Published, SegmentLength, SegmentStore, needs_salvage, read_findings,
     salvage_start, scan,
 };
-use nota_recorder::session::{SessionDir, SessionStore};
+use nota_recorder::session::{Recordings, SessionDir, SessionStore};
 use nota_store::{NewSession, SegmentRow, SessionState, StoreError, Track, Writer};
 
 /// Names under the data directory, and in a session's directory.
@@ -146,6 +146,13 @@ impl Library {
             root: root.to_path_buf(),
             db: Writer::new(&root.join(LIBRARY_DB)),
         })
+    }
+
+    /// The library's recording lock: held shared by every recording, and
+    /// exclusively by a moment playing (see
+    /// [`nota_recorder::session::Recordings`]).
+    pub(crate) fn recordings(&self) -> Recordings<StdFs> {
+        Recordings::new(StdFs, &self.root)
     }
 
     /// The library database's file.
