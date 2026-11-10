@@ -147,7 +147,9 @@ impl Store {
     /// [`StoreError::FinalOverlap`] if a text is on another track, ends
     /// past `up_to`, or overlaps a different text stored or given,
     /// [`StoreError::OutOfRange`] if a sample doesn't fit SQLite's integer,
-    /// and [`StoreError::Sqlite`] for any SQLite failure. Nothing is
+    /// and [`StoreError::Sqlite`] for any SQLite failure, including words
+    /// for a text that starts before the track's stored progress (the
+    /// schema seals a chunk's words once progress passes it). Nothing is
     /// stored then.
     pub fn add_final_text(
         &mut self,
