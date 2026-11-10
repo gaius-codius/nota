@@ -31,6 +31,8 @@ enum Plan {
     Trickle,
     /// Says its answer is longer than nota reads.
     Huge,
+    /// Answers its health check with a server error.
+    Unhealthy,
 }
 
 impl Plan {
@@ -47,6 +49,7 @@ impl Plan {
             "crash" => Self::Crash,
             "trickle" => Self::Trickle,
             "huge" => Self::Huge,
+            "unhealthy" => Self::Unhealthy,
             _ => return None,
         })
     }
@@ -191,7 +194,9 @@ fn handle(stream: &UnixStream, dir: &Path, plan: Plan, healthy: &mut u32) -> io:
     if request.path == "/health" {
         *healthy += 1;
         let loading = plan == Plan::NeverReady || *healthy == 1;
-        let (status, body) = if loading {
+        let (status, body) = if plan == Plan::Unhealthy {
+            (500, &br#"{"error":{"message":"no slots"}}"#[..])
+        } else if loading {
             (503, &br#"{"error":{"message":"Loading model"}}"#[..])
         } else {
             (200, &br#"{"status":"ok"}"#[..])
@@ -201,7 +206,7 @@ fn handle(stream: &UnixStream, dir: &Path, plan: Plan, healthy: &mut u32) -> io:
     }
     log(dir, &format!("request {}", std::process::id()));
     match plan {
-        Plan::Answer | Plan::NeverReady | Plan::Crash => {
+        Plan::Answer | Plan::NeverReady | Plan::Crash | Plan::Unhealthy => {
             respond(stream, 200, &answer(&request.body))?;
         }
         Plan::Hang => loop {

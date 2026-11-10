@@ -279,6 +279,22 @@ fn a_server_killed_mid_question_is_restarted_and_asked_again() {
     assert_eq!(starts.len(), 2, "{starts:?}");
     assert_eq!(starts[0], victim);
     assert_eq!(fixture.requests(), [victim, starts[1]]);
+    // Each start listens on a socket of its own.
+    let hosts: Vec<String> = fixture
+        .starts()
+        .iter()
+        .map(|(_, args)| {
+            args.split(' ')
+                .skip_while(|a| *a != "--host")
+                .nth(1)
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect();
+    assert!(
+        hosts[0].ends_with("-1.sock") && hosts[1].ends_with("-2.sock"),
+        "{hosts:?}"
+    );
     assert!(!exists(victim), "the killed server wasn't reaped");
 }
 
@@ -660,4 +676,24 @@ fn a_bare_program_name_behind_the_launcher_is_left_to_its_exec() {
     };
     assert!(matches!(**last, ServerError::Exited(..)), "{last}");
     assert_eq!(fixture.starts(), Vec::<(u32, String)>::new());
+}
+
+/// A server whose health check answers with a server error is given up
+/// on at once, with what it said, rather than waited on as loading.
+#[test]
+fn a_server_whose_health_check_fails_is_given_up_on_at_once() {
+    let fixture = Fixture::new("unhealthy", "unhealthy");
+    let mut config = fixture.config();
+    config.restarts = 0;
+    let mut decider = Fixture::decider(config);
+    let (result, took) = timed(|| decider.decide(&question(1), &go_on));
+    let err = result.unwrap_err();
+    let ServerError::GaveUp(1, last) = server_error(&err) else {
+        panic!("{err}")
+    };
+    assert!(
+        matches!(&**last, ServerError::Status(500, said) if said.contains("no slots")),
+        "{last}"
+    );
+    assert!(took < PROMPTLY, "took {took:?}");
 }

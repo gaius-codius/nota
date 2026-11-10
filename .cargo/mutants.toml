@@ -7,13 +7,18 @@
 # fake-engine, fake-clock), which nothing enables outside dev-dependencies:
 # the fake filesystem and its crash and sweep harnesses (fs/fake.rs,
 # fs/crash.rs, fs/sweep.rs), the fake speech engine (bin/nota-fake-engine.rs),
-# and the inline `fake` modules below in exclude_re (FakeClock in
-# nota-core's clock.rs, FakeStore in segment/store.rs).
+# the stand-in llama-server (nota-llm's bin/nota-fake-llama-server/, behind
+# fake-server), and the inline `fake` modules below in exclude_re (FakeClock
+# in nota-core's clock.rs, FakeStore in segment/store.rs). nota-llm's
+# bench_decider example is a measuring tool run by hand against a real
+# model; no test runs it.
 exclude_globs = [
   "crates/nota-recorder/src/fs/fake.rs",
   "crates/nota-recorder/src/fs/crash.rs",
   "crates/nota-recorder/src/fs/sweep.rs",
   "crates/nota-recorder/src/bin/nota-fake-engine.rs",
+  "crates/nota-llm/src/bin/nota-fake-llama-server/*.rs",
+  "crates/nota-llm/examples/**/*.rs",
 ]
 
 # The PipeWire stream's Debug impl only names the type, and a test would need
@@ -47,14 +52,21 @@ exclude_globs = [
 # cargo-mutants edits the source whatever its cfg, so a mutant in a function
 # built only off Linux changes nothing CI's Linux runners build, and no test
 # there can catch it: the other platforms' monotonic_now in nota-core's
-# clock.rs, and sync_dir in fs/real.rs. Each is named by its line, since its
-# Linux twin has the same name and the same mutants; if the function moves,
-# move the line here too.
+# clock.rs, sync_dir in fs/real.rs, and exec in nota-llm's lifeline.rs.
+# Each is named by its line, since its Linux twin has the same name and the
+# same mutants; if the function moves, move the line here too.
 #
 # Some mutants change nothing nota does:
 # - Question::is_empty is always false: a question is built with at least
 #   one candidate and has no way to lose one. It's there because
 #   Question::len is public.
+# - Dropping nota-llm's Spawner drops its channel with it, which ends the
+#   spawner's thread whether or not its Drop runs; the Drop only waits for
+#   that end (a join), which no test can see without timing the thread.
+# - nota-llm's strict JSON reader is fed only by serde_json's
+#   deserialize_any, which accepts every JSON value, so its visitor's
+#   `expecting` text is never shown; and its visit_unit builds
+#   Value::Null, which is what Value's Default is too.
 # - EngineSupervisor::shutdown takes the supervisor, and dropping it stops
 #   it the same way (its Drop calls the same stop), so an empty shutdown
 #   still stops it.
@@ -88,5 +100,9 @@ exclude_re = [
   "replace Supervisor::next_deadline -> Option<SessionTime> with Some\\(Default::default\\(\\)\\)$",
   "replace <impl Source for Runs<'_>>::len_hint -> Option<usize> with None$",
   "replace Question::is_empty -> bool with false$",
+  "nota-llm/src/lifeline\\.rs:46:5: replace exec -> ",
+  "replace <impl Drop for Spawner>::drop with \\(\\)$",
+  "replace <impl Visitor<'de> for StrictVisitor>::expecting -> fmt::Result with Ok\\(Default::default\\(\\)\\)$",
+  "replace <impl Visitor<'de> for StrictVisitor>::visit_unit -> Result<Value, E> with Ok\\(Default::default\\(\\)\\)$",
   "replace match guard end\\.is_none_or\\(\\|end\\| end == chunk\\.range\\(\\)\\.start\\(\\)\\) with true in Replay::sent_run_end$",
 ]

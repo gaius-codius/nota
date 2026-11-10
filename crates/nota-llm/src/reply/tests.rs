@@ -285,3 +285,32 @@ fn errors_say_whats_wrong() {
     assert!(not_json.source().is_some());
     assert!(ReplyError::CutShort.source().is_none());
 }
+
+/// A body as long as the limit is read, not refused as too long.
+#[test]
+fn a_body_at_the_limit_is_read() {
+    let body = vec![b' '; MAX_REPLY_LEN];
+    assert!(matches!(parse(&body, 1), Err(ReplyError::NotJson(_))));
+}
+
+/// A weight too large to add up gives no probability, not a false 0.
+#[test]
+fn weights_too_large_to_add_give_no_probability() {
+    let token = json!({"token": "false", "logprob": -0.1, "top_logprobs": [
+        {"token": "true", "logprob": -1.0},
+        {"token": "false", "logprob": 1000.0}
+    ]});
+    let choice = json!({
+        "finish_reason": "stop",
+        "message": {"content": r#"{"decisions":[{"id":1,"apply":false}]}"#},
+        "logprobs": {"content": [token]}
+    });
+    let decisions = parse(&reply_with(&choice), 1).unwrap();
+    assert_eq!(
+        decisions[0],
+        Decision {
+            answer: Answer::No,
+            yes: None
+        }
+    );
+}

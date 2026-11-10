@@ -215,3 +215,58 @@ fn an_exchange_writes_then_reads() {
     assert_eq!(response.status, 200);
     assert_eq!(socket.0, request("/health", None));
 }
+
+/// A body exactly as long as the limit is read whole.
+#[test]
+fn a_body_at_its_limit_is_read() {
+    let mut response =
+        format!("HTTP/1.1 200 OK\r\nContent-Length: {MAX_REPLY_LEN}\r\n\r\n").into_bytes();
+    response.extend(std::iter::repeat_n(b'x', MAX_REPLY_LEN));
+    assert_eq!(read(&response).unwrap().body.len(), MAX_REPLY_LEN);
+}
+
+/// A body that arrives after the head stops at its length, even with
+/// more bytes behind it.
+#[test]
+fn a_body_stops_at_its_length() {
+    let bytes = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhellotrailing junk".to_vec();
+    let response = read_response(&mut Trickle(bytes, 0)).unwrap();
+    assert_eq!(response.body, b"hello");
+}
+
+/// A read that's interrupted is tried again.
+#[test]
+fn an_interrupted_read_is_tried_again() {
+    struct Once(bool, Cursor<Vec<u8>>);
+    impl Read for Once {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if std::mem::replace(&mut self.0, false) {
+                Err(io::ErrorKind::Interrupted.into())
+            } else {
+                self.1.read(buf)
+            }
+        }
+    }
+    let response = read_response(&mut Once(true, Cursor::new(HEALTH.to_vec()))).unwrap();
+    assert_eq!(response.body, br#"{"status":"ok"}"#);
+}
+
+/// Errors say what went wrong, and a failed connection keeps its cause.
+#[test]
+fn http_errors_say_what_went_wrong() {
+    let io = HttpError::Io(io::ErrorKind::UnexpectedEof.into());
+    assert!(
+        io.to_string().starts_with("the connection failed: "),
+        "{io}"
+    );
+    assert!(io.source().is_some());
+    assert_eq!(
+        HttpError::BadHead("no status").to_string(),
+        "the response isn't HTTP as expected: no status"
+    );
+    assert_eq!(
+        HttpError::TooLong("head").to_string(),
+        "the response's head is too long"
+    );
+    assert!(HttpError::TooLong("head").source().is_none());
+}

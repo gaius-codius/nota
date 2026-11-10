@@ -302,5 +302,12 @@ mod tests {
         let refused = e.downcast_ref::<Refused>().unwrap();
         assert_eq!(refused.status, 400);
         assert_eq!(refused.said, said[..SAID_LEN]);
+        assert_eq!(
+            refused.to_string(),
+            format!(
+                "llama-server refused the question (400): {}",
+                &said[..SAID_LEN]
+            )
+        );
     }
 }

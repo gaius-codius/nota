@@ -238,10 +238,6 @@ impl<'de> Visitor<'de> for StrictVisitor {
         Ok(Value::String(v.to_owned()))
     }
 
-    fn visit_string<E>(self, v: String) -> Result<Value, E> {
-        Ok(Value::String(v))
-    }
-
     fn visit_unit<E>(self) -> Result<Value, E> {
         Ok(Value::Null)
     }
@@ -333,7 +329,8 @@ fn yes_weight(token: &Value) -> Option<Probability> {
         }
     }
     let total = yes + no;
-    if total > 0.0 && total.is_finite() {
+    // No weight at all gives 0 / 0, which isn't a probability either.
+    if total.is_finite() {
         Probability::new(yes / total)
     } else {
         None

@@ -477,12 +477,7 @@ impl Server {
         if config.launcher.is_some() && config.program.components().count() > 1 {
             runnable(&config.program).map_err(ServerError::Spawn)?;
         }
-        let socket = config
-            .socket_dir
-            .join(format!("llama-{}-{generation}.sock", std::process::id()));
-        if socket.as_os_str().len() > MAX_SOCKET_PATH {
-            return Err(ServerError::SocketPathTooLong(socket));
-        }
+        let socket = socket_path(&config.socket_dir, std::process::id(), generation)?;
         let mut command = config.command(&socket);
         command
             .env(RECORDER_PID_VAR, std::process::id().to_string())
@@ -684,6 +679,20 @@ fn remove_socket(socket: &Path) {
     let _ = std::fs::remove_file(socket);
 }
 
+/// The socket for start number `generation` of nota process `pid`, in
+/// `dir`.
+///
+/// # Errors
+///
+/// If the path is too long for a UNIX socket.
+fn socket_path(dir: &Path, pid: u32, generation: u64) -> Result<PathBuf, ServerError> {
+    let socket = dir.join(format!("llama-{pid}-{generation}.sock"));
+    if socket.as_os_str().len() > MAX_SOCKET_PATH {
+        return Err(ServerError::SocketPathTooLong(socket));
+    }
+    Ok(socket)
+}
+
 /// Whether `program` is a file that can be run.
 fn runnable(program: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -709,15 +718,12 @@ fn private_dir(dir: &Path) -> Result<(), ServerError> {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
     let failed = |e| ServerError::SocketDir(dir.to_owned(), e);
-    match std::fs::DirBuilder::new()
+    // Making it all the way down succeeds if it's already there.
+    std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(dir)
-    {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(e) => return Err(failed(e)),
-    }
+        .map_err(failed)?;
     let mode = std::fs::metadata(dir).map_err(failed)?.permissions().mode();
     if mode & 0o077 != 0 {
         return Err(ServerError::SocketDirOpen(dir.to_owned()));
@@ -806,8 +812,8 @@ fn read_tail(mut input: impl Read, keep: usize) -> String {
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => break,
         }
-        if kept.len() > keep {
-            kept.drain(..kept.len() - keep);
+        if let Some(over) = kept.len().checked_sub(keep) {
+            kept.drain(..over);
         }
     }
     String::from_utf8_lossy(&kept).into_owned()

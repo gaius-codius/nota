@@ -18,6 +18,7 @@
 //!   - `crash`: exits at once, saying the model is missing
 //!   - `trickle`: answers, a byte every 20 ms
 //!   - `huge`: answers with a length over nota's limit
+//!   - `unhealthy`: answers its health check with error 500
 //!
 //! `nota-fake-llama-server exec-tied PROGRAM ARGS…` is the launch shim
 //! nota uses (`nota_llm::lifeline::exec_tied`), so the tests can start it

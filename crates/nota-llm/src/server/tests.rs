@@ -253,3 +253,196 @@ fn a_stop_during_the_last_wait_is_seen() {
     let stopped = pause(&clock, Duration::from_millis(500), &stop);
     assert!(matches!(stopped, Err(Interrupted::Stopped)), "{stopped:?}");
 }
+
+/// A socket path is taken up to the longest a UNIX socket allows, and
+/// refused one byte past it.
+#[test]
+fn a_socket_path_is_taken_up_to_its_limit() {
+    // "/" + padding + "/llama-1-2.sock" (15 bytes) makes the whole.
+    let dir_of = |whole: usize| PathBuf::from(format!("/{}", "d".repeat(whole - 16)));
+    let at = socket_path(&dir_of(MAX_SOCKET_PATH), 1, 2).unwrap();
+    assert_eq!(at.as_os_str().len(), MAX_SOCKET_PATH);
+    let over = socket_path(&dir_of(MAX_SOCKET_PATH + 1), 1, 2).unwrap_err();
+    assert!(
+        matches!(over, ServerError::SocketPathTooLong(_)),
+        "{over:?}"
+    );
+}
+
+/// A file where the socket directory should be is reported as unusable.
+#[test]
+fn a_file_for_a_socket_directory_is_reported() {
+    let dir = Dir::new("isfile");
+    dir.make(0o700);
+    let file = dir.file("sockets");
+    let err = private_dir(&file).unwrap_err();
+    assert!(
+        matches!(&err, ServerError::SocketDir(p, _) if *p == file),
+        "{err:?}"
+    );
+}
+
+/// Only a file that can be run passes as a program.
+#[test]
+fn only_a_runnable_file_is_a_program() {
+    assert!(runnable(Path::new("/bin/sh")).is_ok());
+    let dir = Dir::new("runnable");
+    dir.make(0o700);
+    let plain = dir.file("plain");
+    for (path, what) in [
+        (&plain, "a file that can't be run"),
+        (&dir.0, "a directory"),
+    ] {
+        let err = runnable(path).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{what}");
+    }
+    assert_eq!(
+        runnable(&dir.0.join("missing")).unwrap_err().kind(),
+        io::ErrorKind::NotFound
+    );
+}
+
+/// A reader that gives what it holds, one result at a time.
+struct Script(Vec<io::Result<Vec<u8>>>);
+
+impl Read for Script {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.0.is_empty() {
+            return Ok(0);
+        }
+        let bytes = self.0.remove(0)?;
+        buf[..bytes.len()].copy_from_slice(&bytes);
+        Ok(bytes.len())
+    }
+}
+
+/// A writer that fails, or would block, as it's told, then takes all.
+struct Sink {
+    /// The errors to give first, in order.
+    errors: Vec<io::ErrorKind>,
+    /// Whether flushing fails.
+    flush_fails: bool,
+}
+
+impl Write for Sink {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.errors.is_empty() {
+            Ok(buf.len())
+        } else {
+            Err(self.errors.remove(0).into())
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if self.flush_fails {
+            Err(io::ErrorKind::BrokenPipe.into())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// A check that lets `n` waits go by, then says to give up.
+fn give_up_after(n: u32) -> impl FnMut() -> io::Result<()> {
+    let mut left = n;
+    move || {
+        if left == 0 {
+            return Err(io::Error::other("gave up"));
+        }
+        left -= 1;
+        Ok(())
+    }
+}
+
+/// A connection's own failure comes back as it is, at once; a read that
+/// times out or is interrupted is tried again.
+#[test]
+fn a_patient_reader_passes_on_failures_and_waits_out_timeouts() {
+    let mut check = give_up_after(10);
+    let mut stream = Script(vec![
+        Err(io::ErrorKind::WouldBlock.into()),
+        Err(io::ErrorKind::Interrupted.into()),
+        Ok(b"ok".to_vec()),
+        Err(io::ErrorKind::ConnectionReset.into()),
+    ]);
+    let mut patient = Patient {
+        stream: &mut stream,
+        check: &mut check,
+    };
+    let mut buf = [0_u8; 8];
+    assert_eq!(patient.read(&mut buf).unwrap(), 2);
+    assert_eq!(&buf[..2], b"ok");
+    let err = patient.read(&mut buf).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::ConnectionReset, "{err}");
+    assert_eq!(format!("{patient:?}"), "Patient");
+}
+
+/// A write that would block is tried again; one that fails comes back
+/// as it is; a failed flush is passed on.
+#[test]
+fn a_patient_writer_passes_on_failures_and_waits_out_timeouts() {
+    let mut check = give_up_after(10);
+    let mut sink = Sink {
+        errors: vec![io::ErrorKind::WouldBlock, io::ErrorKind::TimedOut],
+        flush_fails: false,
+    };
+    let mut patient = Patient {
+        stream: &mut sink,
+        check: &mut check,
+    };
+    assert_eq!(patient.write(b"abc").unwrap(), 3);
+    assert!(patient.flush().is_ok());
+
+    let mut sink = Sink {
+        errors: vec![io::ErrorKind::BrokenPipe],
+        flush_fails: true,
+    };
+    let mut patient = Patient {
+        stream: &mut sink,
+        check: &mut check,
+    };
+    assert_eq!(
+        patient.write(b"abc").unwrap_err().kind(),
+        io::ErrorKind::BrokenPipe
+    );
+    assert_eq!(
+        patient.flush().unwrap_err().kind(),
+        io::ErrorKind::BrokenPipe
+    );
+}
+
+/// An interrupted read of stderr is tried again, and a failed one ends
+/// it with what came before.
+#[test]
+fn a_tail_reads_on_past_an_interruption() {
+    let interrupted = Script(vec![
+        Ok(b"loading ".to_vec()),
+        Err(io::ErrorKind::Interrupted.into()),
+        Ok(b"failed".to_vec()),
+    ]);
+    assert_eq!(read_tail(interrupted, 100), "loading failed");
+    let broken = Script(vec![
+        Ok(b"loading".to_vec()),
+        Err(io::ErrorKind::BrokenPipe.into()),
+        Ok(b" never seen".to_vec()),
+    ]);
+    assert_eq!(read_tail(broken, 100), "loading");
+    // Exactly the kept length stays whole.
+    assert_eq!(read_tail(&b"abcde"[..], 5), "abcde");
+    assert_eq!(read_tail(&b"abcdef"[..], 5), "bcdef");
+}
+
+/// The errors that wrap another keep it as their source.
+#[test]
+fn wrapping_errors_keep_their_source() {
+    let io = || io::Error::from(io::ErrorKind::NotFound);
+    for err in [
+        ServerError::Spawn(io()),
+        ServerError::SocketDir(PathBuf::from("/s"), io()),
+        ServerError::Connection(HttpError::Io(io())),
+        ServerError::Unreadable(HttpError::TooLong("body")),
+    ] {
+        assert!(err.source().is_some(), "{err:?}");
+    }
+    assert!(ServerError::NotReady(Duration::ZERO).source().is_none());
+}

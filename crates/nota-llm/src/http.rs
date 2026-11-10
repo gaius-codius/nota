@@ -20,7 +20,7 @@ use crate::reply::MAX_REPLY_LEN;
 
 /// The longest response head (status line and headers) read, in bytes.
 /// llama-server's are about 200.
-pub const MAX_HEAD_LEN: usize = 16 * 1024;
+pub const MAX_HEAD_LEN: usize = 16_384;
 
 /// A response: its status code and body.
 #[derive(Debug, Clone, PartialEq, Eq)]
