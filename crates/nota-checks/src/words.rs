@@ -304,8 +304,9 @@ fn word_end(chars: &[char], start: usize) -> usize {
     // word character, so `start` itself never ends it.
     (start..chars.len())
         .find(|&k| {
-            let joined =
-                chars[k] == '\'' && k > 0 && joins(chars[k - 1], chars.get(k + 1).copied());
+            let joined = chars[k] == '\''
+                && k.checked_sub(1)
+                    .is_some_and(|before| joins(chars[before], chars.get(k + 1).copied()));
             !is_word(chars[k]) && !joined
         })
         .unwrap_or(chars.len())
