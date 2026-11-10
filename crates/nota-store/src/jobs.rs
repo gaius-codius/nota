@@ -14,6 +14,16 @@
 //! running by a runner that died is taken again ([`Store::recover_jobs`]);
 //! every job is safe to run again, carrying on from what it committed.
 //!
+//! **Why the engine failed.** A run whose speech engine couldn't start or
+//! stopped working ends [`JobEnd::EngineDown`] with the reason, and the
+//! job waits for a working engine as [`JobState::EngineDown`]. The reason
+//! is kept in the row's `detail` (as a failed job's is) and goes with the
+//! job into its next run ([`JobState::Retrying`]), and back to waiting if
+//! that runner dies, so the Processing screen can say why while the
+//! engine is tried again. It goes once that run's engine answers
+//! ([`Store::engine_answered`]), and whatever the run ends with replaces
+//! it: a finished run clears it, and so does any other end.
+//!
 //! The Processing screen shows what this holds.
 
 use nota_core::SessionId;
@@ -53,7 +63,8 @@ pub enum Wait {
     /// Free space: its session stopped on a full disk, or the job ran out
     /// of space. It runs once there's space again.
     Space,
-    /// A speech engine: nota was started without its models.
+    /// A speech engine: nota was started without its models, or (with
+    /// a reason, [`JobState::EngineDown`]) the last one tried failed.
     Engine,
     /// The session's audio: journals it still has are published (by
     /// salvage, at the next start) before its audio is worked on.
@@ -85,8 +96,16 @@ pub enum JobState {
     /// Queued, or paused: it runs when a runner takes it, once what it
     /// waits for (if anything) is there.
     Waiting(Option<Wait>),
+    /// Waiting for a working speech engine, as [`Wait::Engine`], after
+    /// the last run's engine couldn't start or stopped working, for the
+    /// reason given. It runs again like any waiting job.
+    EngineDown(String),
     /// A runner is running it.
     Running,
+    /// A runner is running it again after its engine failed, for the
+    /// reason given: the reason stays until this run's engine answers or
+    /// the run ends.
+    Retrying(String),
     /// Finished.
     Done,
     /// Given up on, for the reason given. It isn't run again.
@@ -140,6 +159,10 @@ pub enum JobEnd {
     /// It stopped before finishing and is to run again: paused for a
     /// recording (`None`), or waiting for what it lacks.
     Waiting(Option<Wait>),
+    /// Its speech engine couldn't start or stopped working, for the
+    /// reason given. It waits for a working engine and runs again,
+    /// keeping the reason until a later run ends.
+    EngineDown(String),
     /// It can't be done, for the reason given.
     Failed(String),
 }
@@ -180,14 +203,18 @@ fn count(n: i64, what: &str) -> Result<u64, StoreError> {
 fn parse_job(
     (id, session, kind, state, attempts, progress, total, waits, detail): RawJob,
 ) -> Result<Job, StoreError> {
+    let waits = waits.as_deref().map(Wait::parse).transpose()?;
     let state = match (state.as_str(), waits, detail) {
-        ("waiting", waits, _) => JobState::Waiting(waits.as_deref().map(Wait::parse).transpose()?),
-        ("running", None, _) => JobState::Running,
+        ("waiting", waits, None) => JobState::Waiting(waits),
+        // Only an engine's failure leaves a reason on a waiting job.
+        ("waiting", Some(Wait::Engine), Some(why)) => JobState::EngineDown(why),
+        ("running", None, None) => JobState::Running,
+        ("running", None, Some(why)) => JobState::Retrying(why),
         ("done", None, _) => JobState::Done,
         ("failed", None, detail) => JobState::Failed(detail.unwrap_or_default()),
-        (state, waits, _) => {
+        (state, waits, detail) => {
             return Err(StoreError::Corrupt(format!(
-                "job {id} is {state:?} waiting for {waits:?}"
+                "job {id} is {state:?} waiting for {waits:?} with detail {detail:?}"
             )));
         }
     };
@@ -286,15 +313,18 @@ impl Store {
     }
 
     /// Takes a waiting job to run: it's [`JobState::Running`] from now,
-    /// with the progress it had. Says whether it was waiting; one that
-    /// wasn't (another runner took it, or it ended) is left as it is.
+    /// with the progress it had, or [`JobState::Retrying`] with the reason
+    /// if it was [`JobState::EngineDown`]. Says whether it was waiting; one
+    /// that wasn't (another runner took it, or it ended) is left as it is.
     ///
     /// # Errors
     ///
     /// [`StoreError::Sqlite`] for any SQLite failure.
     pub fn start_job(&mut self, id: JobId) -> Result<bool, StoreError> {
+        // SQLite reads the old `waits_for` on the right of each `SET`.
         let changed = self.conn.execute(
-            "UPDATE job SET state = 'running', waits_for = NULL, detail = NULL \
+            "UPDATE job SET state = 'running', waits_for = NULL, \
+             detail = CASE WHEN waits_for = 'engine' THEN detail END \
              WHERE id = ?1 AND state = 'waiting'",
             [id.0],
         )?;
@@ -315,7 +345,24 @@ impl Store {
         Ok(())
     }
 
-    /// Ends a run of the job, as `end` says.
+    /// Notes that a running job's engine has answered, so an earlier
+    /// engine failure no longer says anything: a
+    /// [`JobState::Retrying`] job is [`JobState::Running`] from now. Any
+    /// other job is left as it is.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] for any SQLite failure.
+    pub fn engine_answered(&mut self, id: JobId) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE job SET detail = NULL WHERE id = ?1 AND state = 'running'",
+            [id.0],
+        )?;
+        Ok(())
+    }
+
+    /// Ends a run of the job, as `end` says. A reason kept from an
+    /// earlier engine failure goes, or is replaced by this end's.
     ///
     /// # Errors
     ///
@@ -325,6 +372,7 @@ impl Store {
         let (state, waits, detail) = match end {
             JobEnd::Done => ("done", None, None),
             JobEnd::Waiting(waits) => ("waiting", waits.map(Wait::as_str), None),
+            JobEnd::EngineDown(why) => ("waiting", Some(Wait::Engine.as_str()), Some(why.as_str())),
             JobEnd::Failed(why) => ("failed", None, Some(why.as_str())),
         };
         let changed = self.conn.execute(
@@ -340,8 +388,11 @@ impl Store {
     /// Takes back the jobs a runner that died left running: each waits to
     /// run again, with one more attempt counted, or fails once `limit`
     /// attempts have died (a job that kills nota every time it runs mustn't
-    /// keep doing so). Only the runner that holds the job queue calls this,
-    /// before it runs anything. Gives how many were taken back.
+    /// keep doing so). A job that was retrying after its engine failed
+    /// waits as [`JobState::EngineDown`] again, keeping the reason: the
+    /// runner dying says nothing about the engine. Only the runner that
+    /// holds the job queue calls this, before it runs anything. Gives how
+    /// many were taken back.
     ///
     /// # Errors
     ///
@@ -351,7 +402,9 @@ impl Store {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let taken = tx.execute(
-            "UPDATE job SET state = 'waiting', attempts = attempts + 1 WHERE state = 'running'",
+            "UPDATE job SET state = 'waiting', attempts = attempts + 1, \
+             waits_for = CASE WHEN detail IS NULL THEN NULL ELSE 'engine' END \
+             WHERE state = 'running'",
             [],
         )?;
         tx.execute(
