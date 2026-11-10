@@ -1,4 +1,4 @@
-# Weekly mutation testing of the whole core and recorder crates. Each PR
+# Weekly mutation testing of the whole core, recorder and checks crates. Each PR
 # tests only the mutants of its own changes (ci.yml); this catches tests that
 # have weakened since, and code a PR's diff didn't reach.
 name: Mutation testing
@@ -52,7 +52,7 @@ jobs:
           # 16 GB at the cap, and the tests pass under half of it.
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: prlimit --as=1073741824 --
         run: >-
-          cargo mutants -p nota-core -p nota-recorder
+          cargo mutants -p nota-core -p nota-recorder -p nota-checks
           --shard "$SHARD/8"
           --test-tool nextest --jobs 2 --output "$RUNNER_TEMP"
       - if: always()
