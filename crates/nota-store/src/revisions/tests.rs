@@ -297,14 +297,15 @@ fn a_revision_needs_its_parent_and_its_own_chunk_s_words() {
         );
     }
     // Two changes that share a word roll back together.
+    let shared = store.add_revision(
+        S1,
+        RevisionNumber::FINAL,
+        &[change(&a, 0, 1, "p"), change(&a, 1, 2, "q")],
+    );
     assert!(
-        store
-            .add_revision(
-                S1,
-                RevisionNumber::FINAL,
-                &[change(&a, 0, 1, "p"), change(&a, 1, 2, "q")]
-            )
-            .is_err()
+        matches!(&shared, Err(StoreError::Sqlite(e))
+            if e.to_string().contains("never changes a word twice")),
+        "{shared:?}"
     );
     assert!(matches!(
         store.revision(S1, RevisionNumber(1)),
@@ -356,7 +357,7 @@ fn segment(track: TrackId, epoch: u32, a: u64, b: u64) -> SegmentRow {
 /// starts is timed by its own epoch; a track with no anchor comes last.
 #[test]
 fn final_rows_read_in_session_order_across_tracks() {
-    let (_dir, mut store) = store("order");
+    let (_dir, mut store) = store("revisions-order");
     // The microphone from 1 s, reopened at 100 s after a gap; system audio
     // from 1 s at its sample 16 000.
     for (track, epoch) in [
@@ -405,10 +406,93 @@ fn final_rows_read_in_session_order_across_tracks() {
     );
 }
 
+/// Audio skipped as one run over a reopened stream starts under its first
+/// epoch and ends under its last, after the gap.
+#[test]
+fn a_chunk_over_a_reopened_stream_ends_after_the_gap() {
+    let (_dir, mut store) = store("revisions-span");
+    for epoch in [anchor(0, 0, 1), anchor(1, 160_000, 100)] {
+        store.insert_epoch(S1, MIC, &epoch).unwrap();
+    }
+    for row in [
+        segment(MIC, 0, 0, 160_000),
+        segment(MIC, 1, 160_000, 320_000),
+    ] {
+        store.insert_segment(S1, &row).unwrap();
+    }
+    add(&mut store, S1, &[chunk(MIC, 152_000, 168_000, None, &[])]);
+    let lines = store.revision(S1, RevisionNumber::FINAL).unwrap();
+    assert_eq!(
+        lines[0].at,
+        Some(Timed {
+            start: SessionTime::from_nanos(10_500_000_000),
+            end: SessionTime::from_nanos(100_500_000_000),
+        })
+    );
+}
+
+/// A chunk in an epoch whose anchor wasn't kept reads untimed, though the
+/// epochs either side of it are timed: it isn't placed by its neighbour's.
+#[test]
+fn a_chunk_in_an_unanchored_epoch_reads_untimed() {
+    let (_dir, mut store) = store("revisions-unanchored");
+    for epoch in [anchor(0, 0, 1), anchor(2, 320_000, 200)] {
+        store.insert_epoch(S1, MIC, &epoch).unwrap();
+    }
+    for row in [
+        segment(MIC, 0, 0, 160_000),
+        segment(MIC, 1, 160_000, 320_000),
+        segment(MIC, 2, 320_000, 480_000),
+    ] {
+        store.insert_segment(S1, &row).unwrap();
+    }
+    add(
+        &mut store,
+        S1,
+        &[
+            chunk(MIC, 170_000, 180_000, Some("unknown"), &[]),
+            chunk(MIC, 330_000, 340_000, Some("known"), &[]),
+        ],
+    );
+    let read: Vec<_> = store
+        .revision(S1, RevisionNumber::FINAL)
+        .unwrap()
+        .into_iter()
+        .map(|l| (l.text.unwrap(), l.at.is_some()))
+        .collect();
+    assert_eq!(
+        read,
+        [("known".to_owned(), true), ("unknown".to_owned(), false)]
+    );
+}
+
+/// A chunk before its track's first segment reads untimed, even where the
+/// segment before it in order, another track's, covers its samples.
+#[test]
+fn a_chunk_outside_its_track_s_segments_reads_untimed() {
+    let (_dir, mut store) = store("revisions-outside");
+    for track in [MIC, SYSTEM] {
+        store.insert_epoch(S1, track, &anchor(0, 0, 0)).unwrap();
+    }
+    store
+        .insert_segment(S1, &segment(MIC, 0, 0, 100_000))
+        .unwrap();
+    store
+        .insert_segment(S1, &segment(SYSTEM, 0, 50_000, 100_000))
+        .unwrap();
+    add(
+        &mut store,
+        S1,
+        &[chunk(SYSTEM, 10_000, 20_000, Some("x"), &[])],
+    );
+    let lines = store.revision(S1, RevisionNumber::FINAL).unwrap();
+    assert_eq!(lines[0].at, None);
+}
+
 /// Two chunks timed alike read by track, then first sample.
 #[test]
 fn chunks_at_the_same_time_read_by_track() {
-    let (_dir, mut store) = store("ties");
+    let (_dir, mut store) = store("revisions-ties");
     for track in [SYSTEM, MIC] {
         store.insert_epoch(S1, track, &anchor(0, 0, 0)).unwrap();
         store
@@ -453,7 +537,7 @@ fn a_track_whose_anchors_do_not_rebuild_reads_untimed() {
 /// revision 0.
 #[test]
 fn sqlite_refuses_to_change_a_revision() {
-    let (dir, mut store) = store("append-only");
+    let (dir, mut store) = store("revisions-append-only");
     let (a, b) = two_chunks();
     add(&mut store, S1, &[a.clone(), b.clone()]);
     let one = store

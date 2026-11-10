@@ -19,15 +19,17 @@
 //! (version 8) refuse it whatever connection tries.
 //!
 //! **In session order.** A revision's lines are placed in session time by
-//! their epoch's anchor: the epoch of the segment holding the chunk's first
-//! sample (a chunk never spans two epochs). A chunk whose epoch has no
-//! anchor (audio from journals that didn't keep one), or whose track's
-//! anchors don't rebuild into a timeline, has no time; those come after
-//! the timed ones, by track and sample.
+//! their epochs' anchors: a chunk starts under the epoch of the segment
+//! holding its first sample and ends under the one holding its last. (A
+//! chunk with text never spans two epochs; audio skipped as one run can.)
+//! A chunk whose epochs aren't both anchored (audio from journals that
+//! didn't keep one), or whose track's anchors don't rebuild into a
+//! timeline, has no time; those come after the timed ones, by track and
+//! sample.
 
 use std::collections::BTreeMap;
 
-use nota_core::{EpochAnchor, SampleIndex, SessionId, SessionTime, TrackId, TrackTimeline};
+use nota_core::{Epoch, EpochAnchor, SampleIndex, SessionId, SessionTime, TrackId, TrackTimeline};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::final_text::{FinalText, FinalWord, sample, texts_in};
@@ -355,29 +357,44 @@ fn timelines(anchors: Vec<(TrackId, EpochAnchor)>) -> BTreeMap<TrackId, TrackTim
         .collect()
 }
 
-/// When `text` was said: its start and end under the epoch of the segment
-/// holding its first sample, from `segments` (sorted by track, then start).
-/// `None` if no segment holds it or that epoch's anchor isn't stored.
+/// The epoch `sample` of `track` was recorded in: the epoch of the
+/// segment holding it, from `segments` (sorted by track, then start), if
+/// that epoch's anchor is in `timelines`.
+fn epoch_at<'t>(
+    track: TrackId,
+    sample: SampleIndex,
+    segments: &[SegmentRow],
+    timelines: &'t BTreeMap<TrackId, TrackTimeline>,
+) -> Option<&'t Epoch> {
+    let after = segments.partition_point(|s| (s.track(), s.range().start()) <= (track, sample));
+    let segment = segments.get(after.checked_sub(1)?)?;
+    if segment.track() != track || !segment.range().contains(sample) {
+        return None;
+    }
+    timelines
+        .get(&track)?
+        .epochs()
+        .iter()
+        .find(|e| e.id() == segment.epoch())
+}
+
+/// When `text` was said: its start under the epoch of its first sample,
+/// and its end under the epoch of its last, so a chunk that runs on over
+/// a reopened stream (audio skipped as one run) ends after the gap, and
+/// one ending where the next epoch starts ends before it. `None` if a
+/// segment doesn't hold either sample or its epoch's anchor isn't stored.
 fn placed(
     text: &FinalText,
     segments: &[SegmentRow],
     timelines: &BTreeMap<TrackId, TrackTimeline>,
 ) -> Option<Timed> {
-    let key = text.key();
-    let after =
-        segments.partition_point(|s| (s.track(), s.range().start()) <= (key.track, key.start));
-    let segment = segments.get(after.checked_sub(1)?)?;
-    if segment.track() != key.track || !segment.range().contains(key.start) {
-        return None;
-    }
-    let epoch = timelines
-        .get(&key.track)?
-        .epochs()
-        .iter()
-        .find(|e| e.id() == segment.epoch())?;
+    let (track, range) = (text.track, text.range);
+    let last = SampleIndex::new(range.end().get().checked_sub(1)?);
+    let first_epoch = epoch_at(track, range.start(), segments, timelines)?;
+    let last_epoch = epoch_at(track, last, segments, timelines)?;
     Some(Timed {
-        start: epoch.time_of(text.range.start())?,
-        end: epoch.time_of(text.range.end())?,
+        start: first_epoch.time_of(range.start())?,
+        end: last_epoch.time_of(range.end())?,
     })
 }
 

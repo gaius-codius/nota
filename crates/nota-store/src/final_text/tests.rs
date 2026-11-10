@@ -173,7 +173,7 @@ fn the_final_pass_never_shows_in_the_heard_text() {
 /// word to a chunk stored before the newest.
 #[test]
 fn sqlite_refuses_to_change_or_delete_final_text() {
-    let (dir, mut store) = store("append-only");
+    let (dir, mut store) = store("final-append-only");
     let mut worded = text(MIC, 0, 100, Some("good morning"));
     worded.words = vec![
         FinalWord {
