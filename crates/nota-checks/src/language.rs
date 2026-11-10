@@ -76,3 +76,18 @@ pub(crate) fn english() -> &'static English {
         std::sync::LazyLock::new(|| English::new().expect("the built-in word list reads"));
     &ENGLISH
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// In English a window may open on "a", in either case, and on no
+    /// other function word.
+    #[test]
+    fn english_windows_may_open_on_a() {
+        let english = english();
+        assert!(english.may_open_on("a") && english.may_open_on("A"));
+        assert!(!english.may_open_on("the") && !english.may_open_on("an"));
+        assert_eq!(english.code(), "en");
+    }
+}

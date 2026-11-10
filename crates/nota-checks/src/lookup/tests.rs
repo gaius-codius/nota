@@ -442,10 +442,12 @@ fn an_exact_match_comes_before_any_score() {
 fn an_alias_of_up_to_eight_words_is_matched() {
     let eight = "one two three four five six seven eight";
     let nine = "one two three four five six seven eight nine";
-    let terms = [term("octet", &[eight]), term("nonet", &[nine])];
     let fake = Fake::new(&[]);
-    assert_eq!(offered(&fake, &terms, eight), pairs(&[(eight, "octet")]));
-    assert_eq!(offered(&fake, &terms, nine), pairs(&[(eight, "octet")]));
+    assert_eq!(
+        offered(&fake, &[term("octet", &[eight])], eight),
+        pairs(&[(eight, "octet")])
+    );
+    assert_eq!(offered(&fake, &[term("nonet", &[nine])], nine), pairs(&[]));
 }
 
 /// An alias spelled like a term is never matched: it would offer one term

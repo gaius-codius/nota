@@ -320,8 +320,12 @@ impl<'a> Lookup<'a> {
         }
         // Stable: windows that tie keep their order, fewer words first, then
         // earlier in the chunk, as in the bench.
-        scored.sort_by(|a, b| total(b).total_cmp(&total(a)));
-        pick(exact.into_iter().chain(scored))
+        scored.sort_by(|(a, _), (b, _): &(f64, Hit)| b.total_cmp(a));
+        pick(
+            exact
+                .into_iter()
+                .chain(scored.into_iter().map(|(_, hit)| hit)),
+        )
     }
 
     /// Whether a word of `window` is a term, or the whole window is: the
@@ -367,14 +371,14 @@ impl<'a> Lookup<'a> {
         Some(window.hit(start, entry, Matched::Alias))
     }
 
-    /// The best term for `window`, which starts at word `start`, if it
-    /// clears its bar.
+    /// The best term for `window`, which starts at word `start`, with its
+    /// score, if it clears its bar.
     fn scored(
         &self,
         window: &Window<'_>,
         start: usize,
         allows: &dyn Fn(&str, &str) -> bool,
-    ) -> Option<Hit> {
+    ) -> Option<(f64, Hit)> {
         let sounds = self.language.sounds(&window.text);
         let trigrams = Trigrams::of(&window.letters);
         let mut best: Option<(&Entry, Score)> = None;
@@ -395,7 +399,12 @@ impl<'a> Lookup<'a> {
         let rare = window.words.iter().any(|w| w.zipf < RARE_ZIPF);
         score.bar = if rare { Bar::Rare } else { Bar::Usual };
         let bar = if rare { KEEP_RARE } else { KEEP };
-        (score.total >= bar).then(|| window.hit(start, entry, Matched::Scored(score)))
+        (score.total >= bar).then(|| {
+            (
+                score.total,
+                window.hit(start, entry, Matched::Scored(score)),
+            )
+        })
     }
 }
 
@@ -440,14 +449,6 @@ impl<'t> Window<'t> {
                 matched,
             },
         }
-    }
-}
-
-/// A hit's score: 1 for an exact match, which always ranks first.
-fn total(hit: &Hit) -> f64 {
-    match hit.candidate.matched {
-        Matched::Alias => 1.0,
-        Matched::Scored(score) => score.total,
     }
 }
 

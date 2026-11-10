@@ -127,7 +127,7 @@ impl<'a> Reader<'a> {
     /// A big-endian unsigned integer of `width` bytes.
     fn uint(&mut self, width: usize, what: &'static str) -> Result<usize, WordListError> {
         let bytes = self.take(width, what)?;
-        let value = bytes.iter().fold(0u64, |n, &b| (n << 8) | u64::from(b));
+        let value = bytes.iter().fold(0u64, |n, &b| n * 256 + u64::from(b));
         usize::try_from(value).map_err(|_| self.malformed(what))
     }
 

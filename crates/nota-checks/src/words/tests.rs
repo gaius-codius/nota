@@ -227,3 +227,37 @@ fn a_digit_run_too_long_for_a_float_counts_as_unknown() {
     assert!(benford_freq(&long).abs() < 1e-300);
     assert!(english().zipf(&long).value().abs() < 1e-12);
 }
+
+/// Numbers get wordfreq's frequencies exactly: years on their curve (the
+/// peak from 2019 to 2039, falling off either side, and a share for
+/// four digits that aren't a year), other numbers by Benford's law, and
+/// the product over a token's runs.
+#[test]
+fn numbers_get_wordfreqs_frequencies() {
+    let cases: [(f64, f64); 9] = [
+        (year_freq("2019"), 0.012_081_740_881_970_011),
+        (year_freq("1999"), 0.008_261_898_369_213_96),
+        (year_freq("2039"), 0.012_081_740_881_970_011),
+        (year_freq("2040"), 0.007_629_521_390_057_183),
+        (year_freq("2100"), 1.750_000_000_761_202_3e-5),
+        (benford_freq("50"), 0.0078),
+        (benford_freq("123"), 0.003),
+        (benford_freq("007"), 8.999_999_999_999_999e-5),
+        (digit_freq("a12b2019"), 0.000_362_452_226_459_100_3),
+    ];
+    for (i, (got, want)) in cases.into_iter().enumerate() {
+        assert_eq!(
+            got.to_bits(),
+            want.to_bits(),
+            "case {i}: {got} against {want}"
+        );
+    }
+}
+
+/// An apostrophe at the end of the text ends the token before it, with no
+/// elision split off.
+#[test]
+fn a_final_apostrophe_ends_its_token() {
+    assert_eq!(tokens("y'"), ["y"]);
+    assert_eq!(tokens("ab'"), ["ab"]);
+}
