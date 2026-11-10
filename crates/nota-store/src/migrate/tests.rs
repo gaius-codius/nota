@@ -39,7 +39,7 @@ fn a_new_file_gets_the_current_schema() {
     let dir = TestDir::new("fresh");
     let store = Store::open(&dir.db()).unwrap();
     assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
-    assert_eq!(STEPS.len(), 7);
+    assert_eq!(STEPS.len(), 8);
     assert_eq!(STEPS.len(), usize::try_from(VERSION - FIRST + 1).unwrap());
     // Opening again changes nothing.
     drop(store);
@@ -49,7 +49,7 @@ fn a_new_file_gets_the_current_schema() {
 
 #[test]
 fn unknown_versions_are_refused_and_left_alone() {
-    for version in [VERSION + 1, 9, -1] {
+    for version in [VERSION + 1, 10, -1] {
         let dir = TestDir::new(&format!("version{version}"));
         raw(&dir.db())
             .pragma_update(None, "user_version", version)
@@ -595,6 +595,83 @@ fn version_7_upgrades_to_8_keeping_its_heard_revisions_readable() {
         assert!(refused(&conn, sql), "{sql} was allowed");
     }
     // Every row still names rows that are there.
+    let broken: i64 = conn
+        .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(broken, 0);
+}
+
+/// Acceptance: a version 8 library keeps its sessions, revisions and
+/// proposals, and gains empty session packs and learned pairs that new
+/// rows go into and read back from.
+#[test]
+fn version_8_upgrades_to_9_with_no_packs_or_pairs() {
+    let dir = TestDir::new("v8");
+    {
+        let conn = crate::tests::library_at(&dir.db(), 8);
+        conn.execute_batch(
+            "INSERT INTO session (id, state, language) VALUES (1, 'stopped', 'en');
+             INSERT INTO final_text VALUES (1, 0, 0, 100, 'hyper profen', 'e', 'm');
+             INSERT INTO final_word VALUES (1, 0, 0, 0, 'hyper', 0, 50), (1, 0, 0, 1, 'profen', 50, 100);
+             INSERT INTO revision VALUES (1, 0, NULL);
+             INSERT INTO proposal (session_id, revision, track, start_sample, first_word, last_word,
+                                   heard, replacement, source, pack_version, state)
+             VALUES (1, 0, 0, 0, 0, 1, 'hyper profen', 'ibuprofen', 'pharmacy', '2026.11', 'open');",
+        )
+        .unwrap();
+    }
+    let mut store = Store::open(&dir.db()).unwrap();
+    assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
+    let one = SessionId::new(1);
+    assert_eq!(
+        store.session(one).unwrap().unwrap().state,
+        SessionState::Stopped
+    );
+    assert_eq!(
+        store.revisions(one).unwrap(),
+        [crate::RevisionNumber::FINAL]
+    );
+    assert!(store.session_packs(one).unwrap().is_empty());
+    assert!(store.learned().unwrap().history().is_empty());
+
+    // The upgraded library takes new rows of both.
+    let pharmacy = crate::PackRef {
+        name: "pharmacy".to_owned(),
+        version: "2026.11".to_owned(),
+    };
+    store
+        .record_session_packs(one, std::slice::from_ref(&pharmacy))
+        .unwrap();
+    let at = nota_core::WallTime::from_unix_seconds(1_762_765_200).unwrap();
+    store
+        .learn(
+            one,
+            "hyper profen",
+            "ibuprofen",
+            crate::Verdict::Accepted,
+            at,
+        )
+        .unwrap();
+    drop(store);
+    let store = Store::open(&dir.db()).unwrap();
+    assert_eq!(store.session_packs(one).unwrap(), [pharmacy]);
+    assert_eq!(
+        store.learned().unwrap().accepted_for("hyper profen"),
+        ["ibuprofen"]
+    );
+    drop(store);
+
+    // The proposal stored before is as it was, and every row names rows
+    // that are there.
+    let conn = raw(&dir.db());
+    let proposal: (String, String) = conn
+        .query_row("SELECT replacement, pack_version FROM proposal", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(proposal, ("ibuprofen".to_owned(), "2026.11".to_owned()));
     let broken: i64 = conn
         .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
             r.get(0)
