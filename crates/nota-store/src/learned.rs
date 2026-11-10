@@ -60,17 +60,14 @@ impl Verdict {
 /// "endside".
 #[must_use]
 pub fn match_key(text: &str) -> String {
-    let mut key = String::with_capacity(text.len());
-    for word in text
+    // Lower case first: some capitals lower to a letter and a mark ("İ" to
+    // "i" and a combining dot), and splitting after that keeps a key the
+    // same when it's keyed again.
+    text.to_lowercase()
         .split(|c: char| !(c.is_alphanumeric() || c == '\''))
         .filter(|w| !w.is_empty())
-    {
-        if !key.is_empty() {
-            key.push(' ');
-        }
-        key.extend(word.chars().flat_map(char::to_lowercase));
-    }
-    key
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// One choice the user made.
