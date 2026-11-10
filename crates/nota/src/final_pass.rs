@@ -189,6 +189,8 @@ struct Stored<'a> {
     report: &'a dyn Fn(Progress),
     /// Tells the runner the engine has answered.
     answered: &'a dyn Fn(),
+    /// Tells the runner why the engine is down now, or that it's back.
+    engine_down: &'a dyn Fn(Option<&str>),
     /// Whether it has been told yet: once is enough.
     told: bool,
 }
@@ -214,6 +216,7 @@ impl<'a> Stored<'a> {
                 .collect(),
             report: running.progress,
             answered: running.answered,
+            engine_down: running.engine_down,
             told: false,
         }
     }
@@ -283,6 +286,10 @@ impl PassSink for Stored<'_> {
             self.told = true;
         }
         Ok(())
+    }
+
+    fn engine_down(&mut self, why: Option<&str>) {
+        (self.engine_down)(why);
     }
 }
 

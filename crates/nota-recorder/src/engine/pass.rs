@@ -15,7 +15,10 @@
 //!   pass still moves past them and the rest is done;
 //! - each track's runs of samples (consecutive segments in one epoch) are
 //!   flushed at their end, so a chunk never spans a gap or a reopened
-//!   stream.
+//!   stream;
+//! - why the engine is down reaches the sink as the supervisor reports it,
+//!   and its coming back up, so whoever shows the pass can say why it
+//!   stands still before it gives up.
 //!
 //! Audio is sent in frames that end on whole multiples of
 //! [`PassConfig::frame`] (or a segment's end), and never more than
@@ -70,6 +73,13 @@ pub trait PassSink {
         texts: Vec<Transcript>,
         skipped: Vec<SampleRange>,
     ) -> Result<(), Self::Error>;
+
+    /// The engine is down for `why` (`Some`), in the words a stall now
+    /// would end with, or back up after being down in this pass (`None`).
+    /// Called each time the supervisor reports it down, and once when it
+    /// comes back; never for an engine that hasn't been down in this pass.
+    /// It's only shown: the pass carries on whatever the sink does with it.
+    fn engine_down(&mut self, why: Option<&str>);
 }
 
 /// How a pass runs.
@@ -119,7 +129,7 @@ pub enum PassEnd<E> {
     /// `stop` asked it to stop; it carries on from what the sink has.
     Stopped,
     /// Nothing was confirmed for [`PassConfig::stall`]; why the engine was
-    /// down, if it said.
+    /// down, if it said and hasn't come back up since.
     Stalled(Option<String>),
     /// The sink failed.
     Sink(E),
@@ -132,12 +142,18 @@ impl<E: fmt::Display> fmt::Display for PassEnd<E> {
         match self {
             Self::Done => write!(f, "done"),
             Self::Stopped => write!(f, "stopped"),
-            Self::Stalled(Some(why)) => write!(f, "the transcriber stopped working: {why}"),
+            Self::Stalled(Some(why)) => f.write_str(&stopped_working(why)),
             Self::Stalled(None) => write!(f, "the transcriber stopped answering"),
             Self::Sink(e) => write!(f, "{e}"),
             Self::Engine(e) => write!(f, "the transcriber couldn't be started: {e}"),
         }
     }
+}
+
+/// How a stall says why the engine was down, and how the sink hears it
+/// while the pass runs, so the reason reads the same before and after.
+fn stopped_working(why: &str) -> String {
+    format!("the transcriber stopped working: {why}")
 }
 
 /// How often a pass that's waiting for the engine checks whether it's
@@ -209,10 +225,20 @@ pub fn transcribe<K: PassSink>(
                 continue;
             }
             EngineEvent::Status(EngineStatus::Offline(why)) => {
-                offline = Some(why.to_string());
+                let why = why.to_string();
+                sink.engine_down(Some(&stopped_working(&why)));
+                offline = Some(why);
                 continue;
             }
-            EngineEvent::Status(EngineStatus::Online { .. }) => continue,
+            // Back up: the reason no longer applies, to the sink or to a
+            // later stall. An engine that wasn't down in this pass says
+            // nothing: whatever the sink kept from before is its own.
+            EngineEvent::Status(EngineStatus::Online { .. }) => {
+                if offline.take().is_some() {
+                    sink.engine_down(None);
+                }
+                continue;
+            }
             EngineEvent::Confirmed { track, up_to } => (track, up_to, Vec::new()),
             // The skipped audio is the oldest unconfirmed, so everything
             // before its end is now dealt with.
