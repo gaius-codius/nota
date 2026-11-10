@@ -49,7 +49,7 @@ fn a_new_file_gets_the_current_schema() {
 
 #[test]
 fn unknown_versions_are_refused_and_left_alone() {
-    for version in [VERSION + 1, 10, -1] {
+    for version in [VERSION + 1, VERSION + 2, -1] {
         let dir = TestDir::new(&format!("version{version}"));
         raw(&dir.db())
             .pragma_update(None, "user_version", version)
