@@ -16,7 +16,7 @@
 //!
 //! 1. lower-case, and split into tokens on anything but letters and digits,
 //!    keeping an apostrophe between two letters or two digits ("don't");
-//!    one or two letters before an apostrophe and a vowel are a token of
+//!    one or two letters or digits before an apostrophe and a vowel are a token of
 //!    their own ("y'all" is "y" and "all");
 //! 2. in each token, write each run of two or more digits as zeros, look
 //!    that up, and if the token changed, scale by how common such a number
@@ -31,8 +31,10 @@
 //! never asks about one.
 
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
 use std::fmt;
+use std::hash::BuildHasherDefault;
 use std::io::{self, Read};
 
 use flate2::read::GzDecoder;
@@ -114,11 +116,15 @@ impl Error for WordListError {
     }
 }
 
+/// Each word and its centibel list's index. Hashed with fixed keys, not
+/// the standard library's seeded ones, so the crate reads no randomness.
+type Buckets = HashMap<Box<str>, u16, BuildHasherDefault<DefaultHasher>>;
+
 /// A word list: each word and the centibel list it's in.
 #[derive(Debug, Clone)]
 pub(crate) struct WordList {
     /// Each word and its list's index, `i` for frequency 10^(−i/100).
-    buckets: HashMap<Box<str>, u16>,
+    buckets: Buckets,
 }
 
 impl WordList {
@@ -164,7 +170,7 @@ impl WordList {
         if lists - 1 > MAX_BUCKETS {
             return Err(r.malformed("at most 1,000 frequency lists"));
         }
-        let mut buckets = HashMap::new();
+        let mut buckets = Buckets::default();
         for index in 0..lists - 1 {
             let index = u16::try_from(index).map_err(|_| r.malformed("a smaller list"))?;
             for _ in 0..r.array_len("a list of words")? {
@@ -252,20 +258,17 @@ fn round_to(x: f64, digits: i32) -> f64 {
 pub(crate) fn tokens(text: &str) -> Vec<String> {
     let chars: Vec<char> = text.chars().flat_map(char::to_lowercase).collect();
     let mut out = Vec::new();
-    let mut i = 0;
-    while i < chars.len() {
-        if !is_word(chars[i]) {
-            i += 1;
-            continue;
-        }
+    let mut from = 0;
+    // Each token starts at the next word character; anything else between
+    // tokens, an apostrophe after an elision included, is passed over.
+    while let Some(i) = (from..chars.len()).find(|&k| is_word(chars[k])) {
         if let Some(len) = elision(&chars[i..]) {
             out.push(chars[i..i + len].iter().collect());
-            // Past the apostrophe, which starts no token.
-            i += len + 1;
+            from = i + len;
         } else {
             let end = word_end(&chars, i);
             out.push(chars[i..end].iter().collect());
-            i = end;
+            from = end;
         }
     }
     out
@@ -296,17 +299,16 @@ fn elision(rest: &[char]) -> Option<usize> {
 /// Where the word starting at `start` ends: the first break between
 /// characters that Unicode's word rules allow there.
 fn word_end(chars: &[char], start: usize) -> usize {
-    let mut end = start + 1;
-    while end < chars.len() {
-        if is_word(chars[end]) {
-            end += 1;
-        } else if chars[end] == '\'' && joins(chars[end - 1], chars.get(end + 1).copied()) {
-            end += 2;
-        } else {
-            break;
-        }
-    }
-    end
+    // A word character, or an apostrophe that joins its neighbours, goes on
+    // the word; the first of anything else ends it. The caller starts on a
+    // word character, so `start` itself never ends it.
+    (start..chars.len())
+        .find(|&k| {
+            let joined =
+                chars[k] == '\'' && k > 0 && joins(chars[k - 1], chars.get(k + 1).copied());
+            !is_word(chars[k]) && !joined
+        })
+        .unwrap_or(chars.len())
 }
 
 /// Whether an apostrophe between `before` and `after` stays inside a word:
@@ -371,7 +373,9 @@ const DIGIT_FREQS: [f64; 10] = [
 
 /// wordfreq's `benford_freq`: how common the number `digits` is among
 /// numbers of its length. A run too long for a float divides by infinity
-/// and gives 0 (Python raises an overflow error there).
+/// and gives 0 (Python raises an overflow error there). The lookup never
+/// gets that far: the word list's longest run of zeros is 21 digits, so a
+/// longer run is missing from it, and the word counts as unknown, first.
 fn benford_freq(digits: &str) -> f64 {
     let first = digits
         .bytes()

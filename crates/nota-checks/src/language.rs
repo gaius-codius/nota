@@ -7,8 +7,10 @@ use std::fmt;
 use crate::phonetic::{Metaphone, Sounds};
 use crate::words::{WordList, WordListError, Zipf};
 
-/// A language's rules for the term lookup.
-pub trait Language: fmt::Debug {
+/// A language's rules for the term lookup. `Send` and `Sync`, so one
+/// language's rules, and a lookup built on them, can be shared with the
+/// thread that runs the clean-up.
+pub trait Language: fmt::Debug + Send + Sync {
     /// The language's code, as a pack names it (`en`). The lookup leaves
     /// out terms in any other language.
     fn code(&self) -> &'static str;

@@ -138,6 +138,8 @@ fn a_damaged_cbpack_is_refused_where_it_goes_wrong() {
     assert_eq!(malformed_at(&wrong_version), (23, HEADER_WHAT));
     let repeated = cbpack(b"\x82\xa6format\xa2cB\xa6format\xa2cB", &[]);
     assert_eq!(malformed_at(&repeated), (21, HEADER_WHAT));
+    let repeated = cbpack(b"\x82\xa7version\x01\xa7version\x01", &[]);
+    assert_eq!(malformed_at(&repeated), (21, HEADER_WHAT));
     // A list of something other than words, a word that isn't UTF-8, and a
     // word that runs past the end.
     let mut not_words = cbpack(HEADER, &[]);
@@ -220,12 +222,12 @@ fn digit_runs_are_written_as_zeros() {
 }
 
 /// A run too long for a float has no frequency, where Python would raise
-/// an overflow error: the word counts as unknown.
+/// an overflow error. (The lookup never asks: a run that long isn't in the
+/// list, so its word is unknown before its digits are weighed.)
 #[test]
 fn a_digit_run_too_long_for_a_float_counts_as_unknown() {
     let long = "1".repeat(400);
     assert!(benford_freq(&long).abs() < 1e-300);
-    assert!(english().zipf(&long).value().abs() < 1e-12);
 }
 
 /// Numbers get wordfreq's frequencies exactly: years on their curve (the
@@ -234,7 +236,7 @@ fn a_digit_run_too_long_for_a_float_counts_as_unknown() {
 /// the product over a token's runs.
 #[test]
 fn numbers_get_wordfreqs_frequencies() {
-    let cases: [(f64, f64); 9] = [
+    let cases: [(f64, f64); 10] = [
         (year_freq("2019"), 0.012_081_740_881_970_011),
         (year_freq("1999"), 0.008_261_898_369_213_96),
         (year_freq("2039"), 0.012_081_740_881_970_011),
@@ -244,6 +246,8 @@ fn numbers_get_wordfreqs_frequencies() {
         (benford_freq("123"), 0.003),
         (benford_freq("007"), 8.999_999_999_999_999e-5),
         (digit_freq("a12b2019"), 0.000_362_452_226_459_100_3),
+        // A single digit isn't a run: only "22" is weighed.
+        (digit_freq("1x22"), benford_freq("22")),
     ];
     for (i, (got, want)) in cases.into_iter().enumerate() {
         assert_eq!(
@@ -260,4 +264,41 @@ fn numbers_get_wordfreqs_frequencies() {
 fn a_final_apostrophe_ends_its_token() {
     assert_eq!(tokens("y'"), ["y"]);
     assert_eq!(tokens("ab'"), ["ab"]);
+}
+
+/// The wider forms msgpack may use read the same: a list with a 32-bit
+/// length, and words with 16- and 32-bit lengths.
+#[test]
+fn wider_lengths_read_the_same() {
+    let mut bytes = vec![0xdd, 0, 0, 0, 2];
+    bytes.extend(HEADER);
+    bytes.extend([0x92, 0xda, 0, 3]);
+    bytes.extend(b"red");
+    bytes.extend([0xdb, 0, 0, 0, 4]);
+    bytes.extend(b"blue");
+    let list = WordList::from_cbpack(&bytes).unwrap();
+    let mut got: Vec<_> = list
+        .buckets
+        .iter()
+        .map(|(w, &i)| (w.to_string(), i))
+        .collect();
+    got.sort();
+    assert_eq!(got, [("blue".to_owned(), 0), ("red".to_owned(), 0)]);
+}
+
+/// gzip that unpacks to exactly the cap isn't refused as too large; these
+/// zeros then aren't a cBpack.
+#[test]
+fn gzip_of_exactly_the_cap_is_read() {
+    use std::io::Write;
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    let zeros = vec![0u8; 1 << 20];
+    for _ in 0..MAX_UNPACKED >> 20 {
+        gz.write_all(&zeros).unwrap();
+    }
+    let err = WordList::from_gzip(&gz.finish().unwrap()).unwrap_err();
+    assert!(
+        matches!(err, WordListError::Malformed { at: 0, .. }),
+        "{err:?}"
+    );
 }

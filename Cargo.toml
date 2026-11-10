@@ -108,11 +108,11 @@ mod_module_files = "warn"
 redundant_clone = "warn"
 use_self = "warn"
 
-# The crash tests encode thousands of short FLAC segments; unoptimised, the
-# encoder and its hashes dominate the test run.
 # The word list nota-checks unpacks in every test that looks a word up.
 [profile.dev.package.miniz_oxide]
 opt-level = 3
+# The crash tests encode thousands of short FLAC segments; unoptimised, the
+# encoder and its hashes dominate the test run.
 [profile.dev.package.flacenc]
 opt-level = 3
 [profile.dev.package.md-5]

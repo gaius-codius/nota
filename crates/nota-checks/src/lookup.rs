@@ -32,8 +32,7 @@
 //!
 //! The same text and terms always give the same candidates.
 
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
 use crate::language::Language;
@@ -45,8 +44,9 @@ pub const MIN_LETTERS: usize = 5; // check-bound
 /// The most words in a scored window.
 pub const MAX_WORDS: usize = 3; // check-bound
 
-/// The most words in a window matched exactly against an alias. An alias
-/// of more words is never matched.
+/// The most words in a window matched exactly against an alias, and in the
+/// alias itself (counting runs of letters and digits, so "gee-el-pee-one"
+/// is four). An alias of more words is never matched.
 pub const MAX_EXACT_WORDS: usize = 8; // check-bound
 
 /// A single word at least this common (Zipf) is an everyday word, and not
@@ -188,9 +188,7 @@ pub struct Lookup<'a> {
     known: BTreeSet<String>,
     /// Each alias's letters and digits, and the entries it's an alias of,
     /// in order.
-    aliases: HashMap<String, Vec<usize>>,
-    /// The most words in any window an alias might match.
-    exact_words: usize,
+    aliases: BTreeMap<String, Vec<usize>>,
 }
 
 /// A term, made ready to score.
@@ -263,31 +261,18 @@ impl<'a> Lookup<'a> {
             .filter(|(e, _)| !e.letters.is_empty())
             .unzip();
         let known: BTreeSet<String> = entries.iter().map(|e| e.letters.clone()).collect();
-        let mut aliases: HashMap<String, Vec<usize>> = HashMap::new();
-        let mut exact_words = 0;
-        for (index, list) in term_aliases.iter().enumerate() {
-            for alias in list {
-                let key = letters(alias);
-                let words = window_words(alias).len();
-                // An alias spelled like a term would offer one term for
-                // another that's already right.
-                if key.is_empty() || known.contains(&key) || words > MAX_EXACT_WORDS {
-                    continue;
-                }
-                exact_words = exact_words.max(words);
-                aliases.entry(key).or_default().push(index);
-            }
-        }
+        let aliases = index_aliases(&term_aliases);
         Self {
             language,
             entries,
             known,
             aliases,
-            exact_words,
         }
     }
 
-    /// The candidates in `text`, best first. `allows(window, term)` says
+    /// The candidates in `text`: alias matches first, in the order their
+    /// windows come (fewer words first, then position), then scored
+    /// candidates best first. `allows(window, term)` says
     /// whether `term` may be offered for `window`; a term it refuses is
     /// passed over (the user's rejected pairs).
     #[must_use]
@@ -302,7 +287,14 @@ impl<'a> Lookup<'a> {
             .collect();
         let mut exact = Vec::new();
         let mut scored = Vec::new();
-        for n in 1..=MAX_WORDS.max(self.exact_words) {
+        // An alias may be heard as more words than it's written in ("endside"
+        // as "end side"), so with any alias every window size is tried.
+        let most = if self.aliases.is_empty() {
+            MAX_WORDS
+        } else {
+            MAX_EXACT_WORDS
+        };
+        for n in 1..=most {
             for (start, run) in words.windows(n).enumerate() {
                 let window = Window::new(run);
                 if window.letters.len() < MIN_LETTERS || self.has_known_word(&window) {
@@ -452,6 +444,29 @@ impl<'t> Window<'t> {
     }
 }
 
+/// Each alias's letters and digits, and the indexes in `term_aliases` (one
+/// list per entry) of the entries it's an alias of, in order. An alias of
+/// more than [`MAX_EXACT_WORDS`] words is left out. (An alias spelled like a
+/// term needs no check here: a window spelled like a term is skipped as
+/// known. Nor does one under 5 letters: no window that short is offered.)
+fn index_aliases(term_aliases: &[BTreeSet<&str>]) -> BTreeMap<String, Vec<usize>> {
+    let mut aliases: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (index, list) in term_aliases.iter().enumerate() {
+        for alias in list {
+            let key = letters(alias);
+            let words = alias
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|w| !w.is_empty())
+                .count();
+            if words > MAX_EXACT_WORDS {
+                continue;
+            }
+            aliases.entry(key).or_default().push(index);
+        }
+    }
+    aliases
+}
+
 /// The candidates from `hits`, in their order, leaving out any that shares
 /// a word with one already taken, up to [`MAX_CANDIDATES`].
 fn pick(hits: impl Iterator<Item = Hit>) -> Vec<Candidate> {
@@ -558,18 +573,12 @@ impl Trigrams {
         reason = "counts of trigrams are far below 2^52, exact in an f64"
     )]
     fn jaccard(&self, other: &Self) -> f64 {
-        let (mut i, mut j, mut both) = (0, 0, 0);
-        while i < self.0.len() && j < other.0.len() {
-            match self.0[i].cmp(&other.0[j]) {
-                Ordering::Less => i += 1,
-                Ordering::Greater => j += 1,
-                Ordering::Equal => {
-                    both += 1;
-                    i += 1;
-                    j += 1;
-                }
-            }
-        }
+        // Both lists are sorted, so a binary search finds each shared one.
+        let both = self
+            .0
+            .iter()
+            .filter(|g| other.0.binary_search(g).is_ok())
+            .count();
         let either = self.0.len() + other.0.len() - both;
         both as f64 / either.max(1) as f64
     }

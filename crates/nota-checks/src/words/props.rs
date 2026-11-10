@@ -47,7 +47,7 @@ proptest! {
         let refs: Vec<Vec<&str>> = lists.iter().map(|l| l.iter().map(String::as_str).collect()).collect();
         let slices: Vec<&[&str]> = refs.iter().map(Vec::as_slice).collect();
         let list = WordList::from_cbpack(&cbpack(HEADER, &slices)).unwrap();
-        let mut want = HashMap::new();
+        let mut want = Buckets::default();
         for (i, words) in lists.iter().enumerate() {
             for w in words {
                 want.insert(w.as_str().into(), u16::try_from(i).unwrap());

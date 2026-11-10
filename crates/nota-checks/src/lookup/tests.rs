@@ -447,7 +447,13 @@ fn an_alias_of_up_to_eight_words_is_matched() {
         offered(&fake, &[term("octet", &[eight])], eight),
         pairs(&[(eight, "octet")])
     );
+    // Nine words are never matched, even when heard as eight.
+    let heard_as_eight = "one two three four five six seven eightnine";
     assert_eq!(offered(&fake, &[term("nonet", &[nine])], nine), pairs(&[]));
+    assert_eq!(
+        offered(&fake, &[term("nonet", &[nine])], heard_as_eight),
+        pairs(&[])
+    );
 }
 
 /// An alias spelled like a term is never matched: it would offer one term
@@ -568,4 +574,23 @@ fn trigram_jaccard_is_shared_over_union() {
     assert!(empty.jaccard(&empty).abs() < 1e-12);
     // ^ab ab$ against ^ab abc bc$: one shared of four.
     assert!((Trigrams::of("ab").jaccard(&Trigrams::of("abc")) - 0.25).abs() < 1e-12);
+}
+
+/// A hyphenated alias heard as separate words is matched, past the three
+/// words a scored window may have.
+#[test]
+fn a_hyphenated_alias_heard_as_words_is_matched() {
+    let terms = [term("GLP-1", &["gee-el-pee-one"])];
+    assert_eq!(
+        offered(&Fake::new(&[]), &terms, "a gee el pee one agonist"),
+        pairs(&[("gee el pee one", "GLP-1")])
+    );
+}
+
+/// A lookup can be shared with another thread.
+#[test]
+fn a_lookup_can_be_shared_between_threads() {
+    fn shareable<T: Send + Sync>(_: &T) {}
+    let terms = [term("amlodipine", &[])];
+    shareable(&Lookup::new(english(), &terms));
 }
