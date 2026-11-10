@@ -2,7 +2,8 @@
 # Tests check-files.sh: a call without the arguments it needs prints its usage
 # instead of failing on an unbound variable, a media file is refused, a file
 # over 1 MiB is refused unless check-files.allow names its exact path and
-# sha256, a rename is checked like an added file, and the shipped allow list
+# the sha256 of its staged or committed bytes, a rename, a type change and a
+# non-ASCII name are checked like any other file, and the shipped allow list
 # holds exactly the wordfreq entry. The allow-list cases run a copy of the
 # script beside a list of the test's own, so the script itself has no override.
 #
@@ -93,9 +94,11 @@ commit_case allowed
 expect_pass "the allow-listed file"
 
 # The listed path with other bytes is refused as over 1 MiB, staged and in a
-# range.
+# range, even with the listed bytes back on disk: the check reads what is
+# staged or committed, not the working tree.
 fill b big/data.bin
 git add big/data.bin
+cp "$dir/a.bin" big/data.bin
 if out=$("$copy" --staged 2>&1); then
   fail "accepted other bytes at the allow-listed path when staged"
 fi
@@ -129,13 +132,36 @@ git mv a.txt lecture.wav
 commit_case renamed-media
 expect_refused "a rename to a media name" 'media file (recordings are never committed): lecture.wav'
 
+# A large file with a non-ASCII name is checked by its real name, and a symlink
+# replaced by a large file is checked like any change.
+fill d "café.bin"
+git add "café.bin"
+commit_case non-ascii
+expect_refused "a large file with a non-ASCII name" 'file over 1 MiB: café.bin (1100000 bytes)'
+ln -s a.bin link.bin
+git add link.bin
+commit_case symlink
+rm link.bin
+fill e link.bin
+git add link.bin
+commit_case typechange
+expect_refused "a symlink replaced by a large file" 'file over 1 MiB: link.bin (1100000 bytes)'
+
+# A name git still quotes (a tab in it) can't be read back, so it is refused
+# rather than passed unchecked.
+echo small >"$dir/repo/tab"$'\t'"name.txt"
+git add "tab"$'\t'"name.txt"
+commit_case tab
+expect_refused "a name with a tab in it" 'cannot read the size of: "tab\tname.txt"'
+
 # The media rule wins over the allow list.
 cp "$dir/w.bin" big/rec.wav
 git add big/rec.wav
 commit_case media
 expect_refused "an allow-listed media file" 'media file (recordings are never committed): big/rec.wav'
 
-# A missing or malformed allow list stops the check.
+# A missing or malformed allow list, or one naming a path twice, stops the
+# check.
 mv "$dir/tool/check-files.allow" "$dir/tool/saved.allow"
 if out=$("$copy" HEAD~1 HEAD~1 2>&1); then
   fail "ran without an allow list"
@@ -148,5 +174,10 @@ for bad in "abc  big/data.bin" "$(sum "$dir/a.bin") big/data.bin" "$(sum "$dir/a
   fi
   grep -qF 'expected "<sha256>  <path>"' <<<"$out" || fail "malformed line \"$bad\": got: $out"
 done
+printf '%s  big/data.bin\n' "$(sum "$dir/a.bin")" "$(sum "$dir/w.bin")" >"$dir/tool/check-files.allow"
+if out=$("$copy" HEAD~1 HEAD~1 2>&1); then
+  fail "ran with a path listed twice"
+fi
+grep -qF 'check-files.allow:2: path listed twice: big/data.bin' <<<"$out" || fail "duplicate path: got: $out"
 
 exit "$status"
