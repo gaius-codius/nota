@@ -749,6 +749,38 @@ fn version_9_upgrades_to_10_keeping_packs_recorded_without_a_digest() {
         "{err:?}"
     );
 
+    // Two builds of that name and version with other rows: which one the
+    // session used can't be known, so neither is taken, whatever the order.
+    let row = installed.terms()[0].clone();
+    let rebuilt = Pack::new(
+        installed.manifest().clone(),
+        vec![
+            row.clone(),
+            TermRow {
+                term: "ibuprofen".to_owned(),
+                ..row
+            },
+        ],
+        vec![],
+    )
+    .unwrap();
+    for installed in [
+        [installed.clone(), rebuilt.clone()],
+        [rebuilt, installed.clone()],
+    ] {
+        let err = store.session_terms(one, &installed).unwrap_err();
+        assert!(
+            matches!(&err, StoreError::PackMissing { pack, .. } if *pack == old),
+            "{err:?}"
+        );
+    }
+    // The same build installed twice is one pack.
+    let twice = [installed.clone(), installed.clone()];
+    assert_eq!(
+        store.session_terms(one, &twice).unwrap().terms,
+        installed.offered()
+    );
+
     // A session recorded now keeps its pack's digest.
     store
         .record_session_packs(two, &[installed.pack_ref()])

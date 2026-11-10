@@ -16,9 +16,10 @@
 //!
 //! Spans and terms are matched by [`match_key`], which drops case,
 //! punctuation and spacing and composes accents, so "Endside," and
-//! "endside" are one span. The
-//! lookup and the clean-up job ask [`Learned::allows`] before offering a
-//! term for a span; nothing else needs to know the rule.
+//! "endside" are one span, and so are "naïve" with a combining diaeresis
+//! and with the letter "ï". The lookup and the clean-up job ask
+//! [`Learned::allows`] before offering a term for a span; nothing else
+//! needs to know the rule.
 
 use std::collections::BTreeMap;
 

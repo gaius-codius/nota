@@ -252,11 +252,12 @@ proptest! {
     }
 
     /// Acceptance (#227): text in Unicode's composed (NFC) and decomposed
-    /// (NFD) forms has one key. Letters and marks are drawn often, so most
-    /// cases have accents to compose.
+    /// (NFD) forms has one key. Half the cases are Latin letters, some
+    /// accented, each with a combining mark or none, so most have accents
+    /// to compose or reorder.
     #[test]
     fn a_match_key_is_the_same_composed_or_decomposed(
-        text in "[\\p{L}\\p{M}\\PC]{0,30}"
+        text in prop_oneof!["\\PC{0,30}", "([a-zA-Z\\u{c0}-\\u{17f}][\\u{300}-\\u{36f}]?){0,15}"]
     ) {
         use unicode_normalization::UnicodeNormalization as _;
         let (nfc, nfd): (String, String) = (text.nfc().collect(), text.nfd().collect());

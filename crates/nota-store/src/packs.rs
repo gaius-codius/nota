@@ -26,7 +26,9 @@
 //! `application_id` says the file is a nota pack, so a library database
 //! or any other SQLite file is refused. Tables a reader doesn't know are
 //! ignored: one-line facts can come later as a table of their own without
-//! a new format version. A pack is built in memory and written whole by
+//! a new format version. The digest covers only the four tables below, so
+//! a later table that changes what a pack offers needs a new format and a
+//! new digest tag, not only a table. A pack is built in memory and written whole by
 //! SQLite's `VACUUM INTO`, which writes pages in order with no journal, so
 //! the same rows give the same bytes from the same SQLite. It's a build
 //! output, not a recording or the library database, so it doesn't go
