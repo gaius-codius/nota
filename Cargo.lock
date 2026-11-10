@@ -1769,6 +1769,7 @@ dependencies = [
  "nota-llm",
  "proptest",
  "rustix",
+ "serde",
  "serde_json",
 ]
 

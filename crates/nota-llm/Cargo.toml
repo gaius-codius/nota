@@ -19,6 +19,9 @@ required-features = ["fake-server"]
 
 [dependencies]
 nota-core = { path = "../nota-core" }
+# A JSON reader that refuses a key given twice, which serde_json's own
+# `Value` would quietly keep the last of (see `reply`).
+serde.workspace = true
 # The requests to llama-server and its replies, as JSON. With its keys in
 # the order written: llama-server's grammar follows the schema's order, so
 # a sorted schema makes the model answer before it names the candidate,

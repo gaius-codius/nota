@@ -164,6 +164,30 @@ fn a_candidate_given_twice_is_refused() {
     ));
 }
 
+/// A key given twice in one object is refused, wherever it is: the last
+/// one would otherwise win, turning a no into a yes.
+#[test]
+fn a_key_given_twice_is_refused() {
+    let twice = |refused: Result<Vec<Decision>, ReplyError>| match refused {
+        Err(ReplyError::NotJson(e)) => e.to_string().contains("is given twice"),
+        _ => false,
+    };
+    let apply = r#"{"decisions":[{"id":1,"apply":false,"apply":true}]}"#;
+    assert!(twice(parse(&completion(apply), 1)));
+    let decisions = r#"{"decisions":[{"id":1,"apply":false}],"decisions":[{"id":1,"apply":true}]}"#;
+    assert!(twice(parse(&completion(decisions), 1)));
+    let one = r#"{\"decisions\":[{\"id\":1,\"apply\":true}]}"#;
+    let body = format!(
+        r#"{{"choices":[{{"finish_reason":"length","finish_reason":"stop","message":{{"content":"{one}"}}}}]}}"#
+    );
+    assert!(twice(parse(body.as_bytes(), 1)));
+    // The same keys once each read as before.
+    let plain =
+        format!(r#"{{"choices":[{{"finish_reason":"stop","message":{{"content":"{one}"}}}}]}}"#);
+    let decisions = parse(plain.as_bytes(), 1).unwrap();
+    assert_eq!(decisions[0].answer, Answer::Yes);
+}
+
 /// An empty list leaves out the first candidate.
 #[test]
 fn no_decisions_leaves_out_the_first() {

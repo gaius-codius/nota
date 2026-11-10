@@ -6,13 +6,16 @@
 //! no FFI. llama-server is a process of its own, which nota talks to over a
 //! private UNIX socket in plain HTTP ([`http`]), with the bench's prompt
 //! ([`prompt`], [`request`]); its replies are read into typed decisions at
-//! the boundary ([`reply`]). Unix only, for now: the socket, the process
-//! group and the exec are.
+//! the boundary ([`reply`]). The server and the decider are Unix only, for
+//! now: the socket, the process group and the exec are. The request, the
+//! reply and the prompt build everywhere.
 
 pub mod http;
 pub mod lifeline;
+#[cfg(unix)]
 pub mod local;
 pub mod prompt;
 pub mod reply;
 pub mod request;
+#[cfg(unix)]
 pub mod server;

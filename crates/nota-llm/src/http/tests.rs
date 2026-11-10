@@ -160,6 +160,23 @@ fn a_head_or_body_over_its_limit_is_refused() {
     assert_eq!(read(&endless).unwrap().body.len(), MAX_REPLY_LEN);
 }
 
+/// A head over its limit is refused even when its blank line comes in the
+/// same read, and one exactly at its limit is read.
+#[test]
+fn a_whole_head_over_its_limit_is_refused() {
+    let head = |len: usize| {
+        let mut bytes = b"HTTP/1.1 200 OK\r\nX: ".to_vec();
+        bytes.resize(len, b'x');
+        bytes.extend(b"\r\n\r\n");
+        bytes
+    };
+    assert!(matches!(
+        read(&head(MAX_HEAD_LEN + 1)),
+        Err(HttpError::TooLong("head"))
+    ));
+    assert_eq!(read(&head(MAX_HEAD_LEN)).unwrap().status, 200);
+}
+
 /// A request is a closed-connection GET, or a POST with its JSON and its
 /// length.
 #[test]

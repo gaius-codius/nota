@@ -146,6 +146,11 @@ fn read_head(input: &mut impl Read) -> Result<(Vec<u8>, Vec<u8>), HttpError> {
     let mut buf = [0_u8; 4_096];
     loop {
         if let Some(end) = find(&read, b"\r\n\r\n") {
+            // The blank line may have come in a read that took the head
+            // past its limit.
+            if end > MAX_HEAD_LEN {
+                return Err(HttpError::TooLong("head"));
+            }
             let rest = read.split_off(end + 4);
             read.truncate(end);
             return Ok((read, rest));

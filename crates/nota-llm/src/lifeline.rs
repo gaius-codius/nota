@@ -17,7 +17,8 @@ use nota_core::lifeline::{Tie, tie_to_recorder};
 /// Ties this process to the nota that started it, then runs `args` (a
 /// program and its arguments) in its place. Returns only if that fails.
 ///
-/// Off Linux the tie isn't made, and the program runs untied.
+/// Off Linux the tie isn't made, and the program runs untied. Off Unix
+/// there's no exec, and it always fails.
 #[must_use]
 pub fn exec_tied(args: &[OsString]) -> io::Error {
     let Some((program, args)) = args.split_first() else {
@@ -30,7 +31,22 @@ pub fn exec_tied(args: &[OsString]) -> io::Error {
         Ok(Tie::Orphaned) => return io::Error::other("nota has already gone"),
         Err(e) => return e,
     }
+    exec(program, args)
+}
+
+/// Runs `program` with `args` in this process's place.
+#[cfg(unix)]
+fn exec(program: &OsString, args: &[OsString]) -> io::Error {
     std::os::unix::process::CommandExt::exec(std::process::Command::new(program).args(args))
+}
+
+/// There's no exec off Unix.
+#[cfg(not(unix))]
+fn exec(_program: &OsString, _args: &[OsString]) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        "nota runs llama-server only on Unix",
+    )
 }
 
 #[cfg(test)]

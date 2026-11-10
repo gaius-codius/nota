@@ -5,7 +5,7 @@
 //!   order its entries come in
 //! - a reply that repeats or leaves out a candidate is refused
 //! - the token probabilities never change an answer, and any probability
-//!   given is from 0 to 1
+//!   given is from 0 to 1, whatever odd tokens and numbers they hold
 
 use nota_core::decide::{Answer, MAX_CANDIDATES};
 use proptest::prelude::*;
@@ -36,6 +36,59 @@ fn text(entries: &[(usize, Answer)]) -> String {
         .map(|&(index, answer)| json!({"id": index + 1, "apply": answer == Answer::Yes}))
         .collect();
     json!({ "decisions": decisions }).to_string()
+}
+
+/// Any token text, among them the ones the parser looks for.
+fn any_token() -> impl Strategy<Value = Value> {
+    prop_oneof![
+        prop_oneof![
+            Just("true"),
+            Just("false"),
+            Just(" true"),
+            Just("True"),
+            Just("FALSE"),
+            Just(""),
+        ]
+        .prop_map(Value::from),
+        ".{0,6}".prop_map(Value::from),
+        any::<i64>().prop_map(Value::from),
+        Just(Value::Null),
+    ]
+}
+
+/// Any log-probability: any number, including huge, tiny, zero and
+/// positive ones (one JSON can't hold, NaN or infinite, becomes null), or
+/// something that isn't one.
+fn any_logprob() -> impl Strategy<Value = Value> {
+    prop_oneof![
+        any::<f64>().prop_map(|x| json!(x)),
+        prop_oneof![
+            Just(0.0),
+            Just(-0.0),
+            Just(-1e308),
+            Just(1e308),
+            Just(-1e-320)
+        ]
+        .prop_map(|x| json!(x)),
+        Just(json!("-0.5")),
+        Just(Value::Null),
+    ]
+}
+
+/// Token probabilities for `count` tokens of any shape: odd tokens, odd
+/// numbers, and lists of alternatives of any length.
+fn any_logprobs(count: usize) -> impl Strategy<Value = Value> {
+    let alternative = (any_token(), any_logprob())
+        .prop_map(|(token, logprob)| json!({"token": token, "logprob": logprob}));
+    let token = (
+        any_token(),
+        any_logprob(),
+        prop::collection::vec(alternative, 0..6),
+    )
+        .prop_map(|(token, logprob, top)| {
+            json!({"token": token, "logprob": logprob, "top_logprobs": top})
+        });
+    prop::collection::vec(token, count..=count + 2).prop_map(|tokens| json!({ "content": tokens }))
 }
 
 /// A finished completion whose message is `content`, with `logprobs`.
@@ -125,6 +178,23 @@ proptest! {
             prop_assert_eq!(decision.answer, answer);
             let yes = decision.yes.unwrap().get();
             prop_assert!((0.0..=1.0).contains(&yes), "{yes}");
+        }
+    }
+
+    /// Token probabilities of any shape never change an answer or refuse
+    /// a reply, and any probability they give is from 0 to 1.
+    #[test]
+    fn odd_probabilities_never_change_an_answer(
+        (entries, logprobs) in any_shuffled_answers()
+            .prop_flat_map(|e| { let n = e.len(); (Just(e), any_logprobs(n)) }),
+    ) {
+        let decisions = parse(&completion(&text(&entries), &logprobs), entries.len()).unwrap();
+        for &(index, answer) in &entries {
+            let decision = decisions[index];
+            prop_assert_eq!(decision.answer, answer);
+            if let Some(yes) = decision.yes {
+                prop_assert!((0.0..=1.0).contains(&yes.get()), "{}", yes.get());
+            }
         }
     }
 

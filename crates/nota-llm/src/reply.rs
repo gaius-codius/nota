@@ -9,6 +9,8 @@
 //!   once. The request's schema should already make it so, but a schema
 //!   can't forbid a repeated number; a model or server that strays from it
 //!   is refused, never half read.
+//! - No object in the body or the text gives a key twice: which of the two
+//!   to believe is a guess (`{"apply": false, "apply": true}`).
 //! - A refused reply is a failed decision on the whole question: no
 //!   candidate in it is a yes.
 //!
@@ -22,7 +24,8 @@ use std::error::Error;
 use std::fmt;
 
 use nota_core::decide::{Answer, Decision, Probability};
-use serde_json::{Map, Value};
+use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
+use serde_json::{Map, Number, Value};
 
 /// The longest reply body read, in bytes. A reply for the most candidates,
 /// with five token probabilities per token, is about 100 KiB.
@@ -33,7 +36,8 @@ pub const MAX_REPLY_LEN: usize = 1 << 20;
 pub enum ReplyError {
     /// The body was longer than [`MAX_REPLY_LEN`]: its length.
     TooLong(usize),
-    /// The body, or the message text inside it, isn't JSON.
+    /// The body, or the message text inside it, isn't JSON, or gives a key
+    /// twice in one object.
     NotJson(serde_json::Error),
     /// The body isn't a chat completion with a finished text message: the
     /// part that's missing or wrong.
@@ -91,7 +95,7 @@ pub fn parse(body: &[u8], candidates: usize) -> Result<Vec<Decision>, ReplyError
     if body.len() > MAX_REPLY_LEN {
         return Err(ReplyError::TooLong(body.len()));
     }
-    let reply: Value = serde_json::from_slice(body).map_err(ReplyError::NotJson)?;
+    let Strict(reply) = serde_json::from_slice(body).map_err(ReplyError::NotJson)?;
     let choice = reply
         .get("choices")
         .and_then(Value::as_array)
@@ -131,7 +135,7 @@ fn number(index: usize) -> u32 {
 /// its candidate's index (from 0). Every candidate of `candidates` has
 /// exactly one.
 fn answers(text: &str, candidates: usize) -> Result<Vec<(usize, Answer)>, ReplyError> {
-    let value: Value = serde_json::from_str(text).map_err(ReplyError::NotJson)?;
+    let Strict(value) = serde_json::from_str(text).map_err(ReplyError::NotJson)?;
     let top = only_keys(&value, &["decisions"]).ok_or(ReplyError::NotDecisions(
         "it isn't an object holding only \"decisions\"",
     ))?;
@@ -192,6 +196,75 @@ fn whole_number(value: &Value) -> Option<i128> {
         .as_i64()
         .map(i128::from)
         .or_else(|| number.as_u64().map(i128::from))
+}
+
+/// A JSON value read so that no object in it gives a key twice.
+struct Strict(Value);
+
+impl<'de> Deserialize<'de> for Strict {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(StrictVisitor).map(Strict)
+    }
+}
+
+/// Builds a [`Value`] as `serde_json`'s own does, except that a key given
+/// twice is an error.
+struct StrictVisitor;
+
+impl<'de> Visitor<'de> for StrictVisitor {
+    type Value = Value;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("JSON")
+    }
+
+    fn visit_bool<E>(self, v: bool) -> Result<Value, E> {
+        Ok(Value::Bool(v))
+    }
+
+    fn visit_i64<E>(self, v: i64) -> Result<Value, E> {
+        Ok(Value::Number(v.into()))
+    }
+
+    fn visit_u64<E>(self, v: u64) -> Result<Value, E> {
+        Ok(Value::Number(v.into()))
+    }
+
+    fn visit_f64<E>(self, v: f64) -> Result<Value, E> {
+        Ok(Number::from_f64(v).map_or(Value::Null, Value::Number))
+    }
+
+    fn visit_str<E>(self, v: &str) -> Result<Value, E> {
+        Ok(Value::String(v.to_owned()))
+    }
+
+    fn visit_string<E>(self, v: String) -> Result<Value, E> {
+        Ok(Value::String(v))
+    }
+
+    fn visit_unit<E>(self) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+        let mut items = Vec::new();
+        while let Some(Strict(item)) = seq.next_element()? {
+            items.push(item);
+        }
+        Ok(Value::Array(items))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+        let mut object = Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if object.contains_key(&key) {
+                return Err(de::Error::custom(format!("the key {key:?} is given twice")));
+            }
+            let Strict(value) = map.next_value()?;
+            object.insert(key, value);
+        }
+        Ok(Value::Object(object))
+    }
 }
 
 /// `value` as an object, if it is one with exactly the keys `keys`.

@@ -3,8 +3,11 @@
 //! with every server it starts accounted for.
 
 #![cfg(test)]
+// Signals by process id, and the kernel tie the shim test checks, are
+// Linux here.
+#![cfg(target_os = "linux")]
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -15,14 +18,22 @@ use std::time::Duration;
 use nota_core::decide::{Answer, Candidate, DecideError, Decider, Decisions, Question};
 use nota_core::lifeline::RECORDER_PID_VAR;
 use nota_core::{Clock, SystemClock};
+use nota_llm::http::HttpError;
 use nota_llm::local::{LocalDecider, Refused};
 use nota_llm::prompt::English;
 use nota_llm::reply::ReplyError;
-use nota_llm::server::{Device, GpuName, ServerConfig, ServerError};
+use nota_llm::server::{Device, GpuName, Launcher, ServerConfig, ServerError};
 use rustix::process::{Pid, Signal, kill_process, test_kill_process};
 
 /// The stand-in server.
 const FAKE: &str = env!("CARGO_BIN_EXE_nota-fake-llama-server");
+
+/// How soon a decider that's given up, or been told to stop, comes back:
+/// far less than a hang.
+const PROMPTLY: Duration = Duration::from_secs(5); // check-bound
+
+/// How soon after `stop` says to stop the server is gone.
+const STOPPED_WITHIN: Duration = Duration::from_secs(1); // check-bound
 
 /// A test's folder (the stand-in's `--model`, holding its plan and log) and
 /// the socket folder under it, removed when dropped.
@@ -61,6 +72,17 @@ impl Fixture {
         config.initial_backoff = Duration::from_millis(10);
         config.max_backoff = Duration::from_millis(40);
         config.restarts = 2;
+        config
+    }
+
+    /// A config that starts the stand-in through the launch shim, as nota
+    /// starts the real server.
+    fn tied_config(&self) -> ServerConfig {
+        let mut config = self.config();
+        config.launcher = Some(Launcher {
+            program: FAKE.into(),
+            args: vec!["exec-tied".into()],
+        });
         config
     }
 
@@ -247,8 +269,11 @@ fn a_server_killed_mid_question_is_restarted_and_asked_again() {
         })
     };
     let mut decider = Fixture::decider(fixture.config());
-    let decisions = decider.decide(&question(2), &go_on).unwrap();
+    let (decisions, took) = timed(|| decider.decide(&question(2), &go_on));
+    let decisions = decisions.unwrap();
     let victim = killer.join().unwrap();
+    // Seen as the connection broke, not at the 10 s request timeout.
+    assert!(took < PROMPTLY, "took {took:?}");
     assert_eq!(answers(&decisions), [Answer::Yes, Answer::No]);
     let starts: Vec<u32> = fixture.starts().into_iter().map(|(pid, _)| pid).collect();
     assert_eq!(starts.len(), 2, "{starts:?}");
@@ -275,7 +300,7 @@ fn a_server_that_keeps_dying_is_given_up_on() {
     assert_eq!(status.code(), Some(3));
     assert!(tail.contains("fake: exiting on a question"), "{tail:?}");
     assert_eq!(fixture.starts().len(), 3);
-    assert!(took < Duration::from_secs(5), "took {took:?}");
+    assert!(took < PROMPTLY, "took {took:?}");
     assert!(fixture.starts().iter().all(|&(pid, _)| !exists(pid)));
 }
 
@@ -298,7 +323,7 @@ fn a_server_that_hangs_is_given_up_on() {
         "{last}"
     );
     assert_eq!(fixture.requests().len(), 2);
-    assert!(took < Duration::from_secs(5), "took {took:?}");
+    assert!(took < PROMPTLY, "took {took:?}");
     assert!(
         fixture.starts().iter().all(|&(pid, _)| !exists(pid)),
         "a hung server is still running"
@@ -364,7 +389,7 @@ fn a_missing_program_is_unavailable_at_once() {
         matches!(server_error(&err), ServerError::Spawn(e) if e.kind() == std::io::ErrorKind::NotFound),
         "{err}"
     );
-    assert!(took < Duration::from_secs(5), "took {took:?}");
+    assert!(took < PROMPTLY, "took {took:?}");
 }
 
 /// A reply that isn't JSON is a failed decision: not asked again, and the
@@ -453,10 +478,7 @@ fn a_server_is_stopped_when_a_recording_starts_mid_question() {
     assert!(!exists(pid), "server {pid} still runs during the recording");
     assert_eq!(fixture.sockets_left(), Vec::<PathBuf>::new());
     let after = after.unwrap();
-    assert!(
-        after < Duration::from_secs(1),
-        "stopped {after:?} after being told"
-    ); // check-bound
+    assert!(after < STOPPED_WITHIN, "stopped {after:?} after being told");
 }
 
 /// A server started through the launch shim dies with the thread that
@@ -522,11 +544,102 @@ fn wait_within(child: &mut Child, limit: Duration) -> ExitStatus {
     }
 }
 
-/// The plan a fixture runs is in its folder, under the name the stand-in
-/// reads.
+/// A server that answers a byte at a time, slower than the request
+/// timeout, is given up on as one that doesn't answer: every byte that
+/// comes doesn't reset the wait.
 #[test]
-fn the_fixture_writes_the_plan_the_stand_in_reads() {
-    let fixture = Fixture::new("plan", "hang,answer");
-    let plan = std::fs::read_to_string(Path::new(&fixture.dir).join("plan")).unwrap();
-    assert_eq!(plan, "hang,answer");
+fn a_server_that_trickles_its_answer_is_given_up_on() {
+    let fixture = Fixture::new("trickle", "trickle");
+    let mut config = fixture.config();
+    // Its answer takes a few seconds at a byte every 20 ms.
+    config.request_timeout = Duration::from_millis(300);
+    config.restarts = 0;
+    let mut decider = Fixture::decider(config);
+    let (result, took) = timed(|| decider.decide(&question(1), &go_on));
+    let err = result.unwrap_err();
+    let ServerError::GaveUp(1, last) = server_error(&err) else {
+        panic!("{err}")
+    };
+    assert!(matches!(**last, ServerError::NoAnswer(_)), "{last}");
+    assert!(took < PROMPTLY, "took {took:?}");
+}
+
+/// A response longer than nota reads is a failed decision, as a malformed
+/// reply is: the server isn't restarted, and stays for the next question.
+#[test]
+fn a_response_over_the_limit_is_a_failed_decision() {
+    let fixture = Fixture::new("huge", "huge");
+    let mut decider = Fixture::decider(fixture.config());
+    for _ in 0..2 {
+        let err = decider.decide(&question(1), &go_on).unwrap_err();
+        let DecideError::Failed(e) = &err else {
+            panic!("{err:?}")
+        };
+        assert!(
+            matches!(
+                e.downcast_ref::<ServerError>(),
+                Some(ServerError::Unreadable(HttpError::TooLong("body")))
+            ),
+            "{e}"
+        );
+    }
+    assert_eq!(fixture.starts().len(), 1);
+    assert_eq!(fixture.requests().len(), 2);
+}
+
+/// A recording that starts just as the answer comes keeps the answer, but
+/// not the server: it's gone by the time the decider returns.
+#[test]
+fn a_stop_that_comes_with_the_answer_stops_the_server() {
+    let fixture = Fixture::new("late", "answer");
+    let mut decider = Fixture::decider(fixture.config());
+    // Says to stop from the moment the server has the question.
+    let recording = || !fixture.requests().is_empty();
+    match decider.decide(&question(2), &recording) {
+        Ok(decisions) => assert_eq!(answers(&decisions), [Answer::Yes, Answer::No]),
+        Err(DecideError::Stopped) => {}
+        Err(e) => panic!("{e:?}"),
+    }
+    let [(pid, _)] = fixture.starts()[..] else {
+        panic!("{:?}", fixture.starts())
+    };
+    assert!(!exists(pid), "server {pid} still runs during the recording");
+    assert_eq!(fixture.sockets_left(), Vec::<PathBuf>::new());
+}
+
+/// Started through the launch shim, as nota starts it, the server answers
+/// as it does when started directly.
+#[test]
+fn a_server_started_through_the_launcher_answers() {
+    let fixture = Fixture::new("launched", "answer");
+    let mut decider = Fixture::decider(fixture.tied_config());
+    let decisions = decider.decide(&question(2), &go_on).unwrap();
+    assert_eq!(answers(&decisions), [Answer::Yes, Answer::No]);
+    let starts = fixture.starts();
+    let [(pid, args)] = &starts[..] else {
+        panic!("{starts:?}")
+    };
+    // The shim became the server: what was started is what answered.
+    assert!(args.starts_with("--model "), "{args}");
+    drop(decider);
+    assert!(!exists(*pid), "server {pid} outlived its decider");
+}
+
+/// Through the launcher too, a program that isn't there is unavailable at
+/// once: the launcher isn't started only to fail.
+#[test]
+fn a_missing_program_behind_the_launcher_is_unavailable_at_once() {
+    let fixture = Fixture::new("gone", "answer");
+    let mut config = fixture.tied_config();
+    config.program = fixture.dir.join("no-such-llama-server");
+    config.initial_backoff = Duration::from_secs(60);
+    let mut decider = Fixture::decider(config);
+    let (result, took) = timed(|| decider.decide(&question(1), &go_on));
+    let err = result.unwrap_err();
+    assert!(
+        matches!(server_error(&err), ServerError::Spawn(e) if e.kind() == std::io::ErrorKind::NotFound),
+        "{err}"
+    );
+    assert!(took < PROMPTLY, "took {took:?}");
+    assert_eq!(fixture.starts(), Vec::<(u32, String)>::new());
 }

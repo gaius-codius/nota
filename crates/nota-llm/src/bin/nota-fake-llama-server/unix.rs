@@ -1,25 +1,4 @@
-//! A stand-in for llama-server, for the decider's supervision tests: it
-//! listens where `--host` says, answers `/health` and
-//! `/v1/chat/completions` as llama-server does, and misbehaves as told.
-//!
-//! Its `--model` is a directory of the test's, not a model:
-//! - it appends a line to `log` there as it starts (`start <pid> <args>`)
-//!   and as a question arrives (`request <pid>`);
-//! - `plan` there says what each start does, comma-separated: the first
-//!   start does the first, and so on, the last repeating.
-//!   - `answer`: says it's loading once, then ready; answers yes to odd
-//!     candidates and no to even ones
-//!   - `hang`: takes a question and never answers it
-//!   - `exit`: exits as a question arrives, saying so on stderr
-//!   - `garbage`: answers with a body that isn't JSON
-//!   - `refuse`: answers 400, as for a question too long for its context
-//!   - `busy`: answers 500
-//!   - `never-ready`: says it's loading, forever
-//!   - `crash`: exits at once, saying the model is missing
-//!
-//! `nota-fake-llama-server exec-tied PROGRAM ARGS…` is the launch shim
-//! nota uses (`nota_llm::lifeline::exec_tied`), so the tests can start it
-//! as nota starts the real server.
+//! The Unix program; see the binary's own docs.
 
 use std::ffi::OsString;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -48,6 +27,10 @@ enum Plan {
     NeverReady,
     /// Exits at once.
     Crash,
+    /// Answers a byte at a time, slowly.
+    Trickle,
+    /// Says its answer is longer than nota reads.
+    Huge,
 }
 
 impl Plan {
@@ -62,6 +45,8 @@ impl Plan {
             "busy" => Self::Busy,
             "never-ready" => Self::NeverReady,
             "crash" => Self::Crash,
+            "trickle" => Self::Trickle,
+            "huge" => Self::Huge,
             _ => return None,
         })
     }
@@ -142,6 +127,22 @@ fn respond(mut stream: &UnixStream, status: u16, body: &[u8]) -> io::Result<()> 
     stream.flush()
 }
 
+/// Writes a 200 response with `body`, one byte every 20 ms.
+fn trickle(mut stream: &UnixStream, body: &[u8]) -> io::Result<()> {
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    // Nothing is ever sent: the channel only gives a wait.
+    let (_keep, ticks) = std::sync::mpsc::channel::<()>();
+    for byte in head.as_bytes().iter().chain(body) {
+        stream.write_all(&[*byte])?;
+        stream.flush()?;
+        let _ = ticks.recv_timeout(std::time::Duration::from_millis(20));
+    }
+    Ok(())
+}
+
 /// The reply to a chat request `body`: yes to odd candidates, no to even,
 /// with token probabilities that lean the same way.
 fn answer(body: &[u8]) -> Vec<u8> {
@@ -218,6 +219,15 @@ fn handle(stream: &UnixStream, dir: &Path, plan: Plan, healthy: &mut u32) -> io:
             br#"{"error":{"message":"the request exceeds the available context size"}}"#,
         )?,
         Plan::Busy => respond(stream, 500, br#"{"error":{"message":"busy"}}"#)?,
+        Plan::Trickle => trickle(stream, &answer(&request.body))?,
+        Plan::Huge => {
+            let mut stream = stream;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: 2000000\r\nConnection: close\r\n\r\n"
+            )?;
+            stream.flush()?;
+        }
     }
     Ok(Then::Serve)
 }
@@ -228,7 +238,8 @@ fn value(args: &[OsString], flag: &str) -> Option<PathBuf> {
     args.get(at + 1).map(PathBuf::from)
 }
 
-fn main() -> ExitCode {
+/// The program, on Unix.
+pub(crate) fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     if args.first().is_some_and(|a| a == "exec-tied") {
         let err = nota_llm::lifeline::exec_tied(args.get(1..).unwrap_or_default());

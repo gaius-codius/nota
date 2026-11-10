@@ -2,8 +2,8 @@
 //! transcript, a yes or a no on each.
 //!
 //! Code finds the candidates (a heard span and a term it might be a
-//! misheard form of); the decider only answers, one numbered candidate at a
-//! time, whether the heard words really are that term. Its answer is never
+//! misheard form of); the decider only answers, for each numbered
+//! candidate, whether the heard words really are that term. Its answer is never
 //! applied as it stands: the candidate gate (C2) checks every yes. A
 //! decider is a local model or a cloud one, and says which ([`Place`]), so
 //! the screens can mark cloud work with ☁.
@@ -387,6 +387,10 @@ pub trait Decider {
     /// The decisions on `question`'s candidates. `stop` is asked often
     /// while it works; once it says true, the decider stops what it's
     /// running and returns [`DecideError::Stopped`].
+    ///
+    /// A decider may keep what it runs (a loaded model) between calls, and
+    /// sees `stop` only during one. So once `stop` says true between
+    /// questions, the caller drops the decider, which stops it all.
     ///
     /// # Errors
     ///

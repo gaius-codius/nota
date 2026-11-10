@@ -3,19 +3,25 @@
 //! The server starts with the first question and keeps running until the
 //! decider is dropped or [`LocalDecider::stop_server`] is called; a job
 //! drops its decider when it ends, so nothing is left loaded between jobs.
+//! `stop` is only seen while a question is being decided, so a job whose
+//! `stop` says to stop between questions must drop its decider (or stop
+//! its server) then: the decider can't see it.
+//!
 //! What happens to a question:
 //! - **`stop` says to stop** (a recording started, or nota is closing):
 //!   the server is killed at once, and the question comes back
 //!   [`DecideError::Stopped`]. No server is started while `stop` says to.
+//!   If it says to just as the answer has come, the answer stands and the
+//!   server is killed.
 //! - **The server fails** (it exits, hangs past
 //!   [`ServerConfig::request_timeout`], doesn't load within
 //!   [`ServerConfig::start_timeout`], or answers with a server error): it's
 //!   killed and started again after a backoff, and the question is asked
 //!   again, up to [`ServerConfig::restarts`] times. After that the decider
 //!   is [`DecideError::Unavailable`], with the last reason. So is a program
-//!   that can't be started at all, at once.
-//! - **The answer can't be read** (a malformed reply, a reply cut short, a
-//!   request the server refuses): a failed decision,
+//!   that can't be started at all, at once, with or without a launcher.
+//! - **The answer can't be read** (a malformed reply, a reply cut short or
+//!   over its limit, a request the server refuses): a failed decision,
 //!   [`DecideError::Failed`]. It isn't asked again, since the model at
 //!   temperature 0 would answer the same; the server keeps running for the
 //!   next question.
@@ -32,10 +38,7 @@ use crate::http::Response;
 use crate::prompt::Prompt;
 use crate::reply;
 use crate::request;
-use crate::server::{Interrupted, Server, ServerConfig, ServerError, Spawner, pause};
-
-/// The longest part of a refusal's body kept for its reason.
-const REFUSAL_LEN: usize = 300;
+use crate::server::{Interrupted, Server, ServerConfig, ServerError, Spawner, pause, said};
 
 /// The server refused the request (a 4xx status): too long for the
 /// context, say. Asking again gets the same.
@@ -69,12 +72,16 @@ enum Trouble {
     /// No server can run (a missing program, an unusable socket directory):
     /// trying again won't help.
     Hopeless(ServerError),
+    /// The server's response couldn't be read; the server is fine, and
+    /// would answer the same again.
+    Unreadable(ServerError),
 }
 
 impl From<Interrupted> for Trouble {
     fn from(interrupted: Interrupted) -> Self {
         match interrupted {
             Interrupted::Stopped => Self::Stopped,
+            Interrupted::Failed(e @ ServerError::Unreadable(_)) => Self::Unreadable(e),
             Interrupted::Failed(e) => Self::Broken(e),
         }
     }
@@ -130,6 +137,9 @@ impl LocalDecider {
 
     /// Starts a server and waits until it has loaded its model.
     fn start(&mut self, stop: &dyn Fn() -> bool) -> Result<Server, Trouble> {
+        if stop() {
+            return Err(Trouble::Stopped);
+        }
         self.started += 1;
         let spawner = match self.spawner.take() {
             Some(spawner) => spawner,
@@ -148,7 +158,10 @@ impl LocalDecider {
         let (clock, limit) = (Arc::clone(&self.clock), self.config.request_timeout);
         let response = self.running(stop)?.ask(body, &*clock, limit, stop)?;
         if response.status >= 500 {
-            return Err(Trouble::Broken(ServerError::Status(response.status)));
+            return Err(Trouble::Broken(ServerError::Status(
+                response.status,
+                said(&response.body),
+            )));
         }
         Ok(response)
     }
@@ -167,13 +180,9 @@ impl LocalDecider {
 /// The decisions in `response`, the server's answer to `question`.
 fn read(question: &Question, response: &Response) -> Result<Decisions, DecideError> {
     if response.status != 200 {
-        let said: String = String::from_utf8_lossy(&response.body)
-            .chars()
-            .take(REFUSAL_LEN)
-            .collect();
         return Err(DecideError::Failed(Box::new(Refused {
             status: response.status,
-            said,
+            said: said(&response.body),
         })));
     }
     let decisions = reply::parse(&response.body, question.len())
@@ -199,7 +208,16 @@ impl Decider for LocalDecider {
         let mut failures = 0;
         loop {
             let trouble = match self.try_once(&body, stop) {
-                Ok(response) => return read(question, &response),
+                Ok(response) => {
+                    let decided = read(question, &response);
+                    // A stop that came with the answer: the answer stands,
+                    // but no server stays loaded for a recording.
+                    if stop() {
+                        self.stop_server();
+                    }
+                    return decided;
+                }
+                Err(Trouble::Unreadable(e)) => return Err(DecideError::Failed(Box::new(e))),
                 Err(trouble) => trouble,
             };
             // Whatever went wrong, this server is done with.
@@ -207,7 +225,7 @@ impl Decider for LocalDecider {
             let failed = match trouble {
                 Trouble::Stopped => return Err(DecideError::Stopped),
                 Trouble::Hopeless(e) => return Err(DecideError::Unavailable(Box::new(e))),
-                Trouble::Broken(e) => e,
+                Trouble::Broken(e) | Trouble::Unreadable(e) => e,
             };
             failures += 1;
             if failures > self.config.restarts {
@@ -231,7 +249,7 @@ mod tests {
 
     use super::*;
     use crate::prompt::English;
-    use crate::server::Device;
+    use crate::server::{Device, SAID_LEN};
 
     /// A decider whose backoff runs from `first` to `longest`.
     fn decider(first: Duration, longest: Duration) -> LocalDecider {
@@ -271,7 +289,7 @@ mod tests {
             vec![nota_core::decide::Candidate::new("a".to_owned(), "b".to_owned(), None).unwrap()],
         )
         .unwrap();
-        let said = "x".repeat(REFUSAL_LEN + 50);
+        let said = "x".repeat(SAID_LEN + 50);
         let response = Response {
             status: 400,
             body: said.clone().into_bytes(),
@@ -281,6 +299,6 @@ mod tests {
         };
         let refused = e.downcast_ref::<Refused>().unwrap();
         assert_eq!(refused.status, 400);
-        assert_eq!(refused.said, said[..REFUSAL_LEN]);
+        assert_eq!(refused.said, said[..SAID_LEN]);
     }
 }

@@ -21,9 +21,12 @@
 //!   ([`ServerConfig::launcher`], normally `nota engine llama-server`; see
 //!   [`crate::lifeline`]). The kernel kills it when the thread that started
 //!   it ends, so servers are started by a thread of their own (`Spawner`)
-//!   that outlives them.
+//!   that outlives them. The tie is Linux's: elsewhere a nota that dies
+//!   leaves its server running.
 //!
-//! Every wait here is bounded and watches `stop`, at least every [`POLL`].
+//! Every wait here is bounded and watches `stop`, at least every [`POLL`]
+//! and between any two reads or writes, except one: reaping a server that
+//! has been killed, which waits for the kernel to finish with it.
 
 use std::error::Error;
 use std::ffi::OsString;
@@ -143,6 +146,9 @@ impl ServerConfig {
     /// socket in `socket_dir`: a 48k context (49,152 tokens), 120 s to load,
     /// 120 s per question (a CPU takes about 10 s for one), and up to 3
     /// restarts per question, after waits from 500 ms to 10 s.
+    ///
+    /// It has no [`launcher`](Self::launcher), so the server it starts
+    /// isn't tied to nota: nota sets `nota engine llama-server` there.
     #[must_use]
     pub const fn new(
         program: PathBuf,
@@ -218,8 +224,13 @@ pub enum ServerError {
     NoAnswer(Duration),
     /// Talking to it failed.
     Connection(HttpError),
-    /// It answered with a server error: the status code.
-    Status(u16),
+    /// Its response couldn't be read: a head that isn't HTTP as nota reads
+    /// it, or a head or body over its limit. The server is still up, and
+    /// would answer the same again.
+    Unreadable(HttpError),
+    /// It answered with a server error: the status code, and the start of
+    /// what it said.
+    Status(u16, String),
     /// It failed this many times in a row on one question; the last
     /// failure.
     GaveUp(u32, Box<Self>),
@@ -266,7 +277,15 @@ impl fmt::Display for ServerError {
                 write!(f, "llama-server didn't answer within {} s", limit.as_secs())
             }
             Self::Connection(e) => write!(f, "llama-server's connection failed: {e}"),
-            Self::Status(status) => write!(f, "llama-server answered with error {status}"),
+            Self::Unreadable(e) => write!(f, "llama-server's response couldn't be read: {e}"),
+            Self::Status(status, said) => {
+                write!(f, "llama-server answered with error {status}")?;
+                if said.trim().is_empty() {
+                    Ok(())
+                } else {
+                    write!(f, ": {}", said.trim())
+                }
+            }
             Self::GaveUp(times, last) => {
                 write!(f, "llama-server failed {times} times in a row: {last}")
             }
@@ -278,11 +297,22 @@ impl Error for ServerError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Spawn(e) | Self::SocketDir(_, e) => Some(e),
-            Self::Connection(e) => Some(e),
+            Self::Connection(e) | Self::Unreadable(e) => Some(e),
             Self::GaveUp(_, last) => Some(&**last),
             _ => None,
         }
     }
+}
+
+/// The longest part of a response's body kept for a reason.
+pub(crate) const SAID_LEN: usize = 300;
+
+/// The start of `body`, for a reason: up to [`SAID_LEN`] characters.
+pub(crate) fn said(body: &[u8]) -> String {
+    String::from_utf8_lossy(body)
+        .chars()
+        .take(SAID_LEN)
+        .collect()
 }
 
 /// Why a wait on the server ended without what it waited for.
@@ -355,6 +385,11 @@ pub(crate) fn pause(
             return Err(Interrupted::Stopped);
         }
         let _ = ticks.recv_timeout(POLL);
+    }
+    // Once more, for a stop that came during the last wait, or a wait of
+    // nothing: whatever follows a pause starts something.
+    if stop() {
+        return Err(Interrupted::Stopped);
     }
     Ok(())
 }
@@ -436,6 +471,11 @@ impl Server {
         generation: u64,
     ) -> Result<Self, ServerError> {
         private_dir(&config.socket_dir)?;
+        if config.launcher.is_some() {
+            // The launcher would start, then fail to run the server, which
+            // would look like a server that keeps dying.
+            runnable(&config.program).map_err(ServerError::Spawn)?;
+        }
         let socket = config
             .socket_dir
             .join(format!("llama-{}-{generation}.sock", std::process::id()));
@@ -488,10 +528,13 @@ impl Server {
             self.check(clock, until, stop, waiting)?;
             match self.exchange(&http::request("/health", None), clock, until, stop, waiting) {
                 Ok(Response { status: 200, .. }) => return Ok(()),
-                Ok(Response { status, .. }) if status != 503 => {
-                    return Err(ServerError::Status(status).into());
+                Ok(Response { status, body }) if status != 503 => {
+                    return Err(ServerError::Status(status, said(&body)).into());
                 }
                 Err(Interrupted::Stopped) => return Err(Interrupted::Stopped),
+                // Seen while it waited: it has been reaped, so no later
+                // check would see it.
+                Err(Interrupted::Failed(e @ ServerError::Exited(..))) => return Err(e.into()),
                 // 503: still loading its model. A failure: not listening
                 // yet, or it stopped, which the next check says.
                 Ok(_) | Err(Interrupted::Failed(_)) => {}
@@ -553,6 +596,9 @@ impl Server {
         match (result, why) {
             (_, Some(interrupted)) => Err(interrupted),
             (Ok(response), None) => Ok(response),
+            (Err(e @ (HttpError::BadHead(_) | HttpError::TooLong(_))), None) => {
+                Err(ServerError::Unreadable(e).into())
+            }
             (Err(e), None) => Err(ServerError::Connection(e).into()),
         }
     }
@@ -637,6 +683,21 @@ fn remove_socket(socket: &Path) {
     let _ = std::fs::remove_file(socket);
 }
 
+/// Whether `program` is a file that can be run.
+fn runnable(program: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let meta = std::fs::metadata(program)?;
+    if meta.is_file() && meta.permissions().mode() & 0o111 != 0 {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{} isn't a program that can be run", program.display()),
+        ))
+    }
+}
+
 /// Makes `dir` if it's missing, readable only by this user, and checks
 /// that no one else can open it.
 #[expect(
@@ -663,8 +724,9 @@ fn private_dir(dir: &Path) -> Result<(), ServerError> {
     Ok(())
 }
 
-/// A reader that, when a read times out, asks `check` whether to go on
-/// waiting, and fails if not.
+/// A connection that, before each read or write (and so after each one
+/// that times out), asks `check` whether to go on waiting, and fails if
+/// not.
 struct Patient<'a, S> {
     /// The connection.
     stream: &'a mut S,
@@ -675,16 +737,17 @@ struct Patient<'a, S> {
 impl<S: Read> Read for Patient<'_, S> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         loop {
+            // Before every read, not only after one that timed out: a
+            // server that sends a byte at a time would never time out.
+            (self.check)()?;
             match self.stream.read(buf) {
                 Err(e)
                     if matches!(
                         e.kind(),
-                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                    ) =>
-                {
-                    (self.check)()?;
-                }
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                        io::ErrorKind::WouldBlock
+                            | io::ErrorKind::TimedOut
+                            | io::ErrorKind::Interrupted
+                    ) => {}
                 other => return other,
             }
         }
@@ -694,15 +757,13 @@ impl<S: Read> Read for Patient<'_, S> {
 impl<S: Write> Write for Patient<'_, S> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         loop {
+            (self.check)()?;
             match self.stream.write(buf) {
                 Err(e)
                     if matches!(
                         e.kind(),
                         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                    ) =>
-                {
-                    (self.check)()?;
-                }
+                    ) => {}
                 other => return other,
             }
         }

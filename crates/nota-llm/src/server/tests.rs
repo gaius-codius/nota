@@ -200,10 +200,14 @@ fn errors_say_what_went_wrong() {
         ServerError::Exited(None, String::new()).to_string(),
         "llama-server stopped"
     );
-    let gave_up = ServerError::GaveUp(4, Box::new(ServerError::Status(500)));
+    let gave_up = ServerError::GaveUp(4, Box::new(ServerError::Status(500, String::new())));
     assert_eq!(
         gave_up.to_string(),
         "llama-server failed 4 times in a row: llama-server answered with error 500"
+    );
+    assert_eq!(
+        ServerError::Status(500, " {\"error\":\"busy\"}\n".to_owned()).to_string(),
+        "llama-server answered with error 500: {\"error\":\"busy\"}"
     );
     assert!(gave_up.source().is_some());
 }
@@ -222,6 +226,30 @@ fn a_pause_ends_when_told_to_stop() {
     let clock = nota_core::FakeClock::new(SessionTime::ZERO);
     let stopped = pause(&clock, Duration::from_secs(3_600), &|| true);
     assert!(matches!(stopped, Err(Interrupted::Stopped)));
-    // A pause of nothing has nothing to wait for.
-    assert!(pause(&clock, Duration::ZERO, &|| true).is_ok());
+    // A pause of nothing still looks once: what follows it starts a server.
+    assert!(matches!(
+        pause(&clock, Duration::ZERO, &|| true),
+        Err(Interrupted::Stopped)
+    ));
+    assert!(pause(&clock, Duration::ZERO, &|| false).is_ok());
+}
+
+/// A stop that comes during a pause's last wait is seen before it ends.
+#[test]
+fn a_stop_during_the_last_wait_is_seen() {
+    let clock = nota_core::FakeClock::new(SessionTime::ZERO);
+    let asked = std::cell::Cell::new(0_u32);
+    // The first look says go on; the clock then passes the pause's end
+    // while it waits, and the next look says stop.
+    let stop = || {
+        asked.set(asked.get() + 1);
+        if asked.get() == 1 {
+            clock.advance(Duration::from_secs(1));
+            false
+        } else {
+            true
+        }
+    };
+    let stopped = pause(&clock, Duration::from_millis(500), &stop);
+    assert!(matches!(stopped, Err(Interrupted::Stopped)), "{stopped:?}");
 }
