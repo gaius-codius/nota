@@ -21,18 +21,21 @@
 set -euo pipefail
 
 # SHA-256 of each download, and of each model file the tests load.
-parakeet_archive_sha=5793d0fd397c5778d2cf2126994d58e9d56b1be7c04d13c7a15bb1b4eafb16bf
 sherpa_archive_sha=c0bdb7907d3a74bba1d55d22bf4d9fa75586cf1530614ebe88a27b9118e015c4
 voice_archive_sha=f35dac93754fe2ac97c66e1f468311d0d2130f7f0f5a89bfa1197e09a0cbdec5
 declare -A model_sha=(
-  [parakeet-tdt-0.6b-v3-int8/encoder.int8.onnx]=acfc2b4456377e15d04f0243af540b7fe7c992f8d898d751cf134c3a55fd2247
-  [parakeet-tdt-0.6b-v3-int8/decoder.int8.onnx]=179e50c43d1a9de79c8a24149a2f9bac6eb5981823f2a2ed88d655b24248db4e
-  [parakeet-tdt-0.6b-v3-int8/joiner.int8.onnx]=3164c13fc2821009440d20fcb5fdc78bff28b4db2f8d0f0b329101719c0948b3
+  [parakeet-tdt-0.6b-v3-int8/encoder.int8.onnx]=1afbe69c1ffdabee94755f42e4daf1d93549131a3da11356bda84fcef0f2c479
+  [parakeet-tdt-0.6b-v3-int8/decoder.int8.onnx]=0222a86147299d4dee90edf95b6d13827edb42ad8b7c9cf0b2582f030937c0b5
+  [parakeet-tdt-0.6b-v3-int8/joiner.int8.onnx]=cbd02f3696e9944970111fb439d9c3fd365a80374565f13f2b9c7007d253fc98
   [parakeet-tdt-0.6b-v3-int8/tokens.txt]=d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d
   [silero_vad_v6.onnx]=1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3
 )
 # Silero VAD v6.2.3, by commit: a tag can move.
 silero_commit=5cd7945676eb32225748052e2e6a0580e4686a08
+# Parakeet's files, from sherpa-onnx's Hugging Face mirror by commit: the
+# release archive can be replaced in place, as it was on 2026-11-07. This
+# commit is that 2026-11-07 export, the same files as the archive then held.
+parakeet_commit=ed5d745623472f97cfc2e6c2916ee248798fc5a8
 
 root=${NOTA_TEST_MODELS:-$HOME/.local/share/nota/test-models}
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -73,12 +76,11 @@ if [[ ! -e $root/parakeet-tdt-0.6b-v3-int8 ]]; then
   if [[ -n ${NOTA_MODEL_SOURCE:-} ]]; then
     ln -s "$NOTA_MODEL_SOURCE/$parakeet_name" "$root/parakeet-tdt-0.6b-v3-int8"
   else
-    fetch "$gh/asr-models/$parakeet_name.tar.bz2" "$dl/$parakeet_name.tar.bz2" \
-      "$parakeet_archive_sha"
-    tar -xjf "$dl/$parakeet_name.tar.bz2" -C "$dl"
     mkdir -p "$root/parakeet-tdt-0.6b-v3-int8.tmp"
     for f in encoder.int8.onnx decoder.int8.onnx joiner.int8.onnx tokens.txt; do
-      cp "$dl/$parakeet_name/$f" "$root/parakeet-tdt-0.6b-v3-int8.tmp/$f"
+      fetch "https://huggingface.co/csukuangfj/$parakeet_name/resolve/$parakeet_commit/$f" \
+        "$root/parakeet-tdt-0.6b-v3-int8.tmp/$f" \
+        "${model_sha[parakeet-tdt-0.6b-v3-int8/$f]}"
     done
     mv "$root/parakeet-tdt-0.6b-v3-int8.tmp" "$root/parakeet-tdt-0.6b-v3-int8"
   fi
