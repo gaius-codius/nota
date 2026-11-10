@@ -29,3 +29,5 @@ lcov.info
 /fuzz/out/
 /fuzz/in-protocol/
 /fuzz/out-protocol/
+/fuzz/in-reply/
+/fuzz/out-reply/

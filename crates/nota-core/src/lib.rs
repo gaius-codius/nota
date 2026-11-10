@@ -2,7 +2,8 @@
 //! the messages between the recorder and the speech engine, with their wire
 //! encoding (the engine protocol), the engine's tie to its recorder, the
 //! messages between the screens and the recorder (the recorder protocol),
-//! and heard speech placed in session time.
+//! heard speech placed in session time, and the decider's interface (a yes
+//! or no on each candidate correction, [`decide`]).
 //!
 //! Time has one source, the [`Clock`]. Each track maps its sample count to
 //! session time through a [`TrackTimeline`] of epochs; a new epoch starts
@@ -30,6 +31,7 @@
 //! ```
 
 pub mod clock;
+pub mod decide;
 pub mod drift;
 pub mod epoch;
 pub mod ids;

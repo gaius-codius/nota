@@ -30,6 +30,7 @@ directories.workspace = true
 jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 nota-core = { path = "../nota-core" }
 nota-engine = { path = "../nota-engine" }
+nota-llm = { path = "../nota-llm" }
 nota-recorder = { path = "../nota-recorder" }
 nota-store = { path = "../nota-store" }
 nota-tui = { path = "../nota-tui" }

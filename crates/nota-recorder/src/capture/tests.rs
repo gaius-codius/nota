@@ -195,6 +195,7 @@ fn run_in<S: Fs + Clone + 'static>(
         clock: Arc::clone(&clock),
     };
     let (capture, events) = start(&backend, MIC, &Source::Microphone, rate(), &dyn_clock).unwrap();
+    let progress = events.progress(MIC).unwrap();
     let (finished, done) = mpsc::channel();
     thread::spawn(move || {
         let mut reported = Vec::new();
@@ -211,8 +212,64 @@ fn run_in<S: Fs + Clone + 'static>(
     script_sent.recv().unwrap();
     while_running(&clock);
     drop(capture);
-    // A recorder that never returns fails the test rather than hanging it.
-    done.recv_timeout(Duration::from_secs(10)).unwrap()
+    // A recorder that stops fails the test rather than hanging it; a slow
+    // one, on a loaded machine, still has as long as it keeps recording.
+    await_run(&done, STALL_LIMIT, || progress.now()).unwrap()
+}
+
+/// How long the recorder may go without moving its track on before a test
+/// counts it as stopped.
+const STALL_LIMIT: Duration = Duration::from_secs(10); // check-bound
+
+/// Waits on `done` for the recorder's result for as long as `positions`
+/// keeps changing: [`RecvTimeoutError::Timeout`] once a whole `stall`
+/// passes with no result and the same positions at both ends, and
+/// [`RecvTimeoutError::Disconnected`] if the recorder thread ended without
+/// sending one.
+fn await_run<T>(
+    done: &mpsc::Receiver<T>,
+    stall: Duration,
+    mut positions: impl FnMut() -> Positions,
+) -> Result<T, mpsc::RecvTimeoutError> {
+    let mut last = positions();
+    loop {
+        match done.recv_timeout(stall) {
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let now = positions();
+                if now == last {
+                    return Err(mpsc::RecvTimeoutError::Timeout);
+                }
+                last = now;
+            }
+            other => return other,
+        }
+    }
+}
+
+/// A recorder that stops moving its track on fails the wait rather than
+/// hanging it, though its thread lives on.
+#[test]
+fn a_recorder_that_stops_moving_on_fails_the_wait() {
+    let (_alive, done) = mpsc::channel::<()>();
+    let waited = await_run(&done, Duration::from_millis(1), || positions_at(7, 7, 7));
+    assert_eq!(waited, Err(mpsc::RecvTimeoutError::Timeout));
+}
+
+/// A recorder that keeps moving its track on is waited for however many
+/// stalls pass first, as a slow one on a loaded machine needs.
+#[test]
+fn a_recorder_still_moving_on_is_waited_for_past_a_stall() {
+    let (finished, done) = mpsc::channel();
+    let mut polls = 0;
+    let waited = await_run(&done, Duration::from_millis(1), || {
+        polls += 1;
+        // Only once several stalls have passed does the result come.
+        if polls == 5 {
+            finished.send(polls).unwrap();
+        }
+        positions_at(polls, polls, polls)
+    });
+    assert_eq!(waited, Ok(5));
 }
 
 /// The finished journals' audio, in id order: each journal's range must

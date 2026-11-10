@@ -1724,6 +1724,7 @@ dependencies = [
  "nota",
  "nota-core",
  "nota-engine",
+ "nota-llm",
  "nota-recorder",
  "nota-store",
  "nota-tui",
@@ -1759,6 +1760,18 @@ dependencies = [
  "proptest",
  "rustix",
  "sherpa-onnx",
+]
+
+[[package]]
+name = "nota-llm"
+version = "0.0.0"
+dependencies = [
+ "nota-core",
+ "nota-llm",
+ "proptest",
+ "rustix",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2650,6 +2663,7 @@ version = "1.0.151"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
 dependencies = [
+ "indexmap",
  "itoa",
  "memchr",
  "serde",
