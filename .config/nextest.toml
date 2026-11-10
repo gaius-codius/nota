@@ -2,6 +2,16 @@
 # Tests that hang (an engine child that never answers) fail instead of blocking.
 slow-timeout = { period = "30s", terminate-after = 4 }
 
+# Each of nota-llm's tests ends in about a second at most, so one still
+# running after ten seconds has hung: a supervisor that never gives up, or a
+# read that loops. It's stopped then,
+# rather than at two minutes, so that the mutation gate counts a mutant that
+# hangs them as caught. cargo-mutants stops a test run at 20 seconds at the
+# least and counts that as timed out, which fails the gate.
+[[profile.default.overrides]]
+filter = "package(nota-llm)"
+slow-timeout = { period = "10s", terminate-after = 1 }
+
 [profile.ci]
 fail-fast = false
 failure-output = "immediate-final"
