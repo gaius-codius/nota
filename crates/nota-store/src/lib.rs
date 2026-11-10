@@ -5,8 +5,10 @@
 //! has published, the heard text ([`transcript`]), the marks and notes
 //! made while recording ([`annotations`]), the work queued after a stop
 //! ([`jobs`]), the final pass's text ([`final_text`]) and its revisions
-//! ([`revisions`]), and
-//! the tables later work fills (the timeline). The tables are in [`schema`]; versions
+//! ([`revisions`]), the term packs each session chose and the learned
+//! pairs ([`vocabulary`], [`learned`]), and
+//! the tables later work fills (the timeline). Term packs themselves are
+//! separate read-only files ([`packs`]). The tables are in [`schema`]; versions
 //! and the import of the per-session stores that came before are in
 //! [`migrate`].
 //!
@@ -43,25 +45,31 @@ mod epochs;
 pub mod final_text;
 mod findings;
 pub mod jobs;
+pub mod learned;
 pub mod migrate;
+pub mod packs;
 pub mod revisions;
 pub mod schema;
 mod segments;
 mod sessions;
 pub mod timeline;
 pub mod transcript;
+pub mod vocabulary;
 mod writer;
 
 pub use annotations::Annotation;
 pub use final_text::{FinalText, FinalWord, HeardBy};
 pub use findings::{IndexedFinding, Problem, ReadFailure, Status};
 pub use jobs::{Job, JobEnd, JobId, JobKind, JobState, Progress, Wait};
+pub use learned::{Learned, LearnedPair, Verdict};
 pub use migrate::Adopted;
+pub use packs::{Pack, PackError, PackRef};
 pub use revisions::{Applied, Change, ChunkKey, FinalLine, RevisionNumber, Timed, WordSpan};
 pub use segments::{AudioDigest, Inserted, RowKey, SegmentRow, Sha256Digest};
 pub use sessions::{NewSession, Session, SessionState, Track, TrackKind};
 pub use timeline::{Happened, TimelineEvent};
 pub use transcript::{Heard, HeardRevision, Line, StoredUtterance, UtteranceId, Word};
+pub use vocabulary::SessionTerms;
 pub use writer::Writer;
 
 /// How long a write waits for another process's write to finish.
@@ -121,6 +129,18 @@ pub enum StoreError {
     },
     /// There's no job with this number.
     NoJob(i64),
+    /// The session's packs are recorded already: they're recorded once.
+    PacksRecorded(SessionId),
+    /// A pack the session recorded isn't installed at its recorded version.
+    PackMissing {
+        /// The session.
+        session: SessionId,
+        /// The pack it recorded.
+        pack: PackRef,
+    },
+    /// A learned pair's span or term has no letters or digits. Nothing was
+    /// stored.
+    NoText,
     /// Final-pass text that overlaps text stored for the track already,
     /// or ends past the point it's stored up to.
     FinalOverlap {
@@ -199,6 +219,17 @@ impl fmt::Display for StoreError {
                 )
             }
             Self::NoJob(id) => write!(f, "there is no job {id}"),
+            Self::PacksRecorded(id) => {
+                write!(f, "session {}'s packs are recorded already", id.get())
+            }
+            Self::PackMissing { session, pack } => write!(
+                f,
+                "session {} used pack {} {}, which is not installed",
+                session.get(),
+                pack.name,
+                pack.version
+            ),
+            Self::NoText => write!(f, "a learned pair needs heard text and a term"),
             Self::FinalOverlap { track, start } => write!(
                 f,
                 "final-pass text on track {} from sample {} overlaps text already stored, \

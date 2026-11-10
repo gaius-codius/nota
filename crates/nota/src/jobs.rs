@@ -53,6 +53,9 @@ pub(crate) struct Running<'a> {
     pub(crate) stop: &'a dyn Fn() -> bool,
     /// Notes how far it has got, for the Processing screen.
     pub(crate) progress: &'a dyn Fn(Progress),
+    /// Notes that its engine has answered, so the reason an earlier run's
+    /// engine failed no longer shows.
+    pub(crate) answered: &'a dyn Fn(),
 }
 
 /// What runs the jobs.
@@ -242,7 +245,8 @@ struct Loop<W, C, R> {
     shared: Arc<Shared>,
     /// The app's clock, used to space engine retries.
     clock: Arc<dyn Clock>,
-    /// When each job last stopped because its engine could not start.
+    /// When each job last stopped because its engine couldn't start or
+    /// stopped working, or it had none.
     retry_after: BTreeMap<JobId, SessionTime>,
 }
 
@@ -274,8 +278,10 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
     fn next(&self) -> Result<Option<Job>, StoreError> {
         let jobs = self.db.with(|db| db.jobs())?;
         for job in jobs {
-            let JobState::Waiting(waits) = job.state else {
-                continue;
+            let waits = match &job.state {
+                JobState::Waiting(waits) => *waits,
+                JobState::EngineDown(_) => Some(Wait::Engine),
+                _ => continue,
             };
             if self.retry_after.get(&job.id).is_some_and(|at| {
                 self.clock
@@ -291,8 +297,11 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
             if waits == Some(Wait::Space) && !self.room.room() {
                 continue;
             }
+            // A job whose engine failed is rewritten too when it lacks
+            // anything now (no engine this time, or audio to publish):
+            // the old reason no longer says why it waits.
             if let Some(lacks) = self.worker.lacks(&job) {
-                if waits != Some(lacks) && waits != Some(Wait::Space) {
+                if job.state != JobState::Waiting(Some(lacks)) && waits != Some(Wait::Space) {
                     self.db
                         .with(|db| db.end_job(job.id, &JobEnd::Waiting(Some(lacks))))?;
                 }
@@ -314,7 +323,10 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
         if !self.note_end(job.id, &end) {
             return;
         }
-        if end == JobEnd::Waiting(Some(Wait::Engine)) {
+        if matches!(
+            end,
+            JobEnd::EngineDown(_) | JobEnd::Waiting(Some(Wait::Engine))
+        ) {
             self.retry_after.insert(job.id, self.clock.now());
         } else {
             self.retry_after.remove(&job.id);
@@ -333,15 +345,23 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
         let stop = move || shared.stopping() || capture.recording();
         let db = self.db.clone();
         let id = job.id;
-        let progress = move |progress: Progress| {
-            // Only shown; a progress that can't be noted is shown late.
-            let _ = db.with(|db| db.job_progress(id, progress));
+        let progress = {
+            let db = db.clone();
+            move |progress: Progress| {
+                // Only shown; a progress that can't be noted is shown late.
+                let _ = db.with(|db| db.job_progress(id, progress));
+            }
+        };
+        let answered = move || {
+            // Only shown too: the reason goes at the run's end anyway.
+            let _ = db.with(|db| db.engine_answered(id));
         };
         self.worker.run(
             job,
             &Running {
                 stop: &stop,
                 progress: &progress,
+                answered: &answered,
             },
         )
     }

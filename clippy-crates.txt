@@ -54,6 +54,8 @@ ratatui_widgets::calendar::CalendarEventStore::today
 rusqlite::Connection::open
 rusqlite::Connection::open_with_flags
 rusqlite::Connection::open_with_flags_and_vfs
+rusqlite::Connection::open_in_memory
+rusqlite::Connection::open_in_memory_with_flags
 rusqlite::Connection::backup
 rusqlite::Connection::restore
 # Grows, truncates or keeps the database's files outside SQL.

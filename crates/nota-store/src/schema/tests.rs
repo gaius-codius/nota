@@ -87,6 +87,7 @@ fn the_schema_has_exactly_these_tables() {
             "heard_revision",
             "heard_revision_text",
             "job",
+            "learned_pair",
             "mark",
             "note",
             "proposal",
@@ -94,6 +95,8 @@ fn the_schema_has_exactly_these_tables() {
             "revision_text",
             "segment",
             "session",
+            "session_pack",
+            "session_packs_chosen",
             "track",
             "utterance",
             "word"

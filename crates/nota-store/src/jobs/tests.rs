@@ -219,26 +219,137 @@ fn jobs_left_running_are_taken_back_until_they_have_died_too_often() {
     );
 }
 
+/// The reason an engine failed is kept while the job waits, goes with it
+/// into its next run, and is replaced by whatever that run ends with.
+#[test]
+fn an_engine_failure_keeps_its_reason_until_the_next_run_ends() {
+    let (_dir, mut store) = store("engine-down");
+    store.finish_recording(S1, None).unwrap();
+    let id = store.jobs().unwrap()[0].id;
+    let down = JobEnd::EngineDown("the transcriber couldn't start".into());
+    assert!(store.start_job(id).unwrap());
+    store.end_job(id, &down).unwrap();
+    assert_eq!(
+        states(&store),
+        [(
+            S1,
+            JobState::EngineDown("the transcriber couldn't start".into())
+        )]
+    );
+    // The retry still shows why the last run failed.
+    assert!(store.start_job(id).unwrap());
+    assert_eq!(
+        states(&store),
+        [(
+            S1,
+            JobState::Retrying("the transcriber couldn't start".into())
+        )]
+    );
+    // A second failure's reason replaces the first's.
+    store
+        .end_job(id, &JobEnd::EngineDown("exited: no model".into()))
+        .unwrap();
+    assert_eq!(
+        states(&store),
+        [(S1, JobState::EngineDown("exited: no model".into()))]
+    );
+    assert!(store.start_job(id).unwrap());
+    store.end_job(id, &JobEnd::Done).unwrap();
+    assert_eq!(states(&store), [(S1, JobState::Done)]);
+}
+
+/// A retry whose engine answers drops the old reason at once, not at
+/// the end of a long run; only a running job is touched.
+#[test]
+fn an_engine_that_answers_clears_the_old_reason() {
+    let (_dir, mut store) = store("engine-answered");
+    store.finish_recording(S1, None).unwrap();
+    let id = store.jobs().unwrap()[0].id;
+    assert!(store.start_job(id).unwrap());
+    store
+        .end_job(id, &JobEnd::EngineDown("couldn't start".into()))
+        .unwrap();
+    // Waiting, the reason still says why the last run stopped.
+    store.engine_answered(id).unwrap();
+    assert_eq!(
+        states(&store),
+        [(S1, JobState::EngineDown("couldn't start".into()))]
+    );
+    assert!(store.start_job(id).unwrap());
+    store.engine_answered(id).unwrap();
+    assert_eq!(states(&store), [(S1, JobState::Running)]);
+}
+
+/// Any end other than an engine failure clears the kept reason, so a
+/// run paused for a recording starts its next run without it.
+#[test]
+fn a_pause_clears_an_engine_failure_reason() {
+    let (_dir, mut store) = store("engine-down-paused");
+    store.finish_recording(S1, None).unwrap();
+    let id = store.jobs().unwrap()[0].id;
+    assert!(store.start_job(id).unwrap());
+    store
+        .end_job(id, &JobEnd::EngineDown("stopped answering".into()))
+        .unwrap();
+    assert!(store.start_job(id).unwrap());
+    // Paused for a recording: nothing says the engine is still down.
+    store.end_job(id, &JobEnd::Waiting(None)).unwrap();
+    assert_eq!(states(&store), [(S1, JobState::Waiting(None))]);
+    assert!(store.start_job(id).unwrap());
+    assert_eq!(states(&store), [(S1, JobState::Running)]);
+}
+
+/// A job a dead runner left retrying waits for an engine again with its
+/// reason; one left running plainly waits with none.
+#[test]
+fn a_retry_left_running_is_taken_back_with_its_reason() {
+    let (_dir, mut store) = store("engine-down-recover");
+    store.finish_recording(S1, None).unwrap();
+    store.finish_recording(S2, None).unwrap();
+    let ids: Vec<JobId> = store.jobs().unwrap().iter().map(|j| j.id).collect();
+    assert!(store.start_job(ids[0]).unwrap());
+    store
+        .end_job(ids[0], &JobEnd::EngineDown("exited: no model".into()))
+        .unwrap();
+    for id in &ids {
+        assert!(store.start_job(*id).unwrap());
+    }
+    // The runner dies with both running.
+    assert_eq!(store.recover_jobs(3).unwrap(), 2);
+    assert_eq!(
+        states(&store),
+        [
+            (S1, JobState::EngineDown("exited: no model".into())),
+            (S2, JobState::Waiting(None)),
+        ]
+    );
+}
+
 /// A stored job that doesn't parse is an error, not a guess.
 #[test]
 fn a_bad_job_row_is_corrupt() {
     let (_dir, store) = store("corrupt");
-    for (kind, state, waits) in [
-        ("summary", "waiting", None),
-        ("final-pass", "paused", None),
-        ("final-pass", "waiting", Some("time")),
-        ("final-pass", "done", Some("space")),
+    for (kind, state, waits, detail) in [
+        ("summary", "waiting", None, None),
+        ("final-pass", "paused", None, None),
+        ("final-pass", "waiting", Some("time"), None),
+        ("final-pass", "done", Some("space"), None),
+        // Only a wait for an engine keeps a reason.
+        ("final-pass", "waiting", None, Some("why")),
+        ("final-pass", "waiting", Some("space"), Some("why")),
+        ("final-pass", "running", Some("engine"), Some("why")),
     ] {
         store
             .conn
             .execute(
-                "INSERT INTO job (session_id, kind, state, waits_for) VALUES (1, ?1, ?2, ?3)",
-                rusqlite::params![kind, state, waits],
+                "INSERT INTO job (session_id, kind, state, waits_for, detail) \
+                 VALUES (1, ?1, ?2, ?3, ?4)",
+                rusqlite::params![kind, state, waits, detail],
             )
             .unwrap();
         assert!(
             matches!(store.jobs(), Err(StoreError::Corrupt(_))),
-            "{kind} {state} {waits:?}"
+            "{kind} {state} {waits:?} {detail:?}"
         );
         store.conn.execute("DELETE FROM job", []).unwrap();
     }

@@ -25,6 +25,11 @@ pub enum ProcessingWait {
     ),
     /// A working speech engine.
     Engine,
+    /// A working speech engine, after the last one tried failed.
+    EngineDown(
+        /// Why the last one failed, shown under the step.
+        String,
+    ),
     /// Audio that has not been saved yet.
     Audio,
     /// Enough free space to continue.
@@ -43,12 +48,36 @@ impl ProcessingWait {
                 format!("saved audio can't be checked: {}", drawn(reason))
             }
             Self::Engine => "waiting for a working speech engine".into(),
+            Self::EngineDown(_) => "engine failed".into(),
             Self::Audio => "waiting for audio to be saved".into(),
             Self::Space => "waiting for free space".into(),
             Self::Queued => "queued or paused for a recording".into(),
         }
     }
 }
+
+impl ProcessingState {
+    /// Why the speech engine failed on the step's last try, if it's
+    /// waiting for, or trying, the engine again.
+    fn engine_failure(&self) -> Option<&str> {
+        match self {
+            Self::Waiting {
+                reason: ProcessingWait::EngineDown(reason),
+                ..
+            }
+            | Self::Retrying { reason, .. } => Some(reason),
+            _ => None,
+        }
+    }
+}
+
+/// The most lines an engine failure's reason takes under its step: the
+/// reason can hold the end of the engine's error output, and the steps
+/// must stay in view.
+const MAX_REASON_LINES: usize = 3;
+
+/// How far a reason under a step is indented: past the step's glyph.
+const REASON_INDENT: &str = "     ";
 
 /// Why a processing step stopped.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +114,14 @@ pub enum ProcessingState {
     Running {
         /// How far the step got, in percent, limited to 100 when drawn.
         progress: u8,
+    },
+    /// Work underway again after the speech engine failed.
+    Retrying {
+        /// How far the step got, in percent, limited to 100 when drawn.
+        progress: u8,
+        /// Why the engine failed last time, shown under the step until
+        /// the engine answers.
+        reason: String,
     },
     /// Finished successfully.
     Done,
@@ -470,6 +507,7 @@ impl Processing {
             .rev()
             .find_map(|job| match job.state {
                 ProcessingState::Running { progress }
+                | ProcessingState::Retrying { progress, .. }
                 | ProcessingState::Waiting { progress, .. }
                 | ProcessingState::Failed { progress, .. } => Some(progress.min(100)),
                 ProcessingState::Done => None,
@@ -511,7 +549,10 @@ impl Processing {
             Line::styled(self.status().heading(), self.theme.text_bright),
             Line::raw(""),
         ];
-        lines.extend(self.jobs.iter().map(|job| self.job_line(job, width)));
+        for job in &self.jobs {
+            lines.push(self.job_line(job, width));
+            lines.extend(self.reason_lines(&job.state, width));
+        }
         lines.push(Line::raw(""));
         lines.push(Line::styled(
             "Summaries are not available yet.",
@@ -539,6 +580,11 @@ impl Processing {
             ProcessingState::Running { progress } => {
                 ("◐", self.theme.gold, format!("{}%", progress.min(&100)))
             }
+            ProcessingState::Retrying { progress, .. } => (
+                "◐",
+                self.theme.gold,
+                format!("{}% · retrying", progress.min(&100)),
+            ),
             ProcessingState::Done => ("✓", self.theme.green, "done".to_owned()),
             ProcessingState::Failed { reason, .. } => (
                 "!",
@@ -556,6 +602,22 @@ impl Processing {
             ],
             width,
         ))
+    }
+
+    /// Why the engine failed on the step's last try, under the step,
+    /// wrapped and cut to [`MAX_REASON_LINES`]; none for any other state.
+    fn reason_lines(&self, state: &ProcessingState, width: usize) -> Vec<Line<'static>> {
+        let Some(reason) = state.engine_failure() else {
+            return Vec::new();
+        };
+        wrap(
+            &format!("last try: {reason}"),
+            width.saturating_sub(REASON_INDENT.len()),
+        )
+        .into_iter()
+        .take(MAX_REASON_LINES)
+        .map(|text| Line::styled(format!("{REASON_INDENT}{text}"), self.theme.text_hint))
+        .collect()
     }
 }
 

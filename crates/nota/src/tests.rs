@@ -11,9 +11,11 @@ fn engine(list: &[&str]) -> Result<ModelPaths, String> {
 fn engine_cutting(list: &[&str]) -> Result<(ModelPaths, ChunkerConfig), String> {
     match parse(&args(list))? {
         Command::EngineAsr(paths, chunking) => Ok((paths, chunking)),
-        Command::Record(_) | Command::App(_) | Command::EngineFake(_) | Command::EngineLlama(_) => {
-            Err("record".into())
-        }
+        Command::Record(_)
+        | Command::App(_)
+        | Command::EngineFake(_)
+        | Command::EngineLlama(_)
+        | Command::Pack(_) => Err("record".into()),
     }
 }
 
@@ -23,7 +25,8 @@ fn record(list: &[&str]) -> Result<RecordArgs, String> {
         Command::EngineAsr(..)
         | Command::App(_)
         | Command::EngineFake(_)
-        | Command::EngineLlama(_) => Err("engine".into()),
+        | Command::EngineLlama(_)
+        | Command::Pack(_) => Err("engine".into()),
     }
 }
 
@@ -33,7 +36,8 @@ fn app(list: &[&str]) -> Result<RecordArgs, String> {
         Command::EngineAsr(..)
         | Command::Record(_)
         | Command::EngineFake(_)
-        | Command::EngineLlama(_) => Err("not the app".into()),
+        | Command::EngineLlama(_)
+        | Command::Pack(_) => Err("not the app".into()),
     }
 }
 

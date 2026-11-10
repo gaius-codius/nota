@@ -5,6 +5,9 @@ extend-exclude = [
   "*.png",
   "Cargo.lock",
   "LICENSE-*",
+  # Fetched lists of names, spelled as their sources spell them.
+  "packs/pharmacy/rxnorm.tsv",
+  "packs/pharmacy/wikidata.tsv",
   # Mis-heard terms from the research bench ("anormal", "ACI"), which C1 is
   # tested on; the file is generated (the bench's fixtures/export.py).
   "crates/nota-checks/tests/fixtures/c1_pairs.json",

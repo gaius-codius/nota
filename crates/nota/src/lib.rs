@@ -12,6 +12,9 @@
 //! - `nota engine llama-server PROGRAM ARGS…`: starts the local decider's
 //!   llama-server tied to the nota that ran it, so it ends when nota does
 //!   (see `nota_llm::lifeline`).
+//! - `nota pack`: builds term packs, from the committed lists of a shipped
+//!   pack or from a user's glossary, and writes a pack's credits (see
+//!   `pack`).
 //!
 //! The binary's `main` only calls [`main`]; the code is here so its tests
 //! can turn on the `fake-capture` feature.
@@ -39,6 +42,7 @@ mod jobs;
 mod latency;
 mod library;
 mod live;
+mod pack;
 mod record;
 mod terminal;
 #[cfg(feature = "fake-capture")]
@@ -51,7 +55,11 @@ usage: nota [--data DIR] [--parakeet DIR --vad FILE]
        nota record [--title TEXT] [--data DIR] [--parakeet DIR --vad FILE]
                    [--mic NODE] [--system NODE]
        nota engine asr --parakeet DIR --vad FILE [--threads N] [--pass live|final]
-       nota engine llama-server PROGRAM [ARGS...]";
+       nota engine llama-server PROGRAM [ARGS...]
+       nota pack build DIR --out FILE
+       nota pack glossary FILE --out FILE --author NAME [--name NAME]
+                          [--version TEXT] [--language CODE]
+       nota pack notice FILE";
 
 /// What was asked for.
 #[derive(Debug)]
@@ -62,6 +70,8 @@ enum Command {
     EngineAsr(ModelPaths, ChunkerConfig),
     /// `nota engine llama-server`: the server program and its arguments.
     EngineLlama(Vec<OsString>),
+    /// `nota pack`: builds a pack, or writes its credits.
+    Pack(pack::PackCommand),
     /// `nota engine fake`: the engine child with stand-in models (tests
     /// only).
     #[cfg(feature = "fake-capture")]
@@ -102,6 +112,11 @@ pub fn main(args: &[OsString]) -> ExitCode {
         Command::EngineFake(chunking) => match fake_engine::run(chunking) {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => fail(&format!("nota engine fake: {err}"), 1),
+        },
+        // No screen is open: what a pack command prints goes to stdout.
+        Command::Pack(command) => match pack::run(&command, &mut io::stdout()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => fail(&format!("nota pack: {err}"), 1),
         },
         Command::Record(args) => match record::record(&args) {
             Ok(outcome) => {
@@ -155,6 +170,7 @@ fn parse(args: &[OsString]) -> Result<Command, String> {
             parse_pass(args.get(2..).unwrap_or_default()).map(Command::EngineFake)
         }
         Some("record") => parse_record(words.as_slice()).map(Command::Record),
+        Some("pack") => pack::parse(words.as_slice()).map(Command::Pack),
         // No command, or options only: Home.
         None => parse_app(args).map(Command::App),
         Some(word) if word.starts_with("--") => parse_app(args).map(Command::App),
