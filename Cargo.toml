@@ -42,8 +42,13 @@ rusqlite = { version = "0.41", features = ["bundled"] }
 # Double Metaphone for the term lookup (C4), from Apache commons-codec. Its
 # other encoders' rule files stay out (no `embedded` features).
 rphonetic = { version = "=4.0.0", default-features = false }
-# The code checks' fixtures, exported from the research bench as JSON; read
-# in tests only. Already in the tree through the sherpa-onnx bindings.
+# Reading JSON with its own visitor, to refuse a key given twice (nota-llm's
+# replies); serde_json's `Value` keeps only the last. Already in the tree
+# through serde_json.
+serde = "1"
+# JSON: the requests to llama-server and its replies (nota-llm), and the
+# code checks' fixtures exported from the research bench (read in tests).
+# Already in the tree through the sherpa-onnx bindings.
 serde_json = "1"
 # Levenshtein and Jaro-Winkler for the term lookup (C4). Already in the tree
 # through darling and wezterm-dynamic.

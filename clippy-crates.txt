@@ -176,7 +176,7 @@ afl@0.18 block-buffer@0.10 claxon@0.4 crc32fast@1 crypto-common@0.1
 dasp_sample@0.11 digest@0.10 directories@6 errno@0.3 fallible-iterator@0.3
 fallible-streaming-iterator@0.1 flacenc@0.5 generic-array@0.14 jiff-core@0.1
 jiff-static@0.2 jni@0.22 jni-macros@0.22 rand@0.8,0.9 rand_core@0.6,0.9
-serde_core@1 serde_json@1 serde_spanned@1 sha2@0.10 signal-hook@0.3
+serde@1 serde_core@1 serde_json@1 serde_spanned@1 sha2@0.10 signal-hook@0.3
 signal-hook-registry@1 thread-priority@3 toml@1 toml_datetime@1 typenum@1
 unicode-segmentation@1 unicode-width@0.2
 
@@ -215,7 +215,7 @@ portable-atomic-util potential_utf powerfmt ppv-lite86 proc-macro2
 proc-macro-crate pulseaudio quote rand_chacha rand_xorshift redox_syscall redox_users
 r-efi regex regex-automata regex-syntax ring rustc-hash rustc_version
 rustls rustls-pki-types rustls-webpki rustversion ryu same-file scopeguard
-semver seq-macro serde serde_derive sha1 sherpa-onnx-sys shlex
+semver seq-macro serde_derive sha1 sherpa-onnx-sys shlex
 signal-hook-mio simd-adler32 simd_cesu8 simdutf8 similar siphasher slab
 smallvec stable_deref_trait static_assertions strum strum_macros
 subtle syn synstructure system-deps tar target-lexicon tempfile terminfo
