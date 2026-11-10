@@ -92,18 +92,22 @@ pub fn letter_similarity(heard: &str, term: &str) -> Result<Similarity, TooLong>
 /// past the limit, so it never keeps more than that; the characters it drops
 /// are still read.
 fn normalise(s: &str) -> Result<Vec<u8>, TooLong> {
-    let kept: Vec<u8> = s
-        .chars()
-        .flat_map(char::to_lowercase)
-        .filter_map(|c| u8::try_from(c).ok())
-        .filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-        .take(MAX_LETTERS + 1)
-        .collect();
+    let kept: Vec<u8> = letters(s).take(MAX_LETTERS + 1).collect();
     if kept.len() > MAX_LETTERS {
         Err(TooLong)
     } else {
         Ok(kept)
     }
+}
+
+/// The ASCII letters and digits of `s`, lowercased, as bytes, with no
+/// limit: C1's normalisation, which the gate also uses to find a term inside
+/// a replacement.
+pub(crate) fn letters(s: &str) -> impl Iterator<Item = u8> + '_ {
+    s.chars()
+        .flat_map(char::to_lowercase)
+        .filter_map(|c| u8::try_from(c).ok())
+        .filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
 }
 
 /// difflib's `_calculate_ratio`: twice `matched` over `total`, and 1 for two
