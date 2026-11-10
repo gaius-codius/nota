@@ -301,11 +301,18 @@ check_left() {
 }
 
 # 0. check_left itself, against a PID file holding a zombie and then a live
-# process, each run so that its failures are its own. The zombie is
-# a short sleep started by a shell that then becomes a long sleep: the short
-# one exits after the exec (a shell about to exec reaps a child that has
-# already exited), and the long sleep never reaps it.
+# process, each run so that its failures are its own. The zombie is a sleep
+# started by a shell that then becomes another sleep, which never reaps it;
+# the child is killed only once the exec has happened, since a shell about to
+# exec reaps a child that has already exited.
 self_state=$dir/self-state
+# cmdline_is PID TEXT...: PID is running exactly the command TEXT.
+cmdline_is() {
+  local pid=$1 got
+  shift
+  got=$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null) || return 1
+  [[ $got == "$* " ]]
+}
 # check_left_alone NAME: check_left against $self_state's PID files,
 # returning the status its failures set and leaving the suite's alone (bash
 # scopes locals dynamically, so fail sets this function's status).
@@ -315,13 +322,18 @@ check_left_alone() {
   return "$status"
 }
 mkdir "$self_state"
-bash -c 'sleep 0.2 & echo $! >"$1"; exec sleep 60' _ "$self_state/zombie" &
+bash -c 'sleep 60 & echo $! >"$1"; exec sleep 61' _ "$self_state/zombie" &
 holder=$!
 disown "$holder"
 echo "$holder" >>"$dir/self-holders.pids"
 zombie=
 for _ in $(seq 200); do
   [[ ! -s $self_state/zombie ]] || zombie=$(<"$self_state/zombie")
+  [[ -z $zombie ]] || ! cmdline_is "$holder" sleep 61 || break
+  sleep 0.05
+done
+[[ -z $zombie ]] || kill -9 "$zombie" 2>/dev/null || true
+for _ in $(seq 200); do
   [[ -z $zombie || $(proc_state "$zombie") != Z ]] || break
   sleep 0.05
 done
@@ -339,6 +351,10 @@ live=$!
 disown "$live"
 echo "$live" >>"$dir/self-holders.pids"
 echo "$live" >"$self_state/run.pids"
+for _ in $(seq 200); do
+  ! cmdline_is "$live" sleep 60 || break
+  sleep 0.05
+done
 code=0
 check_left_alone live 2>"$dir/self-live.err" || code=$?
 if [[ $code -ne 1 ]] || ! grep -qF "live: left PID $live running: sleep 60" "$dir/self-live.err"; then
@@ -350,6 +366,12 @@ for _ in $(seq 40); do
 done
 ! running "$live" || fail "check_left left live PID $live running"
 kill -9 "$live" "$holder" 2>/dev/null || true
+# Once both are gone their PIDs can be reused, so cleanup mustn't kill them.
+for _ in $(seq 40); do
+  ! running "$live" && ! running "$holder" && break
+  sleep 0.05
+done
+: >"$dir/self-holders.pids"
 
 # run NAME ARGS...: runs the script copy with the stand-ins and ARGS, from a
 # fresh state, leaving its status in $code and its output in $dir/NAME.out
