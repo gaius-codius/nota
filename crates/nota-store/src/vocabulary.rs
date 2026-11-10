@@ -10,8 +10,10 @@
 //! terms, so it's refused as missing, not quietly used.
 //!
 //! A session recorded before digests were (library version 9) has none
-//! for its packs, and its rows are never changed, so its packs are matched
-//! by name and version alone, as they were then ([`RecordedPack`]).
+//! for its packs, and its rows are never changed. Nothing can show that an
+//! installed pack is the one it used, so every pack it recorded is refused
+//! as missing ([`RecordedPack::is`]): its terms can't be read, but no
+//! other build's terms stand in for them.
 
 use rusqlite::{TransactionBehavior, params};
 
@@ -36,12 +38,13 @@ pub struct RecordedPack {
 
 impl RecordedPack {
     /// Whether `pack` is the one recorded: the same name, version and
-    /// digest, or for a record with no digest, the same name and version.
+    /// digest. Never for a record with no digest, which can't show which
+    /// build it was.
     #[must_use]
     pub fn is(&self, pack: &PackRef) -> bool {
         self.name == pack.name()
             && self.version == pack.version()
-            && self.digest.is_none_or(|d| d == pack.digest())
+            && self.digest == Some(pack.digest())
     }
 }
 
@@ -186,12 +189,13 @@ impl Store {
     ) -> Result<SessionTerms, StoreError> {
         let mut terms = Vec::new();
         for chosen in self.session_packs(session)? {
-            let pack = installed_as_recorded(&chosen, installed).ok_or_else(|| {
-                StoreError::PackMissing {
+            let pack = installed
+                .iter()
+                .find(|p| chosen.is(&p.pack_ref()))
+                .ok_or_else(|| StoreError::PackMissing {
                     session,
                     pack: chosen.clone(),
-                }
-            })?;
+                })?;
             terms.extend(pack.offered());
         }
         Ok(SessionTerms {
@@ -199,18 +203,6 @@ impl Store {
             learned: self.learned()?,
         })
     }
-}
-
-/// The pack in `installed` that `chosen` recorded, if there's one. A
-/// record with no digest that two installed builds with other digests
-/// both match has none: which of them the session used can't be known,
-/// and taking whichever comes first would hang on the order.
-fn installed_as_recorded<'a>(chosen: &RecordedPack, installed: &'a [Pack]) -> Option<&'a Pack> {
-    let mut matching = installed.iter().filter(|p| chosen.is(&p.pack_ref()));
-    let first = matching.next()?;
-    matching
-        .all(|p| p.digest() == first.digest())
-        .then_some(first)
 }
 
 #[cfg(test)]

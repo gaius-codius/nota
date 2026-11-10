@@ -707,11 +707,11 @@ fn pharmacy_pack(version: &str) -> Pack {
 }
 
 /// Acceptance (#226): a version 9 library keeps the packs its sessions
-/// recorded, with no digest, and they're still matched by name and
-/// version; a pack recorded after the upgrade has its digest, and one
-/// without is refused.
+/// recorded, with no digest, and refuses each as missing when they're
+/// read, since no installed build can be shown to be the one used; a pack
+/// recorded after the upgrade has its digest, and one without is refused.
 #[test]
-fn version_9_upgrades_to_10_keeping_packs_recorded_without_a_digest() {
+fn version_9_upgrades_to_10_refusing_packs_recorded_without_a_digest() {
     let dir = TestDir::new("v9");
     {
         let conn = crate::tests::library_at(&dir.db(), 9);
@@ -734,52 +734,21 @@ fn version_9_upgrades_to_10_keeping_packs_recorded_without_a_digest() {
         store.session_packs(one).unwrap(),
         std::slice::from_ref(&old)
     );
-    // With no digest recorded, any build of that name and version is it;
-    // another version still isn't.
+    // With no digest recorded, nothing shows which build the session used:
+    // even a pack of the recorded name and version is refused as missing,
+    // alone or beside another build.
     let installed = pharmacy_pack("2026.11");
-    let terms = store
-        .session_terms(one, &[pharmacy_pack("2026.12"), installed.clone()])
-        .unwrap();
-    assert_eq!(terms.terms, installed.offered());
-    let err = store
-        .session_terms(one, &[pharmacy_pack("2026.12")])
-        .unwrap_err();
-    assert!(
-        matches!(&err, StoreError::PackMissing { pack, .. } if *pack == old),
-        "{err:?}"
-    );
-
-    // Two builds of that name and version with other rows: which one the
-    // session used can't be known, so neither is taken, whatever the order.
-    let row = installed.terms()[0].clone();
-    let rebuilt = Pack::new(
-        installed.manifest().clone(),
-        vec![
-            row.clone(),
-            TermRow {
-                term: "ibuprofen".to_owned(),
-                ..row
-            },
-        ],
+    for packs in [
+        vec![installed.clone()],
+        vec![pharmacy_pack("2026.12"), installed.clone()],
         vec![],
-    )
-    .unwrap();
-    for installed in [
-        [installed.clone(), rebuilt.clone()],
-        [rebuilt, installed.clone()],
     ] {
-        let err = store.session_terms(one, &installed).unwrap_err();
+        let err = store.session_terms(one, &packs).unwrap_err();
         assert!(
             matches!(&err, StoreError::PackMissing { pack, .. } if *pack == old),
             "{err:?}"
         );
     }
-    // The same build installed twice is one pack.
-    let twice = [installed.clone(), installed.clone()];
-    assert_eq!(
-        store.session_terms(one, &twice).unwrap().terms,
-        installed.offered()
-    );
 
     // A session recorded now keeps its pack's digest.
     store

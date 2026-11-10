@@ -646,9 +646,10 @@ BEGIN SELECT RAISE(ABORT, 'a learned pair is never replaced'); END;
 /// one the session used.
 ///
 /// Rows recorded before this version have no digest, and can't be given
-/// one: they're never changed, and the pack they named may be gone. They
-/// match a pack by name and version, as they did
-/// ([`crate::vocabulary::RecordedPack`]). Every row recorded from this
+/// one: they're never changed, and the pack they named may be gone. So
+/// nothing shows which build they used, and reading such a session's terms
+/// refuses each of its packs as missing
+/// ([`crate::vocabulary::RecordedPack::is`]). Every row recorded from this
 /// version on has a digest: a trigger refuses one without.
 pub(crate) const V10: &str = "
 ALTER TABLE session_pack ADD COLUMN digest BLOB
