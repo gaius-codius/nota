@@ -178,7 +178,7 @@ fallible-streaming-iterator@0.1 flacenc@0.5 generic-array@0.14 jiff-core@0.1
 jiff-static@0.2 jni@0.22 jni-macros@0.22 rand@0.8,0.9 rand_core@0.6,0.9
 serde_core@1 serde_json@1 serde_spanned@1 sha2@0.10 signal-hook@0.3
 signal-hook-registry@1 thread-priority@3 toml@1 toml_datetime@1 typenum@1
-unicode-segmentation@1 unicode-width@0.2
+unicode-normalization@0.1 unicode-segmentation@1 unicode-width@0.2
 
 [indirect: only a dependency of a dependency, and no direct dependency re-exports it]
 adler2 aes aho-corasick allocator-api2 alsa alsa-sys annotate-snippets
@@ -216,7 +216,7 @@ semver seq-macro serde serde_derive sha1 sherpa-onnx-sys shlex
 signal-hook-mio simd-adler32 simd_cesu8 simdutf8 similar siphasher slab
 smallvec stable_deref_trait static_assertions strsim strum strum_macros
 subtle syn synstructure system-deps tar target-lexicon tempfile terminfo
-termios thiserror thiserror-impl time time-core tinystr toml_edit
+termios thiserror thiserror-impl time time-core tinystr tinyvec toml_edit
 toml_parser toml_writer ucd-trie unarray unicode-ident unicode-truncate
 untrusted ureq url utf8_iter utf8parse uuid vcpkg version_check
 version-compare walkdir wasi wasip2 wasm-bindgen wasm-bindgen-macro

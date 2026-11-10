@@ -15,7 +15,8 @@
 //! one accepted and later rejected is offered no more.
 //!
 //! Spans and terms are matched by [`match_key`], which drops case,
-//! punctuation and spacing, so "Endside," and "endside" are one span. The
+//! punctuation and spacing and composes accents, so "Endside," and
+//! "endside" are one span. The
 //! lookup and the clean-up job ask [`Learned::allows`] before offering a
 //! term for a span; nothing else needs to know the rule.
 
@@ -23,6 +24,7 @@ use std::collections::BTreeMap;
 
 use nota_core::{SessionId, WallTime};
 use rusqlite::{TransactionBehavior, params};
+use unicode_normalization::UnicodeNormalization as _;
 
 use crate::{Store, StoreError, parse_session, session_key};
 
@@ -59,14 +61,20 @@ impl Verdict {
 /// letters, digits and apostrophes made one space, with none at either
 /// end. "GLP-1" and "glp 1" match; so do "Endside," and "endside", and
 /// "Crohn’s" and "crohn's". Text with no letter or digit has an empty key.
-/// (Accents are compared as written: a letter with a combining accent
-/// doesn't match the same letter written as one character.)
+/// Accents match however they were composed: the text is put in Unicode's
+/// composed form (NFC) first, so "naïve" written with a combining
+/// diaeresis and with the single letter "ï" have one key.
+///
+/// Keys are worked out again whenever pairs are read, so a change to them
+/// applies to pairs already stored.
 #[must_use]
 pub fn match_key(text: &str) -> String {
-    // Lower case first: some capitals lower to a letter and a mark ("İ" to
-    // "i" and a combining dot), and splitting after that keeps a key the
-    // same when it's keyed again.
+    // Lower case first, then composed: some capitals lower to a letter and
+    // a mark ("İ" to "i" and a combining dot), and splitting after both
+    // keeps a key the same when it's keyed again.
     text.to_lowercase()
+        .nfc()
+        .collect::<String>()
         .replace(['\u{2018}', '\u{2019}', '\u{02BC}'], "'")
         .split(|c: char| !(c.is_alphanumeric() || c == '\''))
         // A word of apostrophes alone isn't a word.

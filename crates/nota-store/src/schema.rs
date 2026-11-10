@@ -577,7 +577,9 @@ BEGIN SELECT RAISE(ABORT, 'heard text is never replaced'); END;
 /// the span as heard; `heard_key` and `term_key` are the forms pairs are
 /// matched by ([`crate::learned::match_key`]), kept for the index: reading
 /// keys them again from `heard` and `term`, so a later change to the keys
-/// needs no migration. A pair is a record, never
+/// needs no migration. Rows stored before such a change keep their old
+/// keys (they're never updated), so nothing may look pairs up by these
+/// columns. A pair is a record, never
 /// changed: a later choice on the same span and term is a new row, and
 /// the newest says what holds ([`crate::learned`]).
 ///
