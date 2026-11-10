@@ -115,12 +115,13 @@ pub enum ProcessingState {
         /// How far the step got, in percent, limited to 100 when drawn.
         progress: u8,
     },
-    /// Work underway again after the speech engine failed.
+    /// Work underway while the speech engine is tried again: it failed
+    /// on an earlier run, or is down now.
     Retrying {
         /// How far the step got, in percent, limited to 100 when drawn.
         progress: u8,
-        /// Why the engine failed last time, shown under the step until
-        /// the engine answers.
+        /// Why the engine failed, shown under the step until the engine
+        /// answers or comes back up.
         reason: String,
     },
     /// Finished successfully.

@@ -98,6 +98,8 @@ struct Committed {
     calls: Rc<Cell<usize>>,
     /// The last point confirmed, on any track.
     latest: Rc<Cell<u64>>,
+    /// What the pass said of the engine being down, in order.
+    downs: Rc<std::cell::RefCell<Vec<Option<String>>>>,
 }
 
 impl PassSink for Committed {
@@ -130,6 +132,10 @@ impl PassSink for Committed {
         self.latest.set(up_to.get());
         self.calls.set(self.calls.get() + 1);
         Ok(())
+    }
+
+    fn engine_down(&mut self, why: Option<&str>) {
+        self.downs.borrow_mut().push(why.map(str::to_owned));
     }
 }
 
@@ -330,7 +336,9 @@ fn a_pass_stopped_partway_resumes_to_the_same_result() {
 }
 
 /// A pass whose engine never answers gives up once nothing has been
-/// confirmed for its stall time, saying why the engine was down.
+/// confirmed for its stall time, saying why the engine was down: it stopped
+/// answering, or (if the stall comes while a restarted engine is up) no
+/// reason, which reads the same.
 #[test]
 fn a_pass_that_gets_no_answers_gives_up() {
     let mut config = config(&["hang"]);
@@ -339,8 +347,20 @@ fn a_pass_that_gets_no_answers_gives_up() {
     let mut sink = Committed::default();
     match run(&config, &mut sink, &|| false) {
         PassEnd::Stalled(Some(why)) => assert_eq!(why, "stopped answering"),
+        PassEnd::Stalled(None) => {}
         other => panic!("{other:?}"),
     }
+    // It was down, each time, for not answering.
+    let downs = sink.downs.borrow();
+    assert!(downs.contains(&Some(
+        "the transcriber stopped working: stopped answering".to_owned()
+    )));
+    assert!(
+        downs
+            .iter()
+            .flatten()
+            .all(|why| why == "the transcriber stopped working: stopped answering")
+    );
     assert!(sink.texts.is_empty());
 }
 
@@ -385,6 +405,76 @@ fn an_engine_that_exits_at_start_stalls_with_its_last_error() {
         other => panic!("{other:?}"),
     }
     assert!(sink.texts.is_empty());
+}
+
+/// Acceptance (#224): the sink hears why the engine is down while the
+/// pass runs, in the words its stall would give, not only once it ends.
+#[test]
+fn a_pass_says_why_its_engine_is_down_before_it_ends() {
+    let mut config = config(&["echo"]);
+    config.engine.command.program = PathBuf::from("/nonexistent/nota-engine");
+    let mut sink = Committed::default();
+    let downs = Rc::clone(&sink.downs);
+    let end = run(&config, &mut sink, &move || !downs.borrow().is_empty());
+    assert!(matches!(end, PassEnd::Stopped), "{end:?}");
+    assert_eq!(
+        sink.downs.borrow()[0],
+        Some(format!(
+            "the transcriber stopped working: couldn't start: {}",
+            std::io::Error::from_raw_os_error(2)
+        ))
+    );
+}
+
+/// Acceptance (#224): an engine that comes back up after being down
+/// takes its reason with it: the sink hears it's back, and a stall after
+/// that says only that it stopped answering.
+#[test]
+fn an_engine_back_up_no_longer_gives_its_old_reason() {
+    // The first engine exits at start; the second answers hello and then
+    // never confirms anything.
+    let marker = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("pass-back-up-{}", std::process::id()));
+    let mut config = config(&[]);
+    config.engine.command.program = PathBuf::from("/bin/sh");
+    config.engine.command.args = [
+        "-c",
+        r#"if [ -e "$1" ]; then rm -f "$1"; exec "$2" hang; fi
+           : > "$1"; echo 'first try fails' >&2; exit 1"#,
+        "sh",
+    ]
+    .iter()
+    .map(OsString::from)
+    .chain([
+        marker.into_os_string(),
+        OsString::from(env!("CARGO_BIN_EXE_nota-fake-engine")),
+    ])
+    .collect();
+    config.engine.request_timeout = Duration::from_secs(30);
+    config.stall = Duration::from_secs(2);
+    let mut sink = Committed::default();
+    match run(&config, &mut sink, &|| false) {
+        PassEnd::Stalled(None) => {}
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        *sink.downs.borrow(),
+        [
+            Some(
+                "the transcriber stopped working: exited (exit status: 1): first try fails"
+                    .to_owned()
+            ),
+            None
+        ]
+    );
+}
+
+/// An engine that's never down says nothing of it, so whatever the sink
+/// kept from an earlier pass stays until the engine confirms audio.
+#[test]
+fn an_engine_never_down_says_nothing_of_it() {
+    let sink = uninterrupted();
+    assert!(sink.downs.borrow().is_empty());
 }
 
 /// A segment that can't be read is skipped, once everything before it is

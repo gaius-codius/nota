@@ -24,6 +24,12 @@
 //! ([`Store::engine_answered`]), and whatever the run ends with replaces
 //! it: a finished run clears it, and so does any other end.
 //!
+//! A run doesn't wait for its end to say why: while its engine is down,
+//! the running job keeps the reason the engine gives now
+//! ([`Store::engine_down`]), as [`JobState::Retrying`], so the Processing
+//! screen shows it at its next refresh. It goes when that engine comes
+//! back ([`Store::engine_answered`]).
+//!
 //! The Processing screen shows what this holds.
 
 use nota_core::SessionId;
@@ -102,9 +108,10 @@ pub enum JobState {
     EngineDown(String),
     /// A runner is running it.
     Running,
-    /// A runner is running it again after its engine failed, for the
-    /// reason given: the reason stays until this run's engine answers or
-    /// the run ends.
+    /// A runner is running it, and its engine has failed, for the reason
+    /// given: in an earlier run, until this run's engine answers, or in
+    /// this run, until the engine comes back. Either way the engine is
+    /// being tried again. The reason goes when the run ends.
     Retrying(String),
     /// Finished.
     Done,
@@ -331,6 +338,23 @@ impl Store {
         Ok(changed == 1)
     }
 
+    /// Notes that a running job's engine is down now, for `why`: the job
+    /// is [`JobState::Retrying`] with that reason from now, replacing any
+    /// it had, until the engine answers or the run ends. A job that isn't
+    /// running is left as it is, so a note that comes after the run's end
+    /// changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] for any SQLite failure.
+    pub fn engine_down(&mut self, id: JobId, why: &str) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE job SET detail = ?2 WHERE id = ?1 AND state = 'running'",
+            params![id.0, why],
+        )?;
+        Ok(())
+    }
+
     /// Notes a running job's progress.
     ///
     /// # Errors
@@ -345,8 +369,9 @@ impl Store {
         Ok(())
     }
 
-    /// Notes that a running job's engine has answered, so an earlier
-    /// engine failure no longer says anything: a
+    /// Notes that a running job's engine has answered, or come back after
+    /// [`Store::engine_down`], so an engine failure no longer says
+    /// anything: a
     /// [`JobState::Retrying`] job is [`JobState::Running`] from now. Any
     /// other job is left as it is.
     ///
@@ -388,9 +413,10 @@ impl Store {
     /// Takes back the jobs a runner that died left running: each waits to
     /// run again, with one more attempt counted, or fails once `limit`
     /// attempts have died (a job that kills nota every time it runs mustn't
-    /// keep doing so). A job that was retrying after its engine failed
-    /// waits as [`JobState::EngineDown`] again, keeping the reason: the
-    /// runner dying says nothing about the engine. Only the runner that
+    /// keep doing so). A job that was [`JobState::Retrying`] (its engine
+    /// failed, in an earlier run or this one) waits as
+    /// [`JobState::EngineDown`], keeping the reason: the runner dying says
+    /// nothing about the engine. Only the runner that
     /// holds the job queue calls this, before it runs anything. Gives how
     /// many were taken back.
     ///

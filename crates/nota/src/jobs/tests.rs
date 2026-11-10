@@ -80,6 +80,12 @@ enum Then {
     NoEngine,
     /// Its engine couldn't start or stopped working, for this reason.
     EngineDown(&'static str),
+    /// Its engine goes down while it runs, for this reason, and the run
+    /// ends with it down.
+    DownNow(&'static str),
+    /// Its engine goes down while it runs, for this reason, comes back,
+    /// and the run finishes.
+    DownAndBack(&'static str),
 }
 
 /// A worker that does as told per session, and notes each run.
@@ -91,6 +97,10 @@ struct Fake {
     ran: Arc<Mutex<Vec<SessionId>>>,
     /// Whether jobs must wait for an engine.
     no_engine: bool,
+    /// The library, to note each job's state as it runs.
+    db: Option<Writer>,
+    /// The states noted while running, in order.
+    seen: Arc<Mutex<Vec<JobState>>>,
 }
 
 impl Fake {
@@ -100,6 +110,18 @@ impl Fake {
 
     fn ran(&self) -> Vec<SessionId> {
         self.ran.lock().unwrap().clone()
+    }
+
+    fn seen(&self) -> Vec<JobState> {
+        self.seen.lock().unwrap().clone()
+    }
+
+    /// Notes the job's state as the store has it now, mid-run.
+    fn note(&self, job: &Job) {
+        let db = self.db.as_ref().unwrap();
+        let state = db.with(|db| db.jobs()).unwrap();
+        let state = state.into_iter().find(|j| j.id == job.id).unwrap().state;
+        self.seen.lock().unwrap().push(state);
     }
 }
 
@@ -121,6 +143,18 @@ impl Worker for Fake {
             Then::Fail => JobEnd::Failed("it broke".into()),
             Then::NoEngine => JobEnd::Waiting(Some(Wait::Engine)),
             Then::EngineDown(why) => JobEnd::EngineDown(why.into()),
+            Then::DownNow(why) => {
+                (running.engine_down)(Some(why));
+                self.note(job);
+                JobEnd::EngineDown(why.into())
+            }
+            Then::DownAndBack(why) => {
+                (running.engine_down)(Some(why));
+                self.note(job);
+                (running.engine_down)(None);
+                self.note(job);
+                JobEnd::Done
+            }
             Then::NoSpace => JobEnd::Waiting(Some(Wait::Space)),
             Then::UntilStopped => {
                 while !(running.stop)() {
@@ -504,6 +538,60 @@ fn engine_startup_retries_wait_one_idle_interval_and_then_finish() {
         assert_eq!(states(&db), [(S1, JobState::Done)]);
         assert_eq!(worker.ran(), [S1, S1]);
     }
+}
+
+/// Acceptance (#224): while a run goes on, the job already says why its
+/// engine is down, and the run's end keeps that reason; the retry is still
+/// one idle interval after the run's end, and the next session isn't held
+/// up meanwhile.
+#[test]
+fn a_run_says_why_its_engine_is_down_before_it_ends_and_keeps_the_retry_spacing() {
+    let (_dir, db) = library("engine-down-live", &[(S1, None), (S2, None)]);
+    let why = "the transcriber stopped working: couldn't start: gone";
+    let worker = Fake {
+        db: Some(db.clone()),
+        ..Fake::default()
+    };
+    worker.script(S1, &[Then::DownNow(why), Then::Done]);
+    let clock = Arc::new(nota_core::FakeClock::new(SessionTime::ZERO));
+    let mut runner = loop_with_clock(&db, &worker, &clock);
+    let job = runner.next().unwrap().unwrap();
+    runner.run_one(&job);
+    assert_eq!(worker.seen(), [JobState::Retrying(why.into())]);
+    assert_eq!(states(&db)[0], (S1, JobState::EngineDown(why.into())));
+    // S2 runs meanwhile; S1 waits out the idle interval from its end.
+    let job = runner.next().unwrap().unwrap();
+    assert_eq!(job.session, S2);
+    runner.run_one(&job);
+    clock.advance(Duration::from_nanos(4_999_999_999));
+    assert!(runner.next().unwrap().is_none());
+    clock.advance(Duration::from_nanos(1));
+    let job = runner.next().unwrap().unwrap();
+    runner.run_one(&job);
+    assert_eq!(states(&db), [(S1, JobState::Done), (S2, JobState::Done)]);
+    assert_eq!(worker.ran(), [S1, S2, S1]);
+}
+
+/// Acceptance (#224): once the engine is back, the running job no longer
+/// says why it was down.
+#[test]
+fn an_engine_back_up_clears_the_reason_while_the_run_goes_on() {
+    let (_dir, db) = library("engine-down-back", &[(S1, None)]);
+    let why = "the transcriber stopped working: exited: no model";
+    let worker = Fake {
+        db: Some(db.clone()),
+        ..Fake::default()
+    };
+    worker.script(S1, &[Then::DownAndBack(why)]);
+    let clock = Arc::new(nota_core::FakeClock::new(SessionTime::ZERO));
+    let mut runner = loop_with_clock(&db, &worker, &clock);
+    let job = runner.next().unwrap().unwrap();
+    runner.run_one(&job);
+    assert_eq!(
+        worker.seen(),
+        [JobState::Retrying(why.into()), JobState::Running]
+    );
+    assert_eq!(states(&db), [(S1, JobState::Done)]);
 }
 
 /// A runner loop using time the test can advance.
