@@ -140,7 +140,7 @@ rustix::fs::memfd_create
 rustix::time::timerfd_gettime
 
 [allow: SQL can write files (ATTACH, VACUUM INTO) and read the clock (datetime('now')) through any connection, which no ban on a function can see; nota-store owns the library's SQL, and opening a file is banned above]
-rusqlite@0.40
+rusqlite@0.41
 
 [allow: test-only; writes pending snapshots (.snap.new) next to the tests]
 insta@1
@@ -152,7 +152,7 @@ proptest@1
 rsqlite-vfs@0.1 sqlite-wasm-rs@0.5
 
 [none: FFI declarations; every function is unsafe, and unsafe code is forbidden in nota's crates]
-jni-sys@0.3,0.4 libc@0.2 libsqlite3-sys@0.38 linux-raw-sys@0.12 windows@0.62
+jni-sys@0.3,0.4 libc@0.2 libsqlite3-sys@0.39 linux-raw-sys@0.12 windows@0.62
 windows-core@0.62 windows-implement@0.60 windows-interface@0.59
 windows-link@0.2 windows-result@0.4 windows-strings@0.5
 

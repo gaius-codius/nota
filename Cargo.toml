@@ -35,7 +35,7 @@ rustix = { version = "1.1", default-features = false, features = ["std", "time"]
 # its optional extras (the calendar widget, macros, the layout cache).
 ratatui = { version = "0.30", default-features = false, features = ["crossterm", "underline-color"] }
 # The store's database, with SQLite built in (no system library).
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 # SIGHUP, SIGTERM and SIGINT, read on a thread so a recording can stop in
 # order. Already in the tree through crossterm.
 signal-hook = "0.3"
