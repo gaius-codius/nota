@@ -13,9 +13,10 @@
 //! a change means the same words in every revision. Reading a revision
 //! walks back from it to revision 0, and the nearest revision's changes
 //! win: an older change is left out if it touches any word a nearer one
-//! changed. Undoing a change is a new revision whose change puts the words
-//! back. What a revision changes is never changed or added to afterwards;
-//! the schema's triggers (version 8) refuse it whatever connection tries.
+//! changed, even a nearer change that is itself left out. Undoing a change
+//! is a new revision whose change puts the words back. What a revision
+//! changes is never changed or added to afterwards; the schema's triggers
+//! (version 8) refuse it whatever connection tries.
 //!
 //! **In session order.** A revision's lines are placed in session time by
 //! their epoch's anchor: the epoch of the segment holding the chunk's first
@@ -253,7 +254,7 @@ fn parse_change(
 ) -> Result<(ChunkKey, Applied), StoreError> {
     let corrupt = || {
         StoreError::Corrupt(format!(
-            "revision {} changes words {first}..={last} at sample {start}",
+            "revision {} changes words {first}..={last} on track {track} at sample {start}",
             revision.0
         ))
     };
@@ -276,24 +277,34 @@ fn parse_change(
 }
 
 /// The changes `chain` shows, by chunk, each chunk's by first word: the
-/// nearest revision's first, and an older one only where it touches no
-/// word a nearer one changed.
+/// nearest revision's, and an older one only where it touches no word any
+/// nearer revision changed, shown or not.
 fn shown_changes(
     conn: &Connection,
     key: i64,
     chain: &[u32],
 ) -> Result<BTreeMap<ChunkKey, Vec<Applied>>, StoreError> {
     let mut shown: BTreeMap<ChunkKey, Vec<Applied>> = BTreeMap::new();
+    // Every word a nearer revision changed, whether or not that change is
+    // shown: a change left out still supersedes the older ones it covers.
+    let mut changed: BTreeMap<ChunkKey, Vec<WordSpan>> = BTreeMap::new();
     // Revision 0 is the final text, with no changes of its own.
     for &revision in chain.iter().filter(|&&n| n != 0) {
-        let mut own = own_changes(conn, key, revision)?;
+        let own = own_changes(conn, key, revision)?;
+        let keep: Vec<bool> = own
+            .iter()
+            .map(|(chunk, applied)| {
+                changed
+                    .get(chunk)
+                    .is_none_or(|spans| !spans.iter().any(|s| s.overlaps(applied.words)))
+            })
+            .collect();
         // Within one revision changes never overlap (the schema checks), so
-        // their order doesn't matter; sorted, the result doesn't either.
-        own.sort_by_key(|(chunk, applied)| (*chunk, applied.words));
-        for (chunk, applied) in own {
-            let taken = shown.entry(chunk).or_default();
-            if !taken.iter().any(|t| t.words.overlaps(applied.words)) {
-                taken.push(applied);
+        // what this revision covers is marked after all of it is judged.
+        for ((chunk, applied), keep) in own.into_iter().zip(keep) {
+            changed.entry(chunk).or_default().push(applied.words);
+            if keep {
+                shown.entry(chunk).or_default().push(applied);
             }
         }
     }

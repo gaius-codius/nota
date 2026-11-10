@@ -213,6 +213,29 @@ fn undoing_a_change_is_a_new_revision() {
     );
 }
 
+/// A change left out because a nearer one touches its words still
+/// supersedes older changes to the words it covers: they don't come back.
+#[test]
+fn a_superseded_change_stays_superseded() {
+    let (_dir, mut store) = store("superseded");
+    let (_, b) = two_chunks();
+    add(&mut store, S1, std::slice::from_ref(&b));
+    let one = store
+        .add_revision(S1, RevisionNumber::FINAL, &[change(&b, 1, 1, "B")])
+        .unwrap();
+    let two = store
+        .add_revision(S1, one, &[change(&b, 0, 1, "AB")])
+        .unwrap();
+    // Touches only word 0 of revision 2's change, which is then left out;
+    // revision 1's change to word 1, which revision 2 replaced, stays out.
+    let three = store
+        .add_revision(S1, two, &[change(&b, 0, 0, "A")])
+        .unwrap();
+    let lines = store.revision(S1, three).unwrap();
+    assert_eq!(lines[0].text.as_deref(), Some("A profen daily"));
+    assert_eq!(lines[0].changes, [applied(0, 0, "A", three)]);
+}
+
 /// Several changes in one chunk each take their own words, and a change to
 /// nothing leaves no gap.
 #[test]
@@ -298,7 +321,7 @@ fn a_revision_needs_its_parent_and_its_own_chunk_s_words() {
 #[test]
 fn the_first_final_text_makes_revision_0() {
     let (_dir, mut store) = store("revision-0");
-    store.add_final_text(S1, MIC, s(100), &[]).unwrap();
+    store.add_final_text(S1, UNTIMED, s(100), &[]).unwrap();
     assert!(store.revisions(S1).unwrap().is_empty());
     let (a, b) = two_chunks();
     add(&mut store, S1, &[a, b]);
@@ -464,6 +487,14 @@ fn sqlite_refuses_to_change_a_revision() {
         // Revision 0, and a revision that isn't the newest.
         insert(0, 2, 2),
         insert(1, 2, 2),
+        // A stored rowid with a new key, which would delete that row
+        // without firing the delete triggers.
+        "INSERT OR REPLACE INTO revision (rowid, session_id, number, parent) VALUES (2, 2, 0, NULL)"
+            .to_owned(),
+        "INSERT OR REPLACE INTO revision_text \
+         (rowid, session_id, revision, track, start_sample, first_word, last_word, text) \
+         VALUES (1, 1, 2, 1, 16000, 2, 2, 'replaced')"
+            .to_owned(),
     ] {
         assert!(refused(&conn, &sql), "{sql} was allowed");
     }

@@ -183,15 +183,21 @@ impl fmt::Display for StoreError {
                 session,
                 chunk,
                 words,
-            } => write!(
-                f,
-                "session {} has no words {} to {} in its final text on track {} at sample {}",
-                session.get(),
-                words.first(),
-                words.last(),
-                chunk.track.get(),
-                chunk.start.get()
-            ),
+            } => {
+                let (first, last) = (words.first(), words.last());
+                let named = if first == last {
+                    format!("word {first}")
+                } else {
+                    format!("words {first} to {last}")
+                };
+                write!(
+                    f,
+                    "session {} has no {named} in its final text on track {} at sample {}",
+                    session.get(),
+                    chunk.track.get(),
+                    chunk.start.get()
+                )
+            }
             Self::NoJob(id) => write!(f, "there is no job {id}"),
             Self::FinalOverlap { track, start } => write!(
                 f,

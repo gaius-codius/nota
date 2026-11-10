@@ -458,7 +458,7 @@ fn checks_stop_bad_rows() {
 fn error_display_is_specific() {
     use std::error::Error as _;
     let existing = row(3, 0, 42, 50, 1);
-    let cases: [(StoreError, &str); 11] = [
+    let cases: [(StoreError, &str); 13] = [
         (StoreError::Sqlite(rusqlite::Error::InvalidQuery), "sqlite"),
         (
             StoreError::Create(std::io::Error::other("disk on fire")),
@@ -484,6 +484,28 @@ fn error_display_is_specific() {
             "session 32 is in",
         ),
         (StoreError::Corrupt("bad hash".to_owned()), "bad hash"),
+        (
+            StoreError::NoWords {
+                session: SessionId::new(5),
+                chunk: ChunkKey {
+                    track: TrackId::new(1),
+                    start: SampleIndex::new(800),
+                },
+                words: WordSpan::new(2, 2).unwrap(),
+            },
+            "session 5 has no word 2 in its final text on track 1 at sample 800",
+        ),
+        (
+            StoreError::NoWords {
+                session: SessionId::new(5),
+                chunk: ChunkKey {
+                    track: TrackId::new(1),
+                    start: SampleIndex::new(800),
+                },
+                words: WordSpan::new(2, 4).unwrap(),
+            },
+            "has no words 2 to 4 in",
+        ),
         (
             StoreError::CorruptRow {
                 session: SessionId::new(4),

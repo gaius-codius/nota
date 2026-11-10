@@ -343,7 +343,8 @@ fn revisions_chain_and_name_their_final_words() {
         &[int(2), int(1), int(0)],
     );
     refused(&store, "revision_text", columns, &change(2, 1, 0, 0, 1));
-    refused(&store, "revision_text", columns, &change(2, 1, 0, 1, 0));
+    // Both of session 1's words are there, so only the order refuses it.
+    refused(&store, "revision_text", columns, &change(1, 1, 0, 1, 0));
     // Session 2's chunk at the same place is its own: its one word is
     // there to change, though session 1's chunk has a second.
     write(&store, "revision_text", columns, &change(2, 1, 0, 0, 0));
@@ -379,6 +380,10 @@ fn proposals_name_their_revision_and_final_words() {
     refused(&store, "proposal", columns, &proposal(2, 2, 0, 1));
     // A revision the session hasn't.
     refused(&store, "proposal", columns, &proposal(3, 1, 4, 1));
+    // A run that ends before it starts, though both its words are there.
+    let mut backwards = proposal(4, 1, 0, 0);
+    backwards[5] = int(1);
+    refused(&store, "proposal", columns, &backwards);
 }
 
 #[test]

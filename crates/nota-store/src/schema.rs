@@ -242,7 +242,8 @@ CREATE TRIGGER revision_never_deleted BEFORE DELETE ON revision
 BEGIN SELECT RAISE(ABORT, 'a revision is never deleted'); END;
 CREATE TRIGGER revision_never_replaced BEFORE INSERT ON revision
 WHEN EXISTS (
-    SELECT 1 FROM revision WHERE session_id = NEW.session_id AND number = NEW.number
+    SELECT 1 FROM revision
+    WHERE (session_id = NEW.session_id AND number = NEW.number) OR rowid = NEW.rowid
 )
 BEGIN SELECT RAISE(ABORT, 'a revision is never replaced'); END;
 
@@ -381,11 +382,19 @@ ALTER TABLE epoch ADD COLUMN drift_ppb INTEGER NOT NULL DEFAULT 0
 ///
 /// **The final text is append-only.** Triggers refuse an UPDATE, DELETE
 /// or replacing INSERT of a `final_text` or `final_word` row, and a word
-/// for any chunk but the newest stored (its words go in with it). The
-/// newest is the highest rowid: `final_text` has no INTEGER PRIMARY KEY,
-/// and VACUUM may renumber such rowids, which nothing in nota runs.
-/// `final_progress` isn't part of the record: it moves on as the pass
-/// does.
+/// for any chunk but the newest stored, or for one its track's progress
+/// has passed (its words go in with it, before the progress that covers
+/// it). The newest is the highest rowid: `final_text` has no INTEGER
+/// PRIMARY KEY, and VACUUM may renumber such rowids, which nothing in nota
+/// runs. `final_progress` isn't part of the record: it moves on as the
+/// pass does.
+///
+/// **Replacing by rowid.** A table without an INTEGER PRIMARY KEY has a
+/// rowid apart from its key, and an `INSERT OR REPLACE` naming a stored
+/// rowid with a new key would delete that row without firing its delete
+/// trigger. Every append-only table here with such a key refuses an
+/// INSERT whose rowid is taken (an automatic rowid reads as -1 there, and
+/// none is stored), and V4's `word_never_replaced` is made again so.
 pub(crate) const V8: &str = "
 DROP TRIGGER revision_never_updated;
 DROP TRIGGER revision_never_deleted;
@@ -472,7 +481,8 @@ CREATE TRIGGER revision_never_deleted BEFORE DELETE ON revision
 BEGIN SELECT RAISE(ABORT, 'a revision is never deleted'); END;
 CREATE TRIGGER revision_never_replaced BEFORE INSERT ON revision
 WHEN EXISTS (
-    SELECT 1 FROM revision WHERE session_id = NEW.session_id AND number = NEW.number
+    SELECT 1 FROM revision
+    WHERE (session_id = NEW.session_id AND number = NEW.number) OR rowid = NEW.rowid
 )
 BEGIN SELECT RAISE(ABORT, 'a revision is never replaced'); END;
 
@@ -488,6 +498,9 @@ WHEN EXISTS (
       AND first_word <= NEW.last_word AND last_word >= NEW.first_word
 )
 BEGIN SELECT RAISE(ABORT, 'a revision never changes a word twice'); END;
+CREATE TRIGGER revision_text_never_replaced BEFORE INSERT ON revision_text
+WHEN EXISTS (SELECT 1 FROM revision_text WHERE rowid = NEW.rowid)
+BEGIN SELECT RAISE(ABORT, 'a revision is never replaced'); END;
 CREATE TRIGGER revision_text_only_in_the_newest BEFORE INSERT ON revision_text
 WHEN NEW.revision = 0
   OR NEW.revision IS NOT (SELECT max(number) FROM revision WHERE session_id = NEW.session_id)
@@ -500,8 +513,9 @@ BEGIN SELECT RAISE(ABORT, 'final text is never deleted'); END;
 CREATE TRIGGER final_text_never_replaced BEFORE INSERT ON final_text
 WHEN EXISTS (
     SELECT 1 FROM final_text
-    WHERE session_id = NEW.session_id AND track = NEW.track
-      AND start_sample = NEW.start_sample
+    WHERE (session_id = NEW.session_id AND track = NEW.track
+           AND start_sample = NEW.start_sample)
+       OR rowid = NEW.rowid
 )
 BEGIN SELECT RAISE(ABORT, 'final text is never replaced'); END;
 
@@ -512,8 +526,9 @@ BEGIN SELECT RAISE(ABORT, 'final text is never deleted'); END;
 CREATE TRIGGER final_word_never_replaced BEFORE INSERT ON final_word
 WHEN EXISTS (
     SELECT 1 FROM final_word
-    WHERE session_id = NEW.session_id AND track = NEW.track
-      AND start_sample = NEW.start_sample AND position = NEW.position
+    WHERE (session_id = NEW.session_id AND track = NEW.track
+           AND start_sample = NEW.start_sample AND position = NEW.position)
+       OR rowid = NEW.rowid
 )
 BEGIN SELECT RAISE(ABORT, 'final text is never replaced'); END;
 CREATE TRIGGER final_word_only_with_its_text BEFORE INSERT ON final_word
@@ -523,7 +538,21 @@ WHEN NOT EXISTS (
       AND session_id = NEW.session_id AND track = NEW.track
       AND start_sample = NEW.start_sample
 )
+  OR NEW.start_sample < coalesce(
+    (SELECT up_to FROM final_progress
+     WHERE session_id = NEW.session_id AND track = NEW.track),
+    0
+  )
 BEGIN SELECT RAISE(ABORT, 'final text is never added to'); END;
+
+DROP TRIGGER word_never_replaced;
+CREATE TRIGGER word_never_replaced BEFORE INSERT ON word
+WHEN EXISTS (
+    SELECT 1 FROM word
+    WHERE (utterance_id = NEW.utterance_id AND position = NEW.position)
+       OR rowid = NEW.rowid
+)
+BEGIN SELECT RAISE(ABORT, 'heard text is never replaced'); END;
 ";
 
 #[cfg(test)]

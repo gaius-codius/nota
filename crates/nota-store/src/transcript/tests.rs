@@ -197,6 +197,12 @@ fn sqlite_refuses_to_change_or_delete_heard_text() {
             "INSERT OR REPLACE INTO word (utterance_id, position, text, start_ns, end_ns) \
              VALUES ({id}, 0, 'replaced', 0, 1)"
         ),
+        // A stored rowid with a new key (V8): a replace that would delete
+        // the word it takes without firing the delete trigger.
+        format!(
+            "INSERT OR REPLACE INTO word (rowid, utterance_id, position, text, start_ns, end_ns) \
+             VALUES (1, {id}, 5, 'replaced', 0, 1)"
+        ),
     ] {
         assert!(refused(&conn, &sql), "{sql} was allowed");
     }

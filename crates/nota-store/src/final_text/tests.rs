@@ -212,6 +212,18 @@ fn sqlite_refuses_to_change_or_delete_final_text() {
         "INSERT INTO final_word \
          (session_id, track, start_sample, position, text, word_start, word_end) \
          VALUES (1, 0, 0, 2, 'added', 90, 100)",
+        // A word added to the newest chunk, which its progress has passed.
+        "INSERT INTO final_word \
+         (session_id, track, start_sample, position, text, word_start, word_end) \
+         VALUES (1, 1, 0, 0, 'added', 0, 10)",
+        // A stored rowid with a new key: a replace that would delete the
+        // row it takes without firing the delete triggers.
+        "INSERT OR REPLACE INTO final_text \
+         (rowid, session_id, track, start_sample, end_sample, text, engine, model) \
+         VALUES (1, 1, 0, 500, 600, 'replaced', 'e', 'm')",
+        "INSERT OR REPLACE INTO final_word \
+         (rowid, session_id, track, start_sample, position, text, word_start, word_end) \
+         VALUES (1, 1, 1, 0, 0, 'replaced', 0, 10)",
     ] {
         assert!(refused(&conn, sql), "{sql} was allowed");
     }
