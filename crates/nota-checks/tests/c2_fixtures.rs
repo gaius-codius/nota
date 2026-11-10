@@ -217,10 +217,10 @@ fn every_committed_bench_fix_is_gated_as_the_bench_did() {
     // pass on the rest.
     assert!(fixes.len() >= 429, "{} fixes", fixes.len()); // check-bound
     let floors = [
-        ("accepted", 60),
-        ("no offered term in the replacement", 276),
-        ("similarity below 0.6", 60),
-        ("span not found", 33),
+        ("accepted", 60),                            // check-bound
+        ("no offered term in the replacement", 276), // check-bound
+        ("similarity below 0.6", 60),                // check-bound
+        ("span not found", 33),                      // check-bound
     ];
     for (decision, floor) in floors {
         let n = decisions.get(decision).copied().unwrap_or(0);
