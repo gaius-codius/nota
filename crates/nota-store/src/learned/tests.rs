@@ -80,6 +80,8 @@ fn a_span_matches_whatever_its_case_and_punctuation() {
     let learned = store.learned().unwrap();
     assert!(!learned.allows("endside", "inside"));
     assert!(!learned.allows("  ENDSIDE ", "inside!"));
+    // A typographic apostrophe is a plain one.
+    assert_eq!(match_key("Crohn\u{2019}s"), match_key("crohn's"));
     assert_eq!(learned.accepted_for("a dlp one"), ["GLP-1"]);
 }
 
@@ -137,7 +139,12 @@ fn every_term_accepted_for_a_span_comes_back() {
 fn a_pair_needs_text_and_its_session() {
     let dir = TestDir::new("learned-refused");
     let mut store = library(&dir);
-    for (heard, term) in [("", "GLP-1"), ("a dlp one", " - "), ("...", "x")] {
+    for (heard, term) in [
+        ("", "GLP-1"),
+        ("a dlp one", " - "),
+        ("...", "x"),
+        ("'", "x"),
+    ] {
         assert!(matches!(
             store.learn(ONE, heard, term, Verdict::Accepted, at(0)),
             Err(StoreError::NoText)
@@ -173,14 +180,19 @@ fn a_learned_pair_is_never_changed() {
 }
 
 proptest! {
-    /// A match key has no capitals, nothing but letters, digits,
-    /// apostrophes and single spaces, no space at either end, is the same
-    /// key again when keyed, and doesn't depend on ASCII case.
+    /// A match key has nothing but letters, digits, apostrophes and single
+    /// spaces, no space at either end and no word without a letter or
+    /// digit, is the same key again when keyed, and doesn't depend on ASCII
+    /// case.
     #[test]
     fn a_match_key_is_plain_and_stable(text in "\\PC{0,30}") {
         let key = match_key(&text);
         prop_assert!(!key.starts_with(' ') && !key.ends_with(' '), "{key:?}");
         prop_assert!(!key.contains("  "), "{key:?}");
+        prop_assert!(
+            key.split(' ').all(|w| key.is_empty() || w.chars().any(char::is_alphanumeric)),
+            "{key:?}"
+        );
         prop_assert!(key.chars().all(|c| c == ' ' || c == '\'' || c.is_alphanumeric()), "{key:?}");
         prop_assert_eq!(match_key(&key), key);
         // ASCII case only: some letters' capitals aren't one letter.

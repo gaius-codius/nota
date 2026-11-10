@@ -6,7 +6,9 @@
 //! where each came from. Reading its vocabulary later takes the packs as
 //! they are installed and checks each recorded one is there at its
 //! recorded version: a pack upgraded since gives other terms, so it's
-//! refused, not quietly used.
+//! refused, not quietly used. That rests on a pack rebuilt with other rows
+//! getting a new version: nothing here can tell two builds of one version
+//! apart.
 
 use rusqlite::{TransactionBehavior, params};
 
@@ -38,8 +40,8 @@ impl SessionTerms {
 }
 
 impl Store {
-    /// Records that `session` uses `packs`, in this order. A session's packs
-    /// are recorded once, and never changed.
+    /// Records that `session` uses `packs`, in this order, none included. A
+    /// session's packs are recorded once, and never changed.
     ///
     /// # Errors
     ///
@@ -61,13 +63,18 @@ impl Store {
             return Err(StoreError::NoSession(session));
         }
         let recorded: i64 = tx.query_row(
-            "SELECT count(*) FROM session_pack WHERE session_id = ?1",
+            "SELECT count(*) FROM session_packs_chosen WHERE session_id = ?1",
             [key],
             |r| r.get(0),
         )?;
         if recorded > 0 {
             return Err(StoreError::PacksRecorded(session));
         }
+        // Marks the choice made, so a choice of none is recorded too.
+        tx.execute(
+            "INSERT INTO session_packs_chosen (session_id) VALUES (?1)",
+            [key],
+        )?;
         for (position, pack) in (0_i64..).zip(packs) {
             tx.execute(
                 "INSERT INTO session_pack (session_id, position, name, version)

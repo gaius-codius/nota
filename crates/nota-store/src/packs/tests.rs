@@ -276,6 +276,17 @@ fn bad_text_is_refused() {
         matches!(err, PackError::BadText { field: "term", .. }),
         "{err:?}"
     );
+    // An alias is checked as a term is.
+    let err = Pack::new(
+        manifest(PackKind::Shipped),
+        vec![term("GLP-1", "open", Review::Reviewed)],
+        vec![alias("GLP-1", "gee\tel", "open", Review::Reviewed)],
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&err, PackError::BadText { field: "alias", text } if text == "gee\tel"),
+        "{err:?}"
+    );
     // A term at the limit is fine.
     let at_limit = "a".repeat(MAX_TEXT);
     Pack::new(
@@ -408,6 +419,8 @@ fn an_alias_from_two_sources_is_offered_once() {
     )
     .unwrap();
     assert_eq!(pack.offered()[0].aliases, ["gee el pee one"]);
+    // Both sources are credited on the term, the alias's included.
+    assert_eq!(pack.offered()[0].sources, ["open", "public"]);
 }
 
 /// The credits name every source, in id order, with its licence, address
@@ -453,30 +466,82 @@ fn an_unknown_format_is_refused() {
     ));
 }
 
+/// What a refusal of one edit to a pack file must be.
+type Expected = fn(&PackError) -> bool;
+
 /// A file edited outside nota is checked as a built pack is: a row whose
 /// licence was changed, a second manifest row, or an unknown status is
 /// refused.
 #[test]
 fn a_pack_edited_outside_nota_is_refused() {
     let dir = TestDir::new("pack-edited");
+    let licence: Expected = |e| matches!(e, PackError::LicenceMismatch { .. });
+    let corrupt: Expected = |e| matches!(e, PackError::Corrupt(_));
     let edits = [
-        "UPDATE term SET licence = 'proprietary' WHERE term = 'GLP-1'",
-        "INSERT INTO manifest VALUES ('other', '1', 'en', 'own')",
-        "PRAGMA ignore_check_constraints = ON; UPDATE term SET review = 'checked'",
+        (
+            "UPDATE term SET licence = 'proprietary' WHERE term = 'GLP-1'",
+            licence,
+        ),
+        (
+            "INSERT INTO manifest VALUES ('other', '1', 'en', 'own')",
+            corrupt,
+        ),
+        (
+            "PRAGMA ignore_check_constraints = ON; UPDATE term SET review = 'checked'",
+            corrupt,
+        ),
     ];
-    for (n, edit) in edits.into_iter().enumerate() {
+    for (n, (edit, expected)) in edits.into_iter().enumerate() {
         let path = pack_path(&dir, &format!("edited-{n}"));
         sample(PackKind::Shipped).write(&path).unwrap();
         raw(&path).execute_batch(edit).unwrap();
         let err = Pack::open(&path).unwrap_err();
+        assert!(expected(&err), "{edit}: {err:?}");
+    }
+}
+
+/// A file whose rows come from a view, or from a table that isn't the
+/// format's own, is refused before anything is read from it: a view could
+/// run any SQL, for as long as it liked.
+#[test]
+fn a_pack_whose_tables_are_not_the_formats_is_refused() {
+    let dir = TestDir::new("pack-view");
+    let edits = [
+        "ALTER TABLE term RENAME TO term_rows;
+         CREATE VIEW term AS SELECT * FROM term_rows;",
+        "ALTER TABLE alias ADD COLUMN extra TEXT",
+        "DROP TABLE alias",
+    ];
+    for (n, edit) in edits.into_iter().enumerate() {
+        let path = pack_path(&dir, &format!("view-{n}"));
+        sample(PackKind::Shipped).write(&path).unwrap();
+        raw(&path).execute_batch(edit).unwrap();
+        let err = Pack::open(&path).unwrap_err();
         assert!(
-            matches!(
-                err,
-                PackError::LicenceMismatch { .. } | PackError::Corrupt(_)
-            ),
+            matches!(&err, PackError::Corrupt(why) if why.contains("tables")),
             "{edit}: {err:?}"
         );
     }
+}
+
+/// Rows past the limit are refused, not read; rows at it are read.
+#[test]
+fn rows_past_the_limit_are_refused() {
+    assert!(!too_many(2, 1, 3));
+    assert!(too_many(2, 2, 3));
+    assert!(too_many(usize::MAX, 1, 3));
+    let dir = TestDir::new("pack-limit");
+    let path = pack_path(&dir, "limit");
+    sample(PackKind::Shipped).write(&path).unwrap();
+    let conn = raw(&path);
+    // The sample has four term rows.
+    let read = |max| {
+        read_at_most(&conn, "SELECT term FROM term", max, |r| {
+            r.get::<_, String>(0)
+        })
+    };
+    assert_eq!(read(4).unwrap().len(), 4);
+    assert!(matches!(read(3), Err(PackError::TooManyRows)));
 }
 
 /// A table a reader doesn't know, such as facts added in a later pack, is
@@ -525,9 +590,10 @@ fn any_review() -> impl Strategy<Value = Review> {
     prop_oneof![Just(Review::Reviewed), Just(Review::Draft)]
 }
 
-/// A short term from a small alphabet, so terms and aliases repeat.
+/// A term from a small pool, so terms and aliases often repeat, and one
+/// term often comes from both sources.
 fn any_word() -> impl Strategy<Value = String> {
-    "[a-c]{1,3}( [a-c]{1,2})?"
+    proptest::sample::select(vec!["a", "ab", "b c", "ca", "GLP-1", "c"]).prop_map(str::to_owned)
 }
 
 /// Term rows and alias rows of those terms, from either source, with no
@@ -563,8 +629,44 @@ fn any_rows() -> impl Strategy<Value = (Vec<TermRow>, Vec<AliasRow>)> {
     })
 }
 
+/// Writes `bytes` to `path`, as a file damaged outside nota would be.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test scaffolding: a damaged pack file, outside the recorder's write path"
+)]
+fn damage(path: &Path, bytes: &[u8]) {
+    std::fs::write(path, bytes).unwrap();
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(48))]
+
+    /// A pack file with any bytes changed is read as a valid pack or
+    /// refused with an error, never a panic: a pack read back is one
+    /// [`Pack::new`] accepts.
+    #[test]
+    fn a_damaged_pack_is_read_whole_or_refused(
+        changes in proptest::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 1..8),
+    ) {
+        let dir = TestDir::new("pack-damaged");
+        let path = pack_path(&dir, "p");
+        sample(PackKind::Shipped).write(&path).unwrap();
+        let mut file = bytes(&path);
+        for (at, byte) in &changes {
+            let i = at.index(file.len());
+            file[i] = *byte;
+        }
+        let damaged = pack_path(&dir, "damaged");
+        damage(&damaged, &file);
+        if let Ok(pack) = Pack::open(&damaged) {
+            let again = Pack::new(
+                pack.manifest().clone(),
+                pack.terms().to_vec(),
+                pack.aliases().to_vec(),
+            );
+            prop_assert_eq!(again.ok(), Some(pack));
+        }
+    }
 
     /// Any valid pack round-trips through a file unchanged.
     #[test]

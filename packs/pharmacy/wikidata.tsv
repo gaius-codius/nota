@@ -1,13 +1,6 @@
 # Wikidata labels and lower-case aliases of items with an RxNorm id above, https://query.wikidata.org/sparql
 # Written by refresh.py; term<TAB>status[<TAB>alias]
-Asparaginase	draft
-Besifloxacin	draft
-Betadex	draft
 Bifidobacterium bifidum	draft
-Brolucizumab	draft
-Burosumab	draft
-Calamine	draft
-Cefotetan	draft
 Chymotrypsinogen	draft
 Coal tar creosote	draft
 D-fructopyranose	draft
@@ -24,16 +17,10 @@ DL-malic acid	draft
 DL-ofloxacin	draft
 DL-panthenol	draft
 DOTA-TATE	draft
-Diclofenac	draft
+Eucalyptus oil	draft
 Ferumoxides	draft
-Fulvic acid	draft
 GHK-Cu	draft
-Ganirelix	draft
 Hernexeos	draft
-Hyaluronidase	draft
-Idarucizumab	draft
-Insulin Lispro	draft
-Insulin degludec	draft
 L-Asparagine	draft
 L-Cysteine	draft
 L-alanine	draft
@@ -62,21 +49,16 @@ L-tyrosine	draft
 L-valine	draft
 Lacticaseibacillus casei	draft
 Lactobacillus acidophilus	draft
-Lysozyme	draft
-Methoxy polyethylene glycol-epoetin beta	draft
 N-acetyl-L-cysteine	draft
 N-acetyl-L-tyrosine	draft
 N-hexanoylsphingosine	draft
-Protein S	draft
 Prussian blue	draft
 RRR-alpha-tocopherol	draft
 S-adenosylmethionine	draft
 Saccharomyces boulardii	draft
 Saccharomyces cerevisiae	draft
-Sulfasalazine	draft
 Takadiastase	draft
 Tocoretinate	draft
-Tripalmitin	draft
 abacavir	draft
 abaloparatide	draft
 abatacept	draft
@@ -227,6 +209,7 @@ asenapine	draft
 asfotase alfa	draft
 asiatic acid	draft
 asiaticoside	draft
+asparaginase	draft
 aspartame	draft
 aspirin	draft
 astaxanthin	draft
@@ -294,8 +277,10 @@ benzyl salicylate	draft
 benzylpenicillin	draft
 bepotastine	draft
 beractant	draft
+besifloxacin	draft
 beta-Tocopherol	draft
 beta-pinene	draft
+betadex	draft
 betaine	draft
 betamethasone	draft
 betaxolol	draft
@@ -341,6 +326,7 @@ brimonidine	draft
 brinzolamide	draft
 brivaracetam	draft
 brodalumab	draft
+brolucizumab	draft
 bromfenac	draft
 bromhexine	draft
 bromocriptine	draft
@@ -351,6 +337,7 @@ budesonide	draft
 bumetanide	draft
 buprenorphine	draft
 bupropion	draft
+burosumab	draft
 buserelin	draft
 buspirone	draft
 busulfan	draft
@@ -371,6 +358,7 @@ cabazitaxel	draft
 cabergoline	draft
 cabozantinib	draft
 caffeine	draft
+calamine	draft
 calcifediol monohydrate	draft
 calcipotriol	draft
 calcitriol	draft
@@ -441,6 +429,7 @@ cefepime	draft
 cefiderocol	draft
 cefixime trihydrate	draft
 cefotaxime	draft
+cefotetan	draft
 cefoxitin	draft
 cefpodoxime	draft
 ceftaroline	draft
@@ -554,7 +543,7 @@ colesevelam	draft
 colestipol	draft
 colestyramine	draft
 colistin	draft
-collagenase clostridium histolyticum	draft
+collagenase Clostridium histolyticum	draft
 conivaptan	draft
 copper	draft
 copper gluconate	draft
@@ -662,6 +651,7 @@ dichlorobenzyl alcohol	draft
 dichloromethane	draft
 dichlorphenamide	draft
 diclazuril	draft
+diclofenac	draft
 dicloxacillin	draft
 dicyclomine	draft
 didanosine	draft
@@ -851,7 +841,6 @@ etonogestrel	draft
 etoposide	draft
 etravirine	draft
 eucalyptol	draft
-eucalyptus oil	draft
 eugenol	draft
 everolimus	draft
 evolocumab	draft
@@ -928,6 +917,7 @@ fosphenytoin	draft
 fremanezumab	draft
 frovatriptan	draft
 fulvestrant	draft
+fulvic acid	draft
 fumaryl diketopiperazine	draft
 furazolidone	draft
 furosemide	draft
@@ -942,6 +932,7 @@ galcanezumab	draft
 galsulfase	draft
 gamma cyclodextrin	draft
 ganciclovir	draft
+ganirelix	draft
 gatifloxacin	draft
 gefitinib	draft
 gemcitabine	draft
@@ -1015,6 +1006,7 @@ hexyldecanol	draft
 histamine	draft
 histrelin	draft
 homatropine	draft
+hyaluronidase	draft
 hydantoin	draft
 hydralazine	draft
 hydrochlorothiazide	draft
@@ -1049,6 +1041,7 @@ ibutilide	draft
 icatibant	draft
 icodextrin	draft
 idarubicin	draft
+idarucizumab	draft
 idebenone	draft
 idelalisib	draft
 idoxuridine	draft
@@ -1070,8 +1063,10 @@ indomethacin	draft
 infliximab	draft
 inotersen	draft
 inotuzumab ozogamicin	draft
+insulin degludec	draft
 insulin detemir	draft
 insulin glargine	draft
+insulin lispro	draft
 inulin	draft
 iodide ion	draft
 iodixanol	draft
@@ -1213,6 +1208,7 @@ lurasidone	draft
 luspatercept	draft
 lycopene	draft
 lysophosphatidic acid	draft
+lysozyme	draft
 macitentan	draft
 madecassic acid	draft
 mafenide	draft
@@ -1278,6 +1274,7 @@ methocarbamol	draft
 methohexital	draft
 methotrexate	draft
 methoxsalen	draft
+methoxy polyethylene glycol-epoetin beta	draft
 methsuximide	draft
 methyl acrylate	draft
 methyl anthranilate	draft
@@ -1337,7 +1334,7 @@ molybdenum	draft
 mometasone	draft
 monoethanolamine	draft
 monomethyl fumarate	draft
-monophosphoryl lipid a	draft
+monophosphoryl lipid A	draft
 monothioglycerol	draft
 montelukast	draft
 montmorillonite	draft
@@ -1507,7 +1504,7 @@ pembrolizumab	draft
 pemetrexed	draft
 pemirolast	draft
 penciclovir	draft
-penicillin v	draft
+penicillin V	draft
 pentadecalactone	draft
 pentaerythritol	draft
 pentaerythrityl tetraethylhexanoate	draft
@@ -1645,6 +1642,7 @@ propylparaben	draft
 propylthiouracil	draft
 prostacyclin	draft
 protamine	draft
+protein S	draft
 protriptyline	draft
 prucalopride	draft
 pullulan	draft
@@ -2006,6 +2004,7 @@ trimethoprim	draft
 trimethylpentanediyl dibenzoate	draft
 trimipramine	draft
 trimyristin	draft
+tripalmitin	draft
 tripelennamine	draft
 triprolidine	draft
 triptorelin	draft
@@ -2110,20 +2109,16 @@ zoledronic acid monohydrate	draft
 zolmitriptan	draft
 zolpidem	draft
 zonisamide	draft
-D-glucosamine	draft	glucosamine
 D-methamphetamine	draft	d-meth
 D-methamphetamine	draft	d-phenylisopropylmethylamine
 D-methamphetamine	draft	dextromethamphetamine
 D-methamphetamine	draft	metamfetamine
-D-methamphetamine	draft	methamphetamine
 D-methamphetamine	draft	methyl-beta-phenylisopropylamine
 D-methamphetamine	draft	methylamphetamine
-D-penicillamine	draft	penicillamine
 DL-amphetamine	draft	alpha-methylbenzeneethaneamine
 DL-amphetamine	draft	alpha-methylphenethylamine
 DL-amphetamine	draft	alpha-methylphenylethylamine
 DL-amphetamine	draft	amfetamine
-DL-amphetamine	draft	amphetamine
 DL-amphetamine	draft	beta-phenylisopropylamine
 DL-amphetamine	draft	rac-amphetamine
 DL-lactic acid	draft	acidum lacticum
@@ -2133,38 +2128,13 @@ DL-lactic acid	draft	rac-lactic acid
 DL-malic acid	draft	alpha-hydroxysuccinic acid
 DL-malic acid	draft	hydroxybutanedioic acid
 DL-malic acid	draft	hydroxysuccinic acid
-DL-malic acid	draft	malic acid
-DOTA-TATE	draft	dotatate
-Insulin degludec	draft	insulina degludec
-Insulin degludec	draft	insulinum degludecum
-L-Cysteine	draft	cysteine
-L-alanine	draft	alanine
+Eucalyptus oil	draft	eucalyptic essential oil
 L-aspartic acid	draft	asparaginate
 L-aspartic acid	draft	asparaginic acid
-L-aspartic acid	draft	aspartate
-L-aspartic acid	draft	aspartic acid
 L-carbocysteine	draft	carbocisteine
-L-carnitine	draft	levocarnitine
-L-glutamine	draft	glutamine
-L-histidine	draft	histidine
-L-isoleucine	draft	isoleucine
-L-leucine	draft	leucine
-L-lysine	draft	lysine
-L-menthol	draft	levomenthol
-L-menthol	draft	menthol
-L-methionine	draft	methionine
-L-morphan	draft	levorphanol
-L-scopolamine	draft	scopolamine
-L-serine	draft	serine
-L-threonine	draft	threonine
 L-thyroxine	draft	levothyroxine sodium
-L-tyrosine	draft	tyrosine
-L-valine	draft	valine
-Lysozyme	draft	c-type lysozyme
-N-acetyl-L-cysteine	draft	acetylcysteine
 RRR-alpha-tocopherol	draft	d-alpha-tocopherol
 Takadiastase	draft	taka-diastase
-Tripalmitin	draft	tripalmitoylglycerol
 acetaldehyde	draft	acetic aldehyde
 acetaldehyde	draft	aldehyde
 acetaldehyde	draft	ethyl aldehyde
@@ -2181,7 +2151,6 @@ acetone	draft	dimethylketone
 acetone	draft	ketone propane
 acetone	draft	methyl ketone
 acetyl tributyl citrate	draft	acetyltri-n-butyl citrate
-acetyl tributyl citrate	draft	acetyltributyl citrate
 acetyl tributyl citrate	draft	acetyltributylcitrate
 acetyl tributyl citrate	draft	tributyl citrate acetate
 acetylcarnitine	draft	acetyl-carnitine
@@ -2189,19 +2158,14 @@ acetylcarnitine	draft	levocarnitine acetyl
 acetylcholine	draft	acetyl choline ion
 acetylcholine	draft	acetylcholine cation
 acetylcholine	draft	choline acetate
-aciclovir	draft	acyclovir
 acrylamide	draft	ethylenecarboxamide
 adipic acid	draft	adipinic acid
-alanyl glutamine	draft	alanylglutamine
-albendazol	draft	albendazole
 allyl hexanoate	draft	allyl caproate
 alpha-arbutin	draft	alpha arbutin
-aluminium	draft	aluminum
 aluminium phosphate	draft	aluminium monophosphate
 aluminium phosphate	draft	aluminium orthophosphate
 aluminium phosphate	draft	aluminum monophosphate
 aluminium phosphate	draft	aluminum orthophosphate
-aluminium phosphate	draft	aluminum phosphate
 aluminum cation	draft	aluminium cation
 aluminum cation	draft	aluminium ion
 aluminum cation	draft	aluminum ion
@@ -2228,7 +2192,6 @@ ammonia	draft	anhydrous ammonia
 ammonium acetate	draft	ammonium ethanoate
 ammonium acetate	draft	azanium acetate
 ammonium cation	draft	ammonium
-ammonium cation	draft	ammonium ion
 ammonium chloride	draft	amchlor
 ammonium chloride	draft	ammoneric
 ammonium chloride	draft	ammonia hydrochloride
@@ -2268,8 +2231,6 @@ axitinib	draft	axitinibum
 azithromycin	draft	azithromycin anhydrous
 barium sulfate	draft	barium salt of sulfuric acid
 barium sulfate	draft	barium sulphate
-barley malt syrup	draft	maltose syrup
-beclometasone	draft	beclomethasone
 benzaldehyde	draft	benzene carbaldehyde
 benzaldehyde	draft	benzene carboxaldehyde
 benzaldehyde	draft	benzenecarboxaldehyde
@@ -2338,7 +2299,6 @@ caffeine	draft	coffein
 caffeine	draft	coffeinum
 caffeine	draft	koffein
 caffeine	draft	monohydrate caffeine
-calcipotriol	draft	calcipotriene
 calcitriol	draft	cholecalcitriol
 calcium acetate	draft	calcium ethanoate
 calcium ascorbate	draft	calcium ascorbate dihydrate
@@ -2347,7 +2307,6 @@ calcium hydroxide	draft	calcium hydrate
 calcium peroxide	draft	calcium dioxide
 capric acid	draft	caprinic acid
 capric acid	draft	caprynic acid
-capric acid	draft	decanoic acid
 capric acid	draft	decoic acid
 capric acid	draft	n-capric acid
 capric acid	draft	n-decanoic acid
@@ -2357,7 +2316,6 @@ caprylic acid	draft	n-caprylic acid
 caprylic acid	draft	n-octanoic acid
 caprylic acid	draft	n-octoic acid
 caprylic acid	draft	n-octylic acid
-caprylic acid	draft	octanoic acid
 caprylic acid	draft	octoic acid
 caprylic acid	draft	octylic acid
 caprylyl glucoside	draft	octyl glucoside
@@ -2371,7 +2329,6 @@ carbon dioxide	draft	carbon oxide
 carbon dioxide	draft	carbonic acid anhydride
 carbon dioxide	draft	carbonic acid gas
 carbon dioxide	draft	carbonic anhydride
-carboxymethyl cellulose	draft	carboxymethylcellulose
 carboxymethyl cellulose	draft	cellulose gum
 carboxymethyl cellulose	draft	crosslinked carboxymethyl cellulose
 carglumic acid	draft	carbamylglutamic acid
@@ -2390,7 +2347,6 @@ cesium cation	draft	cesium ion
 cesium chloride	draft	caesium monochloride
 cesium chloride	draft	cesium monochloride
 cesium chloride	draft	tricesium trichloride
-cetyl alcohol	draft	cetostearyl alcohol
 cetyl alcohol	draft	cetylic alcohol
 cetyl alcohol	draft	hexadecyl alcohol
 cetyl alcohol	draft	n-cetyl alcohol
@@ -2408,7 +2364,6 @@ chlordiazepoxide	draft	methaminodiazepoxide
 chloride ion	draft	chloride
 chloride ion	draft	chlorides
 chloride ion	draft	chlorine anion
-chloroethane	draft	ethyl chloride
 chloroethane	draft	mono-chloroethane
 chloroethane	draft	monochloroethane
 chloroform	draft	formyl trichloride
@@ -2439,13 +2394,10 @@ citric acid	draft	anhydrous citric acid
 citric acid	draft	beta-hydroxytricarballylic acid
 clavulanic acid	draft	clavulonic acid
 clemastine	draft	meclastin
-clomifene	draft	clomiphene
 clomipramine	draft	chlorimipramine
 clomipramine	draft	monochlorimipramine
 clopidogrel	draft	clopidogrelum
-clorazepic acid	draft	clorazepate
 coagulation factor x human	draft	coagulation factor x
-coagulation factor x human	draft	factor x
 coagulation factor x human	draft	human coagulation factor x
 coagulation factor x human	draft	stuart-prower factor
 cocaine	draft	beta-cocaine
@@ -2456,24 +2408,19 @@ cocaine	draft	l-cocaine
 cocamide MEA	draft	cocamide monoethanolamine
 codeine	draft	codeine anhydrous
 codeine	draft	l-codeine
-colestyramine	draft	cholestyramine resin
 corticotropin	draft	adrenocorticotropic hormone
 corticotropin	draft	adrenocorticotropin
 corticotropin	draft	corticotrophin
 cortisol	draft	hydrocorticosterone
-cortisol	draft	hydrocortisone
 cortisol	draft	hydroxycortisone
 cosyntropin	draft	kosintropin
 cromoglicic acid	draft	cromoglycic acid
-cromoglicic acid	draft	cromolyn
 crystal violet	draft	aniline violet
-crystal violet	draft	gentian violet
 cyclosporine	draft	ciclosporin
 cyproheptadine	draft	cyproheptidine
 cysteamine	draft	cysteamine hydrochloride
 cytarabine	draft	cytosine arabinoside
 dacomitinib	draft	dacomitinib anhydrous
-dasatinib monohydrate	draft	dasatinib
 dasatinib monohydrate	draft	dasatinib hydrate
 daunorubicin	draft	daunomycin
 decyl oleate	draft	decanol oleate ester
@@ -2528,13 +2475,11 @@ dichlorine	draft	diatomic chlorine
 dichlorine	draft	molecular chlorine
 dichloromethane	draft	methane dichloride
 dichloromethane	draft	methylene bichloride
-dichloromethane	draft	methylene chloride
 dichlorphenamide	draft	dichlofenamide
 didanosine	draft	dideoxyinosine
 dienogest	draft	dienogestrel
 diethyl ether	draft	diethyl oxide
 diethyl ether	draft	ether
-diethyl ether	draft	ethyl ether
 diethyl ether	draft	ethyl oxide
 diethyl ether	draft	solvent ether
 diethylene glycol monoethyl ether	draft	ethyl digol
@@ -2562,7 +2507,6 @@ dimethyl sulfone	draft	methyl-sulfonyl-methane
 dimethyl sulfone	draft	methylsulfone
 dimethyl sulfone	draft	methylsulfonyl methane
 dimethyl sulfone	draft	methylsulfonyl-methane
-dimethyl sulfone	draft	methylsulfonylmethane
 dimethyl sulfone	draft	sulfonylbis-methane
 dimethyl sulfone	draft	sulfonylbismethane
 dimethyl sulfone	draft	sulfonyldimethane
@@ -2577,14 +2521,12 @@ diosmin	draft	neodiosmin
 dioxygen	draft	diatomic oxygen
 dioxygen	draft	liquid oxygen
 dioxygen	draft	molecular oxygen
-dioxygen	draft	oxygen
 dioxygen	draft	oxygen gas
 diphenhydramine	draft	benzhydramine
 disodium L-tartrate	draft	disodium tartrate
 disulfiram	draft	tetraethylthiuram disulfide
 disulfiram	draft	tetraethylthiuram disulphide
 dobesilic acid	draft	hydroquinonesulfonic acid
-dodecane	draft	n-dodecane
 doxorubicin	draft	hydroxydaunorubicin
 doxycycline	draft	anhydrous doxycycline
 doxycycline	draft	doxycycline anhydrous
@@ -2593,7 +2535,6 @@ dyclonine	draft	dyclocaine
 edetic acid	draft	ethylenediaminetetraacetic acid
 elbasvir	draft	elbasvir component of zepatier
 elbasvir	draft	zepatier component of elbasvir
-enalaprilat dihydrate	draft	enalaprilat
 enalaprilat dihydrate	draft	enalprilat hydrate
 enalaprilat dihydrate	draft	enalprilate hydrate
 entecavir hydrate	draft	entecavir monohydrate
@@ -2603,7 +2544,6 @@ ertugliflozin	draft	ertugliflozine
 erythritol	draft	erythro-tetritol
 erythritol	draft	mesoerythritol
 erythromycin	draft	erthromycin
-escin Ia	draft	escin
 esomeprazole	draft	esomeprazol
 estriol	draft	oestriol
 estriol	draft	trihydroxyestrin
@@ -2611,7 +2551,6 @@ estropipate	draft	piperazine estrone sulfate
 ethamsylate	draft	etamsylate
 ethanol	draft	dehydrated ethanol
 ethanol	draft	hydroxyethane
-ethinylestradiol	draft	ethinyl estradiol
 ethinylestradiol	draft	ethinyloestradiol
 ethionamide	draft	ethylisothiamide
 ethionamide	draft	etionamide
@@ -2647,7 +2586,6 @@ ethynodiol	draft	etinodiol
 ethynodiol	draft	etynodiol
 ethynodiol	draft	etynodiolum
 etoposide	draft	trans-etoposide
-eucalyptus oil	draft	eucalyptic essential oil
 exenatide	draft	exenatide synthetic
 fentanyl	draft	phentanyl
 ferric chloride	draft	iron trichloride
@@ -2705,10 +2643,8 @@ glucose oxidase	draft	glucose oxyhydrase
 glutathione	draft	gamma-glutamylcysteinylglycine
 glutathione	draft	glutathione reduced
 glutathione	draft	reduced glutathione
-glycerol	draft	glycerin
 glycerol	draft	glycerine
 glyceryl tristearate	draft	stearin
-glyceryl tristearate	draft	tristearin
 glyceryl tristearate	draft	tristearoyl-sn-glycerol
 glycine	draft	glycin
 glycol distearate	draft	ethylene distearate
@@ -2717,7 +2653,6 @@ glycol distearate	draft	ethylene glycol distearate
 glycol salicylate	draft	ethylene glycol monosalicylate
 glycol stearate	draft	ethylene glycol monostearate
 glycol stearate	draft	glycol monostearate
-glycopyrrolate	draft	glycopyrronium
 glycopyrrolate	draft	glycopyrronium cation
 glyoxal	draft	glyoxal aldehyde
 glyoxal	draft	glyoxylaldehyde
@@ -2759,17 +2694,16 @@ hydroxide ion	draft	hydroxide
 hydroxychloroquine	draft	oxychlorochine
 hydroxycitronellal	draft	hydroxy citronellal
 hydroxyproline	draft	delta-hydroxyproline
-hydroxypropyl cellulose	draft	hydroxypropylcellulose
 hydroxypropyl cellulose	draft	hydroxypropylmethylcellulose phthalate
-ibandronic acid	draft	ibandronate
 ibuprofen	draft	ibuprophen
 imipramine	draft	melipramine
 indigo	draft	indigo dye
 indocyanine green	draft	cardio-green
 indocyanine green	draft	indocyanine
 inotuzumab ozogamicin	draft	inotuzumab
+insulin degludec	draft	insulina degludec
+insulin degludec	draft	insulinum degludecum
 irinotecan	draft	biotecan
-iron pentacarbonyl	draft	iron carbonyl
 iron pentacarbonyl	draft	pentacarbonyl iron
 isavuconazole	draft	isavuconazol
 isavuconazole	draft	isavuconazolum
@@ -2814,12 +2748,12 @@ lithium citrate hydrate	draft	lithium citrate tetrahydrate
 lithium citrate hydrate	draft	trilithium citrate tetrahydrate
 loxapine	draft	oxilapine
 lycopene	draft	all-trans-lycopene
+lysozyme	draft	c-type lysozyme
 madecassic acid	draft	brahmic acid
 magnesium acetate	draft	acetic acid magnesium salt
 magnesium acetate	draft	magnesium diacetate
 magnesium chlorate	draft	magnesium dichlorate
 magnesium chlorate	draft	magnesium perchlorite
-magnesium gluconate dihydrate	draft	magnesium gluconate
 magnesium gluconate dihydrate	draft	magnesium gluconate hydrate
 magnesium glycinate	draft	magnesium diglycinate
 magnesium hydroxide	draft	magnesium dihydroxide
@@ -2847,15 +2781,12 @@ methohexital	draft	methohexitone
 methotrexate	draft	amethopterin
 methyl cellulose	draft	cellulose methyl ether
 methyl cellulose	draft	methylated cellulose
-methyl cellulose	draft	methylcellulose
 methyl methacrylate	draft	methacrylic acid methyl ester
 methyl methacrylate	draft	methyl alpha-methylacrylate
 methyl methacrylate	draft	methyl ester of methacrylic acid
 methyl methacrylate	draft	methyl methylacrylate
-methyl methacrylate	draft	methylmethacrylate
 methyl nicotinate	draft	nicotinic acid methyl ester
 methyl perfluoroisobutyl ether	draft	methyl nonafluoroisobutyl ether
-methylcobalamin	draft	mecobalamin
 methyldopa	draft	methyldopa anhydrous
 methylergonovine	draft	methylergobasin
 methylergonovine	draft	methylergometrin
@@ -2869,7 +2800,6 @@ methylphenidate	draft	methyl phenidylacetate
 methylphenidate	draft	methylphenidan
 metirosine	draft	alpha-methyl-p-tyrosine
 metirosine	draft	alpha-methyl-para-tyrosine
-metirosine	draft	metyrosine
 metoclopramide	draft	metaclopromide
 metoclopramide	draft	methochlopramide
 metoclopramide	draft	metochlopramide
@@ -2889,13 +2819,11 @@ monothioglycerol	draft	alpha-thiolglycerol
 monothioglycerol	draft	monothioglycerin
 monothioglycerol	draft	thioglycerin
 monothioglycerol	draft	thioglycerine
-monothioglycerol	draft	thioglycerol
 morphine	draft	anhydrous morphine
 morphine	draft	morphium
 mycophenolate mofetil	draft	mycophenolic acid morpholinoethyl ester
 myristyl alcohol	draft	tetradecyl alcohol
 myristyl myristate	draft	tetradecyl myristate
-n-pentyl nitrite	draft	amyl nitrite
 n-pentyl nitrite	draft	n-amyl nitrite
 n-pentyl nitrite	draft	pentyl nitrite
 nafcillin	draft	naphcillin
@@ -2903,7 +2831,6 @@ nalmefene	draft	nalmetrene
 naloxone	draft	l-naloxone
 natalizumab	draft	natalizumab-sztn
 niacinamide	draft	beta-pyridinecarboxamide
-niacinamide	draft	niacin
 niacinamide	draft	nicotinamide
 niacinamide	draft	nicotinic acid amide
 niacinamide	draft	nicotinic amide
@@ -2916,7 +2843,6 @@ nitric oxide	draft	mononitrogen monoxide
 nitric oxide	draft	nitrogen monooxide
 nitric oxide	draft	nitrogen monoxide
 nitric oxide	draft	nitrogen oxide
-nitric oxide	draft	nitrogen protoxide
 nitric oxide	draft	nitroxide radical
 nitrite ion	draft	nitrite
 nitrite ion	draft	nitrite anion
@@ -2931,11 +2857,9 @@ nitrous oxide	draft	dinitrogen monoxide
 nitrous oxide	draft	hyponitrous acid anhydride
 nitrous oxide	draft	nitrious oxide
 nitrous oxide	draft	nitro
-nitrous oxide	draft	nitrogen protoxide
 nitrous oxide	draft	nitrous
 nonivamide	draft	hydroxymethoxybenzyl pelargonamide
 nonivamide	draft	pelargonyl vanillylamide
-norethisterone	draft	norethindrone
 nortriptyline	draft	demethylamitriptyline
 nortriptyline	draft	desmethylamitriptyline
 octafluoropropane	draft	perfluoropropane
@@ -2945,12 +2869,10 @@ octasulfur	draft	cyclooctasulfur
 octreotide	draft	octrotide
 oleyl oleate	draft	oleic acid oleyl ester
 orthoboric acid	draft	boracic acid
-orthoboric acid	draft	boric acid
 orthoboric acid	draft	o-boric acid
 orthosilicic acid	draft	monosilicic acid
 orthosilicic acid	draft	silicic acid
 orthosilicic acid	draft	silicon tetrahydroxide
-oseltamivir acid	draft	oseltamivir carboxylate
 oxycodone	draft	dihydrohydroxycodeinone
 oxycodone	draft	dihydroxycodeinone
 oxymetazoline	draft	oxymethazoline
@@ -2959,8 +2881,6 @@ p-anisaldehyde	draft	anisaldehyde
 p-anisaldehyde	draft	anise aldehyde
 p-anisaldehyde	draft	anisic aldehyde
 p-anisaldehyde	draft	para-anisaldehyde
-pamidronic acid	draft	pamidronate
-paracetamol	draft	acetaminophen
 paracetamol	draft	p-acetamidophenol
 paracetamol	draft	p-acetaminophenol
 paracetamol	draft	p-hydroxy-acetanilid
@@ -2972,8 +2892,6 @@ pentadecalactone	draft	muskalactone
 pentadecalactone	draft	pentadecanolactone
 pentaerythritol	draft	monopentaerythritol
 pentaerythritol	draft	neopentanetetrol
-pethidine	draft	meperidine
-petroleum jelly	draft	petrolatum
 petroleum jelly	draft	white petrolatum
 phenelzine	draft	phenelzine sulfate
 phenelzine	draft	phenethyl-hydrazine
@@ -3018,21 +2936,16 @@ piperonal	draft	piperonyl aldehyde
 piperonal	draft	piperonylaldehyde
 pitavastatin	draft	itavastatin
 pitolisant	draft	tiprolisant
-polycarbophil calcium	draft	calcium polycarbophil
-polydimethylsiloxane	draft	dimethicone
-polyethylene glycol	draft	polyethylene glycols
 polyethylene glycol	draft	polyethylene oxide
 polyethylene glycol	draft	polyoxyethylene
 potassium carbonate	draft	carbonate of potash
 potassium carbonate	draft	potash
-potassium cation	draft	potassium ion
 potassium cation	draft	potassium monocation
 potassium chloride	draft	chloride of potash
 potassium chloride	draft	monopotassium chloride
 potassium chloride	draft	muriate of potash
 potassium hydrogen carbonate	draft	monopotassium carbonate
 potassium hydrogen carbonate	draft	potassium acid carbonate
-potassium hydrogen carbonate	draft	potassium bicarbonate
 potassium hydroxide	draft	caustic potash
 potassium hydroxide	draft	potash lye
 potassium hydroxide	draft	potassium hydrate
@@ -3055,7 +2968,6 @@ prilocaine	draft	prilocaine base
 procaine	draft	novocaine
 progesterone	draft	progesterol
 propane	draft	n-propane
-propanthelinium	draft	propantheline
 proparacaine	draft	proparacaine hydrochloride
 proparacaine	draft	proxymetacaine hydrochloride
 propionic acid	draft	ethanecarboxylic acid
@@ -3072,7 +2984,6 @@ propylene oxide	draft	propene oxide
 propylparaben	draft	n-propyl paraben
 propylparaben	draft	propyl para-hydroxybenzoate
 propylparaben	draft	propyl paraben
-prostacyclin	draft	epoprostenol
 pyrantel	draft	pirantel
 pyrilamine	draft	mepiramine
 pyrilamine	draft	mepyramine maleate
@@ -3084,13 +2995,9 @@ quinidine	draft	beta-quinine
 quinidine	draft	conquinine
 quinidine	draft	quinidine hydrochloride
 quinine	draft	chinine
-rac-salbutamol	draft	albuterol
-rac-warfarin	draft	warfarin
 rasburicase	draft	uricase
 relebactam	draft	relebactam anhydrous
-resorcin	draft	resorcinol
 resveratrol	draft	trans-resveratrol
-rifampicin	draft	rifampin
 risedronic acid	draft	risedronate sodium
 rizatriptan	draft	risatriptan
 saccharin	draft	saccharimide
@@ -3100,7 +3007,6 @@ salicylic acid	draft	o-hydroxybenzoic acid
 saxagliptin	draft	saxagliptin anhydrous
 selenious acid	draft	selenous acid
 selenium disulfide	draft	selenium disulphide
-selenium disulfide	draft	selenium sulfide
 selenium disulfide	draft	selenium sulphide
 serratiopeptidase	draft	serrapeptase
 silanetriol	draft	methyltrihydroxysilane
@@ -3126,7 +3032,6 @@ sodium chloride	draft	sodium chloride salt
 sodium chlorite	draft	chlorite sodium
 sodium fluoride	draft	sodium monofluoride
 sodium hydroxide	draft	sodium hydrate
-sodium ion	draft	sodium cation
 sodium metabisulfite	draft	disodium pyrosulfite
 sodium metabisulfite	draft	sodium metabisulphite
 sodium metabisulfite	draft	sodium pyrosulfite
@@ -3134,7 +3039,6 @@ sodium metasilicate	draft	sodium polysilicate
 sodium metasilicate	draft	sodium sesquisilicate
 sodium metasilicate	draft	sodium silicate glass
 sodium metasilicate	draft	sodium siliconate
-sodium myristyl sulfate	draft	sodium tetradecyl sulfate
 sodium percarbonate	draft	sodium carbonate perhydrate
 sodium percarbonate	draft	sodium carbonate peroxide
 sodium percarbonate	draft	sodium carbonate peroxyhydrate
@@ -3193,7 +3097,6 @@ tert-butyl alcohol	draft	t-butyl alcohol
 tert-butyl alcohol	draft	tert-butanol
 tetracycline	draft	tetracyclines
 tetrahydrocannabinol	draft	dronabinolen
-theophylline monohydrate	draft	theophylline
 thiomersal	draft	thiomersalate
 thioridazine	draft	thioridazin
 thiosulfate ion	draft	sulfanidesulfonate
@@ -3205,10 +3108,8 @@ thyrotropin alfa	draft	thyrotrophin-alfa
 tiagabine	draft	tiagabine hydrochloride
 tobramycin	draft	nebramycin
 tocilizumab	draft	atlizumab
-tocofersolan	draft	tocophersolan
 tofacitinib	draft	tasocitinib
 tolmetin	draft	tolmetina
-torasemide	draft	torsemide
 trametinib	draft	trametinib dimethyl sulfoxide
 trandolapril	draft	indolapril
 tranexamic acid	draft	tranexmic acid
@@ -3223,14 +3124,12 @@ tri-N-butyl phosphate	draft	tributyl ester of phosphoric acid
 triacetin	draft	glycerin triacetate
 triamcinolone	draft	fluoxiprednisolone
 triamcinolone	draft	fluoxyprednisolone
-tribasic potassium phosphate	draft	potassium phosphate
 tribasic potassium phosphate	draft	tripotassium phosphate
 tribehenin	draft	glycerol tribehenate
 tribehenin	draft	glyceryl tribehenate
 tricaine	draft	metacaine
 tricalcium phosphate	draft	bone phosphate of lime
 tricalcium phosphate	draft	calcium orthophosphate
-tricalcium phosphate	draft	calcium phosphate
 tricalcium phosphate	draft	calcium phosphate tribasic
 tricalcium phosphate	draft	tertiary calcium phosphate
 tricalcium phosphate	draft	tribasic calcium phosphate
@@ -3241,21 +3140,18 @@ triethylenetetramine	draft	triethylene tetramine
 trifluoperazine	draft	trifluoperazine hydrochloride
 trifluridine	draft	trifluorothymidine
 trifluridine	draft	trifluorothymine deoxyriboside
-triiodothyronine	draft	liothyronine
 triiodothyronine	draft	liothyronine sodium
-trimagnesium dicitrate	draft	magnesium citrate
 trimagnesium dicitrate	draft	magnesium dicitrate
 trimagnesium dicitrate	draft	trimagnesium citrate
 trimethobenzamide	draft	trimethobenzamide hydrochloride
 trimipramine	draft	beta-methylimipramine
 trimyristin	draft	trimyristoylglycerol
+tripalmitin	draft	tripalmitoylglycerol
 triptorelin	draft	triptorelina
 triptorelin	draft	triptoreline
 triptorelin	draft	triptorelinum
-trolamine	draft	triethanolamine
 tromethamine	draft	trometamol
 ultramarine	draft	dark ultramarine blue
-ultramarine	draft	ultramarine blue
 undecane	draft	hendecane
 undecane	draft	n-undecane
 undecylenic acid	draft	omega-hendecenoic acid
@@ -3263,7 +3159,6 @@ undecylenic acid	draft	omega-undecenoic acid
 undecylenic acid	draft	undecelinic acid
 vanillin	draft	p-vanillin
 vanillin	draft	vanilla
-vidarabine monohydrate	draft	vidarabine
 vincristine	draft	kyocristine
 vincristine	draft	leurocristine
 vincristine	draft	leurocristine sulfate

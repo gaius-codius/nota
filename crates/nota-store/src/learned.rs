@@ -54,18 +54,23 @@ impl Verdict {
     }
 }
 
-/// The form spans and terms are matched in: lower case, with every run of
-/// characters other than letters, digits and apostrophes made one space,
-/// and none at either end. "GLP-1" and "glp 1" match; so do "Endside," and
-/// "endside".
+/// The form spans and terms are matched in: lower case, typographic
+/// apostrophes made plain ones, and every run of characters other than
+/// letters, digits and apostrophes made one space, with none at either
+/// end. "GLP-1" and "glp 1" match; so do "Endside," and "endside", and
+/// "Crohn’s" and "crohn's". Text with no letter or digit has an empty key.
+/// (Accents are compared as written: a letter with a combining accent
+/// doesn't match the same letter written as one character.)
 #[must_use]
 pub fn match_key(text: &str) -> String {
     // Lower case first: some capitals lower to a letter and a mark ("İ" to
     // "i" and a combining dot), and splitting after that keeps a key the
     // same when it's keyed again.
     text.to_lowercase()
+        .replace(['\u{2018}', '\u{2019}', '\u{02BC}'], "'")
         .split(|c: char| !(c.is_alphanumeric() || c == '\''))
-        .filter(|w| !w.is_empty())
+        // A word of apostrophes alone isn't a word.
+        .filter(|w| w.chars().any(char::is_alphanumeric))
         .collect::<Vec<_>>()
         .join(" ")
 }

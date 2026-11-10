@@ -8,9 +8,13 @@
 # and never AMT, SNOMED CT-AU, WHO ATC or full DrugBank, which can't be
 # redistributed. WHO INN names have no bulk file; the INNs here come through
 # RxNorm and Wikidata.
+#
+# Every row is a draft until it's reviewed, and a shipped pack offers only
+# reviewed rows: until then a session that chooses this pack is offered none
+# of its terms. Mark rows `reviewed` in the lists as they're checked.
 
 name = "pharmacy"
-version = "2026.11.1"
+version = "2026.11.2"
 language = "en"
 kind = "shipped"
 

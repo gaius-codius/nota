@@ -1,9 +1,10 @@
 //! `nota pack`: builds term packs ([`nota_store::packs`]) from text.
 //!
-//! - `nota pack build DIR --out FILE` builds a shipped pack from the
-//!   committed lists in `DIR`: its `pack.toml` (the manifest, and for each
-//!   source the lists it gives) and those lists. The lists are all it
-//!   reads, so the same lists give the same file.
+//! - `nota pack build DIR --out FILE` builds a pack (shipped, as a rule)
+//!   from the committed lists in `DIR`: its `pack.toml` (the manifest, and
+//!   for each source the lists it gives) and those lists, which must be
+//!   files in `DIR` itself. They're all it reads, so the same lists give
+//!   the same file from the same build of nota.
 //! - `nota pack glossary FILE --out FILE --author NAME` builds a user's own
 //!   pack from a plain-text glossary.
 //! - `nota pack notice FILE` writes a pack's credits to stdout, for a
@@ -12,7 +13,7 @@
 //! **`pack.toml`** holds `name`, `version`, `language` and `kind`
 //! (`shipped` or `own`), and one `[[source]]` table per source: `id`,
 //! `name`, `licence`, `attribution`, an optional `url`, and `lists`, the
-//! list files (relative to the directory) whose rows it gives.
+//! list files (by name, in the directory) whose rows it gives.
 //!
 //! **A list** is UTF-8 text, one row per line, fields split by tabs: a term
 //! and its review status (`reviewed` or `draft`) make a term row; a third
@@ -190,14 +191,15 @@ fn write(pack: &Pack, out: &Path) -> Result<(), String> {
 fn read_text(path: &Path) -> Result<String, String> {
     let name = path.display();
     let file = std::fs::File::open(path).map_err(|e| format!("{name}: {e}"))?;
-    let mut text = String::new();
+    let mut bytes = Vec::new();
     file.take(MAX_FILE + 1)
-        .read_to_string(&mut text)
+        .read_to_end(&mut bytes)
         .map_err(|e| format!("{name}: {e}"))?;
-    if text.len() as u64 > MAX_FILE {
+    // The size first: a cut at the limit may fall inside a character.
+    if bytes.len() as u64 > MAX_FILE {
         return Err(format!("{name}: over {MAX_FILE} bytes"));
     }
-    Ok(text)
+    String::from_utf8(bytes).map_err(|e| format!("{name}: not UTF-8: {e}"))
 }
 
 /// The shipped pack built from `dir`'s `pack.toml` and the lists it names.
@@ -214,6 +216,17 @@ pub(crate) fn build_dir(dir: &Path) -> Result<Pack, String> {
         aliases.extend(a);
     }
     Pack::new(manifest, terms, aliases).map_err(|e| format!("{}: {e}", dir.display()))
+}
+
+/// Whether `file` names a file in the pack's directory itself: one
+/// plain part, not absolute and not `..`, so a build reads only its own
+/// directory.
+fn is_plain_name(file: &str) -> bool {
+    let mut parts = Path::new(file).components();
+    matches!(
+        (parts.next(), parts.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    )
 }
 
 /// A manifest from `pack.toml`'s text, and each source's lists with the
@@ -246,6 +259,7 @@ fn parse_manifest(text: &str) -> Result<(Manifest, Vec<(Source, String)>), Strin
         for file in files {
             let file = file
                 .as_str()
+                .filter(|f| is_plain_name(f))
                 .ok_or_else(|| format!("source {:?}'s lists must be file names", source.id))?;
             lists.push((source.clone(), file.to_owned()));
         }

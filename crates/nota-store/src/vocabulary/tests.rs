@@ -107,12 +107,27 @@ fn a_sessions_packs_are_recorded_once() {
         store.record_session_packs(three, &[named("pharmacy", "1")]),
         Err(StoreError::NoSession(id)) if id == three
     ));
-    // One pack named twice is refused whole.
+    // A choice of no packs is a choice: it's recorded once too.
+    store.record_session_packs(TWO, &[]).unwrap();
     assert!(matches!(
-        store.record_session_packs(TWO, &[named("a", "1"), named("a", "2")]),
-        Err(StoreError::Sqlite(_))
+        store.record_session_packs(TWO, &[named("pharmacy", "1")]),
+        Err(StoreError::PacksRecorded(id)) if id == TWO
     ));
     assert!(store.session_packs(TWO).unwrap().is_empty());
+    store
+        .create_session(&new_session(SessionId::new(4)))
+        .unwrap();
+    let four = SessionId::new(4);
+    // One pack named twice is refused whole.
+    assert!(matches!(
+        store.record_session_packs(four, &[named("a", "1"), named("a", "2")]),
+        Err(StoreError::Sqlite(_))
+    ));
+    assert!(store.session_packs(four).unwrap().is_empty());
+    // Refused whole: the choice wasn't recorded either, so it can be made.
+    store
+        .record_session_packs(four, &[named("a", "1")])
+        .unwrap();
 }
 
 /// The record of a session's packs is never changed by SQL either.
@@ -130,6 +145,12 @@ fn a_sessions_packs_are_never_changed() {
         "DELETE FROM session_pack",
         "INSERT OR REPLACE INTO session_pack VALUES (1, 0, 'pharmacy', '2')",
         "INSERT INTO session_pack VALUES (1, 0, 'other', '1')",
+        // A replace by rowid would take session 1's row for session 2.
+        "INSERT OR REPLACE INTO session_pack (rowid, session_id, position, name, version) \
+         VALUES (1, 2, 0, 'x', '1')",
+        "UPDATE session_packs_chosen SET session_id = 2",
+        "DELETE FROM session_packs_chosen",
+        "INSERT OR REPLACE INTO session_packs_chosen VALUES (1)",
     ] {
         assert!(refused(&conn, sql), "{sql} was allowed");
     }

@@ -5,6 +5,9 @@ extend-exclude = [
   "*.png",
   "Cargo.lock",
   "LICENSE-*",
+  # Fetched lists of names, spelled as their sources spell them.
+  "packs/pharmacy/rxnorm.tsv",
+  "packs/pharmacy/wikidata.tsv",
 ]
 
 # Real words typos doesn't know. Add specialist terms here when a test fixture
@@ -15,10 +18,3 @@ caf = "caf"  # Core Audio Format, in scripts/check-files.sh
 flate = "flate"
 ratatui = "ratatui"
 writeable = "writeable"
-# Names in the pharmacy pack's source lists (packs/pharmacy/), spelled as
-# their sources spell them: a chelator (DOTA), a bacterium (B. infantis), a
-# dye (brillant blue) and a citral isomer (neral).
-dota = "dota"
-infantis = "infantis"
-brillant = "brillant"
-neral = "neral"

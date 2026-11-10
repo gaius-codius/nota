@@ -11,7 +11,9 @@
 //! [`Pack::new`] is the one way to make a [`Pack`], and it checks every
 //! rule below, so a pack that exists is a valid one; [`Pack::open`] reads a
 //! file through the same checks, so a file edited or damaged outside nota
-//! is refused rather than half read.
+//! is refused rather than half read. A file whose tables aren't the
+//! format's own (a view in place of one, say) is refused before any row is
+//! read from it.
 //!
 //! **What is offered.** From a [`PackKind::Shipped`] pack, only `reviewed`
 //! rows: a term none of whose rows is reviewed isn't offered, nor is a
@@ -48,8 +50,9 @@ const APPLICATION_ID: i32 = 0x6e6f_7461;
 const PAGE_SIZE: i64 = 4096;
 
 /// The most term and alias rows a pack holds, together. Far above any real
-/// pack (the pharmacy pack has a few thousand), and a bound on what
-/// reading a file from outside can cost.
+/// pack (the pharmacy pack has a few thousand). Reading a file from outside
+/// stops at this many rows in each table, before the rows are checked; past
+/// that, what reading costs is bounded by the file's size.
 pub const MAX_ROWS: usize = 1_000_000;
 
 /// The longest name, version, language, term, alias, source id or licence,
@@ -425,7 +428,7 @@ impl Pack {
         terms: Vec<TermRow>,
         aliases: Vec<AliasRow>,
     ) -> Result<Self, PackError> {
-        if terms.len().saturating_add(aliases.len()) > MAX_ROWS {
+        if too_many(terms.len(), aliases.len(), MAX_ROWS) {
             return Err(PackError::TooManyRows);
         }
         check_manifest(&mut manifest)?;
@@ -506,6 +509,7 @@ impl Pack {
         for row in self.aliases.iter().filter(|r| counts(r.review)) {
             if let Some(entry) = by_term.get_mut(row.term.as_str()) {
                 entry.aliases.push(row.alias.clone());
+                entry.sources.push(row.source.clone());
                 entry.reviewed &= row.review == Review::Reviewed;
             }
         }
@@ -530,6 +534,10 @@ impl Pack {
     /// [`PackError::PathNotUtf8`] if `out` isn't UTF-8, and
     /// [`PackError::Sqlite`] if SQLite fails, including when `out` is a
     /// file that isn't empty. A failure may leave a partial file at `out`.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the pack is built in memory, then written once to `out` by VACUUM INTO, which refuses a file that holds anything"
+    )]
     pub fn write(&self, out: &Path) -> Result<(), PackError> {
         let out = out.to_str().ok_or(PackError::PathNotUtf8)?;
         let mut conn = Connection::open_in_memory()?;
@@ -602,6 +610,7 @@ impl Pack {
         if format != FORMAT {
             return Err(PackError::UnknownFormat(format));
         }
+        check_schema(&conn)?;
         let manifest = read_manifest(&conn)?;
         let terms = read_rows(
             &conn,
@@ -644,6 +653,11 @@ impl Pack {
         .collect::<Result<Vec<_>, PackError>>()?;
         Self::new(manifest, terms, aliases)
     }
+}
+
+/// Whether `terms` and `aliases` rows together are more than `max`.
+const fn too_many(terms: usize, aliases: usize, max: usize) -> bool {
+    terms.saturating_add(aliases) > max
 }
 
 /// Checks the manifest's fields and sources, and sorts the sources by id.
@@ -793,18 +807,67 @@ fn read_manifest(conn: &Connection) -> Result<Manifest, PackError> {
     })
 }
 
+/// The tables a pack's rows are read from.
+const TABLES: [&str; 4] = ["alias", "manifest", "source", "term"];
+
+/// Checks that the file's four tables are the format's own, as [`SCHEMA`]
+/// makes them, before anything is read from them. A file from outside
+/// could make one a view, or give it generated columns, and so run any
+/// SQL, as long as it liked, at the first read; this refuses such a file
+/// before it's read. (Tables it doesn't know are left alone: nothing reads
+/// them.) Schema code from the file is also kept from calling functions
+/// that aren't safe in a schema (`trusted_schema`).
+#[expect(
+    clippy::disallowed_methods,
+    reason = "an empty in-memory database to compare the schema with; it writes no file"
+)]
+fn check_schema(conn: &Connection) -> Result<(), PackError> {
+    conn.pragma_update(None, "trusted_schema", false)?;
+    let expected = Connection::open_in_memory()?;
+    expected.execute_batch(SCHEMA)?;
+    let found = schema_of(conn)?;
+    if found != schema_of(&expected)? {
+        return Err(PackError::Corrupt(
+            "its tables aren't the pack format's".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// The type and SQL of each of [`TABLES`] in `conn`'s schema, in name
+/// order; a table that's missing is missing from the list.
+fn schema_of(conn: &Connection) -> Result<Vec<(String, String, Option<String>)>, PackError> {
+    let mut stmt = conn.prepare(
+        "SELECT name, type, sql FROM sqlite_schema \
+         WHERE name IN (?1, ?2, ?3, ?4) ORDER BY name",
+    )?;
+    let rows = stmt
+        .query_map(TABLES, |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 /// The rows `sql` selects, at most [`MAX_ROWS`] of them.
 fn read_rows<T>(
     conn: &Connection,
     sql: &str,
     map: impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
 ) -> Result<Vec<T>, PackError> {
-    let limit = i64::try_from(MAX_ROWS)
-        .unwrap_or(i64::MAX)
-        .saturating_add(1);
+    read_at_most(conn, sql, MAX_ROWS, map)
+}
+
+/// The rows `sql` selects, refused as [`PackError::TooManyRows`] if there
+/// are more than `max`.
+fn read_at_most<T>(
+    conn: &Connection,
+    sql: &str,
+    max: usize,
+    map: impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+) -> Result<Vec<T>, PackError> {
+    let limit = i64::try_from(max).unwrap_or(i64::MAX).saturating_add(1);
     let mut stmt = conn.prepare(&format!("{sql} LIMIT {limit}"))?;
     let rows = stmt.query_map([], map)?.collect::<Result<Vec<_>, _>>()?;
-    if rows.len() > MAX_ROWS {
+    if rows.len() > max {
         return Err(PackError::TooManyRows);
     }
     Ok(rows)

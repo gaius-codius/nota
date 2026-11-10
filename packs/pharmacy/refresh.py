@@ -21,10 +21,15 @@ tuned on any recording: letters, spaces, hyphens and apostrophes only, 3 to
 are kept, which drops most brand names and codes, and only those that share
 a run of five letters with the label (spelling variants such as
 "metamfetamine"), which drops street names ("ice") and unrelated synonyms:
-an alias is an exact match, so it must not name another thing.
+an alias is an exact match, so it must not name another thing. For the
+same reason an alias that is itself a term of the pack, or that two labels
+share, is dropped, and a Wikidata label that differs from an RxNorm name
+only in case takes RxNorm's spelling.
 
-Every row is a draft until someone reviews it: change REVIEW below (or edit
-a row) once a source's rows are reviewed.
+Every new row is a draft until someone reviews it. A row already in a list
+keeps the status it has there, so a review made by editing rows survives a
+refresh; REVIEW below gives the status of new rows. After a refresh, give
+pack.toml a new version: a session tells packs apart by name and version.
 """
 
 import json
@@ -46,7 +51,7 @@ SELECT ?rxcui ?label (GROUP_CONCAT(DISTINCT ?alias; separator="|") AS ?aliases) 
 } GROUP BY ?rxcui ?label
 """
 
-# Each source's review status for the rows it gives.
+# Each source's review status for the new rows it gives.
 REVIEW = {"rxnorm": "draft", "wikidata": "draft"}
 
 NAME = re.compile(r"^[A-Za-z][A-Za-z' -]{1,38}[A-Za-z]$")
@@ -74,21 +79,47 @@ def drug_name(name):
     return bool(NAME.match(name)) and not NOT_DRUGS.search(name) and "  " not in name
 
 
+def statuses(name):
+    """The status of each row already in the list `name`, by its term and
+    alias (None for a term row)."""
+    path = HERE / name
+    if not path.exists():
+        return {}
+    found = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        fields = line.split("\t")
+        alias = fields[2] if len(fields) > 2 else None
+        found[(fields[0], alias)] = fields[1]
+    return found
+
+
+def hand_terms():
+    """The terms of the hand-written spoken-forms list."""
+    return {key[0] for key in statuses("spoken-forms.tsv")}
+
+
 def main():
     rx = fetch(RXNAV)["minConceptGroup"]["minConcept"]
     ingredients = {c["rxcui"]: c["name"] for c in rx if drug_name(c["name"])}
-    rx_rows = sorted({(name, REVIEW["rxnorm"]) for name in ingredients.values()})
+    rx_kept = statuses("rxnorm.tsv")
+    rx_names = sorted(set(ingredients.values()))
+    rx_rows = [(name, rx_kept.get((name, None), REVIEW["rxnorm"])) for name in rx_names]
+    rx_by_case = {name.lower(): name for name in rx_names}
 
     body = urllib.parse.urlencode({"query": QUERY}).encode()
     wd = fetch(WDQS, body, "application/sparql-results+json")["results"]["bindings"]
-    wd_terms, wd_aliases = set(), set()
+    wd_kept = statuses("wikidata.tsv")
+    labels, alias_of = set(), {}
     for b in wd:
         if b["rxcui"]["value"] not in ingredients:
             continue
         label = b["label"]["value"]
         if not drug_name(label):
             continue
-        wd_terms.add((label, REVIEW["wikidata"]))
+        label = rx_by_case.get(label.lower(), label)
+        labels.add(label)
         for alias in b.get("aliases", {}).get("value", "").split("|"):
             if (
                 alias.lower() != label.lower()
@@ -96,15 +127,24 @@ def main():
                 and not NOT_DRUGS.search(alias)
                 and related(alias, label)
             ):
-                wd_aliases.add((label, REVIEW["wikidata"], alias))
+                alias_of.setdefault(alias, set()).add(label)
+    terms = {t.lower() for t in labels | set(rx_names) | hand_terms()}
+    wd_terms = sorted((label, wd_kept.get((label, None), REVIEW["wikidata"])) for label in labels)
+    wd_aliases = sorted(
+        (label, wd_kept.get((label, alias), REVIEW["wikidata"]), alias)
+        for alias, of in alias_of.items()
+        if len(of) == 1 and alias.lower() not in terms
+        for label in of
+    )
 
     write("rxnorm.tsv", "RxNorm prescribable ingredient names, " + RXNAV, rx_rows)
     write(
         "wikidata.tsv",
         "Wikidata labels and lower-case aliases of items with an RxNorm id above, " + WDQS,
-        sorted(wd_terms) + sorted(wd_aliases),
+        wd_terms + wd_aliases,
     )
     print(f"rxnorm: {len(rx_rows)} terms; wikidata: {len(wd_terms)} terms, {len(wd_aliases)} aliases")
+    print("Now give pack.toml a new version.")
 
 
 def write(name, what, rows):

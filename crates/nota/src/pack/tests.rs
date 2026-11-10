@@ -21,7 +21,7 @@ impl TestDir {
 
     /// Writes `text` to the file `name` in the directory.
     #[expect(clippy::disallowed_methods, reason = "test scaffolding")]
-    fn file(&self, name: &str, text: &str) -> PathBuf {
+    fn file(&self, name: &str, text: impl AsRef<[u8]>) -> PathBuf {
         let path = self.0.join(name);
         std::fs::write(&path, text).unwrap();
         path
@@ -209,6 +209,49 @@ lists = ["open.tsv"]
     );
 }
 
+/// A list named by a path that leaves the pack's directory is refused
+/// before anything is read.
+#[test]
+fn a_list_outside_the_packs_directory_is_refused() {
+    let dir = TestDir::new("build-outside");
+    for list in ["../open.tsv", "/etc/hostname", "sub/open.tsv", ".", ""] {
+        dir.file(
+            "pack.toml",
+            format!(
+                r#"
+name = "test"
+version = "1"
+language = "en"
+kind = "shipped"
+
+[[source]]
+id = "open"
+name = "An open list"
+licence = "CC0-1.0"
+attribution = "From an open list."
+lists = ["{list}"]
+"#
+            ),
+        );
+        let err = build_dir(&dir.0).unwrap_err();
+        assert!(err.contains("must be file names"), "{list}: {err}");
+    }
+}
+
+/// A file over the size limit is refused as too big, even when the limit
+/// falls inside a character.
+#[test]
+fn a_file_over_the_limit_is_refused_as_too_big() {
+    let dir = TestDir::new("big");
+    let limit = usize::try_from(MAX_FILE).unwrap();
+    let path = dir.file("big.txt", format!("{}é", "a".repeat(limit)));
+    let err = read_text(&path).unwrap_err();
+    assert!(err.ends_with(&format!("over {MAX_FILE} bytes")), "{err}");
+    let path = dir.file("bad.txt", b"a\xff");
+    let err = read_text(&path).unwrap_err();
+    assert!(err.contains("not UTF-8"), "{err}");
+}
+
 /// A source with no licence fails the build, so a row can't be built
 /// without one.
 #[test]
@@ -351,8 +394,33 @@ fn the_pharmacy_pack_builds_the_same_bytes_twice() {
         run(&command, &mut Vec::new()).unwrap();
     }
     assert_eq!(bytes(&a), bytes(&b));
+    // The lists' rows in another order give the same bytes too.
+    let reversed = TestDir::new("pharmacy-reversed");
+    for entry in std::fs::read_dir(pharmacy_dir()).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_str().unwrap().to_owned();
+        let text = std::fs::read_to_string(&path).unwrap();
+        if path.extension().is_some_and(|e| e == "tsv") {
+            let mut lines: Vec<_> = text.lines().collect();
+            lines.reverse();
+            reversed.file(&name, lines.join("\n"));
+        } else if name == "pack.toml" {
+            reversed.file(&name, &text);
+        }
+    }
+    let c = dir.0.join("c.pack");
+    let command = PackCommand::Build {
+        dir: reversed.0.clone(),
+        out: c.clone(),
+    };
+    run(&command, &mut Vec::new()).unwrap();
+    assert_eq!(bytes(&a), bytes(&c));
     let pack = Pack::open(&a).unwrap();
     assert_eq!(pack.manifest().name, "pharmacy");
+    // Every row is a draft until it's reviewed, so the pack offers nothing
+    // yet; this changes, on purpose, with the first reviewed rows.
+    assert!(!pack.terms().is_empty());
+    assert_eq!(pack.offered().len(), 0);
     let notice = pack.manifest().notice();
     for source in &pack.manifest().sources {
         assert!(notice.contains(&source.attribution), "{}", source.id);
@@ -366,19 +434,36 @@ fn the_pharmacy_pack_builds_the_same_bytes_twice() {
 }
 
 proptest! {
-    /// Any text gives a glossary pack or a refusal, never a panic; a pack
-    /// it gives has exactly the lines' first fields as its terms.
+    /// Any text of letters, spaces, tabs, line breaks and `#` builds a
+    /// glossary pack whose terms are exactly the lines' first fields.
     #[test]
-    fn any_glossary_text_builds_or_is_refused(text in "[a-c #\t\n\u{7}]{0,60}") {
-        if let Ok(pack) = glossary(&text, &about()) {
-            let want: BTreeSet<String> = text
-                .lines()
-                .filter(|l| !l.trim_start().starts_with('#'))
-                .filter_map(|l| l.split('\t').map(str::trim).find(|f| !f.is_empty()))
-                .map(str::to_owned)
-                .collect();
-            let got: BTreeSet<String> = pack.terms().iter().map(|r| r.term.clone()).collect();
-            prop_assert_eq!(got, want);
-        }
+    fn any_glossary_text_builds(text in "[a-c #\t\n]{0,60}") {
+        let pack = glossary(&text, &about());
+        prop_assert!(pack.is_ok(), "{:?}", pack);
+        let want: BTreeSet<String> = text
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .filter_map(|l| l.split('\t').map(str::trim).find(|f| !f.is_empty()))
+            .map(str::to_owned)
+            .collect();
+        let got: BTreeSet<String> = pack
+            .iter()
+            .flat_map(Pack::terms)
+            .map(|r| r.term.clone())
+            .collect();
+        prop_assert_eq!(got, want);
+    }
+
+    /// A control character in any term or alias is refused, wherever it
+    /// falls in the field.
+    #[test]
+    fn a_control_character_in_a_field_is_refused(
+        before in "[a-c]{0,4}",
+        after in "[a-c]{0,4}",
+        in_alias: bool,
+    ) {
+        let field = format!("{before}\u{7}{after}");
+        let text = if in_alias { format!("term\t{field}\n") } else { format!("{field}\n") };
+        prop_assert!(glossary(&text, &about()).is_err(), "{:?}", text);
     }
 }
