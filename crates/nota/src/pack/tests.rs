@@ -399,13 +399,15 @@ fn the_pharmacy_pack_builds_the_same_bytes_twice() {
     for entry in std::fs::read_dir(pharmacy_dir()).unwrap() {
         let path = entry.unwrap().path();
         let name = path.file_name().unwrap().to_str().unwrap().to_owned();
-        let text = std::fs::read_to_string(&path).unwrap();
+        // Only the lists and the manifest: the directory also holds the
+        // scripts, and whatever running them leaves behind.
         if path.extension().is_some_and(|e| e == "tsv") {
+            let text = std::fs::read_to_string(&path).unwrap();
             let mut lines: Vec<_> = text.lines().collect();
             lines.reverse();
             reversed.file(&name, lines.join("\n"));
         } else if name == "pack.toml" {
-            reversed.file(&name, &text);
+            reversed.file(&name, std::fs::read_to_string(&path).unwrap());
         }
     }
     let c = dir.0.join("c.pack");
