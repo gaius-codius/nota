@@ -112,6 +112,50 @@ fn candidates_are_numbered_from_one_in_order() {
     assert_eq!(numbered, [(1, "amlodipine"), (2, "ibuprofen")]);
 }
 
+/// A candidate and a question give back the text they were made with,
+/// and a missing fact or previous chunk reads as missing.
+#[test]
+fn the_text_given_is_the_text_read() {
+    let with = Candidate::new(
+        "amylo diping".to_owned(),
+        "amlodipine".to_owned(),
+        Some("calcium channel blocker".to_owned()),
+    )
+    .unwrap();
+    assert_eq!(
+        (with.heard(), with.term(), with.fact()),
+        (
+            "amylo diping",
+            "amlodipine",
+            Some("calcium channel blocker")
+        )
+    );
+    assert_eq!(amlodipine().fact(), None);
+
+    let q = Question::new(
+        Some("Good morning.".to_owned()),
+        "Start amylo diping.".to_owned(),
+        vec![with],
+    )
+    .unwrap();
+    assert_eq!(q.previous(), Some("Good morning."));
+    assert_eq!(q.current(), "Start amylo diping.");
+    assert!(!q.is_empty());
+    assert_eq!(question(1).previous(), None);
+}
+
+/// A candidate's number is written as the number itself, as the prompt
+/// shows it.
+#[test]
+fn a_candidate_number_is_written_as_itself() {
+    let numbers: Vec<String> = question(12)
+        .candidates()
+        .map(|(no, _)| no.to_string())
+        .collect();
+    assert_eq!(numbers.first().map(String::as_str), Some("1"));
+    assert_eq!(numbers.last().map(String::as_str), Some("12"));
+}
+
 /// Decisions are made only with one per candidate.
 #[test]
 fn decisions_need_one_per_candidate() {

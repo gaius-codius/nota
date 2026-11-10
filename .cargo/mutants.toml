@@ -52,6 +52,9 @@ exclude_globs = [
 # move the line here too.
 #
 # Some mutants change nothing nota does:
+# - Question::is_empty is always false: a question is built with at least
+#   one candidate and has no way to lose one. It's there because
+#   Question::len is public.
 # - EngineSupervisor::shutdown takes the supervisor, and dropping it stops
 #   it the same way (its Drop calls the same stop), so an empty shutdown
 #   still stops it.
@@ -84,5 +87,6 @@ exclude_re = [
   "replace EngineSupervisor::shutdown with \\(\\)$",
   "replace Supervisor::next_deadline -> Option<SessionTime> with Some\\(Default::default\\(\\)\\)$",
   "replace <impl Source for Runs<'_>>::len_hint -> Option<usize> with None$",
+  "replace Question::is_empty -> bool with false$",
   "replace match guard end\\.is_none_or\\(\\|end\\| end == chunk\\.range\\(\\)\\.start\\(\\)\\) with true in Replay::sent_run_end$",
 ]
