@@ -11,6 +11,9 @@ extend-exclude = [
   # Mis-heard terms from the research bench ("anormal", "ACI"), which C1 is
   # tested on; the file is generated (the bench's fixtures/export.py).
   "crates/nota-checks/tests/fixtures/c1_pairs.json",
+  # Words from wordfreq's list ("thar") and invented mis-hearings, which C4
+  # is tested on; the file is generated (the bench's fixtures/c4_invented.py).
+  "crates/nota-checks/tests/fixtures/c4_invented.json",
 ]
 
 # Real words typos doesn't know. Add specialist terms here when a test fixture
