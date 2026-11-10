@@ -20,7 +20,7 @@
 //!   launcher that ties itself and then becomes the server
 //!   ([`ServerConfig::launcher`], normally `nota engine llama-server`; see
 //!   [`crate::lifeline`]). The kernel kills it when the thread that started
-//!   it ends, so servers are started by a thread of their own ([`Spawner`])
+//!   it ends, so servers are started by a thread of their own (`Spawner`)
 //!   that outlives them.
 //!
 //! Every wait here is bounded and watches `stop`, at least every [`POLL`].

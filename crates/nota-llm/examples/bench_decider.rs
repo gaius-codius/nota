@@ -90,8 +90,11 @@ fn text(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_owned)
 }
 
+/// The bench's answer on each candidate: `None` where its reply failed.
+type BenchAnswers = Vec<Option<bool>>;
+
 /// One entry of the questions file: the question, and the bench's answers.
-fn entry(value: &Value) -> Result<(Question, Vec<Option<bool>>), Box<dyn Error>> {
+fn entry(value: &Value) -> Result<(Question, BenchAnswers), Box<dyn Error>> {
     let candidates = value["candidates"]
         .as_array()
         .ok_or("no candidates")?

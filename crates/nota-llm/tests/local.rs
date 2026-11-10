@@ -2,6 +2,8 @@
 //! (`nota-fake-llama-server`): answers, restarts, giving up, and stopping,
 //! with every server it starts accounted for.
 
+#![cfg(test)]
+
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -246,13 +248,13 @@ fn a_server_killed_mid_question_is_restarted_and_asked_again() {
     };
     let mut decider = Fixture::decider(fixture.config());
     let decisions = decider.decide(&question(2), &go_on).unwrap();
-    let killed = killer.join().unwrap();
+    let victim = killer.join().unwrap();
     assert_eq!(answers(&decisions), [Answer::Yes, Answer::No]);
     let starts: Vec<u32> = fixture.starts().into_iter().map(|(pid, _)| pid).collect();
     assert_eq!(starts.len(), 2, "{starts:?}");
-    assert_eq!(starts[0], killed);
-    assert_eq!(fixture.requests(), [killed, starts[1]]);
-    assert!(!exists(killed), "the killed server wasn't reaped");
+    assert_eq!(starts[0], victim);
+    assert_eq!(fixture.requests(), [victim, starts[1]]);
+    assert!(!exists(victim), "the killed server wasn't reaped");
 }
 
 /// A server that keeps dying on the question is restarted as many times
