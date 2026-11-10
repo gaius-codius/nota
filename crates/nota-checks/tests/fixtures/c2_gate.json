@@ -1,5 +1,5 @@
 {
- "about": "C2, the candidate gate, on bench fixes: each distinct fix from the bench's 16 fix runs whose heard span, replacement and every offered window and term are at most 32 characters and 4 words, gated alone. `chunk` is the heard span where the bench found it, or empty where it didn't (invented: the workshop's text never is). `offered` is every candidate offered for the fix's chunk, in order. `decision` is gate U's (regate.py), `sim` is C1's score at full precision (null where the span wasn't found) and `result` the chunk with an accepted fix placed. `runs` names the fix runs that proposed it. Written by the research bench's fixtures/export.py; don't edit by hand.",
+ "about": "C2, the candidate gate, on bench fixes: each distinct fix from the bench's 16 fix runs whose heard span, replacement and every offered window and term are at most 32 characters and 4 words, gated alone. `chunk` is the heard span where the bench found it, or empty where it didn't (invented: the workshop's text never is). `offered` is every candidate offered for the fix's chunk, in order. `decision` is gate U's (regate.py), with no offered term ever inside the replacement where it found none; `via` is the candidate that let an accepted fix through (null otherwise); `sim` is C1's score at full precision (null where the span wasn't found) and `result` the chunk with an accepted fix placed. `runs` names the fix runs that proposed it. Written by the research bench's fixtures/export.py; don't edit by hand.",
  "fixes": [
   {
    "chunk": "",
@@ -12,7 +12,8 @@
     "q9-fx-both",
     "q9-fx-gloss"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "",
@@ -24,7 +25,8 @@
    "runs": [
     "c-fx-both"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "",
@@ -47,7 +49,8 @@
     "t-fx-gloss",
     "t-fx-lookup"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "",
@@ -63,7 +66,8 @@
     "q9-fx-none",
     "t-fx-gloss"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "",
@@ -77,7 +81,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "",
@@ -92,7 +97,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "",
@@ -111,7 +117,8 @@
     "q5-fx-lookup-nofacts",
     "t-fx-lookup"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "",
@@ -132,7 +139,8 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "",
@@ -148,7 +156,8 @@
     "q9-fx-none",
     "t-fx-lookup"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "",
@@ -160,7 +169,8 @@
    "runs": [
     "c-fx-gloss"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "",
@@ -172,7 +182,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "",
@@ -192,7 +203,8 @@
     "t-fx-gloss",
     "t-fx-lookup"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "",
@@ -221,7 +233,8 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "",
@@ -238,7 +251,8 @@
    "runs": [
     "q9-fx-both"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "",
@@ -250,7 +264,8 @@
    "runs": [
     "q9-fx-gloss"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "",
@@ -262,7 +277,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "",
@@ -277,7 +293,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "",
@@ -291,7 +308,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "",
@@ -305,7 +323,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "",
@@ -334,7 +353,8 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "",
@@ -359,7 +379,8 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "",
@@ -385,7 +406,8 @@
     "q5-fx-both",
     "t-fx-both"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "",
@@ -419,7 +441,8 @@
     "q5-fx-lookup",
     "t-fx-lookup"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "",
@@ -441,7 +464,8 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "",
@@ -453,7 +477,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "",
@@ -467,7 +492,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "",
@@ -479,7 +505,8 @@
    "runs": [
     "q4-fx-none"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "",
@@ -493,7 +520,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "",
@@ -520,7 +548,8 @@
     "q5-fx-both",
     "t-fx-both"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "",
@@ -549,7 +578,8 @@
     "q5-fx-lookup-nofacts",
     "t-fx-lookup"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "",
@@ -571,7 +601,8 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "",
@@ -583,7 +614,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "",
@@ -612,7 +644,8 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": null
+   "sim": null,
+   "via": null
   },
   {
    "chunk": "50 meters",
@@ -624,7 +657,8 @@
    "runs": [
     "q4-fx-none"
    ],
-   "sim": 0.875
+   "sim": 0.875,
+   "via": null
   },
   {
    "chunk": "7067-year-old",
@@ -653,7 +687,8 @@
    "runs": [
     "q9-fx-both"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "7067-year-old",
@@ -682,7 +717,8 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "7067-year-old",
@@ -699,7 +735,8 @@
     "q9-fx-none",
     "t-fx-gloss"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "ACI",
@@ -733,7 +770,8 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.8571428571428571
+   "sim": 0.8571428571428571,
+   "via": null
   },
   {
    "chunk": "ACI",
@@ -745,7 +783,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": 0.8571428571428571
+   "sim": 0.8571428571428571,
+   "via": null
   },
   {
    "chunk": "ACI",
@@ -762,7 +801,8 @@
    "runs": [
     "q9-fx-both"
    ],
-   "sim": 0.8571428571428571
+   "sim": 0.8571428571428571,
+   "via": null
   },
   {
    "chunk": "ACI",
@@ -774,7 +814,8 @@
    "runs": [
     "q9-fx-gloss"
    ],
-   "sim": 0.8571428571428571
+   "sim": 0.8571428571428571,
+   "via": null
   },
   {
    "chunk": "Administering work",
@@ -788,7 +829,8 @@
     "q9-fx-gloss",
     "q9-fx-none"
    ],
-   "sim": 0.6
+   "sim": 0.6,
+   "via": null
   },
   {
    "chunk": "CPD",
@@ -804,7 +846,8 @@
     "q9-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 0.8571428571428571
+   "sim": 0.8571428571428571,
+   "via": null
   },
   {
    "chunk": "Continue almen's like normal",
@@ -818,7 +861,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 0.8076923076923077
+   "sim": 0.8076923076923077,
+   "via": null
   },
   {
    "chunk": "Continue almen's",
@@ -835,7 +879,8 @@
    "runs": [
     "q9-fx-both"
    ],
-   "sim": 0.7741935483870968
+   "sim": 0.7741935483870968,
+   "via": null
   },
   {
    "chunk": "DED",
@@ -857,7 +902,8 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.8
+   "sim": 0.8,
+   "via": null
   },
   {
    "chunk": "DED",
@@ -877,7 +923,8 @@
     "t-fx-gloss",
     "t-fx-lookup"
    ],
-   "sim": 0.8
+   "sim": 0.8,
+   "via": null
   },
   {
    "chunk": "DLP one",
@@ -898,7 +945,8 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "DLP one",
@@ -911,7 +959,8 @@
     "q9-fx-both",
     "q9-fx-gloss"
    ],
-   "sim": 0.6666666666666666
+   "sim": 0.6666666666666666,
+   "via": null
   },
   {
    "chunk": "DLP one",
@@ -923,7 +972,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": 0.6666666666666666
+   "sim": 0.6666666666666666,
+   "via": null
   },
   {
    "chunk": "DLP one",
@@ -944,7 +994,8 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": 0.8333333333333334
+   "sim": 0.8333333333333334,
+   "via": null
   },
   {
    "chunk": "DLP one",
@@ -966,7 +1017,8 @@
     "t-fx-gloss",
     "t-fx-lookup"
    ],
-   "sim": 0.8333333333333334
+   "sim": 0.8333333333333334,
+   "via": null
   },
   {
    "chunk": "DVT",
@@ -980,7 +1032,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "GLP 1",
@@ -993,7 +1046,8 @@
     "q9-fx-gloss",
     "q9-fx-none"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "GP, the usual GP.",
@@ -1019,7 +1073,8 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "Hinailer",
@@ -1045,7 +1100,11 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.8
+   "sim": 0.8,
+   "via": {
+    "term": "inhaler",
+    "window": "Hinailer"
+   }
   },
   {
    "chunk": "Hinailer",
@@ -1067,7 +1126,11 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.8
+   "sim": 0.8,
+   "via": {
+    "term": "inhaler",
+    "window": "Hinailer"
+   }
   },
   {
    "chunk": "Hinailer",
@@ -1084,7 +1147,8 @@
     "q9-fx-none",
     "t-fx-gloss"
    ],
-   "sim": 0.8
+   "sim": 0.8,
+   "via": null
   },
   {
    "chunk": "I don't know",
@@ -1100,7 +1164,8 @@
     "q5-fx-lookup-nofacts",
     "t-fx-lookup"
    ],
-   "sim": 0.35294117647058826
+   "sim": 0.35294117647058826,
+   "via": null
   },
   {
    "chunk": "I don't know",
@@ -1117,7 +1182,8 @@
     "t-fx-both",
     "t-fx-gloss"
    ],
-   "sim": 0.4
+   "sim": 0.4,
+   "via": null
   },
   {
    "chunk": "I don't know",
@@ -1135,7 +1201,8 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.125
+   "sim": 0.125,
+   "via": null
   },
   {
    "chunk": "I normally are stable",
@@ -1147,7 +1214,8 @@
    "runs": [
     "q4-fx-none"
    ],
-   "sim": 0.9142857142857143
+   "sim": 0.9142857142857143,
+   "via": null
   },
   {
    "chunk": "I will it's definitely",
@@ -1160,7 +1228,8 @@
     "c-fx-both",
     "c-fx-gloss"
    ],
-   "sim": 0.8387096774193549
+   "sim": 0.8387096774193549,
+   "via": null
   },
   {
    "chunk": "I will it's definitely",
@@ -1175,7 +1244,8 @@
     "q5-fx-lookup-nofacts",
     "t-fx-lookup"
    ],
-   "sim": 0.9411764705882353
+   "sim": 0.9411764705882353,
+   "via": null
   },
   {
    "chunk": "I will it's definitely",
@@ -1191,7 +1261,8 @@
     "t-fx-both",
     "t-fx-gloss"
    ],
-   "sim": 0.8387096774193549
+   "sim": 0.8387096774193549,
+   "via": null
   },
   {
    "chunk": "I2 diagnosis",
@@ -1207,7 +1278,8 @@
     "t-fx-both",
     "t-fx-gloss"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "I2 diagnosis",
@@ -1222,7 +1294,8 @@
     "q5-fx-lookup-nofacts",
     "t-fx-lookup"
    ],
-   "sim": 0.8695652173913043
+   "sim": 0.8695652173913043,
+   "via": null
   },
   {
    "chunk": "I2",
@@ -1239,7 +1312,8 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 0.4
+   "sim": 0.4,
+   "via": null
   },
   {
    "chunk": "I2",
@@ -1256,7 +1330,8 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": 0.2222222222222222
+   "sim": 0.2222222222222222,
+   "via": null
   },
   {
    "chunk": "Inhale and increase",
@@ -1268,7 +1343,8 @@
    "runs": [
     "q4-fx-none"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "Inhale and increase",
@@ -1281,7 +1357,8 @@
     "q9-fx-gloss",
     "q9-fx-none"
    ],
-   "sim": 0.9444444444444444
+   "sim": 0.9444444444444444,
+   "via": null
   },
   {
    "chunk": "Inhale and increase",
@@ -1295,7 +1372,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 0.5641025641025641
+   "sim": 0.5641025641025641,
+   "via": null
   },
   {
    "chunk": "Inhale",
@@ -1320,7 +1398,8 @@
    "runs": [
     "q9-fx-both"
    ],
-   "sim": 0.9230769230769231
+   "sim": 0.9230769230769231,
+   "via": null
   },
   {
    "chunk": "Inhale",
@@ -1349,7 +1428,11 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.9230769230769231
+   "sim": 0.9230769230769231,
+   "via": {
+    "term": "inhaler",
+    "window": "Inhale"
+   }
   },
   {
    "chunk": "Inhale",
@@ -1387,7 +1470,11 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.9230769230769231
+   "sim": 0.9230769230769231,
+   "via": {
+    "term": "inhaler",
+    "window": "Inhale"
+   }
   },
   {
    "chunk": "Maybe as two is",
@@ -1408,7 +1495,8 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "Medicine satisfy evidence",
@@ -1420,7 +1508,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": 0.8888888888888888
+   "sim": 0.8888888888888888,
+   "via": null
   },
   {
    "chunk": "Medicine satisfy evidence",
@@ -1444,7 +1533,8 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.9166666666666666
+   "sim": 0.9166666666666666,
+   "via": null
   },
   {
    "chunk": "Medicine satisfy evidence",
@@ -1460,7 +1550,8 @@
     "q9-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 0.9166666666666666
+   "sim": 0.9166666666666666,
+   "via": null
   },
   {
    "chunk": "NSAIDs",
@@ -1494,7 +1585,11 @@
     "q5-fx-both",
     "t-fx-both"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": {
+    "term": "NSAID",
+    "window": "NSAIDs"
+   }
   },
   {
    "chunk": "Narancos",
@@ -1520,7 +1615,11 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.8
+   "sim": 0.8,
+   "via": {
+    "term": "Naranjo",
+    "window": "Narancos"
+   }
   },
   {
    "chunk": "Narancos",
@@ -1538,7 +1637,11 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.8
+   "sim": 0.8,
+   "via": {
+    "term": "Naranjo",
+    "window": "Narancos"
+   }
   },
   {
    "chunk": "Narancos",
@@ -1555,7 +1658,8 @@
     "q9-fx-none",
     "t-fx-gloss"
    ],
-   "sim": 0.8
+   "sim": 0.8,
+   "via": null
   },
   {
    "chunk": "Owner",
@@ -1567,7 +1671,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "Owner",
@@ -1580,7 +1685,8 @@
     "q9-fx-both",
     "q9-fx-gloss"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "Present",
@@ -1606,7 +1712,11 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.75
+   "sim": 0.75,
+   "via": {
+    "term": "preventer",
+    "window": "Present So"
+   }
   },
   {
    "chunk": "Taxi drivers",
@@ -1618,7 +1728,8 @@
    "runs": [
     "q9-fx-gloss"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "Taxi drivers",
@@ -1639,7 +1750,8 @@
    "runs": [
     "q9-fx-both"
    ],
-   "sim": 0.3333333333333333
+   "sim": 0.3333333333333333,
+   "via": null
   },
   {
    "chunk": "Unavailable",
@@ -1651,7 +1763,8 @@
    "runs": [
     "q9-fx-gloss"
    ],
-   "sim": 0.4444444444444444
+   "sim": 0.4444444444444444,
+   "via": null
   },
   {
    "chunk": "Unavailable",
@@ -1663,7 +1776,8 @@
    "runs": [
     "q5-fx-gloss"
    ],
-   "sim": 0.8
+   "sim": 0.8,
+   "via": null
   },
   {
    "chunk": "Unavailable",
@@ -1677,7 +1791,8 @@
     "q4-fx-none",
     "t-fx-gloss"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "a couple of squares",
@@ -1693,7 +1808,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "after one",
@@ -1719,7 +1835,8 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.5555555555555556
+   "sim": 0.5555555555555556,
+   "via": null
   },
   {
    "chunk": "again a",
@@ -1740,7 +1857,8 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": 0.6
+   "sim": 0.6,
+   "via": null
   },
   {
    "chunk": "again a",
@@ -1761,7 +1879,8 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 0.9230769230769231
+   "sim": 0.9230769230769231,
+   "via": null
   },
   {
    "chunk": "again a",
@@ -1782,7 +1901,8 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": 0.6666666666666666
+   "sim": 0.6666666666666666,
+   "via": null
   },
   {
    "chunk": "again a",
@@ -1803,7 +1923,8 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 0.9090909090909091
+   "sim": 0.9090909090909091,
+   "via": null
   },
   {
    "chunk": "almen's",
@@ -1820,7 +1941,8 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 0.35294117647058826
+   "sim": 0.35294117647058826,
+   "via": null
   },
   {
    "chunk": "almen's",
@@ -1833,7 +1955,8 @@
     "q9-fx-gloss",
     "q9-fx-none"
    ],
-   "sim": 0.7692307692307693
+   "sim": 0.7692307692307693,
+   "via": null
   },
   {
    "chunk": "almen's",
@@ -1854,7 +1977,8 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.375
+   "sim": 0.375,
+   "via": null
   },
   {
    "chunk": "almen's",
@@ -1871,7 +1995,8 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": 0.375
+   "sim": 0.375,
+   "via": null
   },
   {
    "chunk": "almen's",
@@ -1888,7 +2013,8 @@
    "runs": [
     "q9-fx-both"
    ],
-   "sim": 0.5333333333333333
+   "sim": 0.5333333333333333,
+   "via": null
   },
   {
    "chunk": "amylo diping",
@@ -1922,7 +2048,11 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.8571428571428571
+   "sim": 0.8571428571428571,
+   "via": {
+    "term": "amlodipine",
+    "window": "amylo diping"
+   }
   },
   {
    "chunk": "amylo diping",
@@ -1960,7 +2090,11 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.8571428571428571
+   "sim": 0.8571428571428571,
+   "via": {
+    "term": "amlodipine",
+    "window": "amylo diping"
+   }
   },
   {
    "chunk": "amylo diping",
@@ -1998,7 +2132,11 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.8571428571428571
+   "sim": 0.8571428571428571,
+   "via": {
+    "term": "amlodipine",
+    "window": "amylo diping"
+   }
   },
   {
    "chunk": "amylo diping",
@@ -2028,7 +2166,11 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.8571428571428571
+   "sim": 0.8571428571428571,
+   "via": {
+    "term": "amlodipine",
+    "window": "amylo diping"
+   }
   },
   {
    "chunk": "amylo diping",
@@ -2044,7 +2186,8 @@
     "q9-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 0.8571428571428571
+   "sim": 0.8571428571428571,
+   "via": null
   },
   {
    "chunk": "amylo diping",
@@ -2056,7 +2199,8 @@
    "runs": [
     "q9-fx-gloss"
    ],
-   "sim": 0.5
+   "sim": 0.5,
+   "via": null
   },
   {
    "chunk": "amylo diping",
@@ -2068,7 +2212,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": 0.6363636363636364
+   "sim": 0.6363636363636364,
+   "via": null
   },
   {
    "chunk": "amylo diping",
@@ -2082,7 +2227,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 0.3
+   "sim": 0.3,
+   "via": null
   },
   {
    "chunk": "amylo edema",
@@ -2111,7 +2257,11 @@
    "runs": [
     "q9-fx-both"
    ],
-   "sim": 0.6923076923076923
+   "sim": 0.6923076923076923,
+   "via": {
+    "term": "oedema",
+    "window": "edema"
+   }
   },
   {
    "chunk": "amylo edema",
@@ -2123,7 +2273,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": 0.9090909090909091
+   "sim": 0.9090909090909091,
+   "via": null
   },
   {
    "chunk": "amylo edema",
@@ -2135,7 +2286,8 @@
    "runs": [
     "q9-fx-gloss"
    ],
-   "sim": 0.8695652173913043
+   "sim": 0.8695652173913043,
+   "via": null
   },
   {
    "chunk": "amylo edema",
@@ -2147,7 +2299,8 @@
    "runs": [
     "q4-fx-none"
    ],
-   "sim": 0.64
+   "sim": 0.64,
+   "via": null
   },
   {
    "chunk": "amylo edema",
@@ -2179,7 +2332,11 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.7619047619047619
+   "sim": 0.7619047619047619,
+   "via": {
+    "term": "oedema",
+    "window": "edema"
+   }
   },
   {
    "chunk": "amylo edema",
@@ -2209,7 +2366,11 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.7619047619047619
+   "sim": 0.7619047619047619,
+   "via": {
+    "term": "oedema",
+    "window": "edema"
+   }
   },
   {
    "chunk": "amylo edema",
@@ -2223,7 +2384,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 0.64
+   "sim": 0.64,
+   "via": null
   },
   {
    "chunk": "amylo edema",
@@ -2252,7 +2414,11 @@
    "runs": [
     "q5-fx-lookup-nofacts"
    ],
-   "sim": 0.75
+   "sim": 0.75,
+   "via": {
+    "term": "oedema",
+    "window": "edema"
+   }
   },
   {
    "chunk": "amyloidipin",
@@ -2290,7 +2456,11 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.8571428571428571
+   "sim": 0.8571428571428571,
+   "via": {
+    "term": "amlodipine",
+    "window": "amyloidipin"
+   }
   },
   {
    "chunk": "amyloidipin",
@@ -2320,7 +2490,11 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.8571428571428571
+   "sim": 0.8571428571428571,
+   "via": {
+    "term": "amlodipine",
+    "window": "amyloidipin"
+   }
   },
   {
    "chunk": "amyloidipin",
@@ -2337,7 +2511,8 @@
     "q9-fx-none",
     "t-fx-gloss"
    ],
-   "sim": 0.8571428571428571
+   "sim": 0.8571428571428571,
+   "via": null
   },
   {
    "chunk": "and again",
@@ -2370,7 +2545,8 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "anemia case",
@@ -2389,7 +2565,8 @@
     "q9-fx-both",
     "t-fx-both"
    ],
-   "sim": 0.9523809523809523
+   "sim": 0.9523809523809523,
+   "via": null
   },
   {
    "chunk": "anemia case",
@@ -2410,7 +2587,8 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": 0.9523809523809523
+   "sim": 0.9523809523809523,
+   "via": null
   },
   {
    "chunk": "anemia case",
@@ -2422,7 +2600,8 @@
    "runs": [
     "q5-fx-gloss"
    ],
-   "sim": 0.9523809523809523
+   "sim": 0.9523809523809523,
+   "via": null
   },
   {
    "chunk": "anemia case",
@@ -2434,7 +2613,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": 0.9523809523809523
+   "sim": 0.9523809523809523,
+   "via": null
   },
   {
    "chunk": "anemia case",
@@ -2451,7 +2631,8 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": 0.75
+   "sim": 0.75,
+   "via": null
   },
   {
    "chunk": "anemia case",
@@ -2469,7 +2650,8 @@
     "q5-fx-both",
     "t-fx-both"
    ],
-   "sim": 0.75
+   "sim": 0.75,
+   "via": null
   },
   {
    "chunk": "anemia case",
@@ -2484,7 +2666,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 0.75
+   "sim": 0.75,
+   "via": null
   },
   {
    "chunk": "anemia risk",
@@ -2503,7 +2686,8 @@
     "q5-fx-both",
     "t-fx-both"
    ],
-   "sim": 0.9523809523809523
+   "sim": 0.9523809523809523,
+   "via": null
   },
   {
    "chunk": "anemia",
@@ -2519,7 +2703,8 @@
     "q9-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 0.5
+   "sim": 0.5,
+   "via": null
   },
   {
    "chunk": "ankle swelling",
@@ -2552,7 +2737,11 @@
    "runs": [
     "q9-fx-both"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": {
+    "term": "ankle swelling",
+    "window": "only ankle swelling"
+   }
   },
   {
    "chunk": "ankle swelling",
@@ -2585,7 +2774,8 @@
    "runs": [
     "q5-fx-both"
    ],
-   "sim": 0.36363636363636365
+   "sim": 0.36363636363636365,
+   "via": null
   },
   {
    "chunk": "ankyl edema",
@@ -2614,7 +2804,8 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 0.9
+   "sim": 0.9,
+   "via": null
   },
   {
    "chunk": "ankyl edema",
@@ -2627,7 +2818,8 @@
     "q4-fx-none",
     "q9-fx-none"
    ],
-   "sim": 0.9
+   "sim": 0.9,
+   "via": null
   },
   {
    "chunk": "ankyl edema",
@@ -2639,7 +2831,8 @@
    "runs": [
     "q9-fx-gloss"
    ],
-   "sim": 0.8571428571428571
+   "sim": 0.8571428571428571,
+   "via": null
   },
   {
    "chunk": "ankyl",
@@ -2672,7 +2865,8 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.8
+   "sim": 0.8,
+   "via": null
   },
   {
    "chunk": "ankyl",
@@ -2701,7 +2895,8 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": 0.8
+   "sim": 0.8,
+   "via": null
   },
   {
    "chunk": "ankyl",
@@ -2730,7 +2925,8 @@
    "runs": [
     "q5-fx-lookup-nofacts"
    ],
-   "sim": 0.7142857142857143
+   "sim": 0.7142857142857143,
+   "via": null
   },
   {
    "chunk": "ankyl",
@@ -2744,7 +2940,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 0.42105263157894735
+   "sim": 0.42105263157894735,
+   "via": null
   },
   {
    "chunk": "anormal",
@@ -2766,7 +2963,8 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.9333333333333333
+   "sim": 0.9333333333333333,
+   "via": null
   },
   {
    "chunk": "anormal",
@@ -2786,7 +2984,8 @@
     "t-fx-gloss",
     "t-fx-lookup"
    ],
-   "sim": 0.9333333333333333
+   "sim": 0.9333333333333333,
+   "via": null
   },
   {
    "chunk": "are gonna",
@@ -2815,7 +3014,8 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "are not gonna",
@@ -2844,7 +3044,8 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "as two is",
@@ -2865,7 +3066,8 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "as two is",
@@ -2882,7 +3084,8 @@
    "runs": [
     "q5-fx-both"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "as two is",
@@ -2894,7 +3097,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": 0.6666666666666666
+   "sim": 0.6666666666666666,
+   "via": null
   },
   {
    "chunk": "as two",
@@ -2911,7 +3115,8 @@
    "runs": [
     "t-fx-both"
    ],
-   "sim": 0.5454545454545454
+   "sim": 0.5454545454545454,
+   "via": null
   },
   {
    "chunk": "as two",
@@ -2925,7 +3130,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 0.5454545454545454
+   "sim": 0.5454545454545454,
+   "via": null
   },
   {
    "chunk": "asis",
@@ -2937,7 +3143,8 @@
    "runs": [
     "q9-fx-gloss"
    ],
-   "sim": 0.36363636363636365
+   "sim": 0.36363636363636365,
+   "via": null
   },
   {
    "chunk": "asis",
@@ -2958,7 +3165,8 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": 0.4
+   "sim": 0.4,
+   "via": null
   },
   {
    "chunk": "asis",
@@ -2977,7 +3185,8 @@
     "q9-fx-both",
     "t-fx-both"
    ],
-   "sim": 0.4
+   "sim": 0.4,
+   "via": null
   },
   {
    "chunk": "asis",
@@ -2989,7 +3198,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": 0.4
+   "sim": 0.4,
+   "via": null
   },
   {
    "chunk": "asis",
@@ -3010,7 +3220,8 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 0.4
+   "sim": 0.4,
+   "via": null
   },
   {
    "chunk": "asis",
@@ -3024,7 +3235,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 0.4
+   "sim": 0.4,
+   "via": null
   },
   {
    "chunk": "atropastatin",
@@ -3058,7 +3270,11 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.8333333333333334
+   "sim": 0.8333333333333334,
+   "via": {
+    "term": "atorvastatin",
+    "window": "atropastatin"
+   }
   },
   {
    "chunk": "atropastatin",
@@ -3084,7 +3300,11 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.8333333333333334
+   "sim": 0.8333333333333334,
+   "via": {
+    "term": "atorvastatin",
+    "window": "atropastatin"
+   }
   },
   {
    "chunk": "atropastatin",
@@ -3101,7 +3321,8 @@
     "q9-fx-none",
     "t-fx-gloss"
    ],
-   "sim": 0.8333333333333334
+   "sim": 0.8333333333333334,
+   "via": null
   },
   {
    "chunk": "baricus veins",
@@ -3129,7 +3350,11 @@
     "q9-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.8
+   "sim": 0.8,
+   "via": {
+    "term": "varicose veins",
+    "window": "baricus veins"
+   }
   },
   {
    "chunk": "baricus",
@@ -3141,7 +3366,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": 0.6666666666666666
+   "sim": 0.6666666666666666,
+   "via": null
   },
   {
    "chunk": "better reading all day",
@@ -3164,7 +3390,8 @@
     "q5-fx-both",
     "t-fx-both"
    ],
-   "sim": 0.7741935483870968
+   "sim": 0.7741935483870968,
+   "via": null
   },
   {
    "chunk": "better reading all day",
@@ -3179,7 +3406,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 0.7741935483870968
+   "sim": 0.7741935483870968,
+   "via": null
   },
   {
    "chunk": "better reading all day",
@@ -3191,7 +3419,8 @@
    "runs": [
     "q4-fx-none"
    ],
-   "sim": 0.8205128205128205
+   "sim": 0.8205128205128205,
+   "via": null
   },
   {
    "chunk": "better reading",
@@ -3220,7 +3449,8 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 0.7407407407407407
+   "sim": 0.7407407407407407,
+   "via": null
   },
   {
    "chunk": "blood pressure is",
@@ -3245,7 +3475,11 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": {
+    "term": "blood pressure",
+    "window": "blood pressure is"
+   }
   },
   {
    "chunk": "blood pressure is",
@@ -3262,7 +3496,11 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": {
+    "term": "blood pressure",
+    "window": "blood pressure is"
+   }
   },
   {
    "chunk": "blood pressure",
@@ -3287,7 +3525,11 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": {
+    "term": "blood pressure",
+    "window": "blood pressure is"
+   }
   },
   {
    "chunk": "bloody pine",
@@ -3316,7 +3558,11 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": 0.7
+   "sim": 0.7,
+   "via": {
+    "term": "amlodipine",
+    "window": "a bloody pine"
+   }
   },
   {
    "chunk": "bloody pine",
@@ -3339,7 +3585,11 @@
     "q9-fx-both",
     "t-fx-both"
    ],
-   "sim": 0.7
+   "sim": 0.7,
+   "via": {
+    "term": "amlodipine",
+    "window": "a bloody pine"
+   }
   },
   {
    "chunk": "bloody pine",
@@ -3368,7 +3618,8 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 0.6086956521739131
+   "sim": 0.6086956521739131,
+   "via": null
   },
   {
    "chunk": "bloody pine",
@@ -3391,7 +3642,8 @@
     "q5-fx-lookup-nofacts",
     "t-fx-lookup"
    ],
-   "sim": 0.6086956521739131
+   "sim": 0.6086956521739131,
+   "via": null
   },
   {
    "chunk": "bloody pine",
@@ -3408,7 +3660,8 @@
     "q9-fx-none",
     "t-fx-gloss"
    ],
-   "sim": 0.6086956521739131
+   "sim": 0.6086956521739131,
+   "via": null
   },
   {
    "chunk": "breadliness",
@@ -3446,7 +3699,11 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.72
+   "sim": 0.72,
+   "via": {
+    "term": "breathlessness",
+    "window": "breadliness"
+   }
   },
   {
    "chunk": "breadliness",
@@ -3484,7 +3741,11 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.72
+   "sim": 0.72,
+   "via": {
+    "term": "breathlessness",
+    "window": "breadliness"
+   }
   },
   {
    "chunk": "breadliness",
@@ -3501,7 +3762,8 @@
     "q9-fx-none",
     "t-fx-gloss"
    ],
-   "sim": 0.72
+   "sim": 0.72,
+   "via": null
   },
   {
    "chunk": "breadness",
@@ -3539,7 +3801,11 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.6956521739130435
+   "sim": 0.6956521739130435,
+   "via": {
+    "term": "breathlessness",
+    "window": "breadness"
+   }
   },
   {
    "chunk": "breadness",
@@ -3577,7 +3843,11 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.6956521739130435
+   "sim": 0.6956521739130435,
+   "via": {
+    "term": "breathlessness",
+    "window": "breadness"
+   }
   },
   {
    "chunk": "breadness",
@@ -3592,7 +3862,8 @@
     "q9-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 0.6956521739130435
+   "sim": 0.6956521739130435,
+   "via": null
   },
   {
    "chunk": "breadness",
@@ -3605,7 +3876,8 @@
     "q4-fx-none",
     "q9-fx-none"
    ],
-   "sim": 0.8888888888888888
+   "sim": 0.8888888888888888,
+   "via": null
   },
   {
    "chunk": "cardiovascular one",
@@ -3617,7 +3889,8 @@
    "runs": [
     "q4-fx-none"
    ],
-   "sim": 0.7894736842105263
+   "sim": 0.7894736842105263,
+   "via": null
   },
   {
    "chunk": "care plan",
@@ -3630,7 +3903,8 @@
     "c-fx-gloss",
     "q4-fx-none"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "challenge point",
@@ -3645,7 +3919,8 @@
     "q5-fx-lookup-nofacts",
     "t-fx-lookup"
    ],
-   "sim": 0.5714285714285714
+   "sim": 0.5714285714285714,
+   "via": null
   },
   {
    "chunk": "challenge point",
@@ -3662,7 +3937,8 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": 0.9333333333333333
+   "sim": 0.9333333333333333,
+   "via": null
   },
   {
    "chunk": "challenge point",
@@ -3678,7 +3954,8 @@
     "t-fx-both",
     "t-fx-gloss"
    ],
-   "sim": 0.9333333333333333
+   "sim": 0.9333333333333333,
+   "via": null
   },
   {
    "chunk": "change in",
@@ -3700,7 +3977,8 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "chronic condition programs",
@@ -3715,7 +3993,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 0.7441860465116279
+   "sim": 0.7441860465116279,
+   "via": null
   },
   {
    "chunk": "chronic conditions",
@@ -3741,7 +4020,8 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "chronic conditions",
@@ -3764,7 +4044,8 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "chronic conditions",
@@ -3776,7 +4057,8 @@
    "runs": [
     "c-fx-gloss"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "chronic conditions",
@@ -3800,7 +4082,8 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.5945945945945946
+   "sim": 0.5945945945945946,
+   "via": null
   },
   {
    "chunk": "cite",
@@ -3812,7 +4095,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "confuser",
@@ -3830,7 +4114,8 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.9333333333333333
+   "sim": 0.9333333333333333,
+   "via": null
   },
   {
    "chunk": "confuser",
@@ -3848,7 +4133,8 @@
     "q5-fx-both",
     "t-fx-both"
    ],
-   "sim": 0.9333333333333333
+   "sim": 0.9333333333333333,
+   "via": null
   },
   {
    "chunk": "confuser",
@@ -3862,7 +4148,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 0.9333333333333333
+   "sim": 0.9333333333333333,
+   "via": null
   },
   {
    "chunk": "confuser",
@@ -3874,7 +4161,8 @@
    "runs": [
     "q4-fx-none"
    ],
-   "sim": 0.875
+   "sim": 0.875,
+   "via": null
   },
   {
    "chunk": "confuser",
@@ -3891,7 +4179,8 @@
    "runs": [
     "q9-fx-both"
    ],
-   "sim": 0.7058823529411765
+   "sim": 0.7058823529411765,
+   "via": null
   },
   {
    "chunk": "confuser",
@@ -3904,7 +4193,8 @@
     "q9-fx-gloss",
     "q9-fx-none"
    ],
-   "sim": 0.7058823529411765
+   "sim": 0.7058823529411765,
+   "via": null
   },
   {
    "chunk": "console there",
@@ -3921,7 +4211,8 @@
    "runs": [
     "q9-fx-both"
    ],
-   "sim": 0.8333333333333334
+   "sim": 0.8333333333333334,
+   "via": null
   },
   {
    "chunk": "console there",
@@ -3934,7 +4225,8 @@
     "q9-fx-gloss",
     "q9-fx-none"
    ],
-   "sim": 0.8333333333333334
+   "sim": 0.8333333333333334,
+   "via": null
   },
   {
    "chunk": "console",
@@ -3956,7 +4248,8 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.7142857142857143
+   "sim": 0.7142857142857143,
+   "via": null
   },
   {
    "chunk": "console",
@@ -3974,7 +4267,8 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.7142857142857143
+   "sim": 0.7142857142857143,
+   "via": null
   },
   {
    "chunk": "console",
@@ -3989,7 +4283,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 0.7142857142857143
+   "sim": 0.7142857142857143,
+   "via": null
   },
   {
    "chunk": "console",
@@ -4001,7 +4296,8 @@
    "runs": [
     "q4-fx-none"
    ],
-   "sim": 0.5263157894736842
+   "sim": 0.5263157894736842,
+   "via": null
   },
   {
    "chunk": "control",
@@ -4021,7 +4317,8 @@
     "t-fx-gloss",
     "t-fx-lookup"
    ],
-   "sim": 0.46153846153846156
+   "sim": 0.46153846153846156,
+   "via": null
   },
   {
    "chunk": "could be confuser",
@@ -4040,7 +4337,8 @@
     "q5-fx-lookup-nofacts",
     "t-fx-lookup"
    ],
-   "sim": 0.9333333333333333
+   "sim": 0.9333333333333333,
+   "via": null
   },
   {
    "chunk": "couple more",
@@ -4052,7 +4350,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": 0.8
+   "sim": 0.8,
+   "via": null
   },
   {
    "chunk": "couple more",
@@ -4069,7 +4368,8 @@
    "runs": [
     "q9-fx-both"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "couple of squares",
@@ -4082,7 +4382,8 @@
     "q9-fx-gloss",
     "q9-fx-none"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "decondition",
@@ -4103,7 +4404,8 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.88
+   "sim": 0.88,
+   "via": null
   },
   {
    "chunk": "decondition",
@@ -4122,7 +4424,8 @@
     "q9-fx-none",
     "t-fx-gloss"
    ],
-   "sim": 0.88
+   "sim": 0.88,
+   "via": null
   },
   {
    "chunk": "did not anormal this",
@@ -4136,7 +4439,8 @@
     "q9-fx-gloss",
     "q9-fx-none"
    ],
-   "sim": 0.7428571428571429
+   "sim": 0.7428571428571429,
+   "via": null
   },
   {
    "chunk": "discharge",
@@ -4151,7 +4455,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "during the full month",
@@ -4166,7 +4471,8 @@
     "q5-fx-lookup-nofacts",
     "t-fx-lookup"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "edema",
@@ -4180,7 +4486,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 0.36363636363636365
+   "sim": 0.36363636363636365,
+   "via": null
   },
   {
    "chunk": "edema",
@@ -4192,7 +4499,8 @@
    "runs": [
     "q4-fx-none"
    ],
-   "sim": 0.25
+   "sim": 0.25,
+   "via": null
   },
   {
    "chunk": "edema",
@@ -4211,7 +4519,8 @@
     "q5-fx-lookup-nofacts",
     "t-fx-lookup"
    ],
-   "sim": 0.3333333333333333
+   "sim": 0.3333333333333333,
+   "via": null
   },
   {
    "chunk": "edema",
@@ -4232,7 +4541,8 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 0.16666666666666666
+   "sim": 0.16666666666666666,
+   "via": null
   },
   {
    "chunk": "edema",
@@ -4253,7 +4563,11 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": 0.9090909090909091
+   "sim": 0.9090909090909091,
+   "via": {
+    "term": "oedema",
+    "window": "edema"
+   }
   },
   {
    "chunk": "edema",
@@ -4276,7 +4590,11 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.9090909090909091
+   "sim": 0.9090909090909091,
+   "via": {
+    "term": "oedema",
+    "window": "edema"
+   }
   },
   {
    "chunk": "edema",
@@ -4290,7 +4608,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 0.9090909090909091
+   "sim": 0.9090909090909091,
+   "via": null
   },
   {
    "chunk": "electoral levels",
@@ -4312,7 +4631,8 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.8125
+   "sim": 0.8125,
+   "via": null
   },
   {
    "chunk": "electoral levels",
@@ -4328,7 +4648,8 @@
     "q9-fx-none",
     "t-fx-gloss"
    ],
-   "sim": 0.8125
+   "sim": 0.8125,
+   "via": null
   },
   {
    "chunk": "electoral",
@@ -4362,7 +4683,8 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.7
+   "sim": 0.7,
+   "via": null
   },
   {
    "chunk": "electoral",
@@ -4374,7 +4696,8 @@
    "runs": [
     "q4-fx-none"
    ],
-   "sim": 0.7
+   "sim": 0.7,
+   "via": null
   },
   {
    "chunk": "endside",
@@ -4412,7 +4735,8 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.6666666666666666
+   "sim": 0.6666666666666666,
+   "via": null
   },
   {
    "chunk": "endside",
@@ -4428,7 +4752,8 @@
     "q9-fx-none",
     "t-fx-gloss"
    ],
-   "sim": 0.6666666666666666
+   "sim": 0.6666666666666666,
+   "via": null
   },
   {
    "chunk": "endside",
@@ -4465,7 +4790,8 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.5882352941176471
+   "sim": 0.5882352941176471,
+   "via": null
   },
   {
    "chunk": "endside",
@@ -4498,7 +4824,8 @@
    "runs": [
     "q5-fx-lookup-nofacts"
    ],
-   "sim": 0.8571428571428571
+   "sim": 0.8571428571428571,
+   "via": null
   },
   {
    "chunk": "endside",
@@ -4510,7 +4837,8 @@
    "runs": [
     "q9-fx-gloss"
    ],
-   "sim": 0.35294117647058826
+   "sim": 0.35294117647058826,
+   "via": null
   },
   {
    "chunk": "especially something going on",
@@ -4522,7 +4850,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": 0.9454545454545454
+   "sim": 0.9454545454545454,
+   "via": null
   },
   {
    "chunk": "extension",
@@ -4547,7 +4876,8 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 0.7058823529411765
+   "sim": 0.7058823529411765,
+   "via": null
   },
   {
    "chunk": "extension",
@@ -4566,7 +4896,8 @@
     "q5-fx-lookup-nofacts",
     "t-fx-lookup"
    ],
-   "sim": 0.7058823529411765
+   "sim": 0.7058823529411765,
+   "via": null
   },
   {
    "chunk": "extension",
@@ -4583,7 +4914,8 @@
     "q9-fx-none",
     "t-fx-gloss"
    ],
-   "sim": 0.7058823529411765
+   "sim": 0.7058823529411765,
+   "via": null
   },
   {
    "chunk": "extension",
@@ -4608,7 +4940,8 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": 0.36363636363636365
+   "sim": 0.36363636363636365,
+   "via": null
   },
   {
    "chunk": "extension",
@@ -4627,7 +4960,8 @@
     "q9-fx-both",
     "t-fx-both"
    ],
-   "sim": 0.36363636363636365
+   "sim": 0.36363636363636365,
+   "via": null
   },
   {
    "chunk": "filtration rate",
@@ -4640,7 +4974,8 @@
     "q9-fx-both",
     "q9-fx-gloss"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "fluid overload",
@@ -4677,7 +5012,8 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": 0.4
+   "sim": 0.4,
+   "via": null
   },
   {
    "chunk": "full blood test",
@@ -4690,7 +5026,8 @@
     "q9-fx-gloss",
     "q9-fx-none"
    ],
-   "sim": 0.7407407407407407
+   "sim": 0.7407407407407407,
+   "via": null
   },
   {
    "chunk": "generate this in",
@@ -4715,7 +5052,8 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": 0.896551724137931
+   "sim": 0.896551724137931,
+   "via": null
   },
   {
    "chunk": "generate this in",
@@ -4740,7 +5078,8 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "get another GP",
@@ -4753,7 +5092,8 @@
     "q4-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "glycata hemoglobin",
@@ -4779,7 +5119,11 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.8888888888888888
+   "sim": 0.8888888888888888,
+   "via": {
+    "term": "glycated haemoglobin",
+    "window": "glycata hemoglobin"
+   }
   },
   {
    "chunk": "glycata hemoglobin",
@@ -4801,7 +5145,11 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.8888888888888888
+   "sim": 0.8888888888888888,
+   "via": {
+    "term": "glycated haemoglobin",
+    "window": "glycata hemoglobin"
+   }
   },
   {
    "chunk": "glycata hemoglobin",
@@ -4816,7 +5164,8 @@
     "q9-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 0.8888888888888888
+   "sim": 0.8888888888888888,
+   "via": null
   },
   {
    "chunk": "glycata hemoglobin",
@@ -4828,7 +5177,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": 0.9142857142857143
+   "sim": 0.9142857142857143,
+   "via": null
   },
   {
    "chunk": "glycata",
@@ -4840,7 +5190,8 @@
    "runs": [
     "q4-fx-none"
    ],
-   "sim": 0.8
+   "sim": 0.8,
+   "via": null
   },
   {
    "chunk": "gonna",
@@ -4866,7 +5217,8 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.5
+   "sim": 0.5,
+   "via": null
   },
   {
    "chunk": "gonna",
@@ -4888,7 +5240,8 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.5
+   "sim": 0.5,
+   "via": null
   },
   {
    "chunk": "got it",
@@ -4900,7 +5253,8 @@
    "runs": [
     "q4-fx-none"
    ],
-   "sim": 0.6666666666666666
+   "sim": 0.6666666666666666,
+   "via": null
   },
   {
    "chunk": "guideline",
@@ -4923,7 +5277,8 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "half a square",
@@ -4941,7 +5296,8 @@
     "q5-fx-lookup-nofacts",
     "q9-fx-both"
    ],
-   "sim": 0.47619047619047616
+   "sim": 0.47619047619047616,
+   "via": null
   },
   {
    "chunk": "half a square",
@@ -4958,7 +5314,8 @@
     "q9-fx-none",
     "t-fx-gloss"
    ],
-   "sim": 0.47619047619047616
+   "sim": 0.47619047619047616,
+   "via": null
   },
   {
    "chunk": "half a square",
@@ -4970,7 +5327,8 @@
    "runs": [
     "q4-fx-none"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "have diabetes",
@@ -4999,7 +5357,11 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": 0.8275862068965517
+   "sim": 0.8275862068965517,
+   "via": {
+    "term": "type 2 diabetes",
+    "window": "have diabetes"
+   }
   },
   {
    "chunk": "haven't",
@@ -5013,7 +5375,8 @@
     "q9-fx-gloss",
     "q9-fx-none"
    ],
-   "sim": 0.8
+   "sim": 0.8,
+   "via": null
   },
   {
    "chunk": "hideo bottom",
@@ -5027,7 +5390,8 @@
     "q9-fx-gloss",
     "q9-fx-none"
    ],
-   "sim": 0.6666666666666666
+   "sim": 0.6666666666666666,
+   "via": null
   },
   {
    "chunk": "hideo",
@@ -5045,7 +5409,8 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.8
+   "sim": 0.8,
+   "via": null
   },
   {
    "chunk": "hideo",
@@ -5065,7 +5430,8 @@
     "t-fx-gloss",
     "t-fx-lookup"
    ],
-   "sim": 0.8
+   "sim": 0.8,
+   "via": null
   },
   {
    "chunk": "hydrochlorothiacy",
@@ -5099,7 +5465,11 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.8333333333333334
+   "sim": 0.8333333333333334,
+   "via": {
+    "term": "hydrochlorothiazide",
+    "window": "hydrochlorothiacy"
+   }
   },
   {
    "chunk": "hydrochlorothiacy",
@@ -5129,7 +5499,11 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.8333333333333334
+   "sim": 0.8333333333333334,
+   "via": {
+    "term": "hydrochlorothiazide",
+    "window": "hydrochlorothiacy"
+   }
   },
   {
    "chunk": "hydrochlorothiacy",
@@ -5144,7 +5518,8 @@
     "q9-fx-none",
     "t-fx-gloss"
    ],
-   "sim": 0.8333333333333334
+   "sim": 0.8333333333333334,
+   "via": null
   },
   {
    "chunk": "hyperprofen",
@@ -5156,7 +5531,8 @@
    "runs": [
     "q9-fx-gloss"
    ],
-   "sim": 0.125
+   "sim": 0.125,
+   "via": null
   },
   {
    "chunk": "hyperprofen",
@@ -5168,7 +5544,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": 0.11764705882352941
+   "sim": 0.11764705882352941,
+   "via": null
   },
   {
    "chunk": "hyperprofen",
@@ -5183,7 +5560,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 0.3333333333333333
+   "sim": 0.3333333333333333,
+   "via": null
   },
   {
    "chunk": "hyperprofen",
@@ -5221,7 +5599,11 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.6
+   "sim": 0.6,
+   "via": {
+    "term": "ibuprofen",
+    "window": "hyperprofen"
+   }
   },
   {
    "chunk": "hyperprofen",
@@ -5259,7 +5641,11 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.6
+   "sim": 0.6,
+   "via": {
+    "term": "ibuprofen",
+    "window": "hyperprofen"
+   }
   },
   {
    "chunk": "hypertherylism",
@@ -5271,7 +5657,8 @@
    "runs": [
     "q4-fx-none"
    ],
-   "sim": 0.5714285714285714
+   "sim": 0.5714285714285714,
+   "via": null
   },
   {
    "chunk": "hypertherylism",
@@ -5305,7 +5692,11 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.7586206896551724
+   "sim": 0.7586206896551724,
+   "via": {
+    "term": "hyperthyroidism",
+    "window": "hypertherylism"
+   }
   },
   {
    "chunk": "hypertherylism",
@@ -5331,7 +5722,11 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.7586206896551724
+   "sim": 0.7586206896551724,
+   "via": {
+    "term": "hyperthyroidism",
+    "window": "hypertherylism"
+   }
   },
   {
    "chunk": "hypertherylism",
@@ -5347,7 +5742,8 @@
     "q9-fx-none",
     "t-fx-gloss"
    ],
-   "sim": 0.7586206896551724
+   "sim": 0.7586206896551724,
+   "via": null
   },
   {
    "chunk": "in other",
@@ -5384,7 +5780,8 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": 0.6666666666666666
+   "sim": 0.6666666666666666,
+   "via": null
   },
   {
    "chunk": "in their perception",
@@ -5413,7 +5810,8 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "in their",
@@ -5442,7 +5840,11 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 0.7142857142857143
+   "sim": 0.7142857142857143,
+   "via": {
+    "term": "inhaler",
+    "window": "in their"
+   }
   },
   {
    "chunk": "in-help",
@@ -5464,7 +5866,11 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.6153846153846154
+   "sim": 0.6153846153846154,
+   "via": {
+    "term": "inhaler",
+    "window": "in-help for"
+   }
   },
   {
    "chunk": "in-help",
@@ -5486,7 +5892,8 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.6153846153846154
+   "sim": 0.6153846153846154,
+   "via": null
   },
   {
    "chunk": "in-help",
@@ -5503,7 +5910,8 @@
     "q9-fx-none",
     "t-fx-gloss"
    ],
-   "sim": 0.6153846153846154
+   "sim": 0.6153846153846154,
+   "via": null
   },
   {
    "chunk": "inconsistent",
@@ -5515,7 +5923,8 @@
    "runs": [
     "q4-fx-none"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "instant scripts",
@@ -5537,7 +5946,8 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "instant scripts",
@@ -5559,7 +5969,8 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "instant scripts",
@@ -5575,7 +5986,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "insulin there",
@@ -5600,7 +6012,11 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": 0.7692307692307693
+   "sim": 0.7692307692307693,
+   "via": {
+    "term": "insulin detemir",
+    "window": "insulin there"
+   }
   },
   {
    "chunk": "insulin there",
@@ -5625,7 +6041,8 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 0.6666666666666666
+   "sim": 0.6666666666666666,
+   "via": null
   },
   {
    "chunk": "is",
@@ -5637,7 +6054,8 @@
    "runs": [
     "q4-fx-none"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "it doesn't use",
@@ -5649,7 +6067,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": 0.7586206896551724
+   "sim": 0.7586206896551724,
+   "via": null
   },
   {
    "chunk": "kidney function",
@@ -5670,7 +6089,8 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 0.7407407407407407
+   "sim": 0.7407407407407407,
+   "via": null
   },
   {
    "chunk": "last documented bowl",
@@ -5695,7 +6115,8 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": 0.8
+   "sim": 0.8,
+   "via": null
   },
   {
    "chunk": "last documented bowl",
@@ -5709,7 +6130,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 0.8
+   "sim": 0.8,
+   "via": null
   },
   {
    "chunk": "last documented bowl",
@@ -5721,7 +6143,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": 0.8888888888888888
+   "sim": 0.8888888888888888,
+   "via": null
   },
   {
    "chunk": "last documented bowl",
@@ -5746,7 +6169,8 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 0.8108108108108109
+   "sim": 0.8108108108108109,
+   "via": null
   },
   {
    "chunk": "last documented bowl",
@@ -5767,7 +6191,8 @@
     "q9-fx-both",
     "t-fx-both"
    ],
-   "sim": 0.8108108108108109
+   "sim": 0.8108108108108109,
+   "via": null
   },
   {
    "chunk": "last documented bowl",
@@ -5779,7 +6204,8 @@
    "runs": [
     "q9-fx-gloss"
    ],
-   "sim": 0.8108108108108109
+   "sim": 0.8108108108108109,
+   "via": null
   },
   {
    "chunk": "last documented bowl",
@@ -5792,7 +6218,8 @@
     "c-fx-gloss",
     "q4-fx-none"
    ],
-   "sim": 0.8888888888888888
+   "sim": 0.8888888888888888,
+   "via": null
   },
   {
    "chunk": "leaders",
@@ -5813,7 +6240,8 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "leaders",
@@ -5828,7 +6256,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "many",
@@ -5840,7 +6269,8 @@
    "runs": [
     "q4-fx-none"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "more than 180",
@@ -5865,7 +6295,8 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "more than 200",
@@ -5883,7 +6314,8 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "new medication maybe",
@@ -5901,7 +6333,8 @@
     "t-fx-both",
     "t-fx-gloss"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "night",
@@ -5921,7 +6354,8 @@
     "t-fx-gloss",
     "t-fx-lookup"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "no studying associated",
@@ -5938,7 +6372,8 @@
    "runs": [
     "q9-fx-both"
    ],
-   "sim": 0.8421052631578947
+   "sim": 0.8421052631578947,
+   "via": null
   },
   {
    "chunk": "no studying",
@@ -5959,7 +6394,11 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 0.6
+   "sim": 0.6,
+   "via": {
+    "term": "nystatin",
+    "window": "no studying"
+   }
   },
   {
    "chunk": "no studying",
@@ -5980,7 +6419,8 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": 0.6666666666666666
+   "sim": 0.6666666666666666,
+   "via": null
   },
   {
    "chunk": "nodes",
@@ -5995,7 +6435,8 @@
     "q5-fx-lookup-nofacts",
     "t-fx-lookup"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "nodes",
@@ -6013,7 +6454,8 @@
     "t-fx-both",
     "t-fx-gloss"
    ],
-   "sim": 0.8
+   "sim": 0.8,
+   "via": null
   },
   {
    "chunk": "normal activities",
@@ -6030,7 +6472,8 @@
    "runs": [
     "q9-fx-both"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "normal hygiene process",
@@ -6042,7 +6485,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": 0.6666666666666666
+   "sim": 0.6666666666666666,
+   "via": null
   },
   {
    "chunk": "normal hygiene process",
@@ -6055,7 +6499,8 @@
     "q9-fx-both",
     "q9-fx-gloss"
    ],
-   "sim": 0.8571428571428571
+   "sim": 0.8571428571428571,
+   "via": null
   },
   {
    "chunk": "not control",
@@ -6081,7 +6526,8 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.7272727272727273
+   "sim": 0.7272727272727273,
+   "via": null
   },
   {
    "chunk": "not control",
@@ -6097,7 +6543,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 0.7272727272727273
+   "sim": 0.7272727272727273,
+   "via": null
   },
   {
    "chunk": "objectivize",
@@ -6122,7 +6569,8 @@
    "runs": [
     "q9-fx-both"
    ],
-   "sim": 0.7
+   "sim": 0.7,
+   "via": null
   },
   {
    "chunk": "objectivize",
@@ -6140,7 +6588,8 @@
     "q9-fx-none",
     "t-fx-gloss"
    ],
-   "sim": 0.9090909090909091
+   "sim": 0.9090909090909091,
+   "via": null
   },
   {
    "chunk": "octognea",
@@ -6177,7 +6626,8 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.42857142857142855
+   "sim": 0.42857142857142855,
+   "via": null
   },
   {
    "chunk": "octognea",
@@ -6214,7 +6664,8 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 0.42857142857142855
+   "sim": 0.42857142857142855,
+   "via": null
   },
   {
    "chunk": "octognea",
@@ -6227,7 +6678,8 @@
     "q4-fx-none",
     "q9-fx-none"
    ],
-   "sim": 0.42857142857142855
+   "sim": 0.42857142857142855,
+   "via": null
   },
   {
    "chunk": "octognea",
@@ -6260,7 +6712,8 @@
    "runs": [
     "q9-fx-both"
    ],
-   "sim": 0.6666666666666666
+   "sim": 0.6666666666666666,
+   "via": null
   },
   {
    "chunk": "octognea",
@@ -6297,7 +6750,8 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": 0.6666666666666666
+   "sim": 0.6666666666666666,
+   "via": null
   },
   {
    "chunk": "octognea",
@@ -6312,7 +6766,8 @@
     "q9-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 0.6666666666666666
+   "sim": 0.6666666666666666,
+   "via": null
   },
   {
    "chunk": "one big large square",
@@ -6328,7 +6783,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "only ankle swelling",
@@ -6361,7 +6817,8 @@
    "runs": [
     "t-fx-both"
    ],
-   "sim": 0.625
+   "sim": 0.625,
+   "via": null
   },
   {
    "chunk": "only ankle swelling",
@@ -6394,7 +6851,11 @@
    "runs": [
     "q5-fx-lookup-nofacts"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": {
+    "term": "ankle swelling",
+    "window": "only ankle swelling"
+   }
   },
   {
    "chunk": "only ankle swelling",
@@ -6431,7 +6892,11 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": {
+    "term": "ankle swelling",
+    "window": "with ankle swelling"
+   }
   },
   {
    "chunk": "optopnea",
@@ -6443,7 +6908,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": 0.5
+   "sim": 0.5,
+   "via": null
   },
   {
    "chunk": "optopnea",
@@ -6455,7 +6921,8 @@
    "runs": [
     "q4-fx-none"
    ],
-   "sim": 0.8235294117647058
+   "sim": 0.8235294117647058,
+   "via": null
   },
   {
    "chunk": "optopnea",
@@ -6479,7 +6946,11 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.7777777777777778
+   "sim": 0.7777777777777778,
+   "via": {
+    "term": "orthopnoea",
+    "window": "optopnea"
+   }
   },
   {
    "chunk": "optopnea",
@@ -6494,7 +6965,8 @@
     "q9-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 0.7777777777777778
+   "sim": 0.7777777777777778,
+   "via": null
   },
   {
    "chunk": "orthopny",
@@ -6506,7 +6978,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": 0.8235294117647058
+   "sim": 0.8235294117647058,
+   "via": null
   },
   {
    "chunk": "orthopny",
@@ -6536,7 +7009,11 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.7777777777777778
+   "sim": 0.7777777777777778,
+   "via": {
+    "term": "orthopnoea",
+    "window": "orthopny"
+   }
   },
   {
    "chunk": "orthopny",
@@ -6562,7 +7039,11 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.7777777777777778
+   "sim": 0.7777777777777778,
+   "via": {
+    "term": "orthopnoea",
+    "window": "orthopny"
+   }
   },
   {
    "chunk": "orthopny",
@@ -6574,7 +7055,8 @@
    "runs": [
     "q9-fx-gloss"
    ],
-   "sim": 0.7777777777777778
+   "sim": 0.7777777777777778,
+   "via": null
   },
   {
    "chunk": "other regions",
@@ -6608,7 +7090,8 @@
     "q5-fx-lookup-nofacts",
     "q9-fx-both"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "over 100",
@@ -6622,7 +7105,8 @@
     "q9-fx-gloss",
     "q9-fx-none"
    ],
-   "sim": 0.7777777777777778
+   "sim": 0.7777777777777778,
+   "via": null
   },
   {
    "chunk": "over 100",
@@ -6642,7 +7126,8 @@
     "t-fx-gloss",
     "t-fx-lookup"
    ],
-   "sim": 0.8571428571428571
+   "sim": 0.8571428571428571,
+   "via": null
   },
   {
    "chunk": "parameters",
@@ -6664,7 +7149,8 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "part number four",
@@ -6677,7 +7163,8 @@
     "q9-fx-both",
     "q9-fx-gloss"
    ],
-   "sim": 0.7272727272727273
+   "sim": 0.7272727272727273,
+   "via": null
   },
   {
    "chunk": "patient in",
@@ -6695,7 +7182,8 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.8888888888888888
+   "sim": 0.8888888888888888,
+   "via": null
   },
   {
    "chunk": "potassium is increasing",
@@ -6708,7 +7196,8 @@
     "q9-fx-both",
     "q9-fx-gloss"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "potassium is too",
@@ -6741,7 +7230,8 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "present with anemia",
@@ -6767,7 +7257,8 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "prevented use",
@@ -6789,7 +7280,11 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.9166666666666666
+   "sim": 0.9166666666666666,
+   "via": {
+    "term": "preventer",
+    "window": "prevented use"
+   }
   },
   {
    "chunk": "prevented use",
@@ -6810,7 +7305,11 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.9166666666666666
+   "sim": 0.9166666666666666,
+   "via": {
+    "term": "preventer",
+    "window": "prevented use"
+   }
   },
   {
    "chunk": "prevented",
@@ -6822,7 +7321,8 @@
    "runs": [
     "q4-fx-none"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "prevented",
@@ -6837,7 +7337,8 @@
     "q9-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 0.8888888888888888
+   "sim": 0.8888888888888888,
+   "via": null
   },
   {
    "chunk": "pulmonary edema",
@@ -6872,7 +7373,11 @@
     "q9-fx-both",
     "t-fx-both"
    ],
-   "sim": 0.9655172413793104
+   "sim": 0.9655172413793104,
+   "via": {
+    "term": "pulmonary oedema",
+    "window": "pulmonary edema"
+   }
   },
   {
    "chunk": "pulmonary edema",
@@ -6910,7 +7415,11 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.9655172413793104
+   "sim": 0.9655172413793104,
+   "via": {
+    "term": "pulmonary oedema",
+    "window": "pulmonary edema"
+   }
   },
   {
    "chunk": "pulmonary edema",
@@ -6925,7 +7434,8 @@
     "q9-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 0.9655172413793104
+   "sim": 0.9655172413793104,
+   "via": null
   },
   {
    "chunk": "pulmonary findings",
@@ -6937,7 +7447,8 @@
    "runs": [
     "q9-fx-gloss"
    ],
-   "sim": 0.625
+   "sim": 0.625,
+   "via": null
   },
   {
    "chunk": "reach the chops",
@@ -6962,7 +7473,8 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 0.6206896551724138
+   "sim": 0.6206896551724138,
+   "via": null
   },
   {
    "chunk": "reach the chops",
@@ -6979,7 +7491,8 @@
    "runs": [
     "q5-fx-lookup-nofacts"
    ],
-   "sim": 0.6206896551724138
+   "sim": 0.6206896551724138,
+   "via": null
   },
   {
    "chunk": "reach the chops",
@@ -6994,7 +7507,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 0.7692307692307693
+   "sim": 0.7692307692307693,
+   "via": null
   },
   {
    "chunk": "reach the chops",
@@ -7011,7 +7525,8 @@
    "runs": [
     "q9-fx-both"
    ],
-   "sim": 0.9230769230769231
+   "sim": 0.9230769230769231,
+   "via": null
   },
   {
    "chunk": "reach the chops",
@@ -7025,7 +7540,8 @@
     "q9-fx-gloss",
     "q9-fx-none"
    ],
-   "sim": 0.9230769230769231
+   "sim": 0.9230769230769231,
+   "via": null
   },
   {
    "chunk": "really severe",
@@ -7062,7 +7578,8 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 0.631578947368421
+   "sim": 0.631578947368421,
+   "via": null
   },
   {
    "chunk": "rechalling part",
@@ -7085,7 +7602,8 @@
     "q5-fx-lookup-nofacts",
     "t-fx-lookup"
    ],
-   "sim": 0.9032258064516129
+   "sim": 0.9032258064516129,
+   "via": null
   },
   {
    "chunk": "rechalling part",
@@ -7107,7 +7625,8 @@
     "q5-fx-both",
     "t-fx-both"
    ],
-   "sim": 0.896551724137931
+   "sim": 0.896551724137931,
+   "via": null
   },
   {
    "chunk": "rechalling",
@@ -7119,7 +7638,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": 0.8571428571428571
+   "sim": 0.8571428571428571,
+   "via": null
   },
   {
    "chunk": "rechalling",
@@ -7140,7 +7660,8 @@
    "runs": [
     "q9-fx-both"
    ],
-   "sim": 0.8571428571428571
+   "sim": 0.8571428571428571,
+   "via": null
   },
   {
    "chunk": "rechalling",
@@ -7152,7 +7673,8 @@
    "runs": [
     "q9-fx-gloss"
    ],
-   "sim": 0.8571428571428571
+   "sim": 0.8571428571428571,
+   "via": null
   },
   {
    "chunk": "reconnect it",
@@ -7165,7 +7687,8 @@
     "c-fx-gloss",
     "q5-fx-gloss"
    ],
-   "sim": 0.8333333333333334
+   "sim": 0.8333333333333334,
+   "via": null
   },
   {
    "chunk": "red",
@@ -7177,7 +7700,8 @@
    "runs": [
     "q4-fx-none"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "regulator vaccination use",
@@ -7194,7 +7718,8 @@
    "runs": [
     "q9-fx-both"
    ],
-   "sim": 0.6842105263157895
+   "sim": 0.6842105263157895,
+   "via": null
   },
   {
    "chunk": "regulator vaccination use",
@@ -7206,7 +7731,8 @@
    "runs": [
     "q9-fx-gloss"
    ],
-   "sim": 0.6842105263157895
+   "sim": 0.6842105263157895,
+   "via": null
   },
   {
    "chunk": "regulator vaccination use",
@@ -7218,7 +7744,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": 0.7441860465116279
+   "sim": 0.7441860465116279,
+   "via": null
   },
   {
    "chunk": "regulator vaccination",
@@ -7240,7 +7767,8 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.7368421052631579
+   "sim": 0.7368421052631579,
+   "via": null
   },
   {
    "chunk": "regulator vaccination",
@@ -7261,7 +7789,8 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.7368421052631579
+   "sim": 0.7368421052631579,
+   "via": null
   },
   {
    "chunk": "regulator vaccination",
@@ -7276,7 +7805,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 0.7368421052631579
+   "sim": 0.7368421052631579,
+   "via": null
   },
   {
    "chunk": "residual diagnosis",
@@ -7288,7 +7818,8 @@
    "runs": [
     "q4-fx-none"
    ],
-   "sim": 0.9411764705882353
+   "sim": 0.9411764705882353,
+   "via": null
   },
   {
    "chunk": "residual diagnosis",
@@ -7302,7 +7833,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "respiratory red",
@@ -7314,7 +7846,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": 0.896551724137931
+   "sim": 0.896551724137931,
+   "via": null
   },
   {
    "chunk": "respiratory red",
@@ -7336,7 +7869,8 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.8484848484848485
+   "sim": 0.8484848484848485,
+   "via": null
   },
   {
    "chunk": "respiratory red",
@@ -7354,7 +7888,8 @@
     "q5-fx-both",
     "t-fx-both"
    ],
-   "sim": 0.8484848484848485
+   "sim": 0.8484848484848485,
+   "via": null
   },
   {
    "chunk": "respiratory red",
@@ -7367,7 +7902,8 @@
     "q5-fx-gloss",
     "q9-fx-gloss"
    ],
-   "sim": 0.8484848484848485
+   "sim": 0.8484848484848485,
+   "via": null
   },
   {
    "chunk": "respiratory red",
@@ -7380,7 +7916,8 @@
     "q4-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "respiratory",
@@ -7392,7 +7929,8 @@
    "runs": [
     "q4-fx-none"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "same",
@@ -7413,7 +7951,8 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "semaglal diet",
@@ -7444,7 +7983,11 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.6956521739130435
+   "sim": 0.6956521739130435,
+   "via": {
+    "term": "semaglutide",
+    "window": "semaglal diet"
+   }
   },
   {
    "chunk": "semaglal diet",
@@ -7482,7 +8025,11 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.6956521739130435
+   "sim": 0.6956521739130435,
+   "via": {
+    "term": "semaglutide",
+    "window": "semaglal diet"
+   }
   },
   {
    "chunk": "semaglal diet",
@@ -7495,7 +8042,8 @@
     "q9-fx-gloss",
     "q9-fx-none"
    ],
-   "sim": 0.6956521739130435
+   "sim": 0.6956521739130435,
+   "via": null
   },
   {
    "chunk": "semaglal",
@@ -7511,7 +8059,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 0.631578947368421
+   "sim": 0.631578947368421,
+   "via": null
   },
   {
    "chunk": "semaglotide",
@@ -7541,7 +8090,11 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.9090909090909091
+   "sim": 0.9090909090909091,
+   "via": {
+    "term": "semaglutide",
+    "window": "semaglotide"
+   }
   },
   {
    "chunk": "semaglotide",
@@ -7568,7 +8121,11 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 0.9090909090909091
+   "sim": 0.9090909090909091,
+   "via": {
+    "term": "semaglutide",
+    "window": "semaglotide"
+   }
   },
   {
    "chunk": "semaglotide",
@@ -7586,7 +8143,8 @@
     "q9-fx-none",
     "t-fx-gloss"
    ],
-   "sim": 0.9090909090909091
+   "sim": 0.9090909090909091,
+   "via": null
   },
   {
    "chunk": "side effects",
@@ -7598,7 +8156,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": 0.9523809523809523
+   "sim": 0.9523809523809523,
+   "via": null
   },
   {
    "chunk": "so could",
@@ -7619,7 +8178,8 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 0.3333333333333333
+   "sim": 0.3333333333333333,
+   "via": null
   },
   {
    "chunk": "some nodes",
@@ -7649,7 +8209,8 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.8888888888888888
+   "sim": 0.8888888888888888,
+   "via": null
   },
   {
    "chunk": "some nodes",
@@ -7661,7 +8222,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": 0.7368421052631579
+   "sim": 0.7368421052631579,
+   "via": null
   },
   {
    "chunk": "stalls",
@@ -7691,7 +8253,8 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "stalls",
@@ -7712,7 +8275,8 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "stalls",
@@ -7729,7 +8293,8 @@
    "runs": [
     "q5-fx-lookup-nofacts"
    ],
-   "sim": 0.5
+   "sim": 0.5,
+   "via": null
   },
   {
    "chunk": "step down",
@@ -7741,7 +8306,8 @@
    "runs": [
     "q4-fx-none"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "store the data",
@@ -7753,7 +8319,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": 0.75
+   "sim": 0.75,
+   "via": null
   },
   {
    "chunk": "studying associated",
@@ -7766,7 +8333,8 @@
     "q9-fx-gloss",
     "q9-fx-none"
    ],
-   "sim": 0.8235294117647058
+   "sim": 0.8235294117647058,
+   "via": null
   },
   {
    "chunk": "studying associated",
@@ -7778,7 +8346,8 @@
    "runs": [
     "q4-fx-none"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "studying",
@@ -7792,7 +8361,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 0.47058823529411764
+   "sim": 0.47058823529411764,
+   "via": null
   },
   {
    "chunk": "studying",
@@ -7813,7 +8383,8 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "the pharmacy",
@@ -7831,7 +8402,8 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.41379310344827586
+   "sim": 0.41379310344827586,
+   "via": null
   },
   {
    "chunk": "the usual GP.",
@@ -7844,7 +8416,8 @@
     "q4-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "they didn't",
@@ -7865,7 +8438,8 @@
    "runs": [
     "q9-fx-both"
    ],
-   "sim": 0.2608695652173913
+   "sim": 0.2608695652173913,
+   "via": null
   },
   {
    "chunk": "time to check",
@@ -7891,7 +8465,8 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "to check",
@@ -7912,7 +8487,11 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 0.625
+   "sim": 0.625,
+   "via": {
+    "term": "MedsCheck",
+    "window": "to check"
+   }
   },
   {
    "chunk": "too badly",
@@ -7926,7 +8505,8 @@
     "q9-fx-gloss",
     "q9-fx-none"
    ],
-   "sim": 0.8571428571428571
+   "sim": 0.8571428571428571,
+   "via": null
   },
   {
    "chunk": "two I2 diagnosis",
@@ -7940,7 +8520,8 @@
     "q9-fx-gloss",
     "q9-fx-none"
    ],
-   "sim": 0.896551724137931
+   "sim": 0.896551724137931,
+   "via": null
   },
   {
    "chunk": "two meters long",
@@ -7952,7 +8533,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": 0.7692307692307693
+   "sim": 0.7692307692307693,
+   "via": null
   },
   {
    "chunk": "two meters long",
@@ -7972,7 +8554,8 @@
     "t-fx-gloss",
     "t-fx-lookup"
    ],
-   "sim": 0.9230769230769231
+   "sim": 0.9230769230769231,
+   "via": null
   },
   {
    "chunk": "under control",
@@ -7984,7 +8567,8 @@
    "runs": [
     "q9-fx-gloss"
    ],
-   "sim": 0.75
+   "sim": 0.75,
+   "via": null
   },
   {
    "chunk": "under control",
@@ -8010,7 +8594,8 @@
     "t-fx-both",
     "t-fx-lookup"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "under control",
@@ -8026,7 +8611,8 @@
     "q5-fx-gloss",
     "t-fx-gloss"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "use",
@@ -8038,7 +8624,8 @@
    "runs": [
     "q4-fx-none"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "usual ability",
@@ -8063,7 +8650,8 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "usual ability",
@@ -8080,7 +8668,8 @@
    "runs": [
     "q5-fx-lookup-nofacts"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "volume of",
@@ -8092,7 +8681,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": 0.46153846153846156
+   "sim": 0.46153846153846156,
+   "via": null
   },
   {
    "chunk": "volume of",
@@ -8104,7 +8694,8 @@
    "runs": [
     "q9-fx-gloss"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "walk-intolerance",
@@ -8123,7 +8714,8 @@
     "q9-fx-both",
     "t-fx-both"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "walk-intolerance",
@@ -8144,7 +8736,8 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "walk-intolerance",
@@ -8161,7 +8754,8 @@
     "q9-fx-none",
     "t-fx-gloss"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "walking leaders",
@@ -8173,7 +8767,8 @@
    "runs": [
     "q9-fx-none"
    ],
-   "sim": 0.8
+   "sim": 0.8,
+   "via": null
   },
   {
    "chunk": "walking leaders",
@@ -8193,7 +8788,8 @@
     "q9-fx-both",
     "t-fx-both"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "walking leaders",
@@ -8205,7 +8801,8 @@
    "runs": [
     "q4-fx-none"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "walking leaders",
@@ -8217,7 +8814,8 @@
    "runs": [
     "q9-fx-gloss"
    ],
-   "sim": 0.8148148148148148
+   "sim": 0.8148148148148148,
+   "via": null
   },
   {
    "chunk": "walks to",
@@ -8238,7 +8836,8 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 0.5
+   "sim": 0.5,
+   "via": null
   },
   {
    "chunk": "walks to",
@@ -8259,7 +8858,8 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "weight is",
@@ -8277,7 +8877,8 @@
     "q4-fx-both",
     "q4-fx-lookup"
    ],
-   "sim": 0.5
+   "sim": 0.5,
+   "via": null
   },
   {
    "chunk": "weight the patient",
@@ -8306,7 +8907,8 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": 0.967741935483871
+   "sim": 0.967741935483871,
+   "via": null
   },
   {
    "chunk": "weight the patient",
@@ -8327,7 +8929,8 @@
     "t-fx-gloss",
     "t-fx-lookup"
    ],
-   "sim": 0.967741935483871
+   "sim": 0.967741935483871,
+   "via": null
   },
   {
    "chunk": "weight them",
@@ -8356,7 +8959,8 @@
    "runs": [
     "q4-fx-both"
    ],
-   "sim": 0.9473684210526315
+   "sim": 0.9473684210526315,
+   "via": null
   },
   {
    "chunk": "weight them",
@@ -8377,7 +8981,8 @@
     "t-fx-gloss",
     "t-fx-lookup"
    ],
-   "sim": 0.9473684210526315
+   "sim": 0.9473684210526315,
+   "via": null
   },
   {
    "chunk": "weight them",
@@ -8406,7 +9011,8 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "which normally walks",
@@ -8424,7 +9030,8 @@
     "t-fx-both",
     "t-fx-gloss"
    ],
-   "sim": 1.0
+   "sim": 1.0,
+   "via": null
   },
   {
    "chunk": "without that",
@@ -8444,7 +9051,8 @@
     "t-fx-gloss",
     "t-fx-lookup"
    ],
-   "sim": 0.8
+   "sim": 0.8,
+   "via": null
   },
   {
    "chunk": "you do",
@@ -8481,7 +9089,8 @@
    "runs": [
     "q4-fx-lookup"
    ],
-   "sim": 0.5714285714285714
+   "sim": 0.5714285714285714,
+   "via": null
   }
  ],
  "span_limit": {

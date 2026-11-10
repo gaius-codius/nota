@@ -7,7 +7,10 @@
 //! (or an empty chunk where the bench didn't find the span), so it runs in
 //! CI. Gated alone, a fix's span always sits at the chunk's edges in its
 //! own case, so this fixture doesn't reach the word boundary or the case
-//! match; the gate's own tests do. Every fix run with its chunk text, the
+//! match; and no bench fix has an offered term inside its replacement for a
+//! window elsewhere, so it doesn't reach rule 4's refusal either
+//! ([`Rejection::WindowElsewhere`]). The gate's own tests and properties
+//! cover those. Every fix run with its chunk text, the
 //! workshop's, stays in the local bench (`c2_gate_u.json`); its tests are
 //! ignored here and run by `scripts/bench-fixtures.sh`. Both files are
 //! written by the bench's `fixtures/export.py`.
@@ -170,9 +173,14 @@ fn bench_case(run: &str, chunk: &Value) -> Case {
 
 /// The committed fixture's entry `entry`, the `i`th, as a case of one fix.
 fn committed_case(i: usize, entry: &Value) -> Case {
-    // Gated alone, nothing placed before it can overlap an accepted fix,
-    // so the bench's decision is the whole of it.
-    let want = expected(entry["decision"].as_str().unwrap(), true).unwrap();
+    let want = match entry["decision"].as_str().unwrap() {
+        // The export commits only fixes with no offered term inside the
+        // replacement (it checks), so the gate's refusal is the one rule.
+        "no offered term in the replacement" => vec![Some(Rejection::NotOffered)],
+        // Gated alone, nothing placed before it can overlap an accepted
+        // fix, so an accepted fix is applied.
+        decision => expected(decision, true).unwrap(),
+    };
     Case {
         at: format!("c2_gate.json fixes[{i}]"),
         text: text(entry, "chunk"),
@@ -180,6 +188,22 @@ fn committed_case(i: usize, entry: &Value) -> Case {
         fixes: vec![fix(entry, want)],
         result: text(entry, "result"),
     }
+}
+
+/// Whether the candidate that let `entry`'s fix through, gated alone, is
+/// the one the bench's gate U took (`via`): the first whose term is inside
+/// the replacement and whose window shares a word with the span. `None` if
+/// it is, or if neither applied the fix.
+fn via_mismatch(i: usize, entry: &Value) -> Option<String> {
+    let case = committed_case(i, entry);
+    let proposals: Vec<Proposal> = case.fixes.iter().map(|f| f.proposal.clone()).collect();
+    let gated = gate(&case.text, &case.offered, &proposals);
+    let got = gated.applied().next().map(|fix| fix.offered().clone());
+    let want = (!entry["via"].is_null()).then(|| Offered {
+        window: text(&entry["via"], "window"),
+        term: text(&entry["via"], "term"),
+    });
+    (got != want).then(|| format!("{}: let through by {got:?}, bench {want:?}", case.at))
 }
 
 /// The fixture at `path`, parsed.
@@ -199,7 +223,7 @@ fn committed_fixes(fixture: &Value) -> &[Value] {
 }
 
 /// Every committed bench fix is decided, scored and placed as the bench's
-/// gate U did, gated alone.
+/// gate U did, gated alone, through the same offered candidate.
 #[test]
 fn every_committed_bench_fix_is_gated_as_the_bench_did() {
     let fixture = committed();
@@ -211,6 +235,7 @@ fn every_committed_bench_fix_is_gated_as_the_bench_did() {
             .entry(entry["decision"].as_str().unwrap())
             .or_default() += 1;
         bad.extend(mismatches(&committed_case(i, entry)));
+        bad.extend(via_mismatch(i, entry));
     }
     // The export holds 429 distinct short fixes. A floor on each decision
     // too, so an export that lost one kind (every accepted fix, say) can't
@@ -256,11 +281,36 @@ fn spans(entry: &Value) -> Vec<String> {
     out
 }
 
+/// The fields of a committed entry, and of an offered candidate: [`spans`]
+/// checks every one that holds transcript text, so a field added to the
+/// export must be added here, and its text checked, before the test passes.
+const ENTRY_FIELDS: [&str; 9] = [
+    "chunk", "decision", "heard", "offered", "repl", "result", "runs", "sim", "via",
+];
+/// The fields of an offered candidate, and of `via`.
+const OFFERED_FIELDS: [&str; 2] = ["term", "window"];
+
+/// The names of `v`'s fields, sorted.
+fn fields(v: &Value) -> Vec<&str> {
+    v.as_object().unwrap().keys().map(String::as_str).collect()
+}
+
 /// Every span of transcript text in every committed entry, chunk, windows
-/// and terms included, is short, and the fixture states the same limit.
+/// and terms included, is short, no entry has a field the check doesn't
+/// know, and the fixture states the same limit.
 #[test]
 fn committed_bench_fixes_are_short_spans() {
     let fixture = committed();
+    for entry in committed_fixes(&fixture) {
+        assert_eq!(fields(entry), ENTRY_FIELDS, "{entry}");
+        let candidates = entry["offered"].as_array().unwrap();
+        for o in candidates
+            .iter()
+            .chain(Some(&entry["via"]).filter(|v| !v.is_null()))
+        {
+            assert_eq!(fields(o), OFFERED_FIELDS, "{entry}");
+        }
+    }
     let long: Vec<String> = committed_fixes(&fixture)
         .iter()
         .flat_map(spans)

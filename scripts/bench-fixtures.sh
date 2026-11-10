@@ -35,7 +35,8 @@ fi
 out=$repo/target/bench-fixtures
 rm -rf "$out"
 mkdir -p "$out"
-# Each export writes the committed subsets under their names in the repo.
+# Each export writes the committed subsets into its own committed/ folder,
+# named as their copies in crates/nota-checks/tests/fixtures/ are.
 for run in first second; do
   mkdir -p "$out/$run/committed"
   python3 -I "$exporter" "$out/$run" --committed "$out/$run/committed/c1_pairs.json" \
@@ -47,13 +48,18 @@ if ! diff -r "$out/first" "$out/second" >/dev/null; then
   exit 1
 fi
 
+# Every committed copy is compared, so each one that differs is named.
+stale=0
 for name in c1_pairs.json c2_gate.json; do
   committed=$repo/crates/nota-checks/tests/fixtures/$name
   if ! cmp -s "$out/first/committed/$name" "$committed"; then
     echo "bench-fixtures: $committed differs from the bench's export; re-export it, or find the hand edit" >&2
-    exit 1
+    stale=1
   fi
 done
+if ((stale)); then
+  exit 1
+fi
 
 NOTA_BENCH_FIXTURES=$out/first cargo nextest run -p nota-checks --all-targets --locked \
   --run-ignored only --no-tests=fail
