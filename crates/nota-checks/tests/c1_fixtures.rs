@@ -1,5 +1,5 @@
 //! C1 against the research bench: every fixture's score agrees with Python's
-//! `difflib` to 1e-9, and keeps the bench's decision at the 0.6 threshold.
+//! `difflib` to 1e-9, and falls on the same side of the 0.6 threshold.
 //!
 //! The committed fixture (`fixtures/c1_pairs.json`) holds the short term
 //! pairs and invented edge cases. Every pair the bench scored, long spans
@@ -43,7 +43,7 @@ fn pairs(list: &Value) -> Vec<Pair> {
             a: p["a"].as_str().expect("a string").to_owned(),
             b: p["b"].as_str().expect("b string").to_owned(),
             score: p["score"].as_f64(),
-            kept: p["kept"].as_bool(),
+            kept: p.get("kept").map(|k| k.as_bool().expect("kept is a bool")),
         })
         .collect()
 }
@@ -101,10 +101,8 @@ fn the_committed_bench_pairs_agree_with_python() {
 fn the_edge_cases_agree_with_python() {
     let fixture = committed();
     let cases = pairs(&fixture["edge_cases"]);
-    assert!(
-        cases.iter().filter(|c| c.score.is_none()).count() >= 3,
-        "{cases:?}"
-    ); // check-bound
+    let refused = cases.iter().filter(|c| c.score.is_none()).count();
+    assert!(refused >= 3, "{cases:?}"); // check-bound
     assert_eq!(mismatches(&cases), Vec::<String>::new());
 }
 
@@ -151,6 +149,34 @@ fn the_specs_named_pairs_keep_their_scores() {
     }
 }
 
+/// The longest committed span: the bench's limit for what nota may commit
+/// (fixtures/export.py), written here again so a change there, or a hand
+/// edit of the fixture, can't commit workshop text unnoticed.
+const SPAN_MAX_CHARS: usize = 32; // check-bound
+/// The most words in a committed span.
+const SPAN_MAX_WORDS: usize = 4; // check-bound
+
+/// Whether `s` is within the committed span limit.
+fn short(s: &str) -> bool {
+    s.chars().count() <= SPAN_MAX_CHARS && s.split_whitespace().count() <= SPAN_MAX_WORDS
+}
+
+/// Every committed bench pair is two short spans, and the fixture states the
+/// same limit.
+#[test]
+fn committed_bench_pairs_are_short_spans() {
+    let fixture = committed();
+    let long: Vec<_> = pairs(&fixture["pairs"])
+        .into_iter()
+        .filter(|p| !short(&p.a) || !short(&p.b))
+        .collect();
+    assert!(long.is_empty(), "{long:?}");
+    assert_eq!(
+        fixture["span_limit"],
+        serde_json::json!({ "max_chars": SPAN_MAX_CHARS, "max_words": SPAN_MAX_WORDS })
+    );
+}
+
 /// The local bench fixtures' folder: `NOTA_BENCH_FIXTURES`, which
 /// `scripts/bench-fixtures.sh` sets.
 fn bench_fixtures() -> PathBuf {
@@ -168,7 +194,8 @@ fn bench_fixtures() -> PathBuf {
 fn every_bench_pair_agrees_with_python() {
     let fixture = read(&bench_fixtures().join("c1_pairs.json"));
     let pairs = pairs(&fixture["pairs"]);
-    // The export holds 585 pairs from 21 fixlogs, 3 hotword runs and the spec.
+    // The export holds 585 pairs: the logged sims of 16 fixlogs (the pick
+    // runs log none), 3 hotword runs and the spec's named pairs.
     assert!(pairs.len() >= 585, "{} pairs", pairs.len()); // check-bound
     assert_eq!(mismatches(&pairs), Vec::<String>::new());
 }

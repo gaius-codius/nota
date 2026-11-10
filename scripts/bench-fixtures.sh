@@ -20,6 +20,8 @@
 # Requires: bash, python3 (standard library only), cargo and cargo-nextest.
 set -euo pipefail
 
+# The checkout this script is in, wherever it's run from.
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
 repo=$(git rev-parse --show-toplevel)
 bench=${NOTA_BENCH:-$repo/working-docs/reference/2026-10-01-research-bench}
 exporter=$bench/fixtures/export.py

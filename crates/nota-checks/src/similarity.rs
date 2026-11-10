@@ -88,8 +88,9 @@ pub fn letter_similarity(heard: &str, term: &str) -> Result<Similarity, TooLong>
 ///
 /// # Errors
 ///
-/// [`TooLong`] past [`MAX_LETTERS`]; it stops reading there, so a long
-/// string costs no more than a short one.
+/// [`TooLong`] past [`MAX_LETTERS`]. It stops at the first letter or digit
+/// past the limit, so it never keeps more than that; the characters it drops
+/// are still read.
 fn normalise(s: &str) -> Result<Vec<u8>, TooLong> {
     let kept: Vec<u8> = s
         .chars()
