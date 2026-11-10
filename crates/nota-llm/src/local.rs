@@ -19,7 +19,9 @@
 //!   killed and started again after a backoff, and the question is asked
 //!   again, up to [`ServerConfig::restarts`] times. After that the decider
 //!   is [`DecideError::Unavailable`], with the last reason. So is a program
-//!   that can't be started at all, at once, with or without a launcher.
+//!   that can't be started at all, at once; behind a launcher, a program
+//!   named by its path is checked before the launcher starts, while a bare
+//!   name is left to the launcher's exec, which looks for it on `PATH`.
 //! - **The answer can't be read** (a malformed reply, a reply cut short or
 //!   over its limit, a request the server refuses): a failed decision,
 //!   [`DecideError::Failed`]. It isn't asked again, since the model at

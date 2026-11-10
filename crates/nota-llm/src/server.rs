@@ -112,8 +112,8 @@ pub struct Launcher {
 /// How to run llama-server, and how long to wait on it.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
-    /// The `llama-server` program. Until nota downloads its own (M7), from
-    /// the user's settings.
+    /// The `llama-server` program: a path, or a bare name looked for on
+    /// `PATH`. Until nota downloads its own (M7), from the user's settings.
     pub program: PathBuf,
     /// The model file (GGUF). Likewise from the settings for now.
     pub model: PathBuf,
@@ -471,9 +471,10 @@ impl Server {
         generation: u64,
     ) -> Result<Self, ServerError> {
         private_dir(&config.socket_dir)?;
-        if config.launcher.is_some() {
-            // The launcher would start, then fail to run the server, which
-            // would look like a server that keeps dying.
+        // The launcher would start, then fail to run the server, which
+        // would look like a server that keeps dying. A bare name is looked
+        // for on PATH by the launcher's exec, so it's left to that.
+        if config.launcher.is_some() && config.program.components().count() > 1 {
             runnable(&config.program).map_err(ServerError::Spawn)?;
         }
         let socket = config

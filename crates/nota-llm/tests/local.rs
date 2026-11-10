@@ -643,3 +643,21 @@ fn a_missing_program_behind_the_launcher_is_unavailable_at_once() {
     assert!(took < PROMPTLY, "took {took:?}");
     assert_eq!(fixture.starts(), Vec::<(u32, String)>::new());
 }
+
+/// A bare program name behind the launcher is left to the launcher's exec,
+/// which looks for it on `PATH`: it isn't refused before it's started.
+#[test]
+fn a_bare_program_name_behind_the_launcher_is_left_to_its_exec() {
+    let fixture = Fixture::new("bare", "answer");
+    let mut config = fixture.tied_config();
+    config.program = "no-such-llama-server-on-path".into();
+    config.restarts = 0;
+    let mut decider = Fixture::decider(config);
+    let err = decider.decide(&question(1), &go_on).unwrap_err();
+    // The launcher ran and its exec failed: the server never started.
+    let ServerError::GaveUp(1, last) = server_error(&err) else {
+        panic!("{err}")
+    };
+    assert!(matches!(**last, ServerError::Exited(..)), "{last}");
+    assert_eq!(fixture.starts(), Vec::<(u32, String)>::new());
+}
