@@ -26,10 +26,11 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use nota_core::{Clock, SessionId, SystemClock};
+use nota_core::{Clock, SampleRate, SessionId, SessionTime, SystemClock, TrackId};
 use nota_recorder::fs::{Fs, StdFs};
+use nota_recorder::playback::{Output, OutputError, OutputStream, PlaybackError, play_moment};
 use nota_recorder::segment::needs_salvage;
-use nota_recorder::session::SessionDir;
+use nota_recorder::session::{Recordings, SessionDir};
 use nota_store::{Annotation, JobState, SessionState, Store, TrackKind};
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::fs::{Mode, OFlags};
@@ -1758,7 +1759,7 @@ fn assert_final_pass_covers(data: &Path, session: u64) {
     assert_eq!(covered, runs, "session {session}");
     for &(track, _, end) in &runs {
         assert_eq!(
-            store.final_progress(id).unwrap()[&nota_core::TrackId::new(track)].get(),
+            store.final_progress(id).unwrap()[&TrackId::new(track)].get(),
             end
         );
     }
@@ -1816,4 +1817,115 @@ fn the_final_pass_runs_after_the_stop_and_never_during_a_recording() {
     home.press("q");
     let status = home.exits().expect("nota didn't close");
     assert!(status.success(), "{status:?}");
+}
+
+/// An output that plays nothing and keeps nothing: these tests ask only
+/// whether playing is allowed.
+struct Silent;
+
+/// A [`Silent`] moment, finished as soon as it starts.
+struct SilentStream;
+
+impl OutputStream for SilentStream {
+    fn finished(&self) -> bool {
+        true
+    }
+}
+
+impl Output for Silent {
+    type Stream = SilentStream;
+
+    fn start(&self, _samples: &[i16], _rate: SampleRate) -> Result<SilentStream, OutputError> {
+        Ok(SilentStream)
+    }
+}
+
+/// Plays a moment one second into the microphone track of `session` in
+/// the library in `data`, as the correction card would: from outside the
+/// recording nota, so the lock is seen across processes.
+fn play(data: &Path, session: u64) -> Result<Duration, PlaybackError> {
+    let id = SessionId::new(session);
+    let audio = data
+        .join("sessions")
+        .join(session.to_string())
+        .join("audio");
+    let store = Store::open(&data.join("library.db")).unwrap();
+    let playing = play_moment(
+        &Recordings::new(StdFs, data),
+        &SessionDir::new(id, StdFs, &audio),
+        &store,
+        TrackId::new(0),
+        SessionTime::from_nanos(1_000_000_000),
+        &Silent,
+    )?;
+    Ok(playing.length())
+}
+
+/// While one session records, a moment of another session of the library
+/// is refused with the reason the card shows, and plays once the recording
+/// has stopped.
+#[test]
+fn a_moment_of_another_session_cant_play_while_one_records() {
+    let tmp = TestDir::new("play-while-recording");
+    let mut first = recording(&tmp.0);
+    stop_with_keys(&mut first);
+    // The first session plays while nothing records: the moment is clamped
+    // to its short recording, but it is heard.
+    assert!(play(&tmp.0, 1).unwrap() > Duration::from_secs(1));
+
+    let mut second = recording(&tmp.0);
+    let refused = play(&tmp.0, 1).unwrap_err();
+    assert!(matches!(refused, PlaybackError::Recording), "{refused}");
+    assert_eq!(
+        refused.to_string(),
+        "can't play now: a session is being recorded, or another moment is playing"
+    );
+
+    stop_with_keys(&mut second);
+    assert!(play(&tmp.0, 1).unwrap() > Duration::from_secs(1));
+}
+
+/// While a moment plays, a recording into the library doesn't start: it
+/// says why, and leaves no session behind.
+#[test]
+fn a_recording_doesnt_start_while_a_moment_plays() {
+    let tmp = TestDir::new("record-while-playing");
+    let quiet = Recordings::new(StdFs, &tmp.0).quiet().unwrap();
+    let mut nota = Running::start_with(&tmp.0, &[]);
+    let status = nota.exits().expect("nota didn't give up");
+    assert!(!status.success(), "{status:?}");
+    let said = visible(&nota.output.lock().unwrap());
+    assert!(
+        said.contains("a moment of a session is playing: stop it, then record"),
+        "{said}"
+    );
+    assert!(StdFs.list(&tmp.0.join("sessions")).unwrap().is_empty());
+
+    // Once it has stopped playing, recording starts.
+    drop(quiet);
+    let mut nota = recording(&tmp.0);
+    stop_with_keys(&mut nota);
+}
+
+/// A recording lock that can't be taken for another reason (here a file
+/// where its directory goes) stops the start with that reason, not with
+/// "a moment is playing", and leaves no session behind.
+#[test]
+fn a_recording_lock_that_cant_be_taken_stops_the_start_with_its_reason() {
+    let tmp = TestDir::new("record-lock-file");
+    let _in_the_way = StdFs.create(&tmp.0.join("recording.lock")).unwrap();
+    let mut nota = Running::start_with(&tmp.0, &[]);
+    let status = nota.exits().expect("nota didn't give up");
+    assert!(!status.success(), "{status:?}");
+    let said = visible(&nota.output.lock().unwrap());
+    let lock = tmp.0.join("recording.lock");
+    assert!(
+        said.contains(&format!(
+            "the library's recording lock {} can't be taken: lock_dir needs a directory",
+            lock.display()
+        )),
+        "{said}"
+    );
+    assert!(!said.contains("a moment of a session is playing"), "{said}");
+    assert!(StdFs.list(&tmp.0.join("sessions")).unwrap().is_empty());
 }
