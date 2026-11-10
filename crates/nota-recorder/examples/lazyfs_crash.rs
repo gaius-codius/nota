@@ -249,6 +249,10 @@ impl Fs for CountingFs {
     fn lock_dir(&self, dir: &Path) -> io::Result<StdLock> {
         StdFs.lock_dir(dir)
     }
+
+    fn lock_dir_shared(&self, dir: &Path) -> io::Result<StdLock> {
+        StdFs.lock_dir_shared(dir)
+    }
 }
 
 impl FsFile for CountingFile {

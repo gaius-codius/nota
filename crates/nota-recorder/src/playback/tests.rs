@@ -23,7 +23,7 @@ use super::*;
 use crate::fs::fake::FakeFs;
 use crate::fs::{Fs, FsFile};
 use crate::segment::{SegmentLength, segment_file_name};
-use crate::session::SessionWriter;
+use crate::session::{Recordings, SessionWriter};
 use crate::test_dir::TestDir;
 
 const MIC: TrackId = TrackId::new(0);
@@ -63,10 +63,13 @@ fn anchor(id: u32, start: u64, first_sample: u64) -> EpochAnchor {
     }
 }
 
-/// A session on a fake filesystem, with its rows in a real library.
+/// A session on a fake filesystem, in a library whose data folder is
+/// `/data`, with its rows in a real library database.
 struct Scene {
     fs: FakeFs,
     store: Store,
+    /// The library's recording lock.
+    recordings: Recordings<FakeFs>,
     session: SessionDir<FakeFs>,
     _dir: TestDir,
 }
@@ -78,8 +81,10 @@ impl Scene {
         store.create_session(&NewSession::bare(SESSION)).unwrap();
         let fs = FakeFs::new();
         fs.create_dir(Path::new("/s")).unwrap();
+        fs.create_dir(Path::new("/data")).unwrap();
         let session = SessionDir::new(SESSION, fs.clone(), Path::new("/s"));
         Self {
+            recordings: Recordings::new(fs.clone(), Path::new("/data")),
             fs,
             store,
             session,
@@ -112,7 +117,14 @@ impl Scene {
         track: TrackId,
         at: u64,
     ) -> Result<Playback<FakeFs, FakeStream>, PlaybackError> {
-        play_moment(&self.session, &self.store, track, secs(at), output)
+        play_moment(
+            &self.recordings,
+            &self.session,
+            &self.store,
+            track,
+            secs(at),
+            output,
+        )
     }
 
     /// The samples a play at `at` seconds of `track` hands the output.
@@ -124,7 +136,17 @@ impl Scene {
     /// output.
     fn heard_at(&self, track: TrackId, at: SessionTime) -> Vec<i16> {
         let output = FakeOutput::default();
-        drop(play_moment(&self.session, &self.store, track, at, &output).unwrap());
+        drop(
+            play_moment(
+                &self.recordings,
+                &self.session,
+                &self.store,
+                track,
+                at,
+                &output,
+            )
+            .unwrap(),
+        );
         output.played()
     }
 
@@ -346,8 +368,88 @@ fn a_full_moment_is_five_seconds_at_the_epochs_rate() {
     assert_eq!(output.started.lock().unwrap()[0].1, rate());
 }
 
-/// While a recording runs it holds the session's lock, and playing is
-/// refused before anything is read or played.
+/// While any session of the library records, playing is refused with the
+/// reason the card shows, before anything is read or played. The library's
+/// recording lock is held as the recorder holds it, for another session.
+#[test]
+fn playing_is_refused_while_another_session_records() {
+    let mut scene = Scene::new("another");
+    scene.epoch(MIC, &anchor(0, 0, 0));
+    scene.segment(MIC, 0, 0, 10_000);
+    let output = FakeOutput::default();
+    scene.fs.create_dir(Path::new("/a")).unwrap();
+    let other = SessionDir::new(SessionId::new(2), scene.fs.clone(), Path::new("/a"));
+    let counted = scene.recordings.record().unwrap();
+    let clock = Arc::new(FakeClock::new(SessionTime::ZERO));
+    let recording = SessionWriter::open(
+        &other.lock().unwrap(),
+        rate(),
+        SegmentLength::default_at(rate()),
+        clock,
+    )
+    .unwrap();
+
+    let refused = scene.play(&output, MIC, 5).unwrap_err();
+
+    assert!(matches!(refused, PlaybackError::Recording), "{refused}");
+    assert_eq!(
+        refused.to_string(),
+        "can't play now: a session is being recorded, or another moment is playing"
+    );
+    assert!(output.started.lock().unwrap().is_empty());
+    // Refused before the session was touched: it isn't left locked.
+    assert!(scene.session.lock().is_ok());
+    // Once the recording is over the same call plays.
+    drop(recording);
+    drop(counted);
+    assert_eq!(scene.heard(MIC, 5), values(MIC, 2_500, 7_500));
+}
+
+/// A moment that is playing keeps every recording in the library from
+/// starting until it stops, and no other moment plays alongside it.
+#[test]
+fn a_playing_moment_keeps_recordings_from_starting() {
+    let mut scene = Scene::new("quiet");
+    scene.epoch(MIC, &anchor(0, 0, 0));
+    scene.segment(MIC, 0, 0, 10_000);
+    let output = FakeOutput::default();
+
+    let playing = scene.play(&output, MIC, 5).unwrap();
+    assert_eq!(
+        scene.recordings.record().unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+
+    drop(playing);
+
+    // The sound has stopped and the lock is let go with it.
+    assert!(output.stopped.load(Ordering::Acquire));
+    assert!(scene.recordings.record().is_ok());
+}
+
+/// A recording lock that can't be taken for another reason than a
+/// recording is that error, kept as the cause.
+#[test]
+fn a_recording_lock_that_cant_be_taken_is_its_error() {
+    let mut scene = Scene::new("lock-error");
+    scene.epoch(MIC, &anchor(0, 0, 0));
+    scene.segment(MIC, 0, 0, 10_000);
+    let output = FakeOutput::default();
+    // A data folder that isn't there: nowhere to make the lock.
+    scene.recordings = Recordings::new(scene.fs.clone(), Path::new("/gone"));
+
+    let refused = scene.play(&output, MIC, 5).unwrap_err();
+
+    let PlaybackError::RecordingLock(e) = &refused else {
+        panic!("{refused}");
+    };
+    assert_eq!(e.kind(), io::ErrorKind::NotFound);
+    assert!(output.started.lock().unwrap().is_empty());
+}
+
+/// A session recorded by something that holds only its own lock (not the
+/// library's) is still refused, by its session lock, before anything is
+/// read or played.
 #[test]
 fn playing_is_refused_while_a_recording_runs() {
     let mut scene = Scene::new("recording");
@@ -387,10 +489,11 @@ fn a_playing_moment_holds_the_session_until_it_stops() {
     let output = FakeOutput::default();
 
     let playing = scene.play(&output, MIC, 5).unwrap();
-    // Another space while the first plays is refused until the first stops.
+    // Another space while the first plays is refused until the first
+    // stops: the library's lock is the first it meets.
     assert!(matches!(
         scene.play(&output, MIC, 6),
-        Err(PlaybackError::Busy)
+        Err(PlaybackError::Recording)
     ));
     assert_eq!(
         scene.session.lock().unwrap_err().kind(),
@@ -642,6 +745,18 @@ fn every_failure_has_a_message_for_the_card() {
     let from = SampleIndex::ZERO;
     for (error, message) in [
         (
+            PlaybackError::Recording,
+            "can't play now: a session is being recorded, or another moment is playing",
+        ),
+        (
+            PlaybackError::RecordingLock(io()),
+            "couldn't check whether a session is recording: disk",
+        ),
+        (
+            PlaybackError::Busy,
+            "can't play now: the session is being recorded or repaired, or already playing",
+        ),
+        (
             PlaybackError::Session(io()),
             "couldn't open the session to play it: disk",
         ),
@@ -701,6 +816,9 @@ fn every_failure_has_a_message_for_the_card() {
 fn errors_keep_their_cause() {
     let has_source = |error: PlaybackError| std::error::Error::source(&error).is_some();
     assert!(has_source(PlaybackError::Session(io::Error::other("disk"))));
+    assert!(has_source(PlaybackError::RecordingLock(io::Error::other(
+        "disk"
+    ))));
     assert!(has_source(PlaybackError::Store(StoreError::OutOfRange)));
     assert!(has_source(PlaybackError::Timeline(
         EpochError::TooManyEpochs
@@ -708,6 +826,7 @@ fn errors_keep_their_cause() {
     assert!(has_source(PlaybackError::Segment(ReadSegmentError::Hash)));
     assert!(has_source(PlaybackError::Output(OutputError::NoDevice)));
     assert!(!has_source(PlaybackError::Busy));
+    assert!(!has_source(PlaybackError::Recording));
     assert!(!has_source(PlaybackError::NotTimed));
 }
 

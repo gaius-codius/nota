@@ -361,6 +361,10 @@ impl Fs for Watched {
     fn lock_dir(&self, dir: &Path) -> io::Result<FakeLock> {
         self.fs.lock_dir(dir)
     }
+
+    fn lock_dir_shared(&self, dir: &Path) -> io::Result<FakeLock> {
+        self.fs.lock_dir_shared(dir)
+    }
 }
 
 /// The next file operation on the recorder thread; fails the test after
@@ -2082,6 +2086,10 @@ impl Fs for Stalling {
 
     fn lock_dir(&self, dir: &Path) -> io::Result<FakeLock> {
         self.fs.lock_dir(dir)
+    }
+
+    fn lock_dir_shared(&self, dir: &Path) -> io::Result<FakeLock> {
+        self.fs.lock_dir_shared(dir)
     }
 }
 

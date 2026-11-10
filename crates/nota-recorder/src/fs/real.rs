@@ -18,8 +18,9 @@ pub struct StdFs;
 #[derive(Debug)]
 pub struct StdFile(File);
 
-/// A directory locked by [`StdFs::lock_dir`]: an open handle on it holding
-/// an exclusive `flock`, released when the handle closes.
+/// A directory locked by [`StdFs::lock_dir`] or [`StdFs::lock_dir_shared`]:
+/// an open handle on it holding an exclusive or a shared `flock`, released
+/// when the handle closes.
 #[derive(Debug)]
 pub struct StdLock {
     _handle: File,
@@ -120,29 +121,44 @@ impl Fs for StdFs {
     }
 
     fn lock_dir(&self, dir: &Path) -> io::Result<StdLock> {
-        valid_path(dir)?;
-        let handle = File::open(dir)?;
-        if !handle.metadata()?.is_dir() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotADirectory,
-                "lock_dir needs a directory",
-            ));
-        }
         // `flock(LOCK_EX | LOCK_NB)` on Unix: held per open file
         // description, so a second open in this process is refused too.
-        match handle.try_lock() {
-            Ok(()) => Ok(StdLock { _handle: handle }),
-            Err(std::fs::TryLockError::WouldBlock) => Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "the directory is locked",
-            )),
-            Err(std::fs::TryLockError::Error(e)) => Err(e),
-        }
+        flock_dir(dir, File::try_lock)
+    }
+
+    fn lock_dir_shared(&self, dir: &Path) -> io::Result<StdLock> {
+        // `flock(LOCK_SH | LOCK_NB)`: shared with other shared holders,
+        // refused while anyone holds `LOCK_EX`.
+        flock_dir(dir, File::try_lock_shared)
     }
 
     fn free_space(&self, dir: &Path) -> io::Result<u64> {
         valid_dir(dir)?;
         free_space(dir)
+    }
+}
+
+/// Opens the directory `dir` and takes `lock` on it without waiting: a held
+/// lock in the way is [`io::ErrorKind::WouldBlock`].
+fn flock_dir(
+    dir: &Path,
+    lock: fn(&File) -> Result<(), std::fs::TryLockError>,
+) -> io::Result<StdLock> {
+    valid_path(dir)?;
+    let handle = File::open(dir)?;
+    if !handle.metadata()?.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotADirectory,
+            "lock_dir needs a directory",
+        ));
+    }
+    match lock(&handle) {
+        Ok(()) => Ok(StdLock { _handle: handle }),
+        Err(std::fs::TryLockError::WouldBlock) => Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "the directory is locked",
+        )),
+        Err(std::fs::TryLockError::Error(e)) => Err(e),
     }
 }
 
@@ -611,6 +627,52 @@ mod tests {
         );
         drop(held);
         let _again = fs.lock_dir(&dir.0).unwrap();
+    }
+
+    /// Shared locks are held together, but never with the exclusive one,
+    /// whichever comes first.
+    #[test]
+    fn shared_locks_share_a_directory_but_keep_the_exclusive_lock_out() {
+        let dir = TestDir::new("lock-shared");
+        let fs = StdFs;
+        let first = fs.lock_dir_shared(&dir.0).unwrap();
+        let second = fs.lock_dir_shared(&dir.0).unwrap();
+        assert_eq!(
+            fs.lock_dir(&dir.0).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        // One shared holder left is still enough to keep it out.
+        drop(first);
+        assert_eq!(
+            fs.lock_dir(&dir.0).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(second);
+        let exclusive = fs.lock_dir(&dir.0).unwrap();
+        assert_eq!(
+            fs.lock_dir_shared(&dir.0).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(exclusive);
+        let _again = fs.lock_dir_shared(&dir.0).unwrap();
+    }
+
+    #[test]
+    fn a_shared_lock_needs_an_existing_directory() {
+        let dir = TestDir::new("lock-shared-missing");
+        assert_eq!(
+            StdFs
+                .lock_dir_shared(&dir.0.join("nope"))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        let file = dir.0.join("journal");
+        let _f = StdFs.create(&file).unwrap();
+        assert_eq!(
+            StdFs.lock_dir_shared(&file).unwrap_err().kind(),
+            io::ErrorKind::NotADirectory
+        );
     }
 
     #[test]
