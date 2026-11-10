@@ -35,7 +35,9 @@
 //! # Locks
 //!
 //! [`Fs::lock_dir`] works as `flock` does: each guard is its own holder, so
-//! a second lock on a directory is refused even through the same fake. A
+//! a second lock on a directory is refused even through the same fake.
+//! [`Fs::lock_dir_shared`] guards are counted: any number are held at once,
+//! never alongside the exclusive lock. A
 //! lock isn't an operation on the disk: it isn't logged, doesn't count
 //! towards [`FakeFs::crash_after`], still works after the crash (every disk
 //! operation fails anyway), and is gone from the filesystem the crash
@@ -196,8 +198,27 @@ pub struct FakeLock {
 
 impl Drop for FakeLock {
     fn drop(&mut self) {
-        lock(&self.state).locked.remove(&self.dir);
+        let mut state = lock(&self.state);
+        let last = match state.locked.get_mut(&self.dir) {
+            Some(Locked::Shared(holders)) if *holders > 1 => {
+                *holders -= 1;
+                false
+            }
+            _ => true,
+        };
+        if last {
+            state.locked.remove(&self.dir);
+        }
     }
+}
+
+/// How a directory on a [`FakeFs`] is locked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Locked {
+    /// By one [`Fs::lock_dir`] guard.
+    Exclusive,
+    /// By this many [`Fs::lock_dir_shared`] guards, at least one.
+    Shared(usize),
 }
 
 /// A file opened on a [`FakeFs`].
@@ -418,8 +439,8 @@ struct State {
     /// path fails with this error.
     faults: Vec<(PathBuf, Fault, io::ErrorKind)>,
     crashed: bool,
-    /// The directories locked by a live [`FakeLock`].
-    locked: BTreeSet<PathBuf>,
+    /// The directories locked by a live [`FakeLock`], and how.
+    locked: BTreeMap<PathBuf, Locked>,
     /// Files whose fsyncs are held back, by the name they were created
     /// under.
     stalls: Vec<(PathBuf, Arc<Gate>)>,
@@ -442,7 +463,7 @@ impl State {
             failed: false,
             faults: Vec::new(),
             crashed: false,
-            locked: BTreeSet::new(),
+            locked: BTreeMap::new(),
             stalls: Vec::new(),
             capacity: None,
         }
@@ -772,6 +793,29 @@ impl FakeFs {
     fn lock(&self) -> MutexGuard<'_, State> {
         lock(&self.state)
     }
+
+    /// Locks the existing directory `dir` as `next` says, given how it's
+    /// locked now; `next` gives `None` when the lock held is in the way.
+    fn take_lock(
+        &self,
+        dir: &Path,
+        next: impl FnOnce(Option<Locked>) -> Option<Locked>,
+    ) -> io::Result<FakeLock> {
+        valid_path(dir)?;
+        let mut state = self.lock();
+        state.dir_exists(dir)?;
+        let Some(now) = next(state.locked.get(dir).copied()) else {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "the directory is locked",
+            ));
+        };
+        state.locked.insert(dir.to_path_buf(), now);
+        Ok(FakeLock {
+            state: Arc::clone(&self.state),
+            dir: dir.to_path_buf(),
+        })
+    }
 }
 
 /// A test that panicked while holding the lock shouldn't hide the state from
@@ -962,18 +1006,17 @@ impl Fs for FakeFs {
     }
 
     fn lock_dir(&self, dir: &Path) -> io::Result<FakeLock> {
-        valid_path(dir)?;
-        let mut state = self.lock();
-        state.dir_exists(dir)?;
-        if !state.locked.insert(dir.to_path_buf()) {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "the directory is locked",
-            ));
-        }
-        Ok(FakeLock {
-            state: Arc::clone(&self.state),
-            dir: dir.to_path_buf(),
+        self.take_lock(dir, |held| match held {
+            None => Some(Locked::Exclusive),
+            Some(_) => None,
+        })
+    }
+
+    fn lock_dir_shared(&self, dir: &Path) -> io::Result<FakeLock> {
+        self.take_lock(dir, |held| match held {
+            None => Some(Locked::Shared(1)),
+            Some(Locked::Shared(holders)) => Some(Locked::Shared(holders + 1)),
+            Some(Locked::Exclusive) => None,
         })
     }
 
@@ -1129,6 +1172,51 @@ mod tests {
             io::ErrorKind::WouldBlock
         );
         drop(held);
+    }
+
+    /// Shared locks are counted: the exclusive lock waits for the last to
+    /// go, and keeps every shared one out while it's held.
+    #[test]
+    fn shared_locks_share_a_directory_but_keep_the_exclusive_lock_out() {
+        let fs = FakeFs::with_dirs(["/s"]);
+        let first = fs.lock_dir_shared(&p("/s")).unwrap();
+        let second = fs.lock_dir_shared(&p("/s")).unwrap();
+        assert_eq!(
+            fs.lock_dir(&p("/s")).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        // Dropping one of two must not unlock the directory.
+        drop(first);
+        assert_eq!(
+            fs.lock_dir(&p("/s")).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(second);
+        let exclusive = fs.lock_dir(&p("/s")).unwrap();
+        assert_eq!(
+            fs.lock_dir_shared(&p("/s")).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(exclusive);
+        let _again = fs.lock_dir_shared(&p("/s")).unwrap();
+    }
+
+    #[test]
+    fn a_shared_lock_needs_an_existing_directory() {
+        let fs = FakeFs::with_dirs(["/s"]);
+        assert_eq!(
+            fs.lock_dir_shared(&p("s")).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            fs.lock_dir_shared(&p("/nope")).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        let _f = fs.create(&p("/s/journal")).unwrap();
+        assert_eq!(
+            fs.lock_dir_shared(&p("/s/journal")).unwrap_err().kind(),
+            io::ErrorKind::NotADirectory
+        );
     }
 
     #[test]

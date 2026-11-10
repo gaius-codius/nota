@@ -118,6 +118,7 @@ use crate::segment::SegmentLength;
 
 mod handle;
 mod marks;
+mod recordings;
 mod syncs;
 
 use handle::InUse;
@@ -126,6 +127,7 @@ pub use handle::{SessionDir, SessionLock, SessionStore, Use};
 pub(crate) use marks::is_temp as is_marks_temp;
 pub use marks::{BadMarks, FILE_NAME as MARKS_FILE_NAME};
 use marks::{MarkedEpoch, Marks};
+pub use recordings::{QuietLock, RECORDING_LOCK, RecordingLock, Recordings};
 pub use syncs::Syncing;
 use syncs::TrackSyncs;
 

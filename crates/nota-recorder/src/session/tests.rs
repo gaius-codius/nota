@@ -228,6 +228,10 @@ impl Fs for NoCreates {
     fn lock_dir(&self, dir: &Path) -> io::Result<FakeLock> {
         self.inner.lock_dir(dir)
     }
+
+    fn lock_dir_shared(&self, dir: &Path) -> io::Result<FakeLock> {
+        self.inner.lock_dir_shared(dir)
+    }
 }
 
 /// A filesystem that doesn't say how much space it has says it can't
@@ -1110,6 +1114,10 @@ impl Fs for NoDataSyncs {
 
     fn lock_dir(&self, dir: &Path) -> io::Result<FakeLock> {
         self.0.lock_dir(dir)
+    }
+
+    fn lock_dir_shared(&self, dir: &Path) -> io::Result<FakeLock> {
+        self.0.lock_dir_shared(dir)
     }
 }
 

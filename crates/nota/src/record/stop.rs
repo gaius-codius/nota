@@ -30,6 +30,7 @@ pub(super) fn stop<B: CaptureBackend>(started: Started<B>, shown: Shown) -> (Out
         library,
         session,
         lock,
+        recording,
         captures,
         sleep,
         disk,
@@ -123,6 +124,8 @@ pub(super) fn stop<B: CaptureBackend>(started: Started<B>, shown: Shown) -> (Out
         );
     }
     drop(lock);
+    // The recording is over: a moment may play again.
+    drop(recording);
     // The ballast last: it takes seconds on a slow disk, and nothing the
     // recording needs waits behind it. A signal ends it (the next recording
     // to end makes it), as does another recording starting.
