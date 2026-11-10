@@ -26,9 +26,10 @@ same reason an alias that is itself a term of the pack, or that two labels
 share, is dropped, and a Wikidata label that differs from an RxNorm name
 only in case takes RxNorm's spelling.
 
-Every new row is a draft until someone reviews it. A row already in a list
-keeps the status it has there, so a review made by editing rows survives a
-refresh; REVIEW below gives the status of new rows. After a refresh, give
+RxNorm's names and Wikidata's labels count as reviewed by their source
+(decided on #228); every alias is a draft until a person checks it. A row
+already in a list keeps the status it has there, so a review made by
+editing rows survives a refresh; REVIEW below gives the status of new rows. After a refresh, give
 pack.toml a new version: a session tells packs apart by name and version.
 """
 
@@ -51,8 +52,9 @@ SELECT ?rxcui ?label (GROUP_CONCAT(DISTINCT ?alias; separator="|") AS ?aliases) 
 } GROUP BY ?rxcui ?label
 """
 
-# Each source's review status for the new rows it gives.
-REVIEW = {"rxnorm": "draft", "wikidata": "draft"}
+# The review status of new rows: names from a source count as reviewed by
+# it, aliases don't.
+REVIEW = {"rxnorm": "reviewed", "wikidata": "reviewed", "alias": "draft"}
 
 NAME = re.compile(r"^[A-Za-z][A-Za-z' -]{1,38}[A-Za-z]$")
 ALIAS = re.compile(r"^[a-z][a-z' -]{1,38}[a-z]$")
@@ -131,7 +133,7 @@ def main():
     terms = {t.lower() for t in labels | set(rx_names) | hand_terms()}
     wd_terms = sorted((label, wd_kept.get((label, None), REVIEW["wikidata"])) for label in labels)
     wd_aliases = sorted(
-        (label, wd_kept.get((label, alias), REVIEW["wikidata"]), alias)
+        (label, wd_kept.get((label, alias), REVIEW["alias"]), alias)
         for alias, of in alias_of.items()
         if len(of) == 1 and alias.lower() not in terms
         for label in of

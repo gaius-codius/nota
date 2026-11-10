@@ -9,12 +9,13 @@
 # redistributed. WHO INN names have no bulk file; the INNs here come through
 # RxNorm and Wikidata.
 #
-# Every row is a draft until it's reviewed, and a shipped pack offers only
-# reviewed rows: until then a session that chooses this pack is offered none
-# of its terms. Mark rows `reviewed` in the lists as they're checked.
+# RxNorm's names and Wikidata's labels count as reviewed by their source;
+# every alias, and every spoken form, is a draft until a person checks it,
+# and a shipped pack offers only reviewed rows. Mark rows `reviewed` in the
+# lists as they're checked.
 
 name = "pharmacy"
-version = "2026.11.2"
+version = "2026.11.3"
 language = "en"
 kind = "shipped"
 

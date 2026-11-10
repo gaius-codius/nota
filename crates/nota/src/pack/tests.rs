@@ -417,10 +417,14 @@ fn the_pharmacy_pack_builds_the_same_bytes_twice() {
     assert_eq!(bytes(&a), bytes(&c));
     let pack = Pack::open(&a).unwrap();
     assert_eq!(pack.manifest().name, "pharmacy");
-    // Every row is a draft until it's reviewed, so the pack offers nothing
-    // yet; this changes, on purpose, with the first reviewed rows.
-    assert!(!pack.terms().is_empty());
-    assert_eq!(pack.offered().len(), 0);
+    // RxNorm's names and Wikidata's labels are reviewed by their source;
+    // aliases and spoken forms are drafts, so none is offered. The count
+    // changes, on purpose, as rows are reviewed.
+    let offered = pack.offered();
+    assert_eq!(offered.len(), 3872);
+    assert!(offered.iter().all(|o| o.aliases.is_empty() && o.reviewed));
+    assert!(offered.iter().any(|o| o.term == "amlodipine"));
+    assert!(!offered.iter().any(|o| o.term == "GLP-1"));
     let notice = pack.manifest().notice();
     for source in &pack.manifest().sources {
         assert!(notice.contains(&source.attribution), "{}", source.id);
