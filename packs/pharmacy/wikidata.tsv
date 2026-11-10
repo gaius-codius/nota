@@ -1,0 +1,3183 @@
+# Wikidata labels and lower-case aliases of items with an RxNorm id above, https://query.wikidata.org/sparql
+# Written by refresh.py; term<TAB>status[<TAB>alias]
+Bifidobacterium bifidum	reviewed
+Chymotrypsinogen	reviewed
+Coal tar creosote	reviewed
+D-fructopyranose	reviewed
+D-glucopyranose	reviewed
+D-glucosamine	reviewed
+D-methamphetamine	reviewed
+D-penicillamine	reviewed
+D-sorbitol	reviewed
+DL-acetyltryptophan	reviewed
+DL-amphetamine	reviewed
+DL-lactic acid	reviewed
+DL-magnesium lactate	reviewed
+DL-malic acid	reviewed
+DL-ofloxacin	reviewed
+DL-panthenol	reviewed
+DOTA-TATE	reviewed
+Eucalyptus oil	reviewed
+Ferumoxides	reviewed
+GHK-Cu	reviewed
+Hernexeos	reviewed
+L-Asparagine	reviewed
+L-Cysteine	reviewed
+L-alanine	reviewed
+L-arginine	reviewed
+L-aspartic acid	reviewed
+L-carbocysteine	reviewed
+L-carnitine	reviewed
+L-citrulline	reviewed
+L-folinic acid	reviewed
+L-glutamine	reviewed
+L-histidine	reviewed
+L-isoleucine	reviewed
+L-leucine	reviewed
+L-lysine	reviewed
+L-menthol	reviewed
+L-methionine	reviewed
+L-morphan	reviewed
+L-proline	reviewed
+L-scopolamine	reviewed
+L-selenomethionine	reviewed
+L-serine	reviewed
+L-tartaric acid	reviewed
+L-threonine	reviewed
+L-thyroxine	reviewed
+L-tyrosine	reviewed
+L-valine	reviewed
+Lacticaseibacillus casei	reviewed
+Lactobacillus acidophilus	reviewed
+N-acetyl-L-cysteine	reviewed
+N-acetyl-L-tyrosine	reviewed
+N-hexanoylsphingosine	reviewed
+Prussian blue	reviewed
+RRR-alpha-tocopherol	reviewed
+S-adenosylmethionine	reviewed
+Saccharomyces boulardii	reviewed
+Saccharomyces cerevisiae	reviewed
+Takadiastase	reviewed
+Tocoretinate	reviewed
+abacavir	reviewed
+abaloparatide	reviewed
+abatacept	reviewed
+abemaciclib	reviewed
+abiraterone	reviewed
+acalabrutinib	reviewed
+acamprosate	reviewed
+acarbose	reviewed
+acebutolol	reviewed
+acepromazine	reviewed
+acesulfame	reviewed
+acetaldehyde	reviewed
+acetazolamide	reviewed
+acetic acid	reviewed
+acetohydroxamic acid	reviewed
+acetone	reviewed
+acetyl tributyl citrate	reviewed
+acetyl triethylhexyl citrate	reviewed
+acetylcarnitine	reviewed
+acetylcholine	reviewed
+acetyltriethyl citrate	reviewed
+aciclovir	reviewed
+acitretin	reviewed
+aclidinium	reviewed
+acrylamide	reviewed
+activated charcoal	reviewed
+adalimumab	reviewed
+adapalene	reviewed
+adefovir	reviewed
+adenosine	reviewed
+adenosine triphosphate	reviewed
+adipic acid	reviewed
+aducanumab	reviewed
+afatinib	reviewed
+aflibercept	reviewed
+agalsidase beta	reviewed
+alanyl glutamine	reviewed
+albendazol	reviewed
+alcaftadine	reviewed
+alclometasone	reviewed
+alcloxa	reviewed
+aldehydo-D-galactose	reviewed
+aldehydo-D-mannose	reviewed
+aldehydo-L-glucose	reviewed
+aldehydo-N-acetyl-D-glucosamine	reviewed
+aldesleukin	reviewed
+aldioxa	reviewed
+alectinib	reviewed
+alemtuzumab	reviewed
+alendronic acid	reviewed
+alfentanil	reviewed
+alfuzosin	reviewed
+alglucosidase alfa	reviewed
+alirocumab	reviewed
+aliskiren	reviewed
+alitretinoin	reviewed
+allantoin	reviewed
+allopurinol	reviewed
+allyl hexanoate	reviewed
+almotriptan	reviewed
+alogliptin	reviewed
+alosetron	reviewed
+alpelisib	reviewed
+alpha-arbutin	reviewed
+alpha-pinene	reviewed
+alpha-terpineol	reviewed
+alprazolam	reviewed
+alprostadil	reviewed
+alteplase	reviewed
+altrenogest	reviewed
+aluminium	reviewed
+aluminium oxide	reviewed
+aluminium phosphate	reviewed
+aluminium tristearate	reviewed
+aluminum cation	reviewed
+aluminum chloride hexahydrate	reviewed
+aluminum chlorohydrex propylene glycol	reviewed
+aluminum hydroxide	reviewed
+aluminum subacetate	reviewed
+aluminum sulfate monohydrate	reviewed
+aluminum sulfate tetradecahydrate	reviewed
+alvimopan	reviewed
+amantadine	reviewed
+ambrisentan	reviewed
+ambroxol	reviewed
+amcinonide	reviewed
+amdinocillin	reviewed
+amdinocillin pivoxil	reviewed
+amifampridine	reviewed
+amifostine trihydrate	reviewed
+amikacin	reviewed
+amiloride	reviewed
+aminolevulinic acid	reviewed
+aminomethyl propanediol	reviewed
+aminometradine	reviewed
+aminopentamide	reviewed
+aminophylline	reviewed
+aminopromazine monofumarate	reviewed
+aminopropyl ascorbyl phosphate	reviewed
+amiodarone	reviewed
+amitriptyline	reviewed
+amlexanox	reviewed
+amlodipine	reviewed
+ammonia	reviewed
+ammonium acetate	reviewed
+ammonium acryloyldimethyltaurate	reviewed
+ammonium cation	reviewed
+ammonium chloride	reviewed
+ammonium lauryl sulfate	reviewed
+ammonium sulfate	reviewed
+amobarbital	reviewed
+amoproxan	reviewed
+amoxapine	reviewed
+amoxicillin	reviewed
+amphotericin B	reviewed
+ampicillin	reviewed
+amprenavir	reviewed
+amyl acetate	reviewed
+anagrelide	reviewed
+anakinra	reviewed
+anastrozole	reviewed
+anidulafungin	reviewed
+anisyl alcohol	reviewed
+anthralin	reviewed
+antihemophilic factor	reviewed
+apaflurane	reviewed
+apalutamide	reviewed
+apixaban	reviewed
+apomorphine	reviewed
+apraclonidine	reviewed
+apremilast	reviewed
+aprepitant	reviewed
+aprotinin	reviewed
+arachidyl glucoside	reviewed
+arbutin	reviewed
+arformoterol	reviewed
+aripiprazole	reviewed
+aripiprazole lauroxil	reviewed
+armodafinil	reviewed
+arsenic trioxide	reviewed
+artemether	reviewed
+artesunate	reviewed
+articaine	reviewed
+ascorbyl glucoside	reviewed
+ascorbyl tetraisopalmitate	reviewed
+ascorbyl tocopheryl maleate	reviewed
+asenapine	reviewed
+asfotase alfa	reviewed
+asiatic acid	reviewed
+asiaticoside	reviewed
+asparaginase	reviewed
+aspartame	reviewed
+aspirin	reviewed
+astaxanthin	reviewed
+atazanavir	reviewed
+atenolol	reviewed
+atezolizumab	reviewed
+atipamezole	reviewed
+atomoxetine	reviewed
+atorvastatin	reviewed
+atovaquone	reviewed
+atracurium	reviewed
+atropine	reviewed
+auranofin	reviewed
+avanafil	reviewed
+avapritinib	reviewed
+avelumab	reviewed
+avibactam	reviewed
+aviptadil	reviewed
+avobenzone	reviewed
+axicabtagene ciloleucel	reviewed
+axitinib	reviewed
+azacitidine	reviewed
+azathioprine	reviewed
+azelastine	reviewed
+azilsartan	reviewed
+azithromycin	reviewed
+aztreonam	reviewed
+bacitracin a	reviewed
+baicalin	reviewed
+bakuchiol	reviewed
+balsalazide	reviewed
+baricitinib	reviewed
+barium sulfate	reviewed
+barley malt syrup	reviewed
+basiliximab	reviewed
+bazedoxifene	reviewed
+becaplermin	reviewed
+beclometasone	reviewed
+bedaquiline	reviewed
+behentrimonium methosulfate	reviewed
+behenyl behenate	reviewed
+behenyl erucate	reviewed
+belatacept	reviewed
+belimumab	reviewed
+belinostat	reviewed
+benazepril	reviewed
+bendamustine	reviewed
+benfotiamine	reviewed
+benralizumab	reviewed
+bentonite	reviewed
+bentoquatam	reviewed
+benzaldehyde	reviewed
+benzatropine	reviewed
+benzenesulfonic acid	reviewed
+benzethonium	reviewed
+benznidazole	reviewed
+benzocaine	reviewed
+benzonatate	reviewed
+benzophenone	reviewed
+benzoyl peroxide	reviewed
+benzphetamine	reviewed
+benzyl alcohol	reviewed
+benzyl benzoate	reviewed
+benzyl salicylate	reviewed
+benzylpenicillin	reviewed
+bepotastine	reviewed
+beractant	reviewed
+besifloxacin	reviewed
+beta-Tocopherol	reviewed
+beta-pinene	reviewed
+betadex	reviewed
+betaine	reviewed
+betamethasone	reviewed
+betaxolol	reviewed
+bethanechol	reviewed
+betiatide	reviewed
+bevacizumab	reviewed
+bexarotene	reviewed
+bezafibrate	reviewed
+bezlotoxumab	reviewed
+bicalutamide	reviewed
+bicarbonate ion	reviewed
+bicisate	reviewed
+bictegravir	reviewed
+bimatoprost	reviewed
+binimetinib	reviewed
+biotin	reviewed
+bisacodyl	reviewed
+bismuth	reviewed
+bismuth cation	reviewed
+bismuth subcitrate	reviewed
+bismuth subgallate	reviewed
+bismuth subsalicylate	reviewed
+bisoprolol	reviewed
+bisphenol A	reviewed
+bivalirudin	reviewed
+bleomycin	reviewed
+blinatumomab	reviewed
+borneol	reviewed
+boron	reviewed
+boron citrate	reviewed
+bortezomib	reviewed
+bosentan hydrate	reviewed
+bosutinib	reviewed
+botulinum toxin type A	reviewed
+bremelanotide	reviewed
+brentuximab vedotin	reviewed
+bretylium	reviewed
+brexpiprazole	reviewed
+brigatinib	reviewed
+brillant blue	reviewed
+brilliant green	reviewed
+brimonidine	reviewed
+brinzolamide	reviewed
+brivaracetam	reviewed
+brodalumab	reviewed
+brolucizumab	reviewed
+bromfenac	reviewed
+bromhexine	reviewed
+bromocriptine	reviewed
+bromotheophylline	reviewed
+brompheniramine	reviewed
+bronopol	reviewed
+budesonide	reviewed
+bumetanide	reviewed
+buprenorphine	reviewed
+bupropion	reviewed
+burosumab	reviewed
+buserelin	reviewed
+buspirone	reviewed
+busulfan	reviewed
+butafosfan	reviewed
+butalbital	reviewed
+butamben	reviewed
+butane	reviewed
+butanone	reviewed
+butenafine	reviewed
+butoconazole	reviewed
+butorphanol	reviewed
+butyl acetate	reviewed
+butylated hydroxytoluene	reviewed
+butyloctyl salicylate	reviewed
+butylparaben	reviewed
+butylphenyl methylpropional	reviewed
+cabazitaxel	reviewed
+cabergoline	reviewed
+cabozantinib	reviewed
+caffeine	reviewed
+calamine	reviewed
+calcifediol monohydrate	reviewed
+calcipotriol	reviewed
+calcitriol	reviewed
+calcium	reviewed
+calcium L-threonate	reviewed
+calcium acetate	reviewed
+calcium alginate	reviewed
+calcium ascorbate	reviewed
+calcium carbonate	reviewed
+calcium citrate tetrahydrate	reviewed
+calcium gluconate	reviewed
+calcium hydride	reviewed
+calcium hydroxide	reviewed
+calcium peroxide	reviewed
+calcium pyrophosphate	reviewed
+calcium saccharate tetrahydrate	reviewed
+calcium stearate	reviewed
+calenduloside E	reviewed
+calfactant	reviewed
+canagliflozin hemihydrate	reviewed
+canakinumab	reviewed
+candesartan	reviewed
+cangrelor	reviewed
+cannabidiol	reviewed
+cantharidin	reviewed
+capecitabine	reviewed
+caplacizumab	reviewed
+capric acid	reviewed
+caprylhydroxamic acid	reviewed
+caprylic acid	reviewed
+capryloyl glycine	reviewed
+caprylyl glucoside	reviewed
+caprylyl trisiloxane	reviewed
+capsaicin	reviewed
+captopril	reviewed
+carbachol	reviewed
+carbamazepin	reviewed
+carbamide peroxide	reviewed
+carbamoylcholine	reviewed
+carbazochrome	reviewed
+carbimazole	reviewed
+carbinoxamine	reviewed
+carbon dioxide	reviewed
+carbonate ion	reviewed
+carboplatin	reviewed
+carboprost	reviewed
+carboxymethyl cellulose	reviewed
+carfilzomib	reviewed
+carglumic acid	reviewed
+cariprazine	reviewed
+carisoprodol	reviewed
+carmoisine	reviewed
+carmustine	reviewed
+carnitine	reviewed
+carnosine	reviewed
+carprofen	reviewed
+carteolol	reviewed
+carvedilol	reviewed
+caryophyllene	reviewed
+caspofungin	reviewed
+castor oil	reviewed
+cedrol	reviewed
+cefaclor	reviewed
+cefadroxil	reviewed
+cefazolin	reviewed
+cefdinir	reviewed
+cefepime	reviewed
+cefiderocol	reviewed
+cefixime trihydrate	reviewed
+cefotaxime	reviewed
+cefotetan	reviewed
+cefoxitin	reviewed
+cefpodoxime	reviewed
+ceftaroline	reviewed
+ceftaroline fosamil	reviewed
+ceftazidime	reviewed
+ceftiofur	reviewed
+ceftriaxone	reviewed
+cefuroxime	reviewed
+celecoxib	reviewed
+cemiplimab	reviewed
+cephalexin	reviewed
+ceritinib	reviewed
+certolizumab pegol	reviewed
+cesium cation	reviewed
+cesium chloride	reviewed
+cetalkonium chloride	reviewed
+cetirizine	reviewed
+cetrorelix	reviewed
+cetuximab	reviewed
+cetyl acetate	reviewed
+cetyl alcohol	reviewed
+cetyl betaine	reviewed
+cetyl ethylhexanoate	reviewed
+cetyl lactate	reviewed
+cetyl myristate	reviewed
+cetyl myristoleate	reviewed
+cetyl oleate	reviewed
+cetyl palmitate	reviewed
+cetyl phosphate	reviewed
+cetyl ricinoleate	reviewed
+cetyl stearate	reviewed
+cetylhydroxyproline palmitamide	reviewed
+cetylpyridinium	reviewed
+cevimeline	reviewed
+chlophedianol	reviewed
+chlorambucil	reviewed
+chloramphenicol	reviewed
+chlorate ion	reviewed
+chlorcyclizine	reviewed
+chlordiazepoxide	reviewed
+chlorhexidine	reviewed
+chloride ion	reviewed
+chlorine dioxide	reviewed
+chlorobutanol	reviewed
+chlorocresol	reviewed
+chloroethane	reviewed
+chloroform	reviewed
+chlorophyll	reviewed
+chloroprocaine	reviewed
+chloroquine	reviewed
+chlorothiazide	reviewed
+chlorothymol	reviewed
+chloroxylenol	reviewed
+chlorphenesin	reviewed
+chlorpheniramine	reviewed
+chlorpromazine	reviewed
+chlorthalidone	reviewed
+chlorzoxazone	reviewed
+cholecalciferol	reviewed
+cholesterol	reviewed
+cholic acid	reviewed
+choline	reviewed
+choline fenofibrate	reviewed
+chorionic gonadotropin	reviewed
+chromium nicotinate	reviewed
+chromium picolinate	reviewed
+chrysin	reviewed
+ciclesonide	reviewed
+ciclopirox	reviewed
+cidofovir dihydrate	reviewed
+cilastatin	reviewed
+cilostazol	reviewed
+cimetidine	reviewed
+cinacalcet	reviewed
+ciprofloxacin	reviewed
+cisapride	reviewed
+cisatracurium	reviewed
+cisplatin	reviewed
+citicoline	reviewed
+citric acid	reviewed
+citric acid acetate	reviewed
+cladribine	reviewed
+clarithromycin	reviewed
+clavulanic acid	reviewed
+clemastine	reviewed
+clevidipine	reviewed
+clidinium	reviewed
+climbazole	reviewed
+clindamycin	reviewed
+clobazam	reviewed
+clobetasol	reviewed
+clocortolone	reviewed
+clofarabine	reviewed
+clofazimine	reviewed
+clomifene	reviewed
+clomipramine	reviewed
+clonazepam	reviewed
+clonidine	reviewed
+clopidogrel	reviewed
+clorazepic acid	reviewed
+clotrimazole	reviewed
+clozapine	reviewed
+coagulation factor x human	reviewed
+cobamamide	reviewed
+cobicistat	reviewed
+cobimetinib	reviewed
+cocaine	reviewed
+cocamide MEA	reviewed
+codeine	reviewed
+colesevelam	reviewed
+colestipol	reviewed
+colestyramine	reviewed
+colistin	reviewed
+collagenase Clostridium histolyticum	reviewed
+conivaptan	reviewed
+copper	reviewed
+copper gluconate	reviewed
+corn syrup	reviewed
+corticotropin	reviewed
+cortisol	reviewed
+cortisone	reviewed
+cosyntropin	reviewed
+coumarin	reviewed
+creatine	reviewed
+creosol	reviewed
+crisaborole	reviewed
+crizotinib	reviewed
+crofelemer	reviewed
+cromoglicic acid	reviewed
+crystal violet	reviewed
+curcumin	reviewed
+curdlan	reviewed
+cyclamen aldehyde	reviewed
+cyclobenzaprine	reviewed
+cyclohexane	reviewed
+cycloserine	reviewed
+cyclosporine	reviewed
+cyproheptadine	reviewed
+cysteamine	reviewed
+cytarabine	reviewed
+dabigatran	reviewed
+dabigatran etexilate	reviewed
+dabrafenib	reviewed
+dacarbazine	reviewed
+dacomitinib	reviewed
+dactinomycin	reviewed
+dalbavancin	reviewed
+dalfampridine	reviewed
+dalteparin	reviewed
+damoctocog alfa pegol	reviewed
+danazol	reviewed
+dantrolene	reviewed
+dapagliflozin	reviewed
+dapiprazole	reviewed
+dapsone	reviewed
+daratumumab	reviewed
+darbepoetin alfa	reviewed
+darifenacin	reviewed
+darolutamide	reviewed
+darunavir	reviewed
+dasatinib monohydrate	reviewed
+daunorubicin	reviewed
+deacetylbisacodyl	reviewed
+deanol	reviewed
+decamethyltetrasiloxane	reviewed
+decitabine	reviewed
+decoquinate	reviewed
+decyl glucoside	reviewed
+decyl oleate	reviewed
+decylamine oxide	reviewed
+decylene glycol	reviewed
+decyloxazolidinone	reviewed
+deferasirox	reviewed
+deferiprone	reviewed
+deferoxamine	reviewed
+defibrotide	reviewed
+deflazacort	reviewed
+degarelix	reviewed
+dehydroacetic acid	reviewed
+dehydroepiandrosterone	reviewed
+delafloxacin	reviewed
+demeclocycline	reviewed
+denatonium benzoate monohydrate	reviewed
+denosumab	reviewed
+deoxythymidine	reviewed
+deracoxib	reviewed
+desflurane	reviewed
+desipramine	reviewed
+desirudin	reviewed
+desloratadine	reviewed
+deslorelin	reviewed
+desmopressin	reviewed
+desogestrel	reviewed
+desonide	reviewed
+desoximetasone	reviewed
+desvenlafaxine	reviewed
+detomidine	reviewed
+dexamethasone	reviewed
+dexbrompheniramine	reviewed
+dexchlorpheniramine	reviewed
+dexlansoprazole	reviewed
+dexmedetomidine	reviewed
+dexmethylphenidate	reviewed
+dexpanthenol	reviewed
+dexrazoxane	reviewed
+dextroamphetamine	reviewed
+dextromethorphan	reviewed
+diatrizoic acid	reviewed
+diazepam	reviewed
+diazoxide	reviewed
+dibasic potassium phosphate	reviewed
+dibenzyl ether	reviewed
+dibucaine	reviewed
+dibutyl sebacate	reviewed
+dicaprylyl carbonate	reviewed
+dicaprylyl ether	reviewed
+dichlorine	reviewed
+dichlorobenzyl alcohol	reviewed
+dichloromethane	reviewed
+dichlorphenamide	reviewed
+diclazuril	reviewed
+diclofenac	reviewed
+dicloxacillin	reviewed
+dicyclomine	reviewed
+didanosine	reviewed
+didecyldimonium chloride	reviewed
+dienogest	reviewed
+diethanolamine	reviewed
+diethanolamine cetyl phosphate	reviewed
+diethyl ether	reviewed
+diethyl phthalate	reviewed
+diethyl sebacate	reviewed
+diethylene glycol monoethyl ether	reviewed
+diethylhexyl carbonate	reviewed
+diethylhexyl syringylidenemalonate	reviewed
+diethylstilbestrol	reviewed
+difenoxin	reviewed
+diflorasone	reviewed
+diflunisal	reviewed
+difluprednate	reviewed
+diglycine	reviewed
+digoxin	reviewed
+diheptyl succinate	reviewed
+dihexadecyl phosphate	reviewed
+dihydrocodeine	reviewed
+dihydroergotamine	reviewed
+dihydromyrcenol	reviewed
+dihydrotestosterone	reviewed
+dihydroxyacetone	reviewed
+dihydroxypropyltrimonium	reviewed
+diisodecyl adipate	reviewed
+diisooctyl adipate	reviewed
+diisopropanolamine	reviewed
+diisopropyl adipate	reviewed
+diisopropyl sebacate	reviewed
+diisopropylamine	reviewed
+diisostearyl malate	reviewed
+diltiazem	reviewed
+dimenhydrinate	reviewed
+dimercaprol	reviewed
+dimethyl ether	reviewed
+dimethyl fumarate	reviewed
+dimethyl lauramine	reviewed
+dimethyl sulfone	reviewed
+dimethyl sulfoxide	reviewed
+dinutuximab	reviewed
+diosmin	reviewed
+dioxygen	reviewed
+diphenhydramine	reviewed
+diphenoxylate	reviewed
+dipropylene glycol caprylate	reviewed
+dipyridamole	reviewed
+disodium L-tartrate	reviewed
+disopyramide	reviewed
+disteardimonium hectorite	reviewed
+distearyl phthalamic acid	reviewed
+disulfiram	reviewed
+dobesilic acid	reviewed
+docetaxel trihydrate	reviewed
+docosanol	reviewed
+docusate	reviewed
+dodecane	reviewed
+dodecyl gallate	reviewed
+dofetilide	reviewed
+dolasetron	reviewed
+dolutegravir	reviewed
+donepezil	reviewed
+dopamine	reviewed
+doravirine	reviewed
+dornase alfa	reviewed
+dorzolamide	reviewed
+doxapram	reviewed
+doxazosin	reviewed
+doxercalciferol	reviewed
+doxorubicin	reviewed
+doxycycline	reviewed
+doxylamine	reviewed
+dronedarone	reviewed
+droperidol	reviewed
+drospirenone	reviewed
+droxidopa	reviewed
+dulaglutide	reviewed
+dupilumab	reviewed
+durvalumab	reviewed
+dutasteride	reviewed
+dyclonine	reviewed
+ecallantide	reviewed
+echothiophate	reviewed
+ectoine	reviewed
+eculizumab	reviewed
+edaravone	reviewed
+edetic acid	reviewed
+edetol	reviewed
+edoxaban	reviewed
+efavirenz	reviewed
+efinaconazole	reviewed
+efmoroctocog alfa	reviewed
+elbasvir	reviewed
+eletriptan	reviewed
+elexacaftor	reviewed
+eliglustat	reviewed
+elosulfase alfa	reviewed
+elotuzumab	reviewed
+eltrombopag	reviewed
+eluxadoline	reviewed
+elvitegravir	reviewed
+emicizumab	reviewed
+empagliflozin	reviewed
+emtricitabine	reviewed
+enalapril	reviewed
+enalaprilat dihydrate	reviewed
+enasidenib	reviewed
+encorafenib	reviewed
+enfuvirtide	reviewed
+enoxaparin	reviewed
+enoxolone	reviewed
+enrofloxacin	reviewed
+entacapone	reviewed
+entecavir hydrate	reviewed
+enzalutamide	reviewed
+epigallocatechin gallate	reviewed
+epinephrine	reviewed
+epirubicin	reviewed
+eplerenone	reviewed
+epoetin alfa	reviewed
+eptifibatide	reviewed
+erenumab	reviewed
+ergocalciferol	reviewed
+ergotamine	reviewed
+ergothioneine	reviewed
+eribulin	reviewed
+erlotinib	reviewed
+ertapenem	reviewed
+ertugliflozin	reviewed
+erythritol	reviewed
+erythromycin	reviewed
+escin Ia	reviewed
+escitalopram	reviewed
+esketamine	reviewed
+eslicarbazepine	reviewed
+esmolol	reviewed
+esomeprazole	reviewed
+estazolam	reviewed
+estramustine	reviewed
+estriol	reviewed
+estropipate	reviewed
+eszopiclone	reviewed
+etanercept	reviewed
+etelcalcetide	reviewed
+eteplirsen	reviewed
+ethambutol	reviewed
+ethamsylate	reviewed
+ethanol	reviewed
+ethinylestradiol	reviewed
+ethionamide	reviewed
+ethosuximide	reviewed
+ethyl DL-lactate	reviewed
+ethyl acetate	reviewed
+ethyl acrylate	reviewed
+ethyl butyrate	reviewed
+ethyl eicosapentaenoate	reviewed
+ethyl isovalerate	reviewed
+ethyl levulinate	reviewed
+ethyl linoleate	reviewed
+ethyl maltol	reviewed
+ethyl menthane carboxamide	reviewed
+ethyl nitrate	reviewed
+ethyl oleate	reviewed
+ethyl pyruvate	reviewed
+ethyl valerate	reviewed
+ethyl vanillin	reviewed
+ethylene brassylate	reviewed
+ethylene distearamide	reviewed
+ethylene glycol	reviewed
+ethylene glycol dimethacrylate	reviewed
+ethylene oxide	reviewed
+ethylenediamine	reviewed
+ethylenediamine tetraethanol	reviewed
+ethylhexyl gallate	reviewed
+ethylhexyl hydroxystearate	reviewed
+ethylhexyl isononanoate	reviewed
+ethylhexyl oleate	reviewed
+ethylhexyl stearate	reviewed
+ethylhexylglycerin	reviewed
+ethylparaben	reviewed
+ethynodiol	reviewed
+etomidate	reviewed
+etonogestrel	reviewed
+etoposide	reviewed
+etravirine	reviewed
+eucalyptol	reviewed
+eugenol	reviewed
+everolimus	reviewed
+evolocumab	reviewed
+exemestane	reviewed
+exenatide	reviewed
+ezetimibe	reviewed
+famciclovir	reviewed
+famotidine	reviewed
+febantel	reviewed
+febuxostat	reviewed
+felbamate	reviewed
+felodipine	reviewed
+fenbendazole	reviewed
+fenofibrate	reviewed
+fentanyl	reviewed
+ferric ammonium ferrocyanide	reviewed
+ferric carboxymaltose	reviewed
+ferric chloride	reviewed
+ferric oxide yellow	reviewed
+ferric subsulfate	reviewed
+ferric sulfate pentahydrate	reviewed
+ferrosoferric phosphate	reviewed
+ferrous bisglycinate	reviewed
+ferrous gluconate dihydrate	reviewed
+ferrous sulfate heptahydrate	reviewed
+fesoterodine	reviewed
+fexofenadine	reviewed
+fidaxomicin	reviewed
+filgrastim	reviewed
+finafloxacin	reviewed
+finasteride	reviewed
+fingolimod	reviewed
+flavone	reviewed
+flavoxate	reviewed
+flecainide	reviewed
+flibanserin	reviewed
+florfenicol	reviewed
+floxuridine	reviewed
+fluconazole	reviewed
+fludarabine	reviewed
+fludrocortisone	reviewed
+flumazenil	reviewed
+flunisolide	reviewed
+flunixin	reviewed
+fluocinolone	reviewed
+fluocinonide	reviewed
+fluorescein	reviewed
+fluoride ion	reviewed
+fluorometholone	reviewed
+fluorouracil	reviewed
+fluoxetine	reviewed
+fluphenazine	reviewed
+flurandrenolide	reviewed
+flurazepam	reviewed
+flutamide	reviewed
+fluticasone	reviewed
+fluvastatin	reviewed
+fluvoxamine	reviewed
+folic acid	reviewed
+follitropin alpha	reviewed
+follitropin beta	reviewed
+fomepizole	reviewed
+fondaparinux	reviewed
+formaldehyde	reviewed
+formic acid	reviewed
+formoterol	reviewed
+fosamprenavir	reviewed
+fosaprepitant	reviewed
+foscarnet	reviewed
+fosfomycin	reviewed
+fosinopril	reviewed
+fosinoprilat	reviewed
+fosphenytoin	reviewed
+fremanezumab	reviewed
+frovatriptan	reviewed
+fulvestrant	reviewed
+fulvic acid	reviewed
+fumaryl diketopiperazine	reviewed
+furazolidone	reviewed
+furosemide	reviewed
+gabapentin	reviewed
+gadobutrol	reviewed
+gadodiamide hydrate	reviewed
+gadoterate meglumine	reviewed
+gadoteridol	reviewed
+galactose	reviewed
+galantamine	reviewed
+galcanezumab	reviewed
+galsulfase	reviewed
+gamma cyclodextrin	reviewed
+ganciclovir	reviewed
+ganirelix	reviewed
+gatifloxacin	reviewed
+gefitinib	reviewed
+gemcitabine	reviewed
+gemfibrozil	reviewed
+gemtuzumab ozogamicin	reviewed
+genistein	reviewed
+gentamicin	reviewed
+geranial	reviewed
+geraniol	reviewed
+geranyl acetate	reviewed
+gilteritinib	reviewed
+ginseng	reviewed
+givosiran	reviewed
+glabridin	reviewed
+glasdegib	reviewed
+glecaprevir	reviewed
+glimepiride	reviewed
+glipizide	reviewed
+glucagon	reviewed
+glucarpidase	reviewed
+gluconolactone	reviewed
+glucose oxidase	reviewed
+glutaral	reviewed
+glutathione	reviewed
+glyburide	reviewed
+glycerol	reviewed
+glycerol phenylbutyrate	reviewed
+glyceryl caprate	reviewed
+glyceryl isostearate	reviewed
+glyceryl monobehenate	reviewed
+glyceryl stearate citrate	reviewed
+glyceryl trioleate	reviewed
+glyceryl tristearate	reviewed
+glycine	reviewed
+glycol distearate	reviewed
+glycol salicylate	reviewed
+glycol stearate	reviewed
+glycopyrrolate	reviewed
+glycyrrhizin	reviewed
+glyoxal	reviewed
+golimumab	reviewed
+goserelin	reviewed
+granisetron	reviewed
+graphite	reviewed
+grazoprevir	reviewed
+griseofulvin	reviewed
+growth hormone	reviewed
+guaiacol	reviewed
+guaifenesin	reviewed
+guanabenz	reviewed
+guanfacine	reviewed
+guar gum	reviewed
+guselkumab	reviewed
+haemin	reviewed
+halcinonide	reviewed
+haloperidol	reviewed
+hectorite	reviewed
+helium	reviewed
+heparin	reviewed
+hepatitis B immune globulin	reviewed
+heptyl undecylenate	reviewed
+hesperetin	reviewed
+hesperidin	reviewed
+hexachlorophene	reviewed
+hexamethyldisiloxane	reviewed
+hexamethylindanopyran	reviewed
+hexyl acetate	reviewed
+hexyl laurate	reviewed
+hexyl salicylate	reviewed
+hexyldecanol	reviewed
+histamine	reviewed
+histrelin	reviewed
+homatropine	reviewed
+hyaluronidase	reviewed
+hydantoin	reviewed
+hydralazine	reviewed
+hydrochlorothiazide	reviewed
+hydrocodone	reviewed
+hydrogen bromide	reviewed
+hydrogen fluoride	reviewed
+hydrogen peroxide	reviewed
+hydromorphone	reviewed
+hydroquinone	reviewed
+hydrotalcite	reviewed
+hydroxide ion	reviewed
+hydroxocobalamin	reviewed
+hydroxycarbamide	reviewed
+hydroxychloroquine	reviewed
+hydroxycitronellal	reviewed
+hydroxyethyl cellulose	reviewed
+hydroxyethyl cetyldimonium phosphate	reviewed
+hydroxyethyl starch	reviewed
+hydroxyphenyl propamidobenzoic acid	reviewed
+hydroxyproline	reviewed
+hydroxypropyl cellulose	reviewed
+hydroxypropyl tetrahydropyrantriol	reviewed
+hydroxytyrosol	reviewed
+hyoscyamine	reviewed
+hypochlorite ion	reviewed
+hypromellose	reviewed
+ibandronic acid	reviewed
+ibrutinib	reviewed
+ibuprofen	reviewed
+ibutamoren	reviewed
+ibutilide	reviewed
+icatibant	reviewed
+icodextrin	reviewed
+idarubicin	reviewed
+idarucizumab	reviewed
+idebenone	reviewed
+idelalisib	reviewed
+idoxuridine	reviewed
+idursulfase	reviewed
+ifosfamide	reviewed
+iloperidone	reviewed
+iloprost	reviewed
+imatinib	reviewed
+imidocarb	reviewed
+imidurea	reviewed
+imiglucerase	reviewed
+imipen	reviewed
+imipramine	reviewed
+imiquimod	reviewed
+indapamide	reviewed
+indigo	reviewed
+indocyanine green	reviewed
+indomethacin	reviewed
+infliximab	reviewed
+inotersen	reviewed
+inotuzumab ozogamicin	reviewed
+insulin degludec	reviewed
+insulin detemir	reviewed
+insulin glargine	reviewed
+insulin lispro	reviewed
+inulin	reviewed
+iodide ion	reviewed
+iodixanol	reviewed
+iodoquinol	reviewed
+iohexol	reviewed
+iopamidol	reviewed
+iopromide	reviewed
+iothalamic acid	reviewed
+ioversol	reviewed
+ipilimumab	reviewed
+irbesartan	reviewed
+irinotecan	reviewed
+iron	reviewed
+iron dextran	reviewed
+iron pentacarbonyl	reviewed
+iron polymaltose	reviewed
+iron sucrose	reviewed
+isatuximab	reviewed
+isavuconazole	reviewed
+isavuconazonium	reviewed
+isoamyl acetate	reviewed
+isoamyl laurate	reviewed
+isobutane	reviewed
+isobutylparaben	reviewed
+isocarboxazid	reviewed
+isocetyl stearate	reviewed
+isododecane	reviewed
+isoflurane	reviewed
+isoniazid	reviewed
+isononyl isononanoate	reviewed
+isopentyldiol	reviewed
+isoprenaline	reviewed
+isoprene	reviewed
+isopropyl alcohol	reviewed
+isopropyl isostearate	reviewed
+isopropyl laurate	reviewed
+isopropyl lauroyl sarcosinate	reviewed
+isopropyl myristate	reviewed
+isopropyl palmitate	reviewed
+isopropyl stearate	reviewed
+isopropyl titanium triisostearate	reviewed
+isosorbide	reviewed
+isosorbide dinitrate	reviewed
+isostearamidopropyl morpholine lactate	reviewed
+isostearyl isostearate	reviewed
+isostearyl neopentanoate	reviewed
+isostearyl palmitate	reviewed
+isosulfan blue inner salt	reviewed
+isotretinoin	reviewed
+isoxsuprine	reviewed
+isradipine	reviewed
+itraconazole	reviewed
+ivabradine	reviewed
+ivacaftor	reviewed
+ivermectin	reviewed
+ixabepilone	reviewed
+ixazomib	reviewed
+ixekizumab	reviewed
+kaolin	reviewed
+ketoconazole	reviewed
+ketorolac	reviewed
+ketotifen	reviewed
+kojic acid	reviewed
+labetalol	reviewed
+lacosamide	reviewed
+lactitol	reviewed
+lamivudine	reviewed
+lamotrigine	reviewed
+lanadelumab	reviewed
+lanreotide	reviewed
+lansoprazole	reviewed
+lanthanum carbonate	reviewed
+lapatinib	reviewed
+laponite	reviewed
+laronidase	reviewed
+larotrectinib	reviewed
+latanoprost	reviewed
+lauramide	reviewed
+lauramidopropyl betaine	reviewed
+lauramidopropyl hydroxysultaine	reviewed
+lauramidopropylamine oxide	reviewed
+lauramine oxide	reviewed
+lauric diethanolamide	reviewed
+laurocapram	reviewed
+lauroyl lysine	reviewed
+lauryl betaine	reviewed
+lauryl laurate	reviewed
+lauryl sulfate	reviewed
+ledipasvir	reviewed
+leflunomide	reviewed
+lenvatinib	reviewed
+lesinurad	reviewed
+letermovir	reviewed
+letrozole	reviewed
+leuprolide	reviewed
+levalbuterol	reviewed
+levamisole	reviewed
+levobunolol	reviewed
+levocetirizine	reviewed
+levodopa	reviewed
+levofloxacin hemihydrate	reviewed
+levomenol	reviewed
+levomilnacipran	reviewed
+levonordefrin	reviewed
+levonorgestrel	reviewed
+levulinic acid	reviewed
+lidocaine	reviewed
+lifitegrast	reviewed
+linaclotide	reviewed
+linagliptin	reviewed
+lincomycin	reviewed
+lindane	reviewed
+linezolid	reviewed
+liraglutide	reviewed
+lisdexamfetamine	reviewed
+lisinopril dihydrate	reviewed
+lithium	reviewed
+lithium carbonate	reviewed
+lithium citrate hydrate	reviewed
+lixisenatide	reviewed
+lodoxamide	reviewed
+lofexidine	reviewed
+lomitapide	reviewed
+lomustine	reviewed
+loperamide	reviewed
+lopinavir	reviewed
+loratadine	reviewed
+lorazepam	reviewed
+lorlatinib	reviewed
+losartan	reviewed
+loteprednol etabonate	reviewed
+lovastatin	reviewed
+loxapine	reviewed
+lubiprostone	reviewed
+luliconazole	reviewed
+lumacaftor	reviewed
+lumefantrine	reviewed
+lurasidone	reviewed
+luspatercept	reviewed
+lycopene	reviewed
+lysophosphatidic acid	reviewed
+lysozyme	reviewed
+macitentan	reviewed
+madecassic acid	reviewed
+mafenide	reviewed
+magaldrate	reviewed
+magnesium	reviewed
+magnesium acetate	reviewed
+magnesium carbonate hydrate	reviewed
+magnesium chlorate	reviewed
+magnesium chloride hexahydrate	reviewed
+magnesium gluconate dihydrate	reviewed
+magnesium glycinate	reviewed
+magnesium hydroxide	reviewed
+magnesium nitrate	reviewed
+magnesium salicylate tetrahydrate	reviewed
+magnesium sulfate heptahydrate	reviewed
+magnesium trisilicate	reviewed
+malathion	reviewed
+malondialdehyde	reviewed
+maltitol	reviewed
+maltol	reviewed
+manganese	reviewed
+manganese chloride tetrahydrate	reviewed
+maraviroc	reviewed
+marbofloxacin	reviewed
+masoprocol	reviewed
+mebendazole	reviewed
+mebrofenin	reviewed
+mecamylamine	reviewed
+mecasermin	reviewed
+mecetronium bromide	reviewed
+mechlorethamine	reviewed
+meclofenamic acid	reviewed
+medroxyprogesterone	reviewed
+mefloquine	reviewed
+megestrol	reviewed
+meglumine	reviewed
+melatonin	reviewed
+melengestrol	reviewed
+meloxicam	reviewed
+melphalan	reviewed
+memantine	reviewed
+menatetrenone	reviewed
+mepivacaine	reviewed
+mepolizumab	reviewed
+meprobamate	reviewed
+merbromin	reviewed
+mercaptopurine hydrate	reviewed
+meropenem trihydrate	reviewed
+mesalazine	reviewed
+mesna	reviewed
+metacresol	reviewed
+metamizole	reviewed
+metamizole sodium hydrate	reviewed
+metaproterenol	reviewed
+metaxalone	reviewed
+metformin	reviewed
+methacholine	reviewed
+methanol	reviewed
+methazolamide	reviewed
+methenamine	reviewed
+methimazole	reviewed
+methocarbamol	reviewed
+methohexital	reviewed
+methotrexate	reviewed
+methoxsalen	reviewed
+methoxy polyethylene glycol-epoetin beta	reviewed
+methsuximide	reviewed
+methyl acrylate	reviewed
+methyl anthranilate	reviewed
+methyl benzoin	reviewed
+methyl cellulose	reviewed
+methyl diisopropyl propionamide	reviewed
+methyl isobutyl ketone	reviewed
+methyl laurate	reviewed
+methyl methacrylate	reviewed
+methyl nicotinate	reviewed
+methyl perfluorobutyl ether	reviewed
+methyl perfluoroisobutyl ether	reviewed
+methyl salicylate	reviewed
+methyl stearate	reviewed
+methyl trimethicone	reviewed
+methylcobalamin	reviewed
+methyldopa	reviewed
+methylergonovine	reviewed
+methylhomatropine	reviewed
+methylnaltrexone	reviewed
+methylparaben	reviewed
+methylphenidate	reviewed
+methylprednisolone	reviewed
+methylpropanediol	reviewed
+methyltestosterone	reviewed
+metirosine	reviewed
+metoclopramide	reviewed
+metolazone	reviewed
+metreleptin	reviewed
+metronidazole	reviewed
+metyrapone	reviewed
+micafungin	reviewed
+miconazole	reviewed
+midazolam	reviewed
+midodrine	reviewed
+midostaurin	reviewed
+mifepristone	reviewed
+migalastat	reviewed
+miglitol	reviewed
+miglustat	reviewed
+milnacipran	reviewed
+milrinone	reviewed
+miltefosine	reviewed
+minocycline	reviewed
+minoxidil	reviewed
+mipomersen parent acid	reviewed
+mirabegron	reviewed
+mirtazapine	reviewed
+misoprostol	reviewed
+mitomycin	reviewed
+mitoxantrone	reviewed
+modafinil	reviewed
+moexipril	reviewed
+moexiprilat	reviewed
+mogamulizumab	reviewed
+molybdenum	reviewed
+mometasone	reviewed
+monoethanolamine	reviewed
+monomethyl fumarate	reviewed
+monophosphoryl lipid A	reviewed
+monothioglycerol	reviewed
+montelukast	reviewed
+montmorillonite	reviewed
+morphine	reviewed
+moxidectin	reviewed
+moxifloxacin	reviewed
+mupirocin	reviewed
+musk xylene	reviewed
+mycophenolate mofetil	reviewed
+mycophenolic acid	reviewed
+myo-inositol	reviewed
+myristamidopropylamine oxide	reviewed
+myristamine oxide	reviewed
+myristyl alcohol	reviewed
+myristyl lactate	reviewed
+myristyl myristate	reviewed
+myristyl nicotinate	reviewed
+n-pentyl nitrite	reviewed
+nabilone	reviewed
+nabumetone	reviewed
+nadolol	reviewed
+nafarelin	reviewed
+nafcillin	reviewed
+naftifine	reviewed
+nalbuphine	reviewed
+naldemedine	reviewed
+nalmefene	reviewed
+naloxegol	reviewed
+naloxone	reviewed
+naltrexone	reviewed
+naphazoline	reviewed
+naproxen	reviewed
+naratriptan	reviewed
+narirutin	reviewed
+natalizumab	reviewed
+natamycin	reviewed
+nateglinide	reviewed
+nebivolol	reviewed
+nedocromil	reviewed
+nefazodone	reviewed
+nelarabine	reviewed
+nelfinavir	reviewed
+neomycin	reviewed
+neopentyl glycol	reviewed
+neopentyl glycol diethylhexanoate	reviewed
+neopentyl glycol diisostearate	reviewed
+neostigmine	reviewed
+neotame	reviewed
+nepafenac	reviewed
+neral	reviewed
+neratinib	reviewed
+netupitant	reviewed
+nevirapine	reviewed
+niacinamide	reviewed
+nicardipine	reviewed
+nicotinic acid	reviewed
+nifedipine	reviewed
+nifurtimox	reviewed
+nilotinib	reviewed
+nilutamide	reviewed
+nimodipine	reviewed
+nintedanib	reviewed
+niraparib	reviewed
+nitazoxanide	reviewed
+nitisinone	reviewed
+nitric acid	reviewed
+nitric oxide	reviewed
+nitrite ion	reviewed
+nitrofurantoin	reviewed
+nitrogen	reviewed
+nitroglycerin	reviewed
+nitrous oxide	reviewed
+nivolumab	reviewed
+nizatidine	reviewed
+nonivamide	reviewed
+norelgestromin	reviewed
+norepinephrine	reviewed
+norethisterone	reviewed
+norflurane	reviewed
+norgestimate	reviewed
+nortriptyline	reviewed
+nusinersen	reviewed
+nystatin	reviewed
+obeticholic acid	reviewed
+obinutuzumab	reviewed
+ocrelizumab	reviewed
+octafluoropropane	reviewed
+octasulfur	reviewed
+octinoxate	reviewed
+octreotide	reviewed
+octyldodecyl behenate	reviewed
+octyldodecyl myristate	reviewed
+octyldodecyl neopentanoate	reviewed
+octyldodecyl oleate	reviewed
+octyldodecyl stearoyl stearate	reviewed
+ofatumumab	reviewed
+olanzapine	reviewed
+olaparib	reviewed
+oleyl alcohol	reviewed
+oleyl erucate	reviewed
+oleyl oleate	reviewed
+olmesartan	reviewed
+olodaterol	reviewed
+olopatadine	reviewed
+olsalazine	reviewed
+omalizumab	reviewed
+omeprazole	reviewed
+ondansetron	reviewed
+opium	reviewed
+oprelvekin	reviewed
+oritavancin	reviewed
+orlistat	reviewed
+orphenadrine	reviewed
+orthoboric acid	reviewed
+orthosilicic acid	reviewed
+oseltamivir	reviewed
+oseltamivir acid	reviewed
+osilodrostat	reviewed
+osimertinib	reviewed
+ospemifene	reviewed
+oxaceprol	reviewed
+oxacillin	reviewed
+oxaliplatin	reviewed
+oxandrolone	reviewed
+oxaprozin	reviewed
+oxazepam	reviewed
+oxcarbazepine	reviewed
+oxibendazole	reviewed
+oxiconazole	reviewed
+oxolinic acid	reviewed
+oxybenzone	reviewed
+oxybuprocaine	reviewed
+oxychlorosene	reviewed
+oxycodone	reviewed
+oxymetazoline	reviewed
+oxymorphone	reviewed
+oxyquinoline	reviewed
+oxytocin	reviewed
+ozanimod	reviewed
+p-anisaldehyde	reviewed
+paclitaxel	reviewed
+padimate O	reviewed
+palbociclib	reviewed
+palifermin	reviewed
+paliperidone	reviewed
+palivizumab	reviewed
+pamabrom	reviewed
+pamidronic acid	reviewed
+panitumumab	reviewed
+panobinostat	reviewed
+pantethine	reviewed
+pantoprazole	reviewed
+papaverine	reviewed
+paracetamol	reviewed
+paricalcitol	reviewed
+paromomycin	reviewed
+paroxetine	reviewed
+pasireotide	reviewed
+patiromer	reviewed
+patisiran	reviewed
+pazopanib	reviewed
+pegaspargase	reviewed
+pegfilgrastim	reviewed
+pegloticase	reviewed
+pegvisomant	reviewed
+pembrolizumab	reviewed
+pemetrexed	reviewed
+pemirolast	reviewed
+penciclovir	reviewed
+penicillin V	reviewed
+pentadecalactone	reviewed
+pentaerythritol	reviewed
+pentaerythrityl tetraethylhexanoate	reviewed
+pentaerythrityl tetraisostearate	reviewed
+pentaerythrityl tetrastearate	reviewed
+pentamidine	reviewed
+pentasodium pentetate	reviewed
+pentosan polysulfate	reviewed
+pentostatin	reviewed
+pentoxifylline	reviewed
+pentoxyverine	reviewed
+peramivir trihydrate	reviewed
+perampanel	reviewed
+perindopril	reviewed
+perindoprilat	reviewed
+perlite	reviewed
+permethrin	reviewed
+perphenazine	reviewed
+pertuzumab	reviewed
+pethidine	reviewed
+petroleum jelly	reviewed
+phenazopyridine	reviewed
+phendimetrazine	reviewed
+phenelzine	reviewed
+pheniramine	reviewed
+phenobarbital	reviewed
+phenol	reviewed
+phenolsulfonphthalein	reviewed
+phenoxybenzamine	reviewed
+phenoxyethanol	reviewed
+phentermine	reviewed
+phentolamine	reviewed
+phenyl acetate	reviewed
+phenyl salicylate	reviewed
+phenylalanine	reviewed
+phenylbutazone	reviewed
+phenylephrine	reviewed
+phenylethyl alcohol	reviewed
+phenylethyl resorcinol	reviewed
+phenylmercuric nitrate	reviewed
+phenyltoloxamine	reviewed
+phenytoin	reviewed
+phloretin	reviewed
+phosphonic acid	reviewed
+phosphoric acid	reviewed
+physostigmine	reviewed
+phytic acid	reviewed
+phytosphingosine	reviewed
+pibrentasvir	reviewed
+pilocarpine	reviewed
+pimavanserin	reviewed
+pimecrolimus	reviewed
+pimozide	reviewed
+pindolol	reviewed
+piperacillin	reviewed
+piperazine	reviewed
+piperine	reviewed
+piperonal	reviewed
+piperonyl butoxide	reviewed
+pirfenidone	reviewed
+piroctone olamine	reviewed
+piroxicam	reviewed
+pitavastatin	reviewed
+pitolisant	reviewed
+plecanatide	reviewed
+plerixafor	reviewed
+podofilox	reviewed
+podophyllin	reviewed
+polidocanol	reviewed
+polycarbophil calcium	reviewed
+polydimethylsiloxane	reviewed
+polyethylene glycol	reviewed
+polygalic acid	reviewed
+polymyxin B	reviewed
+pomalidomide	reviewed
+ponatinib	reviewed
+ponazuril	reviewed
+poractant alfa	reviewed
+posaconazole	reviewed
+potassium	reviewed
+potassium acetate	reviewed
+potassium carbonate	reviewed
+potassium cation	reviewed
+potassium chlorate	reviewed
+potassium chloride	reviewed
+potassium gluconate	reviewed
+potassium hydrogen carbonate	reviewed
+potassium hydroxide	reviewed
+potassium iodate	reviewed
+potassium iodide	reviewed
+potassium metabisulfite	reviewed
+potassium nitrate	reviewed
+potassium sorbate	reviewed
+potassium sulfate	reviewed
+povidone-iodine	reviewed
+pralatrexate	reviewed
+pralidoxime	reviewed
+pramipexole	reviewed
+pramlintide	reviewed
+pramoxine	reviewed
+prasugrel	reviewed
+pravastatin	reviewed
+praziquantel	reviewed
+prazosin	reviewed
+prednicarbate	reviewed
+prednisolone	reviewed
+prednisone	reviewed
+pregabalin	reviewed
+prezatide copper acetate	reviewed
+prilocaine	reviewed
+primidone	reviewed
+probenecid	reviewed
+procainamide	reviewed
+procaine	reviewed
+procarbazine	reviewed
+prochlorperazine	reviewed
+proflavine	reviewed
+progesterone	reviewed
+proguanil	reviewed
+propane	reviewed
+propanthelinium	reviewed
+proparacaine	reviewed
+propionic acid	reviewed
+propofol	reviewed
+propranolol	reviewed
+propyl gallate	reviewed
+propylene	reviewed
+propylene carbonate	reviewed
+propylene glycol diacetate	reviewed
+propylene glycol dicaprylate	reviewed
+propylene oxide	reviewed
+propylheptyl caprylate	reviewed
+propylhexedrine	reviewed
+propylparaben	reviewed
+propylthiouracil	reviewed
+prostacyclin	reviewed
+protamine	reviewed
+protein S	reviewed
+protriptyline	reviewed
+prucalopride	reviewed
+pullulan	reviewed
+pyrantel	reviewed
+pyrazinamide	reviewed
+pyridostigmine	reviewed
+pyridoxine	reviewed
+pyrilamine	reviewed
+pyrimethamine	reviewed
+pyrithione	reviewed
+pyrithione zinc	reviewed
+pyrogallol	reviewed
+quadrosilan	reviewed
+quazepam	reviewed
+quercetin	reviewed
+quetiapine	reviewed
+quinapril	reviewed
+quinaprilat	reviewed
+quinidine	reviewed
+quinine	reviewed
+rac-miconazole	reviewed
+rac-salbutamol	reviewed
+rac-warfarin	reviewed
+radium	reviewed
+raloxifene	reviewed
+raltegravir	reviewed
+ramelteon	reviewed
+ramipril	reviewed
+ramiprilat	reviewed
+ramucirumab	reviewed
+ranibizumab	reviewed
+ranitidine	reviewed
+ranolazine	reviewed
+rasagiline	reviewed
+rasburicase	reviewed
+ravulizumab	reviewed
+regorafenib	reviewed
+relebactam	reviewed
+remdesivir	reviewed
+remifentanil	reviewed
+repaglinide	reviewed
+reserpine	reviewed
+reslizumab	reviewed
+resorcin	reviewed
+resveratrol	reviewed
+retapamulin	reviewed
+reteplase	reviewed
+retinyl linoleate	reviewed
+ribavirin	reviewed
+ribociclib	reviewed
+riboflavin	reviewed
+rifabutin	reviewed
+rifampicin	reviewed
+rifamycin	reviewed
+rifapentine	reviewed
+rifaximin	reviewed
+rilonacept	reviewed
+rilpivirine	reviewed
+riluzole	reviewed
+rimantadine	reviewed
+riociguat	reviewed
+risankizumab	reviewed
+risedronic acid	reviewed
+risperidone	reviewed
+ritonavir	reviewed
+rituximab	reviewed
+rivaroxaban	reviewed
+rivastigmine	reviewed
+rizatriptan	reviewed
+robenacoxib	reviewed
+rocuronium	reviewed
+roflumilast	reviewed
+rolapitant	reviewed
+romidepsin	reviewed
+romifidine	reviewed
+romiplostim	reviewed
+ronidazole	reviewed
+ropinirol	reviewed
+rosuvastatin	reviewed
+rucaparib	reviewed
+rufinamide	reviewed
+rutin	reviewed
+ruxolitinib	reviewed
+saccharin	reviewed
+sacrosidase	reviewed
+sacubitril	reviewed
+sacubitrilat	reviewed
+safinamide	reviewed
+salicylamide	reviewed
+salicylic acid	reviewed
+salmeterol	reviewed
+salmon calcitonin	reviewed
+salsalate	reviewed
+samarium	reviewed
+sarcosine	reviewed
+sargramostim	reviewed
+sarilumab	reviewed
+saxagliptin	reviewed
+sebelipase alfa	reviewed
+secnidazole	reviewed
+secukinumab	reviewed
+selenious acid	reviewed
+selenium	reviewed
+selenium disulfide	reviewed
+selexipag	reviewed
+semaglutide	reviewed
+serratiopeptidase	reviewed
+sertraline	reviewed
+sevelamer	reviewed
+sevoflurane	reviewed
+silanetriol	reviewed
+sildenafil	reviewed
+silicon	reviewed
+silicon dioxide	reviewed
+silodosin	reviewed
+silodrate hydrate	reviewed
+siltuximab	reviewed
+silver cation	reviewed
+silver citrate	reviewed
+silver nitrate	reviewed
+silver oxide	reviewed
+silver sulfadiazine	reviewed
+simvastatin	reviewed
+sincalide	reviewed
+sinecatechins	reviewed
+sipuleucel-T	reviewed
+sirolimus	reviewed
+sitagliptin	reviewed
+sodium	reviewed
+sodium D-gluconate	reviewed
+sodium acetate trihydrate	reviewed
+sodium ascorbate	reviewed
+sodium bicarbonate	reviewed
+sodium carbonate	reviewed
+sodium chlorate	reviewed
+sodium chloride	reviewed
+sodium chlorite	reviewed
+sodium ferric gluconate complex	reviewed
+sodium fluoride	reviewed
+sodium hydroxide	reviewed
+sodium iodide	reviewed
+sodium ion	reviewed
+sodium lauriminodipropionate	reviewed
+sodium lauroyl hydroxypropyl sulfonate	reviewed
+sodium lauryl glycol carboxylate	reviewed
+sodium lauryl sulfoacetate	reviewed
+sodium metabisulfite	reviewed
+sodium metasilicate	reviewed
+sodium myristyl sulfate	reviewed
+sodium nitrite	reviewed
+sodium oxide	reviewed
+sodium percarbonate	reviewed
+sodium propionate hydrate	reviewed
+sodium selenate	reviewed
+sodium sulfate decahydrate	reviewed
+sodium sulfite	reviewed
+sofosbuvir	reviewed
+solriamfetol	reviewed
+sonidegib	reviewed
+sorafenib	reviewed
+sorbitan isostearate	reviewed
+sorbitan monooleate	reviewed
+sorbitan monostearate	reviewed
+sorbitan sesquioleate	reviewed
+sorbitan trioleate	reviewed
+sotalol	reviewed
+soybean oil	reviewed
+spinosad	reviewed
+spironolactone	reviewed
+squalane	reviewed
+stannous chloride dihydrate	reviewed
+stavudine	reviewed
+stearalkonium hectorite	reviewed
+stearamide amp	reviewed
+stearamidopropyl dimethylamine lactate	reviewed
+stearyl alcohol	reviewed
+stearyl behenate	reviewed
+stearyl glycyrrhetinate	reviewed
+stearyl stearate	reviewed
+steviol	reviewed
+stevioside	reviewed
+stiripentol	reviewed
+streptomycin	reviewed
+strontium	reviewed
+strontium nitrate	reviewed
+styrene	reviewed
+succimer	reviewed
+succinate dianion	reviewed
+succinic acid	reviewed
+succinylcholine	reviewed
+sucralfate	reviewed
+sucralose	reviewed
+sucrose	reviewed
+sufentanil	reviewed
+sugammadex	reviewed
+sulbactam	reviewed
+sulbutiamine	reviewed
+sulconazole	reviewed
+sulfacetamide	reviewed
+sulfadiazine	reviewed
+sulfadimethoxine	reviewed
+sulfamethoxazole	reviewed
+sulfasalazine	reviewed
+sulfate ion	reviewed
+sulfathiazole	reviewed
+sulfur dioxide	reviewed
+sulfur hexafluoride	reviewed
+sulfuric acid	reviewed
+sulindac	reviewed
+sulisobenzone	reviewed
+sumatriptan	reviewed
+sunitinib	reviewed
+suvorexant	reviewed
+tacrolimus	reviewed
+tadalafil	reviewed
+tafamidis	reviewed
+tafluprost	reviewed
+talazoparib	reviewed
+talc	reviewed
+tamoxifen	reviewed
+tamsulosin	reviewed
+tapentadol	reviewed
+tasimelteon	reviewed
+taurine	reviewed
+tavaborole	reviewed
+tazarotene	reviewed
+tazobactam	reviewed
+tedizolid	reviewed
+teduglutide	reviewed
+tegaserod	reviewed
+telavancin	reviewed
+telmisartan	reviewed
+telotristat	reviewed
+telotristat ethyl	reviewed
+temazepam	reviewed
+temozolomide	reviewed
+temsirolimus	reviewed
+tenecteplase	reviewed
+tenofovir alafenamide	reviewed
+tenofovir disoproxil	reviewed
+terazosin	reviewed
+terbinafine	reviewed
+terbutaline	reviewed
+terconazole	reviewed
+teriflunomide	reviewed
+teriparatide	reviewed
+terlipressin	reviewed
+tert-butyl alcohol	reviewed
+tesamorelin	reviewed
+testosterone	reviewed
+tetrabenazine	reviewed
+tetracaine	reviewed
+tetracycline	reviewed
+tetrahexyldecyl ascorbate	reviewed
+tetrahydrocannabinol	reviewed
+tetrahydrodiferuloylmethane	reviewed
+tetrahydrozoline	reviewed
+tetrapropyl orthosilicate	reviewed
+tetrasodium glutamate diacetate	reviewed
+tezacaftor	reviewed
+thalidomide	reviewed
+theanine	reviewed
+theophylline monohydrate	reviewed
+thioguanine hydrate	reviewed
+thioguanosine	reviewed
+thiomersal	reviewed
+thioridazine	reviewed
+thiosulfate ion	reviewed
+thiotepa	reviewed
+thonzonium	reviewed
+thonzylamine	reviewed
+thymol	reviewed
+thymol iodide	reviewed
+thyrotropin alfa	reviewed
+thyrotropin-releasing hormone	reviewed
+tiagabine	reviewed
+ticagrelor	reviewed
+tigecycline	reviewed
+tildrakizumab	reviewed
+tinidazole	reviewed
+tioconazole	reviewed
+tiopronin	reviewed
+tiotropium	reviewed
+tiotropium cation	reviewed
+tipiracil	reviewed
+tipranavir	reviewed
+tirofiban	reviewed
+tisagenlecleucel	reviewed
+titanium	reviewed
+tivozanib	reviewed
+tizanidine	reviewed
+tobramycin	reviewed
+tocilizumab	reviewed
+tocofersolan	reviewed
+tofacitinib	reviewed
+tolazoline	reviewed
+tolcapone	reviewed
+tolmetin	reviewed
+tolnaftate	reviewed
+tolterodine	reviewed
+toltrazuril	reviewed
+tolvaptan	reviewed
+topiramate	reviewed
+topotecan	reviewed
+torasemide	reviewed
+totarol	reviewed
+trabectedin	reviewed
+tramadol	reviewed
+trametinib	reviewed
+trandolapril	reviewed
+trandolaprilat	reviewed
+tranexamic acid	reviewed
+tranylcypromine	reviewed
+trastuzumab	reviewed
+travoprost	reviewed
+trazodone	reviewed
+treosulfan	reviewed
+treprostinil	reviewed
+tretinoin	reviewed
+tri-N-butyl phosphate	reviewed
+triacetin	reviewed
+triamcinolone	reviewed
+triamterene	reviewed
+triazolam	reviewed
+tribasic potassium phosphate	reviewed
+tribehenin	reviewed
+tributyl citrate	reviewed
+tricaine	reviewed
+tricalcium phosphate	reviewed
+tricaprin	reviewed
+tricaprylin	reviewed
+trichlormethiazide	reviewed
+triclabendazole	reviewed
+triclosan	reviewed
+tridecane	reviewed
+tridecyl salicylate	reviewed
+tridecyl stearate	reviewed
+tridecyl trimellitate	reviewed
+triethanolamine benzoate	reviewed
+triethanolamine lauryl sulfate	reviewed
+triethoxycaprylylsilane	reviewed
+triethyl citrate	reviewed
+triethylamine	reviewed
+triethylene glycol	reviewed
+triethylenetetramine	reviewed
+triethylhexanoin	reviewed
+trifarotene	reviewed
+trifluoperazine	reviewed
+trifluridine	reviewed
+triheptanoin	reviewed
+trihexyphenidyl	reviewed
+triiodothyronine	reviewed
+triisopropanolamine	reviewed
+triisostearin	reviewed
+trilostane	reviewed
+trimagnesium dicitrate	reviewed
+trimethobenzamide	reviewed
+trimethoprim	reviewed
+trimethylpentanediyl dibenzoate	reviewed
+trimipramine	reviewed
+trimyristin	reviewed
+tripalmitin	reviewed
+tripelennamine	reviewed
+triprolidine	reviewed
+triptorelin	reviewed
+trisodium dicarboxymethyl alaninate	reviewed
+trisodium nitrilotriacetate	reviewed
+trolamine	reviewed
+trolamine salicylate	reviewed
+tromethamine	reviewed
+tropicamide	reviewed
+trospium	reviewed
+trypan blue	reviewed
+trypan blue sodium	reviewed
+tryptophan	reviewed
+tulathromycine	reviewed
+tylosin	reviewed
+tyloxapol	reviewed
+ubidecarenone	reviewed
+ulipristal	reviewed
+ulobetasol	reviewed
+ultramarine	reviewed
+umeclidinium	reviewed
+umirolimus	reviewed
+undecane	reviewed
+undecylenic acid	reviewed
+undecylenoyl glycine	reviewed
+upadacitinib	reviewed
+urea	reviewed
+uridine	reviewed
+uridine triacetate	reviewed
+ustekinumab	reviewed
+vaborbactam	reviewed
+valacyclovir	reviewed
+valbenazine	reviewed
+valganciclovir	reviewed
+valrubicin	reviewed
+valsartan	reviewed
+vanadium	reviewed
+vancomycin	reviewed
+vandetanib	reviewed
+vanillin	reviewed
+vanillyl butyl ether	reviewed
+vardenafil	reviewed
+varenicline	reviewed
+vecuronium	reviewed
+vedolizumab	reviewed
+velaglucerase alfa	reviewed
+velpatasvir	reviewed
+vemurafenib	reviewed
+venetoclax	reviewed
+venlafaxine	reviewed
+verapamil	reviewed
+verteporfin	reviewed
+vestronidase alfa	reviewed
+vidarabine	reviewed
+vidarabine monohydrate	reviewed
+vigabatrin	reviewed
+vilanterol	reviewed
+vilazodone	reviewed
+viloxazine	reviewed
+vinblastine	reviewed
+vincristine	reviewed
+vinorelbine	reviewed
+vinyl acetate	reviewed
+vismodegib	reviewed
+vitamin A	reviewed
+vitamin C	reviewed
+vonicog alfa	reviewed
+vorapaxar	reviewed
+voretigene neparvovec	reviewed
+voriconazole	reviewed
+vorinostat	reviewed
+vortioxetine	reviewed
+voxilaprevir	reviewed
+water	reviewed
+wheat germ oil	reviewed
+xylazine	reviewed
+xylitol	reviewed
+xylitylglucoside	reviewed
+xylometazoline	reviewed
+yellow OB	reviewed
+yohimbine	reviewed
+zafirlukast	reviewed
+zaleplon	reviewed
+zanamivir	reviewed
+zeaxanthin	reviewed
+ziconotide	reviewed
+zidovudine	reviewed
+zileuton	reviewed
+zinc	reviewed
+zinc acetate dihydrate	reviewed
+zinc aspartate	reviewed
+zinc carbonate hydroxide	reviewed
+zinc chloride	reviewed
+zinc citrate	reviewed
+zinc gluconate	reviewed
+zinc glycinate	reviewed
+zinc phosphate	reviewed
+zinc picolinate	reviewed
+ziprasidone	reviewed
+zirconium	reviewed
+zoledronic acid monohydrate	reviewed
+zolmitriptan	reviewed
+zolpidem	reviewed
+zonisamide	reviewed
+D-methamphetamine	draft	d-meth
+D-methamphetamine	draft	d-phenylisopropylmethylamine
+D-methamphetamine	draft	dextromethamphetamine
+D-methamphetamine	draft	metamfetamine
+D-methamphetamine	draft	methyl-beta-phenylisopropylamine
+D-methamphetamine	draft	methylamphetamine
+DL-amphetamine	draft	alpha-methylbenzeneethaneamine
+DL-amphetamine	draft	alpha-methylphenethylamine
+DL-amphetamine	draft	alpha-methylphenylethylamine
+DL-amphetamine	draft	amfetamine
+DL-amphetamine	draft	beta-phenylisopropylamine
+DL-amphetamine	draft	rac-amphetamine
+DL-lactic acid	draft	acidum lacticum
+DL-lactic acid	draft	lactic acid
+DL-lactic acid	draft	lacticum acidum
+DL-lactic acid	draft	rac-lactic acid
+DL-malic acid	draft	alpha-hydroxysuccinic acid
+DL-malic acid	draft	hydroxybutanedioic acid
+DL-malic acid	draft	hydroxysuccinic acid
+Eucalyptus oil	draft	eucalyptic essential oil
+L-aspartic acid	draft	asparaginate
+L-aspartic acid	draft	asparaginic acid
+L-carbocysteine	draft	carbocisteine
+L-thyroxine	draft	levothyroxine sodium
+RRR-alpha-tocopherol	draft	d-alpha-tocopherol
+Takadiastase	draft	taka-diastase
+acetaldehyde	draft	acetic aldehyde
+acetaldehyde	draft	aldehyde
+acetaldehyde	draft	ethyl aldehyde
+acetic acid	draft	ethanoic acid
+acetic acid	draft	ethoic acid
+acetic acid	draft	ethylic acid
+acetic acid	draft	methanecarboxylic acid
+acetohydroxamic acid	draft	acetohydroximic acid
+acetohydroxamic acid	draft	acetylhydroxamic acid
+acetohydroxamic acid	draft	cetohyroxamic acid
+acetohydroxamic acid	draft	methylhydroxamic acid
+acetone	draft	dimethyl ketone
+acetone	draft	dimethylketone
+acetone	draft	ketone propane
+acetone	draft	methyl ketone
+acetyl tributyl citrate	draft	acetyltri-n-butyl citrate
+acetyl tributyl citrate	draft	acetyltributylcitrate
+acetyl tributyl citrate	draft	tributyl citrate acetate
+acetylcarnitine	draft	acetyl-carnitine
+acetylcarnitine	draft	levocarnitine acetyl
+acetylcholine	draft	acetyl choline ion
+acetylcholine	draft	acetylcholine cation
+acetylcholine	draft	choline acetate
+acrylamide	draft	ethylenecarboxamide
+adipic acid	draft	adipinic acid
+allyl hexanoate	draft	allyl caproate
+alpha-arbutin	draft	alpha arbutin
+aluminium phosphate	draft	aluminium monophosphate
+aluminium phosphate	draft	aluminium orthophosphate
+aluminium phosphate	draft	aluminum monophosphate
+aluminium phosphate	draft	aluminum orthophosphate
+aluminum cation	draft	aluminium cation
+aluminum cation	draft	aluminium ion
+aluminum cation	draft	aluminum ion
+aluminum chloride hexahydrate	draft	aluminium chloride hexahydrate
+aluminum chloride hexahydrate	draft	aluminium chloride hexahydtate
+aluminum chloride hexahydrate	draft	aluminium trichloride hexahydrate
+aluminum chloride hexahydrate	draft	aluminum trichloride hexahydrate
+aluminum hydroxide	draft	aluminium hydroxide
+aluminum subacetate	draft	aluminium diacetate
+aluminum subacetate	draft	aluminum diacetate
+aluminum sulfate monohydrate	draft	aluminium sulphate hydrate
+aluminum sulfate monohydrate	draft	aluminium sulphate monohydrate
+aluminum sulfate monohydrate	draft	aluminum sulfate hydrate
+alvimopan	draft	alvimopan anhydrous
+amdinocillin	draft	mecillinam
+amifostine trihydrate	draft	amifostine hydrate
+aminopentamide	draft	dimevamide
+aminophylline	draft	aminophilline
+amiodarone	draft	amiodarone hydrochloride
+amitriptyline	draft	amitryptiline
+amlodipine	draft	amlodipine free base
+ammonia	draft	ammonia gas
+ammonia	draft	anhydrous ammonia
+ammonium acetate	draft	ammonium ethanoate
+ammonium acetate	draft	azanium acetate
+ammonium cation	draft	ammonium
+ammonium chloride	draft	amchlor
+ammonium chloride	draft	ammoneric
+ammonium chloride	draft	ammonia hydrochloride
+ammonium chloride	draft	ammonium muriate
+ammonium chloride	draft	azanium chloride
+ammonium chloride	draft	chloride of ammonia
+ammonium chloride	draft	chloride of ammonium
+ammonium chloride	draft	darammon
+ammonium chloride	draft	sal ammonia
+ammonium chloride	draft	sal ammoniac
+ammonium chloride	draft	salammonite
+ammonium lauryl sulfate	draft	ammonium dodecyl sulfate
+ammonium lauryl sulfate	draft	ammonium dodecyl sulphate
+ammonium lauryl sulfate	draft	ammonium laurilsulfate
+ammonium lauryl sulfate	draft	ammonium lauryl sulphate
+ammonium sulfate	draft	ammonium sulphate
+ammonium sulfate	draft	diammonium sulfate
+amoxicillin	draft	amoxil
+amoxicillin	draft	amoxycillin
+amoxicillin	draft	amoxycillin anhydrous
+ampicillin	draft	aminobenzylpenicillin
+ampicillin	draft	ampicillin acid
+ampicillin	draft	anhydrous ampicillin
+amyl acetate	draft	amyl acetic ester
+amyl acetate	draft	n-amyl acetate
+amyl acetate	draft	n-pentyl acetate
+amyl acetate	draft	pentyl acetate
+apalutamide	draft	apalutamid
+artesunate	draft	artesunato
+artesunate	draft	artesunatum
+artesunate	draft	artesunic acid
+articaine	draft	carticaine
+aspartame	draft	methyl aspartylphenylalanate
+astaxanthin	draft	astaxanthine
+atomoxetine	draft	tomoxetine
+axitinib	draft	axitinibum
+azithromycin	draft	azithromycin anhydrous
+barium sulfate	draft	barium salt of sulfuric acid
+barium sulfate	draft	barium sulphate
+benzaldehyde	draft	benzene carbaldehyde
+benzaldehyde	draft	benzene carboxaldehyde
+benzaldehyde	draft	benzenecarboxaldehyde
+benzaldehyde	draft	benzoic acid aldehyde
+benzaldehyde	draft	benzoic aldehyde
+benzaldehyde	draft	benzylaldehyde
+benzaldehyde	draft	phenylformaldehyde
+benzocaine	draft	ethyl p-aminobenzoate
+benzonatate	draft	benzononatine
+benzophenone	draft	benzopheneone
+benzophenone	draft	benzoyl-benzene
+benzophenone	draft	benzoylbenzene
+benzphetamine	draft	benzaphetamine
+benzphetamine	draft	benzylamphetamine
+benzyl alcohol	draft	benzylic alcohol
+benzyl alcohol	draft	phenylmethyl alcohol
+benzyl benzoate	draft	benzoic acid phenylmethyl ester
+benzyl benzoate	draft	phenylmethyl benzoate
+benzylpenicillin	draft	bensylpenicillin
+benzylpenicillin	draft	benzyl benicillin
+benzylpenicillin	draft	benzylpenicillinic acid
+bepotastine	draft	betotastine
+beta-pinene	draft	nopinene
+beta-pinene	draft	pseudopinene
+betaine	draft	glycine betaine
+betaine	draft	glycinebetaine
+bicarbonate ion	draft	bicarbonate
+bicarbonate ion	draft	bicarbonate anion
+bicarbonate ion	draft	bicarbonate ions
+bicarbonate ion	draft	hydrogen carbonate
+bicarbonate ion	draft	hydrogen carbonate anion
+bicarbonate ion	draft	hydrogen carbonate ion
+bicarbonate ion	draft	hydrogentrioxocarbonate
+bicarbonate ion	draft	monohydrogen carbonate
+bismuth subgallate	draft	gallic acid bismuth basic salt
+bismuth subsalicylate	draft	pink bismuth
+bisphenol A	draft	bisphenol
+borneol	draft	borneols
+bosentan hydrate	draft	bosentan monohydrate
+bosutinib	draft	bosutinibum
+brentuximab vedotin	draft	brentuximab
+bretylium	draft	bretylium tosylate
+bromocriptine	draft	bromocryptine
+bromocriptine	draft	bromoergocriptine
+brompheniramine	draft	brompheniramine maleate
+buserelin	draft	buserelin acetate
+butalbital	draft	allylbarbital
+butalbital	draft	butalbarbital
+butalbital	draft	itobarbital
+butalbital	draft	tetrallobarbital
+butane	draft	n-butane
+butane	draft	normal-butane
+butanone	draft	oxobutane
+butenafine	draft	butenafina
+butorphanol	draft	butorphanol tartrate
+butyl acetate	draft	acetic acid n-butyl ester
+butyl acetate	draft	butyl ester of acetic acid
+butyl acetate	draft	butyl ethanoate
+butyl acetate	draft	n-butyl acetate
+butyl acetate	draft	n-butyl ester of acetic acid
+butyl acetate	draft	n-butyl ethanoate
+butyl acetate	draft	n-butylacetate
+caffeine	draft	anhydrous caffeine
+caffeine	draft	caffeinum
+caffeine	draft	coffein
+caffeine	draft	coffeinum
+caffeine	draft	koffein
+caffeine	draft	monohydrate caffeine
+calcitriol	draft	cholecalcitriol
+calcium acetate	draft	calcium ethanoate
+calcium ascorbate	draft	calcium ascorbate dihydrate
+calcium citrate tetrahydrate	draft	calcium citrate hydrate
+calcium hydroxide	draft	calcium hydrate
+calcium peroxide	draft	calcium dioxide
+capric acid	draft	caprinic acid
+capric acid	draft	caprynic acid
+capric acid	draft	decoic acid
+capric acid	draft	n-capric acid
+capric acid	draft	n-decanoic acid
+capric acid	draft	n-decoic acid
+capric acid	draft	n-decylic acid
+caprylic acid	draft	n-caprylic acid
+caprylic acid	draft	n-octanoic acid
+caprylic acid	draft	n-octoic acid
+caprylic acid	draft	n-octylic acid
+caprylic acid	draft	octoic acid
+caprylic acid	draft	octylic acid
+caprylyl glucoside	draft	octyl glucoside
+carbachol	draft	carbachol chloride
+carbachol	draft	carbamylcholine
+carbachol	draft	choline carbamate chloride
+carbachol	draft	choline chlorine carbamate
+carbinoxamine	draft	carbinoxamine base
+carbinoxamine	draft	paracarbinoxamine
+carbon dioxide	draft	carbon oxide
+carbon dioxide	draft	carbonic acid anhydride
+carbon dioxide	draft	carbonic acid gas
+carbon dioxide	draft	carbonic anhydride
+carboxymethyl cellulose	draft	cellulose gum
+carboxymethyl cellulose	draft	crosslinked carboxymethyl cellulose
+carglumic acid	draft	carbamylglutamic acid
+carglumic acid	draft	ureidoglutaric acid
+carisoprodol	draft	isopropyl meprobamate
+caryophyllene	draft	trans-caryophyllene
+castor oil	draft	castor bean oil
+cedrol	draft	alpha-cedrol
+cefaclor	draft	cefaclor anhydrous
+cefixime trihydrate	draft	cefixim trihydrate
+ceftazidime	draft	ceftazidime anhydrous
+cephalexin	draft	cefalexin
+cesium cation	draft	caesium cation
+cesium cation	draft	caesium ion
+cesium cation	draft	cesium ion
+cesium chloride	draft	caesium monochloride
+cesium chloride	draft	cesium monochloride
+cesium chloride	draft	tricesium trichloride
+cetyl alcohol	draft	cetylic alcohol
+cetyl alcohol	draft	hexadecyl alcohol
+cetyl alcohol	draft	n-cetyl alcohol
+cetyl alcohol	draft	n-hexadecyl alcohol
+cetyl alcohol	draft	palmityl alcohol
+cetyl oleate	draft	hexadecanol oleate ester
+cetyl palmitate	draft	n-hexadecanyl palmitate
+cetyl palmitate	draft	palmitic acid palmityl ester
+cetyl stearate	draft	cetyl alcohol stearate
+cetyl stearate	draft	stearic acid hexadecyl ester
+chlorambucil	draft	chloraminophen
+chlorambucil	draft	chlorbutin
+chlordiazepoxide	draft	chloradiazepoxide
+chlordiazepoxide	draft	methaminodiazepoxide
+chloride ion	draft	chloride
+chloride ion	draft	chlorides
+chloride ion	draft	chlorine anion
+chloroethane	draft	mono-chloroethane
+chloroethane	draft	monochloroethane
+chloroform	draft	formyl trichloride
+chloroform	draft	methane trichloride
+chloroform	draft	methenyl chloride
+chloroform	draft	methenyl trichloride
+chloroform	draft	methyl trichloride
+chloroform	draft	methylidyne trichloride
+chloroform	draft	trichloroform
+chloroform	draft	trichloromethane
+chloroform	draft	trichloromethyl radical
+chloroprocaine	draft	chloroprocain
+chloroprocaine	draft	chloroprocaine hydrochloride
+chloroxylenol	draft	chloro-xylenol
+chloroxylenol	draft	p-chloro-m-xylenol
+chloroxylenol	draft	parachlorometaxylenol
+chlorpheniramine	draft	chlorophenylpyridamine
+chlorpheniramine	draft	chlorphenamine
+chlorthalidone	draft	chlorphthalidolone
+chlorzoxazone	draft	chlorzoxane
+cholecalciferol	draft	calciol
+cholecalciferol	draft	colecalciferol
+choline	draft	choline cation
+choline	draft	choline ion
+chorionic gonadotropin	draft	human chorionic gonadotropin
+cidofovir dihydrate	draft	cidofovir hydrate
+citric acid	draft	anhydrous citric acid
+citric acid	draft	beta-hydroxytricarballylic acid
+clavulanic acid	draft	clavulonic acid
+clemastine	draft	meclastin
+clomipramine	draft	chlorimipramine
+clomipramine	draft	monochlorimipramine
+clopidogrel	draft	clopidogrelum
+coagulation factor x human	draft	coagulation factor x
+coagulation factor x human	draft	human coagulation factor x
+coagulation factor x human	draft	stuart-prower factor
+cocaine	draft	beta-cocaine
+cocaine	draft	cocaina
+cocaine	draft	cocainum
+cocaine	draft	crack cocaine
+cocaine	draft	l-cocaine
+cocamide MEA	draft	cocamide monoethanolamine
+codeine	draft	codeine anhydrous
+codeine	draft	l-codeine
+corticotropin	draft	adrenocorticotropic hormone
+corticotropin	draft	adrenocorticotropin
+corticotropin	draft	corticotrophin
+cortisol	draft	hydrocorticosterone
+cortisol	draft	hydroxycortisone
+cosyntropin	draft	kosintropin
+cromoglicic acid	draft	cromoglycic acid
+crystal violet	draft	aniline violet
+cyclosporine	draft	ciclosporin
+cyproheptadine	draft	cyproheptidine
+cysteamine	draft	cysteamine hydrochloride
+cytarabine	draft	cytosine arabinoside
+dacomitinib	draft	dacomitinib anhydrous
+dasatinib monohydrate	draft	dasatinib hydrate
+daunorubicin	draft	daunomycin
+decyl oleate	draft	decanol oleate ester
+deferasirox	draft	deferasiroxum
+dehydroepiandrosterone	draft	androstenolone
+dehydroepiandrosterone	draft	prasterono
+denatonium benzoate monohydrate	draft	denatonium benzoate hydrate
+deoxythymidine	draft	deoxyribosylthymine
+deoxythymidine	draft	thymine deoxyriboside
+desipramine	draft	demethylimipramine
+desipramine	draft	desmethylimipramine
+desipramine	draft	monodemethylimipramine
+desipramine	draft	norimipramine
+desirudin	draft	desirudina
+desirudin	draft	desirudinum
+desirudin	draft	hirudin desirudin
+desloratadine	draft	descarboethoxyloratadine
+desmopressin	draft	deamino arginine vasopressin
+desonide	draft	desfluorotriamcinolone acetonide
+desoximetasone	draft	desoxymethasone
+dexamethasone	draft	desametasone
+dexbrompheniramine	draft	d-brompheniramine
+dexmethylphenidate	draft	d-threo-methylphenidate
+dexrazoxane	draft	dextrorazoxane
+dextroamphetamine	draft	d-amphetamine
+dextroamphetamine	draft	dexamphetamine
+dextromethorphan	draft	d-methorphan
+dextromethorphan	draft	delta-methorphan
+dextromethorphan	draft	dextromethorfan
+dibasic potassium phosphate	draft	dipotassium acid phosphate
+dibasic potassium phosphate	draft	dipotassium hydrogen monophosphate
+dibasic potassium phosphate	draft	dipotassium hydrogen orthophosphate
+dibasic potassium phosphate	draft	dipotassium hydrogen phosphate
+dibasic potassium phosphate	draft	dipotassium hydrogenorthophosphate
+dibasic potassium phosphate	draft	dipotassium hydrogenphosphate
+dibasic potassium phosphate	draft	dipotassium monohydrogen phosphate
+dibasic potassium phosphate	draft	dipotassium monophosphate
+dibasic potassium phosphate	draft	dipotassium orthophosphate
+dibasic potassium phosphate	draft	dipotassium phosphate
+dibasic potassium phosphate	draft	hydrogen dipotassium phosphate
+dibasic potassium phosphate	draft	potassium dibasic phosphate
+dibasic potassium phosphate	draft	potassium hydrogen phosphate
+dibasic potassium phosphate	draft	potassium monohydrogen phosphate
+dibasic potassium phosphate	draft	potassium monophosphate
+dibasic potassium phosphate	draft	potassium phosphate dibasic
+dibasic potassium phosphate	draft	secondary potassium phosphate
+dibucaine	draft	cincaine chloride
+dibucaine	draft	dibucaine base
+dichlorine	draft	chlorine gas
+dichlorine	draft	chlorine molecule
+dichlorine	draft	diatomic chlorine
+dichlorine	draft	molecular chlorine
+dichloromethane	draft	methane dichloride
+dichloromethane	draft	methylene bichloride
+dichlorphenamide	draft	dichlofenamide
+didanosine	draft	dideoxyinosine
+dienogest	draft	dienogestrel
+diethyl ether	draft	diethyl oxide
+diethyl ether	draft	ether
+diethyl ether	draft	ethyl oxide
+diethyl ether	draft	solvent ether
+diethylene glycol monoethyl ether	draft	ethyl digol
+diethylstilbestrol	draft	stilboestrol
+difenoxin	draft	difenoxin hydrochloride
+difenoxin	draft	diphenoxilic acid
+diglycine	draft	glycine dipeptide
+dihexadecyl phosphate	draft	dipalmityl hydrogen phosphate
+dihexadecyl phosphate	draft	dipalmityl phosphate
+dihydrocodeine	draft	dihydrocodeine bitartrate
+dimethyl ether	draft	dimethyl oxide
+dimethyl ether	draft	methyl ether
+dimethyl fumarate	draft	dimethyl trans-ethylenedicarboxylate
+dimethyl fumarate	draft	fumaric acid
+dimethyl fumarate	draft	trans-butenedioic acid dimethyl ester
+dimethyl sulfone	draft	dimethyl sulphone
+dimethyl sulfone	draft	dimethylsulfone
+dimethyl sulfone	draft	dimethylsulphone
+dimethyl sulfone	draft	methanesulfonyl methane
+dimethyl sulfone	draft	methanesulfonylmethane
+dimethyl sulfone	draft	methyl sulfone
+dimethyl sulfone	draft	methyl sulfonmethane
+dimethyl sulfone	draft	methyl sulfonyl methane
+dimethyl sulfone	draft	methyl-sulfonyl-methane
+dimethyl sulfone	draft	methylsulfone
+dimethyl sulfone	draft	methylsulfonyl methane
+dimethyl sulfone	draft	methylsulfonyl-methane
+dimethyl sulfone	draft	sulfonylbis-methane
+dimethyl sulfone	draft	sulfonylbismethane
+dimethyl sulfone	draft	sulfonyldimethane
+dimethyl sulfoxide	draft	dimethyl sulfur oxide
+dimethyl sulfoxide	draft	dimethyl sulphoxide
+dimethyl sulfoxide	draft	dimethylsulfoxid
+dimethyl sulfoxide	draft	dimethylsulfoxyde
+dimethyl sulfoxide	draft	dimetil sulfoxido
+dimethyl sulfoxide	draft	methylsulfinylmethane
+diosmin	draft	diosmine
+diosmin	draft	neodiosmin
+dioxygen	draft	diatomic oxygen
+dioxygen	draft	liquid oxygen
+dioxygen	draft	molecular oxygen
+dioxygen	draft	oxygen gas
+diphenhydramine	draft	benzhydramine
+disodium L-tartrate	draft	disodium tartrate
+disulfiram	draft	tetraethylthiuram disulfide
+disulfiram	draft	tetraethylthiuram disulphide
+dobesilic acid	draft	hydroquinonesulfonic acid
+doxorubicin	draft	hydroxydaunorubicin
+doxycycline	draft	anhydrous doxycycline
+doxycycline	draft	doxycycline anhydrous
+drospirenone	draft	dihydrospirorenone
+dyclonine	draft	dyclocaine
+edetic acid	draft	ethylenediaminetetraacetic acid
+elbasvir	draft	elbasvir component of zepatier
+elbasvir	draft	zepatier component of elbasvir
+enalaprilat dihydrate	draft	enalprilat hydrate
+enalaprilat dihydrate	draft	enalprilate hydrate
+entecavir hydrate	draft	entecavir monohydrate
+epinephrine	draft	levoepinephrine
+eribulin	draft	eribulin mesylate
+ertugliflozin	draft	ertugliflozine
+erythritol	draft	erythro-tetritol
+erythritol	draft	mesoerythritol
+erythromycin	draft	erthromycin
+esomeprazole	draft	esomeprazol
+estriol	draft	oestriol
+estriol	draft	trihydroxyestrin
+estropipate	draft	piperazine estrone sulfate
+ethamsylate	draft	etamsylate
+ethanol	draft	dehydrated ethanol
+ethanol	draft	hydroxyethane
+ethinylestradiol	draft	ethinyloestradiol
+ethionamide	draft	ethylisothiamide
+ethionamide	draft	etionamide
+ethosuximide	draft	alpha-ethyl-alpha-methylsuccinimide
+ethosuximide	draft	alpha-methyl-alpha-ethylsuccinimide
+ethosuximide	draft	gamma-ethyl-gamma-methyl-succinimide
+ethosuximide	draft	gamma-methyl-gamma-ethyl-succinimide
+ethyl DL-lactate	draft	ethyl hydroxypropanoate
+ethyl DL-lactate	draft	lactic acid ethyl ester
+ethyl acetate	draft	acetic acid ethyl ester
+ethyl acetate	draft	ethyl acetic ester
+ethyl acetate	draft	ethyl ester of acetic acid
+ethyl acetate	draft	ethyl ethanoate
+ethyl acrylate	draft	ethyl ester of acrylic acid
+ethyl acrylate	draft	ethyl propenoate
+ethyl butyrate	draft	butanoic acid ethyl ester
+ethyl butyrate	draft	butyric acid ethyl ester
+ethyl butyrate	draft	butyric ether
+ethyl butyrate	draft	ethyl butanoate
+ethyl eicosapentaenoate	draft	ethyl eicosapentaenoic acid
+ethyl eicosapentaenoate	draft	icosapentate
+ethyl levulinate	draft	ethyl ketovalerate
+ethyl oleate	draft	oleic acid ethyl ester
+ethylene distearamide	draft	ethylene distearylamide
+ethylene glycol	draft	ethylene alcohol
+ethylene glycol	draft	glycol
+ethylene glycol	draft	glycol alcohol
+ethylene glycol	draft	monoethylene glycol
+ethylene oxide	draft	ethene oxide
+ethylparaben	draft	ethyl para-hydroxybenzoate
+ethylparaben	draft	ethyl paraben
+ethynodiol	draft	etinodiol
+ethynodiol	draft	etynodiol
+ethynodiol	draft	etynodiolum
+etoposide	draft	trans-etoposide
+exenatide	draft	exenatide synthetic
+fentanyl	draft	phentanyl
+ferric chloride	draft	iron trichloride
+ferric subsulfate	draft	basic ferric sulfate
+ferrous gluconate dihydrate	draft	ferrous gluconate hydrate
+ferrous sulfate heptahydrate	draft	ferrous sulfate hydrate
+fexofenadine	draft	carboxyterfenadine
+fexofenadine	draft	terfenadine acid metabolite
+fexofenadine	draft	terfenadine carboxylate
+floxuridine	draft	floxidine
+flumazenil	draft	flumazepil
+flunisolide	draft	flunisolide anhydrous
+fluoride ion	draft	fluorine anion
+fluorouracil	draft	fluoro uracil
+fluorouracil	draft	fluorouracilum
+fluorouracil	draft	fluoruracil
+fluorouracil	draft	fluouracil
+fluorouracil	draft	topical fluorouracil
+fluphenazine	draft	fluorfenazine
+fluphenazine	draft	fluorophenazine
+fluphenazine	draft	fluorphenazine
+fluphenazine	draft	triflumethazine
+flurandrenolide	draft	flurandrenolone
+folic acid	draft	pteroylglutamic acid
+folic acid	draft	pteroylmonoglutamic acid
+fondaparinux	draft	natural heparin pentasaccharide
+formic acid	draft	aminic acid
+formic acid	draft	formylic acid
+formic acid	draft	hydrogen carboxylic acid
+formic acid	draft	methanoic acid
+formic acid	draft	methoic acid
+fosinoprilat	draft	fosinopril diacid
+fosinoprilat	draft	fosinoprilic acid
+fremanezumab	draft	fremanezumab-vfrm
+furazolidone	draft	nitrofurazolidone
+galactose	draft	galacto-hexose
+galantamine	draft	galanthamine
+gamma cyclodextrin	draft	cyclooctaamylose
+gatifloxacin	draft	gatifloxacin anhydrous
+gatifloxacin	draft	gatifloxacine
+gemcitabine	draft	gemcitabine hydrochloride
+gentamicin	draft	gentamicin sulfate
+gentamicin	draft	gentamicins
+gentamicin	draft	gentamycin
+geranial	draft	geranialdehyde
+geraniol	draft	geranyl alcohol
+geraniol	draft	t-geraniol
+geraniol	draft	trans-geraniol
+glucagon	draft	glucagon recombinant
+glucagon	draft	glucagone
+gluconolactone	draft	delta-gluconolactone
+gluconolactone	draft	gluconic delta-lactone
+glucose oxidase	draft	glucose aerodehydrogenase
+glucose oxidase	draft	glucose oxyhydrase
+glutathione	draft	gamma-glutamylcysteinylglycine
+glutathione	draft	glutathione reduced
+glutathione	draft	reduced glutathione
+glycerol	draft	glycerine
+glyceryl tristearate	draft	stearin
+glyceryl tristearate	draft	tristearoyl-sn-glycerol
+glycine	draft	glycin
+glycol distearate	draft	ethylene distearate
+glycol distearate	draft	ethylene glycol dioctadecanoate
+glycol distearate	draft	ethylene glycol distearate
+glycol salicylate	draft	ethylene glycol monosalicylate
+glycol stearate	draft	ethylene glycol monostearate
+glycol stearate	draft	glycol monostearate
+glycopyrrolate	draft	glycopyrronium cation
+glyoxal	draft	glyoxal aldehyde
+glyoxal	draft	glyoxylaldehyde
+graphite	draft	silver graphite
+grazoprevir	draft	grazoprevir anhydrous
+growth hormone	draft	artificial growth hormone
+growth hormone	draft	growth hormones
+guaiacol	draft	o-guaiacol
+guaifenesin	draft	guaiphenesin
+heparin	draft	heparin sodium
+hepatitis B immune globulin	draft	human hepatitis b immunoglobulin
+hepatitis B immune globulin	draft	human hepatitis-b immunoglobulin
+hesperidin	draft	hesperidoside
+hexyl acetate	draft	n-hexyl ethanoate
+hydralazine	draft	hydralazin
+hydralazine	draft	hydrallazine
+hydralazine	draft	hydrazinophthalazine
+hydrochlorothiazide	draft	hydrochlorthiazide
+hydrogen peroxide	draft	dihydrogen dioxide
+hydrogen peroxide	draft	peroxide
+hydromorphone	draft	hydromorphone hydrochloride
+hydroquinone	draft	a-hydroquinone
+hydroquinone	draft	alpha-hydroquinone
+hydroquinone	draft	b-quinol
+hydroquinone	draft	benzohydroquinone
+hydroquinone	draft	benzoquinol
+hydroquinone	draft	beta-quinol
+hydroquinone	draft	dihydroquinone
+hydroquinone	draft	dihydroxybenzene
+hydroquinone	draft	hydrochinone
+hydroquinone	draft	hydroquinol
+hydroquinone	draft	hydroquinoue
+hydroquinone	draft	p-dihydroxybenzene
+hydroquinone	draft	p-hydroquinone
+hydroquinone	draft	p-hydroxybenzene
+hydroquinone	draft	p-hydroxyphenol
+hydroquinone	draft	quinol
+hydroxide ion	draft	hydroxide
+hydroxychloroquine	draft	oxychlorochine
+hydroxycitronellal	draft	hydroxy citronellal
+hydroxyproline	draft	delta-hydroxyproline
+hydroxypropyl cellulose	draft	hydroxypropylmethylcellulose phthalate
+ibuprofen	draft	ibuprophen
+imipramine	draft	melipramine
+indigo	draft	indigo dye
+indocyanine green	draft	cardio-green
+indocyanine green	draft	indocyanine
+inotuzumab ozogamicin	draft	inotuzumab
+insulin degludec	draft	insulina degludec
+insulin degludec	draft	insulinum degludecum
+irinotecan	draft	biotecan
+iron pentacarbonyl	draft	pentacarbonyl iron
+isavuconazole	draft	isavuconazol
+isavuconazole	draft	isavuconazolum
+isoamyl acetate	draft	amylacetic ester
+isoamyl acetate	draft	beta-methyl butyl acetate
+isoamyl acetate	draft	i-amyl acetate
+isoamyl acetate	draft	isoamyl ethanoate
+isoamyl acetate	draft	isopentyl acetate
+isoamyl laurate	draft	isopentyl laurate
+isopropyl alcohol	draft	i-propylalkohol
+isopropyl alcohol	draft	isopropanol
+isopropyl alcohol	draft	sec-propyl alcohol
+isopropyl alcohol	draft	secondary propyl alcohol
+isopropyl palmitate	draft	isopropyl hexadecanoate
+isopropyl palmitate	draft	isopropyl n-hexadecanoate
+isopropyl palmitate	draft	palmitic acid isopropyl ester
+isotretinoin	draft	cis-retinoic acid
+isotretinoin	draft	retinoic acid
+kaolin	draft	gaoling
+kaolin	draft	gaolingtu
+kaolin	draft	kao-lin
+kaolin	draft	kao-ling
+kaolin	draft	kao-ling-t'u
+kaolin	draft	kao-ling-tu
+kaolin	draft	kaolinite clay
+lacosamide	draft	erlosamide
+lanthanum carbonate	draft	lanthanum carbonate anhydrous
+lauramidopropyl betaine	draft	dodecanamidopropyl betaine
+lauramidopropyl betaine	draft	lauramido propyl betaine
+lauramidopropyl betaine	draft	lauroylamide propylbetaine
+lauramine oxide	draft	lauryldimethylamine oxide
+levulinic acid	draft	gamma-ketovaleric acid
+levulinic acid	draft	levulic acid
+lidocaine	draft	lignocaine
+lidocaine	draft	xylocaine
+lithium	draft	lithium compound
+lithium	draft	lithium compounds
+lithium	draft	lithium drugs
+lithium	draft	lithium salts
+lithium carbonate	draft	dilithium carbonate
+lithium citrate hydrate	draft	lithium citrate tetrahydrate
+lithium citrate hydrate	draft	trilithium citrate tetrahydrate
+loxapine	draft	oxilapine
+lycopene	draft	all-trans-lycopene
+lysozyme	draft	c-type lysozyme
+madecassic acid	draft	brahmic acid
+magnesium acetate	draft	acetic acid magnesium salt
+magnesium acetate	draft	magnesium diacetate
+magnesium chlorate	draft	magnesium dichlorate
+magnesium chlorate	draft	magnesium perchlorite
+magnesium gluconate dihydrate	draft	magnesium gluconate hydrate
+magnesium glycinate	draft	magnesium diglycinate
+magnesium hydroxide	draft	magnesium dihydroxide
+magnesium hydroxide	draft	magnesium hydrate
+magnesium hydroxide	draft	milk of magnesia
+magnesium salicylate tetrahydrate	draft	magnesium salicylate hydrate
+magnesium sulfate heptahydrate	draft	hydrated magnesium sulfate
+magnesium sulfate heptahydrate	draft	magnesium sulphate heptahydrate
+magnesium trisilicate	draft	magnesium trisilicate anhydrous
+mechlorethamine	draft	chlormethine
+megestrol	draft	megestryl acetate
+mercaptopurine hydrate	draft	mercaptopurine monohydrate
+meropenem trihydrate	draft	meropenem hydrate
+metamizole sodium hydrate	draft	dipyrone monohydrate
+metamizole sodium hydrate	draft	metamizole monosodium monohydrate
+methacholine	draft	methacholine bromide
+methanol	draft	hydroxymethane
+methanol	draft	monohydroxymethane
+methazolamide	draft	methenamide
+methenamine	draft	hexamethylenamine
+methenamine	draft	hexamethylenetetramine
+methenamine	draft	hexamine
+methimazole	draft	thiamazole
+methohexital	draft	methohexitone
+methotrexate	draft	amethopterin
+methyl cellulose	draft	cellulose methyl ether
+methyl cellulose	draft	methylated cellulose
+methyl methacrylate	draft	methacrylic acid methyl ester
+methyl methacrylate	draft	methyl alpha-methylacrylate
+methyl methacrylate	draft	methyl ester of methacrylic acid
+methyl methacrylate	draft	methyl methylacrylate
+methyl nicotinate	draft	nicotinic acid methyl ester
+methyl perfluoroisobutyl ether	draft	methyl nonafluoroisobutyl ether
+methyldopa	draft	methyldopa anhydrous
+methylergonovine	draft	methylergobasin
+methylergonovine	draft	methylergometrin
+methylergonovine	draft	methylergometrine
+methylhomatropine	draft	homotropine methyl
+methylparaben	draft	methyl p-hydroxybenzoate
+methylparaben	draft	methyl para-hydroxybenzoate
+methylparaben	draft	methyl paraben
+methylparaben	draft	p-hydroxybenzoic acid methyl ester
+methylphenidate	draft	methyl phenidylacetate
+methylphenidate	draft	methylphenidan
+metirosine	draft	alpha-methyl-p-tyrosine
+metirosine	draft	alpha-methyl-para-tyrosine
+metoclopramide	draft	metaclopromide
+metoclopramide	draft	methochlopramide
+metoclopramide	draft	metochlopramide
+metoclopramide	draft	metoclopramide hydrochloride
+metyrapone	draft	mepyrapone
+midostaurin	draft	benzoylstaurosporine
+molybdenum	draft	elemental molybdenum
+molybdenum	draft	metallic molybdenum
+molybdenum	draft	molybdenum atom
+monoethanolamine	draft	beta-aminoethanol
+monoethanolamine	draft	beta-aminoethyl alcohol
+monoethanolamine	draft	beta-ethanolamine
+monoethanolamine	draft	beta-hydroxyethylamine
+monoethanolamine	draft	colamine
+monoethanolamine	draft	olamine
+monothioglycerol	draft	alpha-thiolglycerol
+monothioglycerol	draft	monothioglycerin
+monothioglycerol	draft	thioglycerin
+monothioglycerol	draft	thioglycerine
+morphine	draft	anhydrous morphine
+morphine	draft	morphium
+mycophenolate mofetil	draft	mycophenolic acid morpholinoethyl ester
+myristyl alcohol	draft	tetradecyl alcohol
+myristyl myristate	draft	tetradecyl myristate
+n-pentyl nitrite	draft	n-amyl nitrite
+n-pentyl nitrite	draft	pentyl nitrite
+nafcillin	draft	naphcillin
+nalmefene	draft	nalmetrene
+naloxone	draft	l-naloxone
+natalizumab	draft	natalizumab-sztn
+niacinamide	draft	beta-pyridinecarboxamide
+niacinamide	draft	nicotinamide
+niacinamide	draft	nicotinic acid amide
+niacinamide	draft	nicotinic amide
+nicotinic acid	draft	beta-pyridinecarboxylic acid
+nicotinic acid	draft	m-pyridinecarboxylic acid
+nicotinic acid	draft	nicotinate
+nicotinic acid	draft	pyridine-beta-carboxylic acid
+nitric acid	draft	fuming nitric acid
+nitric oxide	draft	mononitrogen monoxide
+nitric oxide	draft	nitrogen monooxide
+nitric oxide	draft	nitrogen monoxide
+nitric oxide	draft	nitrogen oxide
+nitric oxide	draft	nitroxide radical
+nitrite ion	draft	nitrite
+nitrite ion	draft	nitrite anion
+nitroglycerin	draft	glycerin trinitrate
+nitroglycerin	draft	glycerol trinitrate
+nitroglycerin	draft	glyceryl trinitrate
+nitroglycerin	draft	nitroglycerine
+nitroglycerin	draft	nitroglycerol
+nitroglycerin	draft	trinitroglycerin
+nitroglycerin	draft	trinitroglycerol
+nitrous oxide	draft	dinitrogen monoxide
+nitrous oxide	draft	hyponitrous acid anhydride
+nitrous oxide	draft	nitrious oxide
+nitrous oxide	draft	nitro
+nitrous oxide	draft	nitrous
+nonivamide	draft	hydroxymethoxybenzyl pelargonamide
+nonivamide	draft	pelargonyl vanillylamide
+nortriptyline	draft	demethylamitriptyline
+nortriptyline	draft	desmethylamitriptyline
+octafluoropropane	draft	perfluoropropane
+octasulfur	draft	cyclo-octasulfur
+octasulfur	draft	cyclooctasulfane
+octasulfur	draft	cyclooctasulfur
+octreotide	draft	octrotide
+oleyl oleate	draft	oleic acid oleyl ester
+orthoboric acid	draft	boracic acid
+orthoboric acid	draft	o-boric acid
+orthosilicic acid	draft	monosilicic acid
+orthosilicic acid	draft	silicic acid
+orthosilicic acid	draft	silicon tetrahydroxide
+oxycodone	draft	dihydrohydroxycodeinone
+oxycodone	draft	dihydroxycodeinone
+oxymetazoline	draft	oxymethazoline
+oxymorphone	draft	oxymorphone hydrochloride
+p-anisaldehyde	draft	anisaldehyde
+p-anisaldehyde	draft	anise aldehyde
+p-anisaldehyde	draft	anisic aldehyde
+p-anisaldehyde	draft	para-anisaldehyde
+paracetamol	draft	p-acetamidophenol
+paracetamol	draft	p-acetaminophenol
+paracetamol	draft	p-hydroxy-acetanilid
+paracetamol	draft	p-hydroxyacetanilide
+paracetamol	draft	p-hydroxyphenolacetamide
+pembrolizumab	draft	lambrolizumab
+pentadecalactone	draft	cyclopentadecanolide
+pentadecalactone	draft	muskalactone
+pentadecalactone	draft	pentadecanolactone
+pentaerythritol	draft	monopentaerythritol
+pentaerythritol	draft	neopentanetetrol
+petroleum jelly	draft	white petrolatum
+phenelzine	draft	phenelzine sulfate
+phenelzine	draft	phenethyl-hydrazine
+phenelzine	draft	phenethylhydrazine
+phenobarbital	draft	phenobarbitol
+phenobarbital	draft	phenobarbitone
+phenobarbital	draft	phenobarbituric acid
+phenobarbital	draft	phenylethylbarbiturate
+phenobarbital	draft	phenylethylbarbituric acid
+phenol	draft	benzophenol
+phenol	draft	monophenol
+phenol	draft	phenol alcohol
+phenol	draft	phenol homopolymer
+phenol	draft	phenosmolin
+phenoxybenzamine	draft	phenoxybenzamine hydrochloride
+phentolamine	draft	fentolamin
+phenyl acetate	draft	acetic acid phenyl ester
+phenyl acetate	draft	phenol acetate
+phenyl acetate	draft	phenyl ethanoate
+phenyl salicylate	draft	phenol salicylate
+phenyl salicylate	draft	salicylic acid phenyl ester
+phenylephrine	draft	metasynephrine
+phenylethyl alcohol	draft	benzyl ethyl alcohol
+phenylethyl alcohol	draft	beta-hydroxyethylbenzene
+phenylethyl alcohol	draft	hydroxyethylbenzene
+phenylethyl alcohol	draft	phenethyl alcohol
+phenylethyl alcohol	draft	phenyl ethyl alcohol
+phenylethyl alcohol	draft	phenylethanol
+phenylethyl resorcinol	draft	phenethyl resorcinol
+phenytoin	draft	diphenylhydantoin
+phosphoric acid	draft	orthophosphoric acid
+phosphoric acid	draft	white phosphoric acid
+physostigmine	draft	physostigmine salicylate
+phytic acid	draft	fytic acid
+phytic acid	draft	phytine
+pilocarpine	draft	pilocarpine hydrochloride
+pilocarpine	draft	pilocarpine nitrate
+pilocarpine	draft	pilokarpin
+pindolol	draft	betapindol
+piperonal	draft	piperonaldehyde
+piperonal	draft	piperonyl aldehyde
+piperonal	draft	piperonylaldehyde
+pitavastatin	draft	itavastatin
+pitolisant	draft	tiprolisant
+polyethylene glycol	draft	polyethylene oxide
+polyethylene glycol	draft	polyoxyethylene
+potassium carbonate	draft	carbonate of potash
+potassium carbonate	draft	potash
+potassium cation	draft	potassium monocation
+potassium chloride	draft	chloride of potash
+potassium chloride	draft	monopotassium chloride
+potassium chloride	draft	muriate of potash
+potassium hydrogen carbonate	draft	monopotassium carbonate
+potassium hydrogen carbonate	draft	potassium acid carbonate
+potassium hydroxide	draft	caustic potash
+potassium hydroxide	draft	potash lye
+potassium hydroxide	draft	potassium hydrate
+potassium metabisulfite	draft	dipotassium disulfite
+potassium metabisulfite	draft	dipotassium disulphite
+potassium metabisulfite	draft	potassium metabisulphite
+potassium metabisulfite	draft	potassium pyrosulfite
+potassium sorbate	draft	sorbic acid potassium salt
+potassium sulfate	draft	dipotassium sulfate
+potassium sulfate	draft	potassium sulphate
+povidone-iodine	draft	iodopovidone
+povidone-iodine	draft	polyvinylpyrrolidone-iodine
+povidone-iodine	draft	povidone iodine
+pramoxine	draft	pramocaine
+pravastatin	draft	pravastatin acid
+pravastatin	draft	pravastatin sodium
+prazosin	draft	prazosine
+prednisone	draft	prednison
+prilocaine	draft	prilocaine base
+procaine	draft	novocaine
+progesterone	draft	progesterol
+propane	draft	n-propane
+proparacaine	draft	proparacaine hydrochloride
+proparacaine	draft	proxymetacaine hydrochloride
+propionic acid	draft	ethanecarboxylic acid
+propionic acid	draft	ethylformic acid
+propionic acid	draft	metacetonic acid
+propionic acid	draft	methylacetic acid
+propionic acid	draft	propanoic acid
+propionic acid	draft	proprionic acid
+propionic acid	draft	pseudoacetic acid
+propranolol	draft	propranolol hydrochloride
+propylene	draft	methylethylene
+propylene oxide	draft	methyl ethylene oxide
+propylene oxide	draft	propene oxide
+propylparaben	draft	n-propyl paraben
+propylparaben	draft	propyl para-hydroxybenzoate
+propylparaben	draft	propyl paraben
+pyrantel	draft	pirantel
+pyrilamine	draft	mepiramine
+pyrilamine	draft	mepyramine maleate
+pyrilamine	draft	pyranisamine
+pyrilamine	draft	pyrilamine tannate
+pyrithione zinc	draft	zinc pyridinethione
+quercetin	draft	quercetol
+quinidine	draft	beta-quinine
+quinidine	draft	conquinine
+quinidine	draft	quinidine hydrochloride
+quinine	draft	chinine
+rasburicase	draft	uricase
+relebactam	draft	relebactam anhydrous
+resveratrol	draft	trans-resveratrol
+risedronic acid	draft	risedronate sodium
+rizatriptan	draft	risatriptan
+saccharin	draft	saccharimide
+salicylamide	draft	o-hydroxybenzamide
+salicylamide	draft	salicylic acid amide
+salicylic acid	draft	o-hydroxybenzoic acid
+saxagliptin	draft	saxagliptin anhydrous
+selenious acid	draft	selenous acid
+selenium disulfide	draft	selenium disulphide
+selenium disulfide	draft	selenium sulphide
+serratiopeptidase	draft	serrapeptase
+silanetriol	draft	methyltrihydroxysilane
+silanetriol	draft	trihydroxymethylsilane
+silicon dioxide	draft	silica
+silicon dioxide	draft	silicic anhydride
+silicon dioxide	draft	silicon oxide
+silver oxide	draft	argentous oxide
+silver oxide	draft	silver monoxide
+sodium acetate trihydrate	draft	hydrated sodium acetate
+sodium acetate trihydrate	draft	sodium acetate hydrate
+sodium bicarbonate	draft	bicarbonate of soda
+sodium bicarbonate	draft	carbonic acid monosodium salt
+sodium bicarbonate	draft	monosodium carbonate
+sodium bicarbonate	draft	sodium acid carbonate
+sodium bicarbonate	draft	sodium hydrogen carbonate
+sodium bicarbonate	draft	sodium hydrogencarbonate
+sodium carbonate	draft	anhydrous sodium carbonate
+sodium carbonate	draft	disodium carbonate
+sodium carbonate	draft	sodium carbonate anhydrous
+sodium carbonate	draft	sodium salt of carbonic acid
+sodium chloride	draft	sodium chloride salt
+sodium chlorite	draft	chlorite sodium
+sodium fluoride	draft	sodium monofluoride
+sodium hydroxide	draft	sodium hydrate
+sodium metabisulfite	draft	disodium pyrosulfite
+sodium metabisulfite	draft	sodium metabisulphite
+sodium metabisulfite	draft	sodium pyrosulfite
+sodium metasilicate	draft	sodium polysilicate
+sodium metasilicate	draft	sodium sesquisilicate
+sodium metasilicate	draft	sodium silicate glass
+sodium metasilicate	draft	sodium siliconate
+sodium percarbonate	draft	sodium carbonate perhydrate
+sodium percarbonate	draft	sodium carbonate peroxide
+sodium percarbonate	draft	sodium carbonate peroxyhydrate
+sodium propionate hydrate	draft	sodium propanoate hydrate
+sodium propionate hydrate	draft	sodium propanoate monohydrate
+sodium propionate hydrate	draft	sodium propionate monohydrate
+sodium sulfate decahydrate	draft	disodium sulfate decahydrate
+sodium sulfate decahydrate	draft	sodium sulphate decahydrate
+sodium sulfite	draft	anhydrous sodium sulfite
+sodium sulfite	draft	dried sodium sulfite
+sodium sulfite	draft	sodium sulfite anhydrous
+sodium sulfite	draft	sodium sulphite
+sorafenib	draft	sorafenibum
+soybean oil	draft	soy bean oil
+spironolactone	draft	spironolattone
+spironolactone	draft	spirotone
+stannous chloride dihydrate	draft	dihydrated stannous chloride
+stannous chloride dihydrate	draft	stannous chloride hydrate
+stearamide amp	draft	stearoyl aminomethylpropanol
+stearyl alcohol	draft	n-octadecyl alcohol
+streptomycin	draft	streomycin
+styrene	draft	styrene monomer
+succimer	draft	meso-dimercaptosuccinic acid
+succinic acid	draft	butanedioic acid
+succinic acid	draft	butanedionic acid
+succinic acid	draft	dihydrofumaric acid
+succinic acid	draft	ethylenesuccinic acid
+succinylcholine	draft	dicholine succinate
+succinylcholine	draft	succinocholine
+succinylcholine	draft	succinoylcholine
+succinylcholine	draft	succinylbischoline
+succinylcholine	draft	succinyldicholine
+sufentanil	draft	sufentanil citrate
+sulfadiazine	draft	sulfadiazin
+sulfamethoxazole	draft	acetylsulfamethoxazole
+sulfamethoxazole	draft	sulphamethoxazole
+sulfamethoxazole	draft	suphamethoxazole
+sulfate ion	draft	sulphate ion
+sulfathiazole	draft	sulfthiazole
+sulfur dioxide	draft	sulfur oxide
+sulfur dioxide	draft	sulfurous acid anhydride
+sulfur dioxide	draft	sulfurous anhydride
+sulfur dioxide	draft	sulfurous oxide
+sulfur dioxide	draft	sulphur dioxide
+sulfur hexafluoride	draft	hexafluoridosulfur
+sulfur hexafluoride	draft	sulfur fluoride
+sulfur hexafluoride	draft	sulphur hexafluoride
+sulfuric acid	draft	sulphuric acid
+sulfuric acid	draft	vitriolic acid
+sumatriptan	draft	triptan
+tacrolimus	draft	anhydrous tacrolimus
+tacrolimus	draft	tacrolimus anhydrous
+tafamidis	draft	tafamidisum
+taurine	draft	tauric acid
+tert-butyl alcohol	draft	t-butyl alcohol
+tert-butyl alcohol	draft	tert-butanol
+tetracycline	draft	tetracyclines
+tetrahydrocannabinol	draft	dronabinolen
+thiomersal	draft	thiomersalate
+thioridazine	draft	thioridazin
+thiosulfate ion	draft	sulfanidesulfonate
+thiosulfate ion	draft	thiosulphate
+thiosulfate ion	draft	thiosulphate ion
+thonzylamine	draft	neohetramine
+thymol	draft	m-thymol
+thyrotropin alfa	draft	thyrotrophin-alfa
+tiagabine	draft	tiagabine hydrochloride
+tobramycin	draft	nebramycin
+tocilizumab	draft	atlizumab
+tofacitinib	draft	tasocitinib
+tolmetin	draft	tolmetina
+trametinib	draft	trametinib dimethyl sulfoxide
+trandolapril	draft	indolapril
+tranexamic acid	draft	tranexmic acid
+tranylcypromine	draft	rac-tranylcypromine
+tranylcypromine	draft	racemic tranylcypromine
+treosulfan	draft	threosulphan
+treosulfan	draft	treosulphan
+treosulfan	draft	tresulfan
+tri-N-butyl phosphate	draft	butyl phosphate
+tri-N-butyl phosphate	draft	phosphoric acid tributyl ester
+tri-N-butyl phosphate	draft	tributyl ester of phosphoric acid
+triacetin	draft	glycerin triacetate
+triamcinolone	draft	fluoxiprednisolone
+triamcinolone	draft	fluoxyprednisolone
+tribasic potassium phosphate	draft	tripotassium phosphate
+tribehenin	draft	glycerol tribehenate
+tribehenin	draft	glyceryl tribehenate
+tricaine	draft	metacaine
+tricalcium phosphate	draft	bone phosphate of lime
+tricalcium phosphate	draft	calcium orthophosphate
+tricalcium phosphate	draft	calcium phosphate tribasic
+tricalcium phosphate	draft	tertiary calcium phosphate
+tricalcium phosphate	draft	tribasic calcium phosphate
+tricalcium phosphate	draft	tricalcium orthophosphate
+tridecane	draft	n-tridecane
+triethylene glycol	draft	triglycol
+triethylenetetramine	draft	triethylene tetramine
+trifluoperazine	draft	trifluoperazine hydrochloride
+trifluridine	draft	trifluorothymidine
+trifluridine	draft	trifluorothymine deoxyriboside
+triiodothyronine	draft	liothyronine sodium
+trimagnesium dicitrate	draft	magnesium dicitrate
+trimagnesium dicitrate	draft	trimagnesium citrate
+trimethobenzamide	draft	trimethobenzamide hydrochloride
+trimipramine	draft	beta-methylimipramine
+trimyristin	draft	trimyristoylglycerol
+tripalmitin	draft	tripalmitoylglycerol
+triptorelin	draft	triptorelina
+triptorelin	draft	triptoreline
+triptorelin	draft	triptorelinum
+tromethamine	draft	trometamol
+ultramarine	draft	dark ultramarine blue
+undecane	draft	hendecane
+undecane	draft	n-undecane
+undecylenic acid	draft	omega-hendecenoic acid
+undecylenic acid	draft	omega-undecenoic acid
+undecylenic acid	draft	undecelinic acid
+vanillin	draft	p-vanillin
+vanillin	draft	vanilla
+vincristine	draft	kyocristine
+vincristine	draft	leurocristine
+vincristine	draft	leurocristine sulfate
+vinyl acetate	draft	vinyl acetate monomer
+vinyl acetate	draft	vinyl ethanoate
+voretigene neparvovec	draft	voretigene neparvovec-rzyl
+vortioxetine	draft	vortioxetinum
+water	draft	pure water
+xylitol	draft	xylite
+xylometazoline	draft	xylomethazoline
+yohimbine	draft	yohimbic acid methyl ester
+yohimbine	draft	yohimbin
+zeaxanthin	draft	anchovyxanthin
+zeaxanthin	draft	zeaxanthins
+zeaxanthin	draft	zeaxanthol
+zinc chloride	draft	dichlorozinc
+zinc chloride	draft	zinc dichloride
+zinc glycinate	draft	zinc bisglycinate
+zoledronic acid monohydrate	draft	zoladrona acid mylan
+zoledronic acid monohydrate	draft	zoledronate hydrate
+zoledronic acid monohydrate	draft	zoledronic
+zoledronic acid monohydrate	draft	zoledronic acid hydrate
