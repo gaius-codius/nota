@@ -58,6 +58,8 @@ disallowed-methods = [
   { path = "rusqlite::Connection::open_with_flags_and_vfs", reason = "the library database is opened by nota-store; anything else needs #[expect] with a reason", allow-invalid = true },
   { path = "rusqlite::Connection::backup", reason = "the library database is opened by nota-store; anything else needs #[expect] with a reason", allow-invalid = true },
   { path = "rusqlite::Connection::restore", reason = "the library database is opened by nota-store; anything else needs #[expect] with a reason", allow-invalid = true },
+  # Grows, truncates or keeps the database's files outside SQL (SizeHint, ChunkSize, PersistWal).
+  { path = "rusqlite::Connection::file_control", reason = "recordings and the database go through the durable-write layer; anything else needs #[expect] with a reason", allow-invalid = true },
   # sherpa-onnx's WAV writers.
   { path = "sherpa_onnx::write", reason = "recordings and the database go through the durable-write layer; anything else needs #[expect] with a reason", allow-invalid = true },
   { path = "sherpa_onnx::Wave::write", reason = "recordings and the database go through the durable-write layer; anything else needs #[expect] with a reason", allow-invalid = true },
