@@ -172,6 +172,43 @@ fn confirmed_text_is_stored_with_its_progress() {
     );
 }
 
+/// Acceptance: a final pass run again over a session's stored chunks (its
+/// progress lost, so from the start) leaves them, and the session's one
+/// revision, unchanged: the same text again stores nothing, and other text
+/// for a stored chunk is refused.
+#[test]
+fn a_rerun_over_stored_chunks_leaves_them_unchanged() {
+    let dir = TestDir::new("rerun");
+    let db = db(&dir);
+    let tracks = tracks(vec![row(MIC, 0, 100)], &BTreeMap::new());
+    let report = |_: Progress| {};
+    let stop = || false;
+    let running = Running {
+        stop: &stop,
+        progress: &report,
+    };
+    let heard = |text: &str| Transcript::new(MIC, range(0, 80), text.into()).unwrap();
+    Stored::new(db.clone(), SESSION, heard_by(), &tracks, &running)
+        .confirmed(MIC, s(100), vec![heard("hello there")], vec![])
+        .unwrap();
+    let before = db.with(|db| db.final_texts(SESSION)).unwrap();
+
+    let mut rerun = Stored::new(db.clone(), SESSION, heard_by(), &tracks, &running);
+    rerun
+        .confirmed(MIC, s(100), vec![heard("hello there")], vec![])
+        .unwrap();
+    // An engine that hears the chunk differently this time.
+    assert!(matches!(
+        rerun.confirmed(MIC, s(100), vec![heard("yellow hair")], vec![]),
+        Err(StoreError::FinalOverlap { track: MIC, .. })
+    ));
+    assert_eq!(db.with(|db| db.final_texts(SESSION)).unwrap(), before);
+    assert_eq!(
+        db.with(|db| db.revisions(SESSION)).unwrap(),
+        [nota_store::RevisionNumber::FINAL]
+    );
+}
+
 /// Without an engine, the final pass waits for one rather than failing.
 #[test]
 fn without_an_engine_the_final_pass_waits_for_one() {

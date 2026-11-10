@@ -2,11 +2,18 @@
 //! after the stop, in longer chunks than the live pass's.
 //!
 //! **Beside the heard text, never in it.** The heard text (the live pass,
-//! [`crate::transcript`]) is the record, and revisions show it; the final
-//! pass's text has rows of its own, so nothing that reads utterances or
-//! revisions sees the two passes mixed. Its rows are located as the engine
-//! gives them, by track and sample: placing them in session time needs
-//! each epoch's anchor, which isn't stored yet.
+//! [`crate::transcript`]) has rows of its own, and so does the final
+//! pass's, so nothing reads the two passes mixed. Revisions show the final
+//! pass's text ([`crate::revisions`]): its first row makes the session's
+//! revision 0. Its rows are located as the engine gives them, by track and
+//! sample; a revision places them in session time through the epochs'
+//! anchors.
+//!
+//! **A record, like the heard text.** Once a chunk's text and words are
+//! stored, nothing changes, deletes or replaces them, and no word is added
+//! to a chunk stored before: the schema's triggers (version 8) refuse it
+//! whatever connection tries. A rerun of the pass over stored chunks
+//! stores nothing again.
 //!
 //! **Each sample once.** A track's rows never overlap. With them, each
 //! track's progress says how far the pass has got: every published sample
@@ -20,6 +27,7 @@ use std::collections::BTreeMap;
 use nota_core::{SampleIndex, SampleRange, SessionId, TrackId};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
+use crate::revisions::make_final_revision;
 use crate::segments::{parse_track, session_exists};
 use crate::{Store, StoreError, session_key};
 
@@ -56,7 +64,8 @@ pub struct FinalText {
     pub heard_by: HeardBy,
 }
 
-fn sample(at: SampleIndex) -> Result<i64, StoreError> {
+/// A sample index as SQLite holds it.
+pub(crate) fn sample(at: SampleIndex) -> Result<i64, StoreError> {
     i64::try_from(at.get()).map_err(|_| StoreError::OutOfRange)
 }
 
@@ -129,7 +138,8 @@ impl Store {
     /// got to `up_to` on it, in one transaction committed before
     /// returning. Progress never goes back: an `up_to` before the stored
     /// one leaves it. A text stored exactly so already (a write retried
-    /// after its answer was lost) isn't stored twice.
+    /// after its answer was lost, or a pass run again) isn't stored twice.
+    /// The session's first text makes its revision 0, the final text.
     ///
     /// # Errors
     ///
@@ -198,6 +208,8 @@ impl Store {
                     ],
                 )?;
             }
+            // With its first text, the session has a text to revise.
+            make_final_revision(&tx, key)?;
         }
         tx.execute(
             "INSERT INTO final_progress (session_id, track, up_to) VALUES (?1, ?2, ?3) \
@@ -244,34 +256,39 @@ impl Store {
         let key = session_key(session)?;
         // One snapshot: a text comes with its words.
         let tx = self.conn.unchecked_transaction()?;
-        let mut stmt = tx.prepare(
-            "SELECT track, start_sample, end_sample, text, engine, model FROM final_text \
-             WHERE session_id = ?1 ORDER BY track, start_sample",
-        )?;
-        let raws = stmt
-            .query_map([key], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, i64>(2)?,
-                    r.get::<_, Option<String>>(3)?,
-                    r.get::<_, String>(4)?,
-                    r.get::<_, String>(5)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        raws.into_iter()
-            .map(|(track, start, end, text, engine, model)| {
-                Ok(FinalText {
-                    track: parse_track(track)?,
-                    range: parse_range(start, end)?,
-                    text,
-                    words: words_of(&tx, key, track, start)?,
-                    heard_by: HeardBy { engine, model },
-                })
-            })
-            .collect()
+        texts_in(&tx, key)
     }
+}
+
+/// [`Store::final_texts`]' work, on `conn`.
+pub(crate) fn texts_in(conn: &Connection, key: i64) -> Result<Vec<FinalText>, StoreError> {
+    let mut stmt = conn.prepare(
+        "SELECT track, start_sample, end_sample, text, engine, model FROM final_text \
+         WHERE session_id = ?1 ORDER BY track, start_sample",
+    )?;
+    let raws = stmt
+        .query_map([key], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    raws.into_iter()
+        .map(|(track, start, end, text, engine, model)| {
+            Ok(FinalText {
+                track: parse_track(track)?,
+                range: parse_range(start, end)?,
+                text,
+                words: words_of(conn, key, track, start)?,
+                heard_by: HeardBy { engine, model },
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]

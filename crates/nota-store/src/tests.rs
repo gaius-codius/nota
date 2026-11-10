@@ -520,6 +520,42 @@ pub(crate) fn raw(path: &Path) -> Connection {
     Connection::open(path).unwrap()
 }
 
+/// Whether `sql` is refused on `conn` by the schema's triggers, whose
+/// messages all say what is "never" done; any other refusal fails the test.
+pub(crate) fn refused(conn: &Connection, sql: &str) -> bool {
+    match conn.execute_batch(sql) {
+        Err(e) => {
+            let text = e.to_string();
+            assert!(
+                text.contains("never"),
+                "{sql}: refused, but not by the triggers: {text}"
+            );
+            true
+        }
+        Ok(()) => false,
+    }
+}
+
+/// An empty library at `path` as version `version` (2 to 7) made it, and a
+/// plain connection to it for filling it in by hand.
+pub(crate) fn library_at(path: &Path, version: usize) -> Connection {
+    let steps = [
+        schema::V2,
+        schema::V3,
+        schema::V4,
+        schema::V5,
+        schema::V6,
+        schema::V7,
+    ];
+    let conn = raw(path);
+    for step in &steps[..version - 1] {
+        conn.execute_batch(step).unwrap();
+    }
+    conn.pragma_update(None, "user_version", i64::try_from(version).unwrap())
+        .unwrap();
+    conn
+}
+
 #[test]
 fn stopping_a_recording_session_writes_once() {
     let dir = TestDir::new("stop");

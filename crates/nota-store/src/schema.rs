@@ -6,8 +6,8 @@
 //! that too (`track`): segments, epochs, utterances and timeline events. Two
 //! sessions can hold rows at the same track and samples without one ever
 //! claiming the other's, and a row that names another row (a revision's
-//! text and a proposal name an utterance) names one of its own session's:
-//! the foreign key includes the session.
+//! text and a proposal name words of a final-text chunk) names one of its
+//! own session's: the foreign key includes the session.
 //!
 //! Tables, and who fills them:
 //!
@@ -18,11 +18,12 @@
 //! | `segment` | each published segment: its track, epoch, samples, SHA-256, decoded-audio digest (V6) | the recorder's publish step and salvage |
 //! | `epoch` | each epoch's first sample, rate, session-time anchor and drift (V7) ([`Store::insert_epoch`](crate::Store::insert_epoch)) | the recorder's publish step, before each segment row |
 //! | `utterance`, `word` | the heard text, as the engine confirmed it, with word times; never changed (V4's triggers) | `nota record`'s live text ([`crate::transcript`]) |
-//! | `revision`, `revision_text` | the displayed text: revision 0 is the heard text, each later one a new row holding only what it changes; never changed | revision 0 with the first utterance, later ones by term clean-up |
-//! | `proposal` | a proposed fix, with the revision, model, pack and thresholds it came from | term clean-up |
+//! | `revision`, `revision_text` | the displayed text: revision 0 is the final pass's text, each later one a new row holding only what it changes, as runs of a chunk's words; never changed (V8) | revision 0 with the first final-text row, later ones by term clean-up ([`crate::revisions`]) |
+//! | `proposal` | a proposed fix to a run of a chunk's words, with the revision, model, pack and thresholds it came from (V8) | term clean-up |
+//! | `heard_revision`, `heard_revision_text`, `heard_proposal` | the heard text's revisions and proposals from before V8, kept as they were and never added to | nothing since V8 |
 //! | `mark`, `note` | marks and notes made while recording, in session time | `nota record`, as each is made ([`crate::annotations`]) |
 //! | `job` | work queued after a stop: its kind, state, progress and what it waits for (V5) | the job queue ([`crate::jobs`]) |
-//! | `final_text`, `final_word`, `final_progress` | the final pass's text, by track and sample, beside the heard text and never in it; how far it has got on each track (V5) | the final pass ([`crate::final_text`]) |
+//! | `final_text`, `final_word`, `final_progress` | the final pass's text, by track and sample, beside the heard text and never in it, never changed (V8); how far it has got on each track (V5) | the final pass ([`crate::final_text`]) |
 //! | `event` | the timeline: warnings raised and cleared, device changes, the transcriber's state, gaps | `nota record`, as each is sent to the screen ([`crate::timeline`]) |
 //! | `finding` | an index of each session's findings file: rows whose file didn't prove them, and rows that don't parse (V6) | the app, from the findings files ([`Store::index_findings`](crate::Store::index_findings)) |
 //!
@@ -352,6 +353,177 @@ CREATE INDEX finding_by_session ON finding (session_id, status);
 pub(crate) const V7: &str = "
 ALTER TABLE epoch ADD COLUMN drift_ppb INTEGER NOT NULL DEFAULT 0
     CHECK (drift_ppb BETWEEN -1000000 AND 1000000);
+";
+
+/// Version 8: revisions and proposals on the final pass's text, which
+/// becomes a record like the heard text.
+///
+/// **The heard text's revisions are kept, and closed.** Versions 2 to 7
+/// revised the heard text: `revision`, `revision_text` and `proposal`
+/// named utterances. Those tables become `heard_revision`,
+/// `heard_revision_text` and `heard_proposal`, rows and all (SQLite's
+/// rename carries their foreign keys with them), and triggers refuse any
+/// INSERT, UPDATE or DELETE on them: they read as they did, through
+/// [`Store::heard_revision`](crate::Store::heard_revision), and nothing is
+/// added to them. V4's triggers on the old tables are dropped first, so
+/// their names are free for the new tables.
+///
+/// **Revisions are of the final pass's text.** `revision` is as before; a
+/// session's revision 0 is its final text, made with its first final-text
+/// row (and here, for every session that has some already). A
+/// `revision_text` row is one change: a run of a chunk's words, first to
+/// last by position, and the text that replaces them. The chunk is named
+/// by session, track and first sample, and both ends of the run are
+/// foreign keys to `final_word`, so a change names words its own
+/// session's chunk has. A `proposal` names its chunk and words the same
+/// way. A revision's changes never overlap, and as with V4, revision 0
+/// has none, and only the session's newest revision is added to.
+///
+/// **The final text is append-only.** Triggers refuse an UPDATE, DELETE
+/// or replacing INSERT of a `final_text` or `final_word` row, and a word
+/// for any chunk but the newest stored (its words go in with it). The
+/// newest is the highest rowid: `final_text` has no INTEGER PRIMARY KEY,
+/// and VACUUM may renumber such rowids, which nothing in nota runs.
+/// `final_progress` isn't part of the record: it moves on as the pass
+/// does.
+pub(crate) const V8: &str = "
+DROP TRIGGER revision_never_updated;
+DROP TRIGGER revision_never_deleted;
+DROP TRIGGER revision_never_replaced;
+DROP TRIGGER revision_text_never_updated;
+DROP TRIGGER revision_text_never_deleted;
+DROP TRIGGER revision_text_never_replaced;
+DROP TRIGGER revision_text_only_in_the_newest;
+ALTER TABLE revision RENAME TO heard_revision;
+ALTER TABLE revision_text RENAME TO heard_revision_text;
+ALTER TABLE proposal RENAME TO heard_proposal;
+
+CREATE TRIGGER heard_revision_never_added BEFORE INSERT ON heard_revision
+BEGIN SELECT RAISE(ABORT, 'the heard text is never revised again'); END;
+CREATE TRIGGER heard_revision_never_updated BEFORE UPDATE ON heard_revision
+BEGIN SELECT RAISE(ABORT, 'a revision is never changed'); END;
+CREATE TRIGGER heard_revision_never_deleted BEFORE DELETE ON heard_revision
+BEGIN SELECT RAISE(ABORT, 'a revision is never deleted'); END;
+CREATE TRIGGER heard_revision_text_never_added BEFORE INSERT ON heard_revision_text
+BEGIN SELECT RAISE(ABORT, 'the heard text is never revised again'); END;
+CREATE TRIGGER heard_revision_text_never_updated BEFORE UPDATE ON heard_revision_text
+BEGIN SELECT RAISE(ABORT, 'a revision is never changed'); END;
+CREATE TRIGGER heard_revision_text_never_deleted BEFORE DELETE ON heard_revision_text
+BEGIN SELECT RAISE(ABORT, 'a revision is never deleted'); END;
+CREATE TRIGGER heard_proposal_never_added BEFORE INSERT ON heard_proposal
+BEGIN SELECT RAISE(ABORT, 'the heard text is never proposed for again'); END;
+CREATE TRIGGER heard_proposal_never_updated BEFORE UPDATE ON heard_proposal
+BEGIN SELECT RAISE(ABORT, 'a heard proposal is never changed'); END;
+CREATE TRIGGER heard_proposal_never_deleted BEFORE DELETE ON heard_proposal
+BEGIN SELECT RAISE(ABORT, 'a heard proposal is never deleted'); END;
+
+CREATE TABLE revision (
+    session_id INTEGER NOT NULL REFERENCES session(id),
+    number INTEGER NOT NULL CHECK (number >= 0),
+    parent INTEGER CHECK (parent < number),
+    PRIMARY KEY (session_id, number),
+    FOREIGN KEY (session_id, parent) REFERENCES revision(session_id, number)
+) STRICT;
+
+CREATE TABLE revision_text (
+    session_id INTEGER NOT NULL,
+    revision INTEGER NOT NULL,
+    track INTEGER NOT NULL,
+    start_sample INTEGER NOT NULL,
+    first_word INTEGER NOT NULL,
+    last_word INTEGER NOT NULL CHECK (last_word >= first_word),
+    text TEXT NOT NULL,
+    PRIMARY KEY (session_id, revision, track, start_sample, first_word),
+    FOREIGN KEY (session_id, revision) REFERENCES revision(session_id, number),
+    FOREIGN KEY (session_id, track, start_sample, first_word)
+        REFERENCES final_word(session_id, track, start_sample, position),
+    FOREIGN KEY (session_id, track, start_sample, last_word)
+        REFERENCES final_word(session_id, track, start_sample, position)
+) STRICT;
+
+CREATE TABLE proposal (
+    id INTEGER PRIMARY KEY,
+    session_id INTEGER NOT NULL,
+    revision INTEGER NOT NULL,
+    track INTEGER NOT NULL,
+    start_sample INTEGER NOT NULL,
+    first_word INTEGER NOT NULL,
+    last_word INTEGER NOT NULL CHECK (last_word >= first_word),
+    heard TEXT NOT NULL,
+    replacement TEXT NOT NULL,
+    source TEXT NOT NULL,
+    model TEXT,
+    pack_version TEXT,
+    thresholds TEXT,
+    state TEXT NOT NULL,
+    FOREIGN KEY (session_id, revision) REFERENCES revision(session_id, number),
+    FOREIGN KEY (session_id, track, start_sample, first_word)
+        REFERENCES final_word(session_id, track, start_sample, position),
+    FOREIGN KEY (session_id, track, start_sample, last_word)
+        REFERENCES final_word(session_id, track, start_sample, position)
+) STRICT;
+
+INSERT INTO revision (session_id, number, parent)
+SELECT DISTINCT session_id, 0, NULL FROM final_text;
+
+CREATE TRIGGER revision_never_updated BEFORE UPDATE ON revision
+BEGIN SELECT RAISE(ABORT, 'a revision is never changed'); END;
+CREATE TRIGGER revision_never_deleted BEFORE DELETE ON revision
+BEGIN SELECT RAISE(ABORT, 'a revision is never deleted'); END;
+CREATE TRIGGER revision_never_replaced BEFORE INSERT ON revision
+WHEN EXISTS (
+    SELECT 1 FROM revision WHERE session_id = NEW.session_id AND number = NEW.number
+)
+BEGIN SELECT RAISE(ABORT, 'a revision is never replaced'); END;
+
+CREATE TRIGGER revision_text_never_updated BEFORE UPDATE ON revision_text
+BEGIN SELECT RAISE(ABORT, 'a revision is never changed'); END;
+CREATE TRIGGER revision_text_never_deleted BEFORE DELETE ON revision_text
+BEGIN SELECT RAISE(ABORT, 'a revision is never deleted'); END;
+CREATE TRIGGER revision_text_never_overlaps BEFORE INSERT ON revision_text
+WHEN EXISTS (
+    SELECT 1 FROM revision_text
+    WHERE session_id = NEW.session_id AND revision = NEW.revision
+      AND track = NEW.track AND start_sample = NEW.start_sample
+      AND first_word <= NEW.last_word AND last_word >= NEW.first_word
+)
+BEGIN SELECT RAISE(ABORT, 'a revision never changes a word twice'); END;
+CREATE TRIGGER revision_text_only_in_the_newest BEFORE INSERT ON revision_text
+WHEN NEW.revision = 0
+  OR NEW.revision IS NOT (SELECT max(number) FROM revision WHERE session_id = NEW.session_id)
+BEGIN SELECT RAISE(ABORT, 'a revision is never added to'); END;
+
+CREATE TRIGGER final_text_never_updated BEFORE UPDATE ON final_text
+BEGIN SELECT RAISE(ABORT, 'final text is never changed'); END;
+CREATE TRIGGER final_text_never_deleted BEFORE DELETE ON final_text
+BEGIN SELECT RAISE(ABORT, 'final text is never deleted'); END;
+CREATE TRIGGER final_text_never_replaced BEFORE INSERT ON final_text
+WHEN EXISTS (
+    SELECT 1 FROM final_text
+    WHERE session_id = NEW.session_id AND track = NEW.track
+      AND start_sample = NEW.start_sample
+)
+BEGIN SELECT RAISE(ABORT, 'final text is never replaced'); END;
+
+CREATE TRIGGER final_word_never_updated BEFORE UPDATE ON final_word
+BEGIN SELECT RAISE(ABORT, 'final text is never changed'); END;
+CREATE TRIGGER final_word_never_deleted BEFORE DELETE ON final_word
+BEGIN SELECT RAISE(ABORT, 'final text is never deleted'); END;
+CREATE TRIGGER final_word_never_replaced BEFORE INSERT ON final_word
+WHEN EXISTS (
+    SELECT 1 FROM final_word
+    WHERE session_id = NEW.session_id AND track = NEW.track
+      AND start_sample = NEW.start_sample AND position = NEW.position
+)
+BEGIN SELECT RAISE(ABORT, 'final text is never replaced'); END;
+CREATE TRIGGER final_word_only_with_its_text BEFORE INSERT ON final_word
+WHEN NOT EXISTS (
+    SELECT 1 FROM final_text
+    WHERE rowid = (SELECT max(rowid) FROM final_text)
+      AND session_id = NEW.session_id AND track = NEW.track
+      AND start_sample = NEW.start_sample
+)
+BEGIN SELECT RAISE(ABORT, 'final text is never added to'); END;
 ";
 
 #[cfg(test)]
