@@ -408,3 +408,36 @@ fn words_are_runs_of_letters_and_digits() {
         .collect();
     assert_eq!(got, ["2", "500mg", "diabetes", "type"]);
 }
+
+/// A decision reports its score and verdict to the log: the score and the
+/// fix for an applied one, the score and the rule for a refused one.
+#[test]
+fn a_decision_reports_its_score_and_verdict() {
+    let gated = gate(
+        "start amylo diping daily",
+        &[amlodipine()],
+        &[
+            propose("amylo diping", "amlodipine"),
+            propose("amylo diping", "amylodipine"),
+        ],
+    );
+    let reported: Vec<_> = gated
+        .decisions()
+        .iter()
+        .map(|d| (d.similarity(), d.verdict().clone()))
+        .collect();
+    let fix = gated.applied().next().unwrap().clone();
+    assert_eq!(
+        reported,
+        [
+            (
+                Some(score("amylo diping", "amlodipine")),
+                Verdict::Applied(fix)
+            ),
+            (
+                Some(score("amylo diping", "amylodipine")),
+                Verdict::Rejected(Rejection::NotOffered)
+            ),
+        ]
+    );
+}
