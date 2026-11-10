@@ -1732,6 +1732,7 @@ dependencies = [
  "rusqlite",
  "rustix",
  "signal-hook",
+ "toml",
 ]
 
 [[package]]

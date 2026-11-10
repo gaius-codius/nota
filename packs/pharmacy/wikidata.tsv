@@ -1,0 +1,3288 @@
+# Wikidata labels and lower-case aliases of items with an RxNorm id above, https://query.wikidata.org/sparql
+# Written by refresh.py; term<TAB>status[<TAB>alias]
+Asparaginase	draft
+Besifloxacin	draft
+Betadex	draft
+Bifidobacterium bifidum	draft
+Brolucizumab	draft
+Burosumab	draft
+Calamine	draft
+Cefotetan	draft
+Chymotrypsinogen	draft
+Coal tar creosote	draft
+D-fructopyranose	draft
+D-glucopyranose	draft
+D-glucosamine	draft
+D-methamphetamine	draft
+D-penicillamine	draft
+D-sorbitol	draft
+DL-acetyltryptophan	draft
+DL-amphetamine	draft
+DL-lactic acid	draft
+DL-magnesium lactate	draft
+DL-malic acid	draft
+DL-ofloxacin	draft
+DL-panthenol	draft
+DOTA-TATE	draft
+Diclofenac	draft
+Ferumoxides	draft
+Fulvic acid	draft
+GHK-Cu	draft
+Ganirelix	draft
+Hernexeos	draft
+Hyaluronidase	draft
+Idarucizumab	draft
+Insulin Lispro	draft
+Insulin degludec	draft
+L-Asparagine	draft
+L-Cysteine	draft
+L-alanine	draft
+L-arginine	draft
+L-aspartic acid	draft
+L-carbocysteine	draft
+L-carnitine	draft
+L-citrulline	draft
+L-folinic acid	draft
+L-glutamine	draft
+L-histidine	draft
+L-isoleucine	draft
+L-leucine	draft
+L-lysine	draft
+L-menthol	draft
+L-methionine	draft
+L-morphan	draft
+L-proline	draft
+L-scopolamine	draft
+L-selenomethionine	draft
+L-serine	draft
+L-tartaric acid	draft
+L-threonine	draft
+L-thyroxine	draft
+L-tyrosine	draft
+L-valine	draft
+Lacticaseibacillus casei	draft
+Lactobacillus acidophilus	draft
+Lysozyme	draft
+Methoxy polyethylene glycol-epoetin beta	draft
+N-acetyl-L-cysteine	draft
+N-acetyl-L-tyrosine	draft
+N-hexanoylsphingosine	draft
+Protein S	draft
+Prussian blue	draft
+RRR-alpha-tocopherol	draft
+S-adenosylmethionine	draft
+Saccharomyces boulardii	draft
+Saccharomyces cerevisiae	draft
+Sulfasalazine	draft
+Takadiastase	draft
+Tocoretinate	draft
+Tripalmitin	draft
+abacavir	draft
+abaloparatide	draft
+abatacept	draft
+abemaciclib	draft
+abiraterone	draft
+acalabrutinib	draft
+acamprosate	draft
+acarbose	draft
+acebutolol	draft
+acepromazine	draft
+acesulfame	draft
+acetaldehyde	draft
+acetazolamide	draft
+acetic acid	draft
+acetohydroxamic acid	draft
+acetone	draft
+acetyl tributyl citrate	draft
+acetyl triethylhexyl citrate	draft
+acetylcarnitine	draft
+acetylcholine	draft
+acetyltriethyl citrate	draft
+aciclovir	draft
+acitretin	draft
+aclidinium	draft
+acrylamide	draft
+activated charcoal	draft
+adalimumab	draft
+adapalene	draft
+adefovir	draft
+adenosine	draft
+adenosine triphosphate	draft
+adipic acid	draft
+aducanumab	draft
+afatinib	draft
+aflibercept	draft
+agalsidase beta	draft
+alanyl glutamine	draft
+albendazol	draft
+alcaftadine	draft
+alclometasone	draft
+alcloxa	draft
+aldehydo-D-galactose	draft
+aldehydo-D-mannose	draft
+aldehydo-L-glucose	draft
+aldehydo-N-acetyl-D-glucosamine	draft
+aldesleukin	draft
+aldioxa	draft
+alectinib	draft
+alemtuzumab	draft
+alendronic acid	draft
+alfentanil	draft
+alfuzosin	draft
+alglucosidase alfa	draft
+alirocumab	draft
+aliskiren	draft
+alitretinoin	draft
+allantoin	draft
+allopurinol	draft
+allyl hexanoate	draft
+almotriptan	draft
+alogliptin	draft
+alosetron	draft
+alpelisib	draft
+alpha-arbutin	draft
+alpha-pinene	draft
+alpha-terpineol	draft
+alprazolam	draft
+alprostadil	draft
+alteplase	draft
+altrenogest	draft
+aluminium	draft
+aluminium oxide	draft
+aluminium phosphate	draft
+aluminium tristearate	draft
+aluminum cation	draft
+aluminum chloride hexahydrate	draft
+aluminum chlorohydrex propylene glycol	draft
+aluminum hydroxide	draft
+aluminum subacetate	draft
+aluminum sulfate monohydrate	draft
+aluminum sulfate tetradecahydrate	draft
+alvimopan	draft
+amantadine	draft
+ambrisentan	draft
+ambroxol	draft
+amcinonide	draft
+amdinocillin	draft
+amdinocillin pivoxil	draft
+amifampridine	draft
+amifostine trihydrate	draft
+amikacin	draft
+amiloride	draft
+aminolevulinic acid	draft
+aminomethyl propanediol	draft
+aminometradine	draft
+aminopentamide	draft
+aminophylline	draft
+aminopromazine monofumarate	draft
+aminopropyl ascorbyl phosphate	draft
+amiodarone	draft
+amitriptyline	draft
+amlexanox	draft
+amlodipine	draft
+ammonia	draft
+ammonium acetate	draft
+ammonium acryloyldimethyltaurate	draft
+ammonium cation	draft
+ammonium chloride	draft
+ammonium lauryl sulfate	draft
+ammonium sulfate	draft
+amobarbital	draft
+amoproxan	draft
+amoxapine	draft
+amoxicillin	draft
+amphotericin B	draft
+ampicillin	draft
+amprenavir	draft
+amyl acetate	draft
+anagrelide	draft
+anakinra	draft
+anastrozole	draft
+anidulafungin	draft
+anisyl alcohol	draft
+anthralin	draft
+antihemophilic factor	draft
+apaflurane	draft
+apalutamide	draft
+apixaban	draft
+apomorphine	draft
+apraclonidine	draft
+apremilast	draft
+aprepitant	draft
+aprotinin	draft
+arachidyl glucoside	draft
+arbutin	draft
+arformoterol	draft
+aripiprazole	draft
+aripiprazole lauroxil	draft
+armodafinil	draft
+arsenic trioxide	draft
+artemether	draft
+artesunate	draft
+articaine	draft
+ascorbyl glucoside	draft
+ascorbyl tetraisopalmitate	draft
+ascorbyl tocopheryl maleate	draft
+asenapine	draft
+asfotase alfa	draft
+asiatic acid	draft
+asiaticoside	draft
+aspartame	draft
+aspirin	draft
+astaxanthin	draft
+atazanavir	draft
+atenolol	draft
+atezolizumab	draft
+atipamezole	draft
+atomoxetine	draft
+atorvastatin	draft
+atovaquone	draft
+atracurium	draft
+atropine	draft
+auranofin	draft
+avanafil	draft
+avapritinib	draft
+avelumab	draft
+avibactam	draft
+aviptadil	draft
+avobenzone	draft
+axicabtagene ciloleucel	draft
+axitinib	draft
+azacitidine	draft
+azathioprine	draft
+azelastine	draft
+azilsartan	draft
+azithromycin	draft
+aztreonam	draft
+bacitracin a	draft
+baicalin	draft
+bakuchiol	draft
+balsalazide	draft
+baricitinib	draft
+barium sulfate	draft
+barley malt syrup	draft
+basiliximab	draft
+bazedoxifene	draft
+becaplermin	draft
+beclometasone	draft
+bedaquiline	draft
+behentrimonium methosulfate	draft
+behenyl behenate	draft
+behenyl erucate	draft
+belatacept	draft
+belimumab	draft
+belinostat	draft
+benazepril	draft
+bendamustine	draft
+benfotiamine	draft
+benralizumab	draft
+bentonite	draft
+bentoquatam	draft
+benzaldehyde	draft
+benzatropine	draft
+benzenesulfonic acid	draft
+benzethonium	draft
+benznidazole	draft
+benzocaine	draft
+benzonatate	draft
+benzophenone	draft
+benzoyl peroxide	draft
+benzphetamine	draft
+benzyl alcohol	draft
+benzyl benzoate	draft
+benzyl salicylate	draft
+benzylpenicillin	draft
+bepotastine	draft
+beractant	draft
+beta-Tocopherol	draft
+beta-pinene	draft
+betaine	draft
+betamethasone	draft
+betaxolol	draft
+bethanechol	draft
+betiatide	draft
+bevacizumab	draft
+bexarotene	draft
+bezafibrate	draft
+bezlotoxumab	draft
+bicalutamide	draft
+bicarbonate ion	draft
+bicisate	draft
+bictegravir	draft
+bimatoprost	draft
+binimetinib	draft
+biotin	draft
+bisacodyl	draft
+bismuth	draft
+bismuth cation	draft
+bismuth subcitrate	draft
+bismuth subgallate	draft
+bismuth subsalicylate	draft
+bisoprolol	draft
+bisphenol A	draft
+bivalirudin	draft
+bleomycin	draft
+blinatumomab	draft
+borneol	draft
+boron	draft
+boron citrate	draft
+bortezomib	draft
+bosentan hydrate	draft
+bosutinib	draft
+botulinum toxin type A	draft
+bremelanotide	draft
+brentuximab vedotin	draft
+bretylium	draft
+brexpiprazole	draft
+brigatinib	draft
+brillant blue	draft
+brilliant green	draft
+brimonidine	draft
+brinzolamide	draft
+brivaracetam	draft
+brodalumab	draft
+bromfenac	draft
+bromhexine	draft
+bromocriptine	draft
+bromotheophylline	draft
+brompheniramine	draft
+bronopol	draft
+budesonide	draft
+bumetanide	draft
+buprenorphine	draft
+bupropion	draft
+buserelin	draft
+buspirone	draft
+busulfan	draft
+butafosfan	draft
+butalbital	draft
+butamben	draft
+butane	draft
+butanone	draft
+butenafine	draft
+butoconazole	draft
+butorphanol	draft
+butyl acetate	draft
+butylated hydroxytoluene	draft
+butyloctyl salicylate	draft
+butylparaben	draft
+butylphenyl methylpropional	draft
+cabazitaxel	draft
+cabergoline	draft
+cabozantinib	draft
+caffeine	draft
+calcifediol monohydrate	draft
+calcipotriol	draft
+calcitriol	draft
+calcium	draft
+calcium L-threonate	draft
+calcium acetate	draft
+calcium alginate	draft
+calcium ascorbate	draft
+calcium carbonate	draft
+calcium citrate tetrahydrate	draft
+calcium gluconate	draft
+calcium hydride	draft
+calcium hydroxide	draft
+calcium peroxide	draft
+calcium pyrophosphate	draft
+calcium saccharate tetrahydrate	draft
+calcium stearate	draft
+calenduloside E	draft
+calfactant	draft
+canagliflozin hemihydrate	draft
+canakinumab	draft
+candesartan	draft
+cangrelor	draft
+cannabidiol	draft
+cantharidin	draft
+capecitabine	draft
+caplacizumab	draft
+capric acid	draft
+caprylhydroxamic acid	draft
+caprylic acid	draft
+capryloyl glycine	draft
+caprylyl glucoside	draft
+caprylyl trisiloxane	draft
+capsaicin	draft
+captopril	draft
+carbachol	draft
+carbamazepin	draft
+carbamide peroxide	draft
+carbamoylcholine	draft
+carbazochrome	draft
+carbimazole	draft
+carbinoxamine	draft
+carbon dioxide	draft
+carbonate ion	draft
+carboplatin	draft
+carboprost	draft
+carboxymethyl cellulose	draft
+carfilzomib	draft
+carglumic acid	draft
+cariprazine	draft
+carisoprodol	draft
+carmoisine	draft
+carmustine	draft
+carnitine	draft
+carnosine	draft
+carprofen	draft
+carteolol	draft
+carvedilol	draft
+caryophyllene	draft
+caspofungin	draft
+castor oil	draft
+cedrol	draft
+cefaclor	draft
+cefadroxil	draft
+cefazolin	draft
+cefdinir	draft
+cefepime	draft
+cefiderocol	draft
+cefixime trihydrate	draft
+cefotaxime	draft
+cefoxitin	draft
+cefpodoxime	draft
+ceftaroline	draft
+ceftaroline fosamil	draft
+ceftazidime	draft
+ceftiofur	draft
+ceftriaxone	draft
+cefuroxime	draft
+celecoxib	draft
+cemiplimab	draft
+cephalexin	draft
+ceritinib	draft
+certolizumab pegol	draft
+cesium cation	draft
+cesium chloride	draft
+cetalkonium chloride	draft
+cetirizine	draft
+cetrorelix	draft
+cetuximab	draft
+cetyl acetate	draft
+cetyl alcohol	draft
+cetyl betaine	draft
+cetyl ethylhexanoate	draft
+cetyl lactate	draft
+cetyl myristate	draft
+cetyl myristoleate	draft
+cetyl oleate	draft
+cetyl palmitate	draft
+cetyl phosphate	draft
+cetyl ricinoleate	draft
+cetyl stearate	draft
+cetylhydroxyproline palmitamide	draft
+cetylpyridinium	draft
+cevimeline	draft
+chlophedianol	draft
+chlorambucil	draft
+chloramphenicol	draft
+chlorate ion	draft
+chlorcyclizine	draft
+chlordiazepoxide	draft
+chlorhexidine	draft
+chloride ion	draft
+chlorine dioxide	draft
+chlorobutanol	draft
+chlorocresol	draft
+chloroethane	draft
+chloroform	draft
+chlorophyll	draft
+chloroprocaine	draft
+chloroquine	draft
+chlorothiazide	draft
+chlorothymol	draft
+chloroxylenol	draft
+chlorphenesin	draft
+chlorpheniramine	draft
+chlorpromazine	draft
+chlorthalidone	draft
+chlorzoxazone	draft
+cholecalciferol	draft
+cholesterol	draft
+cholic acid	draft
+choline	draft
+choline fenofibrate	draft
+chorionic gonadotropin	draft
+chromium nicotinate	draft
+chromium picolinate	draft
+chrysin	draft
+ciclesonide	draft
+ciclopirox	draft
+cidofovir dihydrate	draft
+cilastatin	draft
+cilostazol	draft
+cimetidine	draft
+cinacalcet	draft
+ciprofloxacin	draft
+cisapride	draft
+cisatracurium	draft
+cisplatin	draft
+citicoline	draft
+citric acid	draft
+citric acid acetate	draft
+cladribine	draft
+clarithromycin	draft
+clavulanic acid	draft
+clemastine	draft
+clevidipine	draft
+clidinium	draft
+climbazole	draft
+clindamycin	draft
+clobazam	draft
+clobetasol	draft
+clocortolone	draft
+clofarabine	draft
+clofazimine	draft
+clomifene	draft
+clomipramine	draft
+clonazepam	draft
+clonidine	draft
+clopidogrel	draft
+clorazepic acid	draft
+clotrimazole	draft
+clozapine	draft
+coagulation factor x human	draft
+cobamamide	draft
+cobicistat	draft
+cobimetinib	draft
+cocaine	draft
+cocamide MEA	draft
+codeine	draft
+colesevelam	draft
+colestipol	draft
+colestyramine	draft
+colistin	draft
+collagenase clostridium histolyticum	draft
+conivaptan	draft
+copper	draft
+copper gluconate	draft
+corn syrup	draft
+corticotropin	draft
+cortisol	draft
+cortisone	draft
+cosyntropin	draft
+coumarin	draft
+creatine	draft
+creosol	draft
+crisaborole	draft
+crizotinib	draft
+crofelemer	draft
+cromoglicic acid	draft
+crystal violet	draft
+curcumin	draft
+curdlan	draft
+cyclamen aldehyde	draft
+cyclobenzaprine	draft
+cyclohexane	draft
+cycloserine	draft
+cyclosporine	draft
+cyproheptadine	draft
+cysteamine	draft
+cytarabine	draft
+dabigatran	draft
+dabigatran etexilate	draft
+dabrafenib	draft
+dacarbazine	draft
+dacomitinib	draft
+dactinomycin	draft
+dalbavancin	draft
+dalfampridine	draft
+dalteparin	draft
+damoctocog alfa pegol	draft
+danazol	draft
+dantrolene	draft
+dapagliflozin	draft
+dapiprazole	draft
+dapsone	draft
+daratumumab	draft
+darbepoetin alfa	draft
+darifenacin	draft
+darolutamide	draft
+darunavir	draft
+dasatinib monohydrate	draft
+daunorubicin	draft
+deacetylbisacodyl	draft
+deanol	draft
+decamethyltetrasiloxane	draft
+decitabine	draft
+decoquinate	draft
+decyl glucoside	draft
+decyl oleate	draft
+decylamine oxide	draft
+decylene glycol	draft
+decyloxazolidinone	draft
+deferasirox	draft
+deferiprone	draft
+deferoxamine	draft
+defibrotide	draft
+deflazacort	draft
+degarelix	draft
+dehydroacetic acid	draft
+dehydroepiandrosterone	draft
+delafloxacin	draft
+demeclocycline	draft
+denatonium benzoate monohydrate	draft
+denosumab	draft
+deoxythymidine	draft
+deracoxib	draft
+desflurane	draft
+desipramine	draft
+desirudin	draft
+desloratadine	draft
+deslorelin	draft
+desmopressin	draft
+desogestrel	draft
+desonide	draft
+desoximetasone	draft
+desvenlafaxine	draft
+detomidine	draft
+dexamethasone	draft
+dexbrompheniramine	draft
+dexchlorpheniramine	draft
+dexlansoprazole	draft
+dexmedetomidine	draft
+dexmethylphenidate	draft
+dexpanthenol	draft
+dexrazoxane	draft
+dextroamphetamine	draft
+dextromethorphan	draft
+diatrizoic acid	draft
+diazepam	draft
+diazoxide	draft
+dibasic potassium phosphate	draft
+dibenzyl ether	draft
+dibucaine	draft
+dibutyl sebacate	draft
+dicaprylyl carbonate	draft
+dicaprylyl ether	draft
+dichlorine	draft
+dichlorobenzyl alcohol	draft
+dichloromethane	draft
+dichlorphenamide	draft
+diclazuril	draft
+dicloxacillin	draft
+dicyclomine	draft
+didanosine	draft
+didecyldimonium chloride	draft
+dienogest	draft
+diethanolamine	draft
+diethanolamine cetyl phosphate	draft
+diethyl ether	draft
+diethyl phthalate	draft
+diethyl sebacate	draft
+diethylene glycol monoethyl ether	draft
+diethylhexyl carbonate	draft
+diethylhexyl syringylidenemalonate	draft
+diethylstilbestrol	draft
+difenoxin	draft
+diflorasone	draft
+diflunisal	draft
+difluprednate	draft
+diglycine	draft
+digoxin	draft
+diheptyl succinate	draft
+dihexadecyl phosphate	draft
+dihydrocodeine	draft
+dihydroergotamine	draft
+dihydromyrcenol	draft
+dihydrotestosterone	draft
+dihydroxyacetone	draft
+dihydroxypropyltrimonium	draft
+diisodecyl adipate	draft
+diisooctyl adipate	draft
+diisopropanolamine	draft
+diisopropyl adipate	draft
+diisopropyl sebacate	draft
+diisopropylamine	draft
+diisostearyl malate	draft
+diltiazem	draft
+dimenhydrinate	draft
+dimercaprol	draft
+dimethyl ether	draft
+dimethyl fumarate	draft
+dimethyl lauramine	draft
+dimethyl sulfone	draft
+dimethyl sulfoxide	draft
+dinutuximab	draft
+diosmin	draft
+dioxygen	draft
+diphenhydramine	draft
+diphenoxylate	draft
+dipropylene glycol caprylate	draft
+dipyridamole	draft
+disodium L-tartrate	draft
+disopyramide	draft
+disteardimonium hectorite	draft
+distearyl phthalamic acid	draft
+disulfiram	draft
+dobesilic acid	draft
+docetaxel trihydrate	draft
+docosanol	draft
+docusate	draft
+dodecane	draft
+dodecyl gallate	draft
+dofetilide	draft
+dolasetron	draft
+dolutegravir	draft
+donepezil	draft
+dopamine	draft
+doravirine	draft
+dornase alfa	draft
+dorzolamide	draft
+doxapram	draft
+doxazosin	draft
+doxercalciferol	draft
+doxorubicin	draft
+doxycycline	draft
+doxylamine	draft
+dronedarone	draft
+droperidol	draft
+drospirenone	draft
+droxidopa	draft
+dulaglutide	draft
+dupilumab	draft
+durvalumab	draft
+dutasteride	draft
+dyclonine	draft
+ecallantide	draft
+echothiophate	draft
+ectoine	draft
+eculizumab	draft
+edaravone	draft
+edetic acid	draft
+edetol	draft
+edoxaban	draft
+efavirenz	draft
+efinaconazole	draft
+efmoroctocog alfa	draft
+elbasvir	draft
+eletriptan	draft
+elexacaftor	draft
+eliglustat	draft
+elosulfase alfa	draft
+elotuzumab	draft
+eltrombopag	draft
+eluxadoline	draft
+elvitegravir	draft
+emicizumab	draft
+empagliflozin	draft
+emtricitabine	draft
+enalapril	draft
+enalaprilat dihydrate	draft
+enasidenib	draft
+encorafenib	draft
+enfuvirtide	draft
+enoxaparin	draft
+enoxolone	draft
+enrofloxacin	draft
+entacapone	draft
+entecavir hydrate	draft
+enzalutamide	draft
+epigallocatechin gallate	draft
+epinephrine	draft
+epirubicin	draft
+eplerenone	draft
+epoetin alfa	draft
+eptifibatide	draft
+erenumab	draft
+ergocalciferol	draft
+ergotamine	draft
+ergothioneine	draft
+eribulin	draft
+erlotinib	draft
+ertapenem	draft
+ertugliflozin	draft
+erythritol	draft
+erythromycin	draft
+escin Ia	draft
+escitalopram	draft
+esketamine	draft
+eslicarbazepine	draft
+esmolol	draft
+esomeprazole	draft
+estazolam	draft
+estramustine	draft
+estriol	draft
+estropipate	draft
+eszopiclone	draft
+etanercept	draft
+etelcalcetide	draft
+eteplirsen	draft
+ethambutol	draft
+ethamsylate	draft
+ethanol	draft
+ethinylestradiol	draft
+ethionamide	draft
+ethosuximide	draft
+ethyl DL-lactate	draft
+ethyl acetate	draft
+ethyl acrylate	draft
+ethyl butyrate	draft
+ethyl eicosapentaenoate	draft
+ethyl isovalerate	draft
+ethyl levulinate	draft
+ethyl linoleate	draft
+ethyl maltol	draft
+ethyl menthane carboxamide	draft
+ethyl nitrate	draft
+ethyl oleate	draft
+ethyl pyruvate	draft
+ethyl valerate	draft
+ethyl vanillin	draft
+ethylene brassylate	draft
+ethylene distearamide	draft
+ethylene glycol	draft
+ethylene glycol dimethacrylate	draft
+ethylene oxide	draft
+ethylenediamine	draft
+ethylenediamine tetraethanol	draft
+ethylhexyl gallate	draft
+ethylhexyl hydroxystearate	draft
+ethylhexyl isononanoate	draft
+ethylhexyl oleate	draft
+ethylhexyl stearate	draft
+ethylhexylglycerin	draft
+ethylparaben	draft
+ethynodiol	draft
+etomidate	draft
+etonogestrel	draft
+etoposide	draft
+etravirine	draft
+eucalyptol	draft
+eucalyptus oil	draft
+eugenol	draft
+everolimus	draft
+evolocumab	draft
+exemestane	draft
+exenatide	draft
+ezetimibe	draft
+famciclovir	draft
+famotidine	draft
+febantel	draft
+febuxostat	draft
+felbamate	draft
+felodipine	draft
+fenbendazole	draft
+fenofibrate	draft
+fentanyl	draft
+ferric ammonium ferrocyanide	draft
+ferric carboxymaltose	draft
+ferric chloride	draft
+ferric oxide yellow	draft
+ferric subsulfate	draft
+ferric sulfate pentahydrate	draft
+ferrosoferric phosphate	draft
+ferrous bisglycinate	draft
+ferrous gluconate dihydrate	draft
+ferrous sulfate heptahydrate	draft
+fesoterodine	draft
+fexofenadine	draft
+fidaxomicin	draft
+filgrastim	draft
+finafloxacin	draft
+finasteride	draft
+fingolimod	draft
+flavone	draft
+flavoxate	draft
+flecainide	draft
+flibanserin	draft
+florfenicol	draft
+floxuridine	draft
+fluconazole	draft
+fludarabine	draft
+fludrocortisone	draft
+flumazenil	draft
+flunisolide	draft
+flunixin	draft
+fluocinolone	draft
+fluocinonide	draft
+fluorescein	draft
+fluoride ion	draft
+fluorometholone	draft
+fluorouracil	draft
+fluoxetine	draft
+fluphenazine	draft
+flurandrenolide	draft
+flurazepam	draft
+flutamide	draft
+fluticasone	draft
+fluvastatin	draft
+fluvoxamine	draft
+folic acid	draft
+follitropin alpha	draft
+follitropin beta	draft
+fomepizole	draft
+fondaparinux	draft
+formaldehyde	draft
+formic acid	draft
+formoterol	draft
+fosamprenavir	draft
+fosaprepitant	draft
+foscarnet	draft
+fosfomycin	draft
+fosinopril	draft
+fosinoprilat	draft
+fosphenytoin	draft
+fremanezumab	draft
+frovatriptan	draft
+fulvestrant	draft
+fumaryl diketopiperazine	draft
+furazolidone	draft
+furosemide	draft
+gabapentin	draft
+gadobutrol	draft
+gadodiamide hydrate	draft
+gadoterate meglumine	draft
+gadoteridol	draft
+galactose	draft
+galantamine	draft
+galcanezumab	draft
+galsulfase	draft
+gamma cyclodextrin	draft
+ganciclovir	draft
+gatifloxacin	draft
+gefitinib	draft
+gemcitabine	draft
+gemfibrozil	draft
+gemtuzumab ozogamicin	draft
+genistein	draft
+gentamicin	draft
+geranial	draft
+geraniol	draft
+geranyl acetate	draft
+gilteritinib	draft
+ginseng	draft
+givosiran	draft
+glabridin	draft
+glasdegib	draft
+glecaprevir	draft
+glimepiride	draft
+glipizide	draft
+glucagon	draft
+glucarpidase	draft
+gluconolactone	draft
+glucose oxidase	draft
+glutaral	draft
+glutathione	draft
+glyburide	draft
+glycerol	draft
+glycerol phenylbutyrate	draft
+glyceryl caprate	draft
+glyceryl isostearate	draft
+glyceryl monobehenate	draft
+glyceryl stearate citrate	draft
+glyceryl trioleate	draft
+glyceryl tristearate	draft
+glycine	draft
+glycol distearate	draft
+glycol salicylate	draft
+glycol stearate	draft
+glycopyrrolate	draft
+glycyrrhizin	draft
+glyoxal	draft
+golimumab	draft
+goserelin	draft
+granisetron	draft
+graphite	draft
+grazoprevir	draft
+griseofulvin	draft
+growth hormone	draft
+guaiacol	draft
+guaifenesin	draft
+guanabenz	draft
+guanfacine	draft
+guar gum	draft
+guselkumab	draft
+haemin	draft
+halcinonide	draft
+haloperidol	draft
+hectorite	draft
+helium	draft
+heparin	draft
+hepatitis B immune globulin	draft
+heptyl undecylenate	draft
+hesperetin	draft
+hesperidin	draft
+hexachlorophene	draft
+hexamethyldisiloxane	draft
+hexamethylindanopyran	draft
+hexyl acetate	draft
+hexyl laurate	draft
+hexyl salicylate	draft
+hexyldecanol	draft
+histamine	draft
+histrelin	draft
+homatropine	draft
+hydantoin	draft
+hydralazine	draft
+hydrochlorothiazide	draft
+hydrocodone	draft
+hydrogen bromide	draft
+hydrogen fluoride	draft
+hydrogen peroxide	draft
+hydromorphone	draft
+hydroquinone	draft
+hydrotalcite	draft
+hydroxide ion	draft
+hydroxocobalamin	draft
+hydroxycarbamide	draft
+hydroxychloroquine	draft
+hydroxycitronellal	draft
+hydroxyethyl cellulose	draft
+hydroxyethyl cetyldimonium phosphate	draft
+hydroxyethyl starch	draft
+hydroxyphenyl propamidobenzoic acid	draft
+hydroxyproline	draft
+hydroxypropyl cellulose	draft
+hydroxypropyl tetrahydropyrantriol	draft
+hydroxytyrosol	draft
+hyoscyamine	draft
+hypochlorite ion	draft
+hypromellose	draft
+ibandronic acid	draft
+ibrutinib	draft
+ibuprofen	draft
+ibutamoren	draft
+ibutilide	draft
+icatibant	draft
+icodextrin	draft
+idarubicin	draft
+idebenone	draft
+idelalisib	draft
+idoxuridine	draft
+idursulfase	draft
+ifosfamide	draft
+iloperidone	draft
+iloprost	draft
+imatinib	draft
+imidocarb	draft
+imidurea	draft
+imiglucerase	draft
+imipen	draft
+imipramine	draft
+imiquimod	draft
+indapamide	draft
+indigo	draft
+indocyanine green	draft
+indomethacin	draft
+infliximab	draft
+inotersen	draft
+inotuzumab ozogamicin	draft
+insulin detemir	draft
+insulin glargine	draft
+inulin	draft
+iodide ion	draft
+iodixanol	draft
+iodoquinol	draft
+iohexol	draft
+iopamidol	draft
+iopromide	draft
+iothalamic acid	draft
+ioversol	draft
+ipilimumab	draft
+irbesartan	draft
+irinotecan	draft
+iron	draft
+iron dextran	draft
+iron pentacarbonyl	draft
+iron polymaltose	draft
+iron sucrose	draft
+isatuximab	draft
+isavuconazole	draft
+isavuconazonium	draft
+isoamyl acetate	draft
+isoamyl laurate	draft
+isobutane	draft
+isobutylparaben	draft
+isocarboxazid	draft
+isocetyl stearate	draft
+isododecane	draft
+isoflurane	draft
+isoniazid	draft
+isononyl isononanoate	draft
+isopentyldiol	draft
+isoprenaline	draft
+isoprene	draft
+isopropyl alcohol	draft
+isopropyl isostearate	draft
+isopropyl laurate	draft
+isopropyl lauroyl sarcosinate	draft
+isopropyl myristate	draft
+isopropyl palmitate	draft
+isopropyl stearate	draft
+isopropyl titanium triisostearate	draft
+isosorbide	draft
+isosorbide dinitrate	draft
+isostearamidopropyl morpholine lactate	draft
+isostearyl isostearate	draft
+isostearyl neopentanoate	draft
+isostearyl palmitate	draft
+isosulfan blue inner salt	draft
+isotretinoin	draft
+isoxsuprine	draft
+isradipine	draft
+itraconazole	draft
+ivabradine	draft
+ivacaftor	draft
+ivermectin	draft
+ixabepilone	draft
+ixazomib	draft
+ixekizumab	draft
+kaolin	draft
+ketoconazole	draft
+ketorolac	draft
+ketotifen	draft
+kojic acid	draft
+labetalol	draft
+lacosamide	draft
+lactitol	draft
+lamivudine	draft
+lamotrigine	draft
+lanadelumab	draft
+lanreotide	draft
+lansoprazole	draft
+lanthanum carbonate	draft
+lapatinib	draft
+laponite	draft
+laronidase	draft
+larotrectinib	draft
+latanoprost	draft
+lauramide	draft
+lauramidopropyl betaine	draft
+lauramidopropyl hydroxysultaine	draft
+lauramidopropylamine oxide	draft
+lauramine oxide	draft
+lauric diethanolamide	draft
+laurocapram	draft
+lauroyl lysine	draft
+lauryl betaine	draft
+lauryl laurate	draft
+lauryl sulfate	draft
+ledipasvir	draft
+leflunomide	draft
+lenvatinib	draft
+lesinurad	draft
+letermovir	draft
+letrozole	draft
+leuprolide	draft
+levalbuterol	draft
+levamisole	draft
+levobunolol	draft
+levocetirizine	draft
+levodopa	draft
+levofloxacin hemihydrate	draft
+levomenol	draft
+levomilnacipran	draft
+levonordefrin	draft
+levonorgestrel	draft
+levulinic acid	draft
+lidocaine	draft
+lifitegrast	draft
+linaclotide	draft
+linagliptin	draft
+lincomycin	draft
+lindane	draft
+linezolid	draft
+liraglutide	draft
+lisdexamfetamine	draft
+lisinopril dihydrate	draft
+lithium	draft
+lithium carbonate	draft
+lithium citrate hydrate	draft
+lixisenatide	draft
+lodoxamide	draft
+lofexidine	draft
+lomitapide	draft
+lomustine	draft
+loperamide	draft
+lopinavir	draft
+loratadine	draft
+lorazepam	draft
+lorlatinib	draft
+losartan	draft
+loteprednol etabonate	draft
+lovastatin	draft
+loxapine	draft
+lubiprostone	draft
+luliconazole	draft
+lumacaftor	draft
+lumefantrine	draft
+lurasidone	draft
+luspatercept	draft
+lycopene	draft
+lysophosphatidic acid	draft
+macitentan	draft
+madecassic acid	draft
+mafenide	draft
+magaldrate	draft
+magnesium	draft
+magnesium acetate	draft
+magnesium carbonate hydrate	draft
+magnesium chlorate	draft
+magnesium chloride hexahydrate	draft
+magnesium gluconate dihydrate	draft
+magnesium glycinate	draft
+magnesium hydroxide	draft
+magnesium nitrate	draft
+magnesium salicylate tetrahydrate	draft
+magnesium sulfate heptahydrate	draft
+magnesium trisilicate	draft
+malathion	draft
+malondialdehyde	draft
+maltitol	draft
+maltol	draft
+manganese	draft
+manganese chloride tetrahydrate	draft
+maraviroc	draft
+marbofloxacin	draft
+masoprocol	draft
+mebendazole	draft
+mebrofenin	draft
+mecamylamine	draft
+mecasermin	draft
+mecetronium bromide	draft
+mechlorethamine	draft
+meclofenamic acid	draft
+medroxyprogesterone	draft
+mefloquine	draft
+megestrol	draft
+meglumine	draft
+melatonin	draft
+melengestrol	draft
+meloxicam	draft
+melphalan	draft
+memantine	draft
+menatetrenone	draft
+mepivacaine	draft
+mepolizumab	draft
+meprobamate	draft
+merbromin	draft
+mercaptopurine hydrate	draft
+meropenem trihydrate	draft
+mesalazine	draft
+mesna	draft
+metacresol	draft
+metamizole	draft
+metamizole sodium hydrate	draft
+metaproterenol	draft
+metaxalone	draft
+metformin	draft
+methacholine	draft
+methanol	draft
+methazolamide	draft
+methenamine	draft
+methimazole	draft
+methocarbamol	draft
+methohexital	draft
+methotrexate	draft
+methoxsalen	draft
+methsuximide	draft
+methyl acrylate	draft
+methyl anthranilate	draft
+methyl benzoin	draft
+methyl cellulose	draft
+methyl diisopropyl propionamide	draft
+methyl isobutyl ketone	draft
+methyl laurate	draft
+methyl methacrylate	draft
+methyl nicotinate	draft
+methyl perfluorobutyl ether	draft
+methyl perfluoroisobutyl ether	draft
+methyl salicylate	draft
+methyl stearate	draft
+methyl trimethicone	draft
+methylcobalamin	draft
+methyldopa	draft
+methylergonovine	draft
+methylhomatropine	draft
+methylnaltrexone	draft
+methylparaben	draft
+methylphenidate	draft
+methylprednisolone	draft
+methylpropanediol	draft
+methyltestosterone	draft
+metirosine	draft
+metoclopramide	draft
+metolazone	draft
+metreleptin	draft
+metronidazole	draft
+metyrapone	draft
+micafungin	draft
+miconazole	draft
+midazolam	draft
+midodrine	draft
+midostaurin	draft
+mifepristone	draft
+migalastat	draft
+miglitol	draft
+miglustat	draft
+milnacipran	draft
+milrinone	draft
+miltefosine	draft
+minocycline	draft
+minoxidil	draft
+mipomersen parent acid	draft
+mirabegron	draft
+mirtazapine	draft
+misoprostol	draft
+mitomycin	draft
+mitoxantrone	draft
+modafinil	draft
+moexipril	draft
+moexiprilat	draft
+mogamulizumab	draft
+molybdenum	draft
+mometasone	draft
+monoethanolamine	draft
+monomethyl fumarate	draft
+monophosphoryl lipid a	draft
+monothioglycerol	draft
+montelukast	draft
+montmorillonite	draft
+morphine	draft
+moxidectin	draft
+moxifloxacin	draft
+mupirocin	draft
+musk xylene	draft
+mycophenolate mofetil	draft
+mycophenolic acid	draft
+myo-inositol	draft
+myristamidopropylamine oxide	draft
+myristamine oxide	draft
+myristyl alcohol	draft
+myristyl lactate	draft
+myristyl myristate	draft
+myristyl nicotinate	draft
+n-pentyl nitrite	draft
+nabilone	draft
+nabumetone	draft
+nadolol	draft
+nafarelin	draft
+nafcillin	draft
+naftifine	draft
+nalbuphine	draft
+naldemedine	draft
+nalmefene	draft
+naloxegol	draft
+naloxone	draft
+naltrexone	draft
+naphazoline	draft
+naproxen	draft
+naratriptan	draft
+narirutin	draft
+natalizumab	draft
+natamycin	draft
+nateglinide	draft
+nebivolol	draft
+nedocromil	draft
+nefazodone	draft
+nelarabine	draft
+nelfinavir	draft
+neomycin	draft
+neopentyl glycol	draft
+neopentyl glycol diethylhexanoate	draft
+neopentyl glycol diisostearate	draft
+neostigmine	draft
+neotame	draft
+nepafenac	draft
+neral	draft
+neratinib	draft
+netupitant	draft
+nevirapine	draft
+niacinamide	draft
+nicardipine	draft
+nicotinic acid	draft
+nifedipine	draft
+nifurtimox	draft
+nilotinib	draft
+nilutamide	draft
+nimodipine	draft
+nintedanib	draft
+niraparib	draft
+nitazoxanide	draft
+nitisinone	draft
+nitric acid	draft
+nitric oxide	draft
+nitrite ion	draft
+nitrofurantoin	draft
+nitrogen	draft
+nitroglycerin	draft
+nitrous oxide	draft
+nivolumab	draft
+nizatidine	draft
+nonivamide	draft
+norelgestromin	draft
+norepinephrine	draft
+norethisterone	draft
+norflurane	draft
+norgestimate	draft
+nortriptyline	draft
+nusinersen	draft
+nystatin	draft
+obeticholic acid	draft
+obinutuzumab	draft
+ocrelizumab	draft
+octafluoropropane	draft
+octasulfur	draft
+octinoxate	draft
+octreotide	draft
+octyldodecyl behenate	draft
+octyldodecyl myristate	draft
+octyldodecyl neopentanoate	draft
+octyldodecyl oleate	draft
+octyldodecyl stearoyl stearate	draft
+ofatumumab	draft
+olanzapine	draft
+olaparib	draft
+oleyl alcohol	draft
+oleyl erucate	draft
+oleyl oleate	draft
+olmesartan	draft
+olodaterol	draft
+olopatadine	draft
+olsalazine	draft
+omalizumab	draft
+omeprazole	draft
+ondansetron	draft
+opium	draft
+oprelvekin	draft
+oritavancin	draft
+orlistat	draft
+orphenadrine	draft
+orthoboric acid	draft
+orthosilicic acid	draft
+oseltamivir	draft
+oseltamivir acid	draft
+osilodrostat	draft
+osimertinib	draft
+ospemifene	draft
+oxaceprol	draft
+oxacillin	draft
+oxaliplatin	draft
+oxandrolone	draft
+oxaprozin	draft
+oxazepam	draft
+oxcarbazepine	draft
+oxibendazole	draft
+oxiconazole	draft
+oxolinic acid	draft
+oxybenzone	draft
+oxybuprocaine	draft
+oxychlorosene	draft
+oxycodone	draft
+oxymetazoline	draft
+oxymorphone	draft
+oxyquinoline	draft
+oxytocin	draft
+ozanimod	draft
+p-anisaldehyde	draft
+paclitaxel	draft
+padimate O	draft
+palbociclib	draft
+palifermin	draft
+paliperidone	draft
+palivizumab	draft
+pamabrom	draft
+pamidronic acid	draft
+panitumumab	draft
+panobinostat	draft
+pantethine	draft
+pantoprazole	draft
+papaverine	draft
+paracetamol	draft
+paricalcitol	draft
+paromomycin	draft
+paroxetine	draft
+pasireotide	draft
+patiromer	draft
+patisiran	draft
+pazopanib	draft
+pegaspargase	draft
+pegfilgrastim	draft
+pegloticase	draft
+pegvisomant	draft
+pembrolizumab	draft
+pemetrexed	draft
+pemirolast	draft
+penciclovir	draft
+penicillin v	draft
+pentadecalactone	draft
+pentaerythritol	draft
+pentaerythrityl tetraethylhexanoate	draft
+pentaerythrityl tetraisostearate	draft
+pentaerythrityl tetrastearate	draft
+pentamidine	draft
+pentasodium pentetate	draft
+pentosan polysulfate	draft
+pentostatin	draft
+pentoxifylline	draft
+pentoxyverine	draft
+peramivir trihydrate	draft
+perampanel	draft
+perindopril	draft
+perindoprilat	draft
+perlite	draft
+permethrin	draft
+perphenazine	draft
+pertuzumab	draft
+pethidine	draft
+petroleum jelly	draft
+phenazopyridine	draft
+phendimetrazine	draft
+phenelzine	draft
+pheniramine	draft
+phenobarbital	draft
+phenol	draft
+phenolsulfonphthalein	draft
+phenoxybenzamine	draft
+phenoxyethanol	draft
+phentermine	draft
+phentolamine	draft
+phenyl acetate	draft
+phenyl salicylate	draft
+phenylalanine	draft
+phenylbutazone	draft
+phenylephrine	draft
+phenylethyl alcohol	draft
+phenylethyl resorcinol	draft
+phenylmercuric nitrate	draft
+phenyltoloxamine	draft
+phenytoin	draft
+phloretin	draft
+phosphonic acid	draft
+phosphoric acid	draft
+physostigmine	draft
+phytic acid	draft
+phytosphingosine	draft
+pibrentasvir	draft
+pilocarpine	draft
+pimavanserin	draft
+pimecrolimus	draft
+pimozide	draft
+pindolol	draft
+piperacillin	draft
+piperazine	draft
+piperine	draft
+piperonal	draft
+piperonyl butoxide	draft
+pirfenidone	draft
+piroctone olamine	draft
+piroxicam	draft
+pitavastatin	draft
+pitolisant	draft
+plecanatide	draft
+plerixafor	draft
+podofilox	draft
+podophyllin	draft
+polidocanol	draft
+polycarbophil calcium	draft
+polydimethylsiloxane	draft
+polyethylene glycol	draft
+polygalic acid	draft
+polymyxin B	draft
+pomalidomide	draft
+ponatinib	draft
+ponazuril	draft
+poractant alfa	draft
+posaconazole	draft
+potassium	draft
+potassium acetate	draft
+potassium carbonate	draft
+potassium cation	draft
+potassium chlorate	draft
+potassium chloride	draft
+potassium gluconate	draft
+potassium hydrogen carbonate	draft
+potassium hydroxide	draft
+potassium iodate	draft
+potassium iodide	draft
+potassium metabisulfite	draft
+potassium nitrate	draft
+potassium sorbate	draft
+potassium sulfate	draft
+povidone-iodine	draft
+pralatrexate	draft
+pralidoxime	draft
+pramipexole	draft
+pramlintide	draft
+pramoxine	draft
+prasugrel	draft
+pravastatin	draft
+praziquantel	draft
+prazosin	draft
+prednicarbate	draft
+prednisolone	draft
+prednisone	draft
+pregabalin	draft
+prezatide copper acetate	draft
+prilocaine	draft
+primidone	draft
+probenecid	draft
+procainamide	draft
+procaine	draft
+procarbazine	draft
+prochlorperazine	draft
+proflavine	draft
+progesterone	draft
+proguanil	draft
+propane	draft
+propanthelinium	draft
+proparacaine	draft
+propionic acid	draft
+propofol	draft
+propranolol	draft
+propyl gallate	draft
+propylene	draft
+propylene carbonate	draft
+propylene glycol diacetate	draft
+propylene glycol dicaprylate	draft
+propylene oxide	draft
+propylheptyl caprylate	draft
+propylhexedrine	draft
+propylparaben	draft
+propylthiouracil	draft
+prostacyclin	draft
+protamine	draft
+protriptyline	draft
+prucalopride	draft
+pullulan	draft
+pyrantel	draft
+pyrazinamide	draft
+pyridostigmine	draft
+pyridoxine	draft
+pyrilamine	draft
+pyrimethamine	draft
+pyrithione	draft
+pyrithione zinc	draft
+pyrogallol	draft
+quadrosilan	draft
+quazepam	draft
+quercetin	draft
+quetiapine	draft
+quinapril	draft
+quinaprilat	draft
+quinidine	draft
+quinine	draft
+rac-miconazole	draft
+rac-salbutamol	draft
+rac-warfarin	draft
+radium	draft
+raloxifene	draft
+raltegravir	draft
+ramelteon	draft
+ramipril	draft
+ramiprilat	draft
+ramucirumab	draft
+ranibizumab	draft
+ranitidine	draft
+ranolazine	draft
+rasagiline	draft
+rasburicase	draft
+ravulizumab	draft
+regorafenib	draft
+relebactam	draft
+remdesivir	draft
+remifentanil	draft
+repaglinide	draft
+reserpine	draft
+reslizumab	draft
+resorcin	draft
+resveratrol	draft
+retapamulin	draft
+reteplase	draft
+retinyl linoleate	draft
+ribavirin	draft
+ribociclib	draft
+riboflavin	draft
+rifabutin	draft
+rifampicin	draft
+rifamycin	draft
+rifapentine	draft
+rifaximin	draft
+rilonacept	draft
+rilpivirine	draft
+riluzole	draft
+rimantadine	draft
+riociguat	draft
+risankizumab	draft
+risedronic acid	draft
+risperidone	draft
+ritonavir	draft
+rituximab	draft
+rivaroxaban	draft
+rivastigmine	draft
+rizatriptan	draft
+robenacoxib	draft
+rocuronium	draft
+roflumilast	draft
+rolapitant	draft
+romidepsin	draft
+romifidine	draft
+romiplostim	draft
+ronidazole	draft
+ropinirol	draft
+rosuvastatin	draft
+rucaparib	draft
+rufinamide	draft
+rutin	draft
+ruxolitinib	draft
+saccharin	draft
+sacrosidase	draft
+sacubitril	draft
+sacubitrilat	draft
+safinamide	draft
+salicylamide	draft
+salicylic acid	draft
+salmeterol	draft
+salmon calcitonin	draft
+salsalate	draft
+samarium	draft
+sarcosine	draft
+sargramostim	draft
+sarilumab	draft
+saxagliptin	draft
+sebelipase alfa	draft
+secnidazole	draft
+secukinumab	draft
+selenious acid	draft
+selenium	draft
+selenium disulfide	draft
+selexipag	draft
+semaglutide	draft
+serratiopeptidase	draft
+sertraline	draft
+sevelamer	draft
+sevoflurane	draft
+silanetriol	draft
+sildenafil	draft
+silicon	draft
+silicon dioxide	draft
+silodosin	draft
+silodrate hydrate	draft
+siltuximab	draft
+silver cation	draft
+silver citrate	draft
+silver nitrate	draft
+silver oxide	draft
+silver sulfadiazine	draft
+simvastatin	draft
+sincalide	draft
+sinecatechins	draft
+sipuleucel-T	draft
+sirolimus	draft
+sitagliptin	draft
+sodium	draft
+sodium D-gluconate	draft
+sodium acetate trihydrate	draft
+sodium ascorbate	draft
+sodium bicarbonate	draft
+sodium carbonate	draft
+sodium chlorate	draft
+sodium chloride	draft
+sodium chlorite	draft
+sodium ferric gluconate complex	draft
+sodium fluoride	draft
+sodium hydroxide	draft
+sodium iodide	draft
+sodium ion	draft
+sodium lauriminodipropionate	draft
+sodium lauroyl hydroxypropyl sulfonate	draft
+sodium lauryl glycol carboxylate	draft
+sodium lauryl sulfoacetate	draft
+sodium metabisulfite	draft
+sodium metasilicate	draft
+sodium myristyl sulfate	draft
+sodium nitrite	draft
+sodium oxide	draft
+sodium percarbonate	draft
+sodium propionate hydrate	draft
+sodium selenate	draft
+sodium sulfate decahydrate	draft
+sodium sulfite	draft
+sofosbuvir	draft
+solriamfetol	draft
+sonidegib	draft
+sorafenib	draft
+sorbitan isostearate	draft
+sorbitan monooleate	draft
+sorbitan monostearate	draft
+sorbitan sesquioleate	draft
+sorbitan trioleate	draft
+sotalol	draft
+soybean oil	draft
+spinosad	draft
+spironolactone	draft
+squalane	draft
+stannous chloride dihydrate	draft
+stavudine	draft
+stearalkonium hectorite	draft
+stearamide amp	draft
+stearamidopropyl dimethylamine lactate	draft
+stearyl alcohol	draft
+stearyl behenate	draft
+stearyl glycyrrhetinate	draft
+stearyl stearate	draft
+steviol	draft
+stevioside	draft
+stiripentol	draft
+streptomycin	draft
+strontium	draft
+strontium nitrate	draft
+styrene	draft
+succimer	draft
+succinate dianion	draft
+succinic acid	draft
+succinylcholine	draft
+sucralfate	draft
+sucralose	draft
+sucrose	draft
+sufentanil	draft
+sugammadex	draft
+sulbactam	draft
+sulbutiamine	draft
+sulconazole	draft
+sulfacetamide	draft
+sulfadiazine	draft
+sulfadimethoxine	draft
+sulfamethoxazole	draft
+sulfasalazine	draft
+sulfate ion	draft
+sulfathiazole	draft
+sulfur dioxide	draft
+sulfur hexafluoride	draft
+sulfuric acid	draft
+sulindac	draft
+sulisobenzone	draft
+sumatriptan	draft
+sunitinib	draft
+suvorexant	draft
+tacrolimus	draft
+tadalafil	draft
+tafamidis	draft
+tafluprost	draft
+talazoparib	draft
+talc	draft
+tamoxifen	draft
+tamsulosin	draft
+tapentadol	draft
+tasimelteon	draft
+taurine	draft
+tavaborole	draft
+tazarotene	draft
+tazobactam	draft
+tedizolid	draft
+teduglutide	draft
+tegaserod	draft
+telavancin	draft
+telmisartan	draft
+telotristat	draft
+telotristat ethyl	draft
+temazepam	draft
+temozolomide	draft
+temsirolimus	draft
+tenecteplase	draft
+tenofovir alafenamide	draft
+tenofovir disoproxil	draft
+terazosin	draft
+terbinafine	draft
+terbutaline	draft
+terconazole	draft
+teriflunomide	draft
+teriparatide	draft
+terlipressin	draft
+tert-butyl alcohol	draft
+tesamorelin	draft
+testosterone	draft
+tetrabenazine	draft
+tetracaine	draft
+tetracycline	draft
+tetrahexyldecyl ascorbate	draft
+tetrahydrocannabinol	draft
+tetrahydrodiferuloylmethane	draft
+tetrahydrozoline	draft
+tetrapropyl orthosilicate	draft
+tetrasodium glutamate diacetate	draft
+tezacaftor	draft
+thalidomide	draft
+theanine	draft
+theophylline monohydrate	draft
+thioguanine hydrate	draft
+thioguanosine	draft
+thiomersal	draft
+thioridazine	draft
+thiosulfate ion	draft
+thiotepa	draft
+thonzonium	draft
+thonzylamine	draft
+thymol	draft
+thymol iodide	draft
+thyrotropin alfa	draft
+thyrotropin-releasing hormone	draft
+tiagabine	draft
+ticagrelor	draft
+tigecycline	draft
+tildrakizumab	draft
+tinidazole	draft
+tioconazole	draft
+tiopronin	draft
+tiotropium	draft
+tiotropium cation	draft
+tipiracil	draft
+tipranavir	draft
+tirofiban	draft
+tisagenlecleucel	draft
+titanium	draft
+tivozanib	draft
+tizanidine	draft
+tobramycin	draft
+tocilizumab	draft
+tocofersolan	draft
+tofacitinib	draft
+tolazoline	draft
+tolcapone	draft
+tolmetin	draft
+tolnaftate	draft
+tolterodine	draft
+toltrazuril	draft
+tolvaptan	draft
+topiramate	draft
+topotecan	draft
+torasemide	draft
+totarol	draft
+trabectedin	draft
+tramadol	draft
+trametinib	draft
+trandolapril	draft
+trandolaprilat	draft
+tranexamic acid	draft
+tranylcypromine	draft
+trastuzumab	draft
+travoprost	draft
+trazodone	draft
+treosulfan	draft
+treprostinil	draft
+tretinoin	draft
+tri-N-butyl phosphate	draft
+triacetin	draft
+triamcinolone	draft
+triamterene	draft
+triazolam	draft
+tribasic potassium phosphate	draft
+tribehenin	draft
+tributyl citrate	draft
+tricaine	draft
+tricalcium phosphate	draft
+tricaprin	draft
+tricaprylin	draft
+trichlormethiazide	draft
+triclabendazole	draft
+triclosan	draft
+tridecane	draft
+tridecyl salicylate	draft
+tridecyl stearate	draft
+tridecyl trimellitate	draft
+triethanolamine benzoate	draft
+triethanolamine lauryl sulfate	draft
+triethoxycaprylylsilane	draft
+triethyl citrate	draft
+triethylamine	draft
+triethylene glycol	draft
+triethylenetetramine	draft
+triethylhexanoin	draft
+trifarotene	draft
+trifluoperazine	draft
+trifluridine	draft
+triheptanoin	draft
+trihexyphenidyl	draft
+triiodothyronine	draft
+triisopropanolamine	draft
+triisostearin	draft
+trilostane	draft
+trimagnesium dicitrate	draft
+trimethobenzamide	draft
+trimethoprim	draft
+trimethylpentanediyl dibenzoate	draft
+trimipramine	draft
+trimyristin	draft
+tripelennamine	draft
+triprolidine	draft
+triptorelin	draft
+trisodium dicarboxymethyl alaninate	draft
+trisodium nitrilotriacetate	draft
+trolamine	draft
+trolamine salicylate	draft
+tromethamine	draft
+tropicamide	draft
+trospium	draft
+trypan blue	draft
+trypan blue sodium	draft
+tryptophan	draft
+tulathromycine	draft
+tylosin	draft
+tyloxapol	draft
+ubidecarenone	draft
+ulipristal	draft
+ulobetasol	draft
+ultramarine	draft
+umeclidinium	draft
+umirolimus	draft
+undecane	draft
+undecylenic acid	draft
+undecylenoyl glycine	draft
+upadacitinib	draft
+urea	draft
+uridine	draft
+uridine triacetate	draft
+ustekinumab	draft
+vaborbactam	draft
+valacyclovir	draft
+valbenazine	draft
+valganciclovir	draft
+valrubicin	draft
+valsartan	draft
+vanadium	draft
+vancomycin	draft
+vandetanib	draft
+vanillin	draft
+vanillyl butyl ether	draft
+vardenafil	draft
+varenicline	draft
+vecuronium	draft
+vedolizumab	draft
+velaglucerase alfa	draft
+velpatasvir	draft
+vemurafenib	draft
+venetoclax	draft
+venlafaxine	draft
+verapamil	draft
+verteporfin	draft
+vestronidase alfa	draft
+vidarabine	draft
+vidarabine monohydrate	draft
+vigabatrin	draft
+vilanterol	draft
+vilazodone	draft
+viloxazine	draft
+vinblastine	draft
+vincristine	draft
+vinorelbine	draft
+vinyl acetate	draft
+vismodegib	draft
+vitamin A	draft
+vitamin C	draft
+vonicog alfa	draft
+vorapaxar	draft
+voretigene neparvovec	draft
+voriconazole	draft
+vorinostat	draft
+vortioxetine	draft
+voxilaprevir	draft
+water	draft
+wheat germ oil	draft
+xylazine	draft
+xylitol	draft
+xylitylglucoside	draft
+xylometazoline	draft
+yellow OB	draft
+yohimbine	draft
+zafirlukast	draft
+zaleplon	draft
+zanamivir	draft
+zeaxanthin	draft
+ziconotide	draft
+zidovudine	draft
+zileuton	draft
+zinc	draft
+zinc acetate dihydrate	draft
+zinc aspartate	draft
+zinc carbonate hydroxide	draft
+zinc chloride	draft
+zinc citrate	draft
+zinc gluconate	draft
+zinc glycinate	draft
+zinc phosphate	draft
+zinc picolinate	draft
+ziprasidone	draft
+zirconium	draft
+zoledronic acid monohydrate	draft
+zolmitriptan	draft
+zolpidem	draft
+zonisamide	draft
+D-glucosamine	draft	glucosamine
+D-methamphetamine	draft	d-meth
+D-methamphetamine	draft	d-phenylisopropylmethylamine
+D-methamphetamine	draft	dextromethamphetamine
+D-methamphetamine	draft	metamfetamine
+D-methamphetamine	draft	methamphetamine
+D-methamphetamine	draft	methyl-beta-phenylisopropylamine
+D-methamphetamine	draft	methylamphetamine
+D-penicillamine	draft	penicillamine
+DL-amphetamine	draft	alpha-methylbenzeneethaneamine
+DL-amphetamine	draft	alpha-methylphenethylamine
+DL-amphetamine	draft	alpha-methylphenylethylamine
+DL-amphetamine	draft	amfetamine
+DL-amphetamine	draft	amphetamine
+DL-amphetamine	draft	beta-phenylisopropylamine
+DL-amphetamine	draft	rac-amphetamine
+DL-lactic acid	draft	acidum lacticum
+DL-lactic acid	draft	lactic acid
+DL-lactic acid	draft	lacticum acidum
+DL-lactic acid	draft	rac-lactic acid
+DL-malic acid	draft	alpha-hydroxysuccinic acid
+DL-malic acid	draft	hydroxybutanedioic acid
+DL-malic acid	draft	hydroxysuccinic acid
+DL-malic acid	draft	malic acid
+DOTA-TATE	draft	dotatate
+Insulin degludec	draft	insulina degludec
+Insulin degludec	draft	insulinum degludecum
+L-Cysteine	draft	cysteine
+L-alanine	draft	alanine
+L-aspartic acid	draft	asparaginate
+L-aspartic acid	draft	asparaginic acid
+L-aspartic acid	draft	aspartate
+L-aspartic acid	draft	aspartic acid
+L-carbocysteine	draft	carbocisteine
+L-carnitine	draft	levocarnitine
+L-glutamine	draft	glutamine
+L-histidine	draft	histidine
+L-isoleucine	draft	isoleucine
+L-leucine	draft	leucine
+L-lysine	draft	lysine
+L-menthol	draft	levomenthol
+L-menthol	draft	menthol
+L-methionine	draft	methionine
+L-morphan	draft	levorphanol
+L-scopolamine	draft	scopolamine
+L-serine	draft	serine
+L-threonine	draft	threonine
+L-thyroxine	draft	levothyroxine sodium
+L-tyrosine	draft	tyrosine
+L-valine	draft	valine
+Lysozyme	draft	c-type lysozyme
+N-acetyl-L-cysteine	draft	acetylcysteine
+RRR-alpha-tocopherol	draft	d-alpha-tocopherol
+Takadiastase	draft	taka-diastase
+Tripalmitin	draft	tripalmitoylglycerol
+acetaldehyde	draft	acetic aldehyde
+acetaldehyde	draft	aldehyde
+acetaldehyde	draft	ethyl aldehyde
+acetic acid	draft	ethanoic acid
+acetic acid	draft	ethoic acid
+acetic acid	draft	ethylic acid
+acetic acid	draft	methanecarboxylic acid
+acetohydroxamic acid	draft	acetohydroximic acid
+acetohydroxamic acid	draft	acetylhydroxamic acid
+acetohydroxamic acid	draft	cetohyroxamic acid
+acetohydroxamic acid	draft	methylhydroxamic acid
+acetone	draft	dimethyl ketone
+acetone	draft	dimethylketone
+acetone	draft	ketone propane
+acetone	draft	methyl ketone
+acetyl tributyl citrate	draft	acetyltri-n-butyl citrate
+acetyl tributyl citrate	draft	acetyltributyl citrate
+acetyl tributyl citrate	draft	acetyltributylcitrate
+acetyl tributyl citrate	draft	tributyl citrate acetate
+acetylcarnitine	draft	acetyl-carnitine
+acetylcarnitine	draft	levocarnitine acetyl
+acetylcholine	draft	acetyl choline ion
+acetylcholine	draft	acetylcholine cation
+acetylcholine	draft	choline acetate
+aciclovir	draft	acyclovir
+acrylamide	draft	ethylenecarboxamide
+adipic acid	draft	adipinic acid
+alanyl glutamine	draft	alanylglutamine
+albendazol	draft	albendazole
+allyl hexanoate	draft	allyl caproate
+alpha-arbutin	draft	alpha arbutin
+aluminium	draft	aluminum
+aluminium phosphate	draft	aluminium monophosphate
+aluminium phosphate	draft	aluminium orthophosphate
+aluminium phosphate	draft	aluminum monophosphate
+aluminium phosphate	draft	aluminum orthophosphate
+aluminium phosphate	draft	aluminum phosphate
+aluminum cation	draft	aluminium cation
+aluminum cation	draft	aluminium ion
+aluminum cation	draft	aluminum ion
+aluminum chloride hexahydrate	draft	aluminium chloride hexahydrate
+aluminum chloride hexahydrate	draft	aluminium chloride hexahydtate
+aluminum chloride hexahydrate	draft	aluminium trichloride hexahydrate
+aluminum chloride hexahydrate	draft	aluminum trichloride hexahydrate
+aluminum hydroxide	draft	aluminium hydroxide
+aluminum subacetate	draft	aluminium diacetate
+aluminum subacetate	draft	aluminum diacetate
+aluminum sulfate monohydrate	draft	aluminium sulphate hydrate
+aluminum sulfate monohydrate	draft	aluminium sulphate monohydrate
+aluminum sulfate monohydrate	draft	aluminum sulfate hydrate
+alvimopan	draft	alvimopan anhydrous
+amdinocillin	draft	mecillinam
+amifostine trihydrate	draft	amifostine hydrate
+aminopentamide	draft	dimevamide
+aminophylline	draft	aminophilline
+amiodarone	draft	amiodarone hydrochloride
+amitriptyline	draft	amitryptiline
+amlodipine	draft	amlodipine free base
+ammonia	draft	ammonia gas
+ammonia	draft	anhydrous ammonia
+ammonium acetate	draft	ammonium ethanoate
+ammonium acetate	draft	azanium acetate
+ammonium cation	draft	ammonium
+ammonium cation	draft	ammonium ion
+ammonium chloride	draft	amchlor
+ammonium chloride	draft	ammoneric
+ammonium chloride	draft	ammonia hydrochloride
+ammonium chloride	draft	ammonium muriate
+ammonium chloride	draft	azanium chloride
+ammonium chloride	draft	chloride of ammonia
+ammonium chloride	draft	chloride of ammonium
+ammonium chloride	draft	darammon
+ammonium chloride	draft	sal ammonia
+ammonium chloride	draft	sal ammoniac
+ammonium chloride	draft	salammonite
+ammonium lauryl sulfate	draft	ammonium dodecyl sulfate
+ammonium lauryl sulfate	draft	ammonium dodecyl sulphate
+ammonium lauryl sulfate	draft	ammonium laurilsulfate
+ammonium lauryl sulfate	draft	ammonium lauryl sulphate
+ammonium sulfate	draft	ammonium sulphate
+ammonium sulfate	draft	diammonium sulfate
+amoxicillin	draft	amoxil
+amoxicillin	draft	amoxycillin
+amoxicillin	draft	amoxycillin anhydrous
+ampicillin	draft	aminobenzylpenicillin
+ampicillin	draft	ampicillin acid
+ampicillin	draft	anhydrous ampicillin
+amyl acetate	draft	amyl acetic ester
+amyl acetate	draft	n-amyl acetate
+amyl acetate	draft	n-pentyl acetate
+amyl acetate	draft	pentyl acetate
+apalutamide	draft	apalutamid
+artesunate	draft	artesunato
+artesunate	draft	artesunatum
+artesunate	draft	artesunic acid
+articaine	draft	carticaine
+aspartame	draft	methyl aspartylphenylalanate
+astaxanthin	draft	astaxanthine
+atomoxetine	draft	tomoxetine
+axitinib	draft	axitinibum
+azithromycin	draft	azithromycin anhydrous
+barium sulfate	draft	barium salt of sulfuric acid
+barium sulfate	draft	barium sulphate
+barley malt syrup	draft	maltose syrup
+beclometasone	draft	beclomethasone
+benzaldehyde	draft	benzene carbaldehyde
+benzaldehyde	draft	benzene carboxaldehyde
+benzaldehyde	draft	benzenecarboxaldehyde
+benzaldehyde	draft	benzoic acid aldehyde
+benzaldehyde	draft	benzoic aldehyde
+benzaldehyde	draft	benzylaldehyde
+benzaldehyde	draft	phenylformaldehyde
+benzocaine	draft	ethyl p-aminobenzoate
+benzonatate	draft	benzononatine
+benzophenone	draft	benzopheneone
+benzophenone	draft	benzoyl-benzene
+benzophenone	draft	benzoylbenzene
+benzphetamine	draft	benzaphetamine
+benzphetamine	draft	benzylamphetamine
+benzyl alcohol	draft	benzylic alcohol
+benzyl alcohol	draft	phenylmethyl alcohol
+benzyl benzoate	draft	benzoic acid phenylmethyl ester
+benzyl benzoate	draft	phenylmethyl benzoate
+benzylpenicillin	draft	bensylpenicillin
+benzylpenicillin	draft	benzyl benicillin
+benzylpenicillin	draft	benzylpenicillinic acid
+bepotastine	draft	betotastine
+beta-pinene	draft	nopinene
+beta-pinene	draft	pseudopinene
+betaine	draft	glycine betaine
+betaine	draft	glycinebetaine
+bicarbonate ion	draft	bicarbonate
+bicarbonate ion	draft	bicarbonate anion
+bicarbonate ion	draft	bicarbonate ions
+bicarbonate ion	draft	hydrogen carbonate
+bicarbonate ion	draft	hydrogen carbonate anion
+bicarbonate ion	draft	hydrogen carbonate ion
+bicarbonate ion	draft	hydrogentrioxocarbonate
+bicarbonate ion	draft	monohydrogen carbonate
+bismuth subgallate	draft	gallic acid bismuth basic salt
+bismuth subsalicylate	draft	pink bismuth
+bisphenol A	draft	bisphenol
+borneol	draft	borneols
+bosentan hydrate	draft	bosentan monohydrate
+bosutinib	draft	bosutinibum
+brentuximab vedotin	draft	brentuximab
+bretylium	draft	bretylium tosylate
+bromocriptine	draft	bromocryptine
+bromocriptine	draft	bromoergocriptine
+brompheniramine	draft	brompheniramine maleate
+buserelin	draft	buserelin acetate
+butalbital	draft	allylbarbital
+butalbital	draft	butalbarbital
+butalbital	draft	itobarbital
+butalbital	draft	tetrallobarbital
+butane	draft	n-butane
+butane	draft	normal-butane
+butanone	draft	oxobutane
+butenafine	draft	butenafina
+butorphanol	draft	butorphanol tartrate
+butyl acetate	draft	acetic acid n-butyl ester
+butyl acetate	draft	butyl ester of acetic acid
+butyl acetate	draft	butyl ethanoate
+butyl acetate	draft	n-butyl acetate
+butyl acetate	draft	n-butyl ester of acetic acid
+butyl acetate	draft	n-butyl ethanoate
+butyl acetate	draft	n-butylacetate
+caffeine	draft	anhydrous caffeine
+caffeine	draft	caffeinum
+caffeine	draft	coffein
+caffeine	draft	coffeinum
+caffeine	draft	koffein
+caffeine	draft	monohydrate caffeine
+calcipotriol	draft	calcipotriene
+calcitriol	draft	cholecalcitriol
+calcium acetate	draft	calcium ethanoate
+calcium ascorbate	draft	calcium ascorbate dihydrate
+calcium citrate tetrahydrate	draft	calcium citrate hydrate
+calcium hydroxide	draft	calcium hydrate
+calcium peroxide	draft	calcium dioxide
+capric acid	draft	caprinic acid
+capric acid	draft	caprynic acid
+capric acid	draft	decanoic acid
+capric acid	draft	decoic acid
+capric acid	draft	n-capric acid
+capric acid	draft	n-decanoic acid
+capric acid	draft	n-decoic acid
+capric acid	draft	n-decylic acid
+caprylic acid	draft	n-caprylic acid
+caprylic acid	draft	n-octanoic acid
+caprylic acid	draft	n-octoic acid
+caprylic acid	draft	n-octylic acid
+caprylic acid	draft	octanoic acid
+caprylic acid	draft	octoic acid
+caprylic acid	draft	octylic acid
+caprylyl glucoside	draft	octyl glucoside
+carbachol	draft	carbachol chloride
+carbachol	draft	carbamylcholine
+carbachol	draft	choline carbamate chloride
+carbachol	draft	choline chlorine carbamate
+carbinoxamine	draft	carbinoxamine base
+carbinoxamine	draft	paracarbinoxamine
+carbon dioxide	draft	carbon oxide
+carbon dioxide	draft	carbonic acid anhydride
+carbon dioxide	draft	carbonic acid gas
+carbon dioxide	draft	carbonic anhydride
+carboxymethyl cellulose	draft	carboxymethylcellulose
+carboxymethyl cellulose	draft	cellulose gum
+carboxymethyl cellulose	draft	crosslinked carboxymethyl cellulose
+carglumic acid	draft	carbamylglutamic acid
+carglumic acid	draft	ureidoglutaric acid
+carisoprodol	draft	isopropyl meprobamate
+caryophyllene	draft	trans-caryophyllene
+castor oil	draft	castor bean oil
+cedrol	draft	alpha-cedrol
+cefaclor	draft	cefaclor anhydrous
+cefixime trihydrate	draft	cefixim trihydrate
+ceftazidime	draft	ceftazidime anhydrous
+cephalexin	draft	cefalexin
+cesium cation	draft	caesium cation
+cesium cation	draft	caesium ion
+cesium cation	draft	cesium ion
+cesium chloride	draft	caesium monochloride
+cesium chloride	draft	cesium monochloride
+cesium chloride	draft	tricesium trichloride
+cetyl alcohol	draft	cetostearyl alcohol
+cetyl alcohol	draft	cetylic alcohol
+cetyl alcohol	draft	hexadecyl alcohol
+cetyl alcohol	draft	n-cetyl alcohol
+cetyl alcohol	draft	n-hexadecyl alcohol
+cetyl alcohol	draft	palmityl alcohol
+cetyl oleate	draft	hexadecanol oleate ester
+cetyl palmitate	draft	n-hexadecanyl palmitate
+cetyl palmitate	draft	palmitic acid palmityl ester
+cetyl stearate	draft	cetyl alcohol stearate
+cetyl stearate	draft	stearic acid hexadecyl ester
+chlorambucil	draft	chloraminophen
+chlorambucil	draft	chlorbutin
+chlordiazepoxide	draft	chloradiazepoxide
+chlordiazepoxide	draft	methaminodiazepoxide
+chloride ion	draft	chloride
+chloride ion	draft	chlorides
+chloride ion	draft	chlorine anion
+chloroethane	draft	ethyl chloride
+chloroethane	draft	mono-chloroethane
+chloroethane	draft	monochloroethane
+chloroform	draft	formyl trichloride
+chloroform	draft	methane trichloride
+chloroform	draft	methenyl chloride
+chloroform	draft	methenyl trichloride
+chloroform	draft	methyl trichloride
+chloroform	draft	methylidyne trichloride
+chloroform	draft	trichloroform
+chloroform	draft	trichloromethane
+chloroform	draft	trichloromethyl radical
+chloroprocaine	draft	chloroprocain
+chloroprocaine	draft	chloroprocaine hydrochloride
+chloroxylenol	draft	chloro-xylenol
+chloroxylenol	draft	p-chloro-m-xylenol
+chloroxylenol	draft	parachlorometaxylenol
+chlorpheniramine	draft	chlorophenylpyridamine
+chlorpheniramine	draft	chlorphenamine
+chlorthalidone	draft	chlorphthalidolone
+chlorzoxazone	draft	chlorzoxane
+cholecalciferol	draft	calciol
+cholecalciferol	draft	colecalciferol
+choline	draft	choline cation
+choline	draft	choline ion
+chorionic gonadotropin	draft	human chorionic gonadotropin
+cidofovir dihydrate	draft	cidofovir hydrate
+citric acid	draft	anhydrous citric acid
+citric acid	draft	beta-hydroxytricarballylic acid
+clavulanic acid	draft	clavulonic acid
+clemastine	draft	meclastin
+clomifene	draft	clomiphene
+clomipramine	draft	chlorimipramine
+clomipramine	draft	monochlorimipramine
+clopidogrel	draft	clopidogrelum
+clorazepic acid	draft	clorazepate
+coagulation factor x human	draft	coagulation factor x
+coagulation factor x human	draft	factor x
+coagulation factor x human	draft	human coagulation factor x
+coagulation factor x human	draft	stuart-prower factor
+cocaine	draft	beta-cocaine
+cocaine	draft	cocaina
+cocaine	draft	cocainum
+cocaine	draft	crack cocaine
+cocaine	draft	l-cocaine
+cocamide MEA	draft	cocamide monoethanolamine
+codeine	draft	codeine anhydrous
+codeine	draft	l-codeine
+colestyramine	draft	cholestyramine resin
+corticotropin	draft	adrenocorticotropic hormone
+corticotropin	draft	adrenocorticotropin
+corticotropin	draft	corticotrophin
+cortisol	draft	hydrocorticosterone
+cortisol	draft	hydrocortisone
+cortisol	draft	hydroxycortisone
+cosyntropin	draft	kosintropin
+cromoglicic acid	draft	cromoglycic acid
+cromoglicic acid	draft	cromolyn
+crystal violet	draft	aniline violet
+crystal violet	draft	gentian violet
+cyclosporine	draft	ciclosporin
+cyproheptadine	draft	cyproheptidine
+cysteamine	draft	cysteamine hydrochloride
+cytarabine	draft	cytosine arabinoside
+dacomitinib	draft	dacomitinib anhydrous
+dasatinib monohydrate	draft	dasatinib
+dasatinib monohydrate	draft	dasatinib hydrate
+daunorubicin	draft	daunomycin
+decyl oleate	draft	decanol oleate ester
+deferasirox	draft	deferasiroxum
+dehydroepiandrosterone	draft	androstenolone
+dehydroepiandrosterone	draft	prasterono
+denatonium benzoate monohydrate	draft	denatonium benzoate hydrate
+deoxythymidine	draft	deoxyribosylthymine
+deoxythymidine	draft	thymine deoxyriboside
+desipramine	draft	demethylimipramine
+desipramine	draft	desmethylimipramine
+desipramine	draft	monodemethylimipramine
+desipramine	draft	norimipramine
+desirudin	draft	desirudina
+desirudin	draft	desirudinum
+desirudin	draft	hirudin desirudin
+desloratadine	draft	descarboethoxyloratadine
+desmopressin	draft	deamino arginine vasopressin
+desonide	draft	desfluorotriamcinolone acetonide
+desoximetasone	draft	desoxymethasone
+dexamethasone	draft	desametasone
+dexbrompheniramine	draft	d-brompheniramine
+dexmethylphenidate	draft	d-threo-methylphenidate
+dexrazoxane	draft	dextrorazoxane
+dextroamphetamine	draft	d-amphetamine
+dextroamphetamine	draft	dexamphetamine
+dextromethorphan	draft	d-methorphan
+dextromethorphan	draft	delta-methorphan
+dextromethorphan	draft	dextromethorfan
+dibasic potassium phosphate	draft	dipotassium acid phosphate
+dibasic potassium phosphate	draft	dipotassium hydrogen monophosphate
+dibasic potassium phosphate	draft	dipotassium hydrogen orthophosphate
+dibasic potassium phosphate	draft	dipotassium hydrogen phosphate
+dibasic potassium phosphate	draft	dipotassium hydrogenorthophosphate
+dibasic potassium phosphate	draft	dipotassium hydrogenphosphate
+dibasic potassium phosphate	draft	dipotassium monohydrogen phosphate
+dibasic potassium phosphate	draft	dipotassium monophosphate
+dibasic potassium phosphate	draft	dipotassium orthophosphate
+dibasic potassium phosphate	draft	dipotassium phosphate
+dibasic potassium phosphate	draft	hydrogen dipotassium phosphate
+dibasic potassium phosphate	draft	potassium dibasic phosphate
+dibasic potassium phosphate	draft	potassium hydrogen phosphate
+dibasic potassium phosphate	draft	potassium monohydrogen phosphate
+dibasic potassium phosphate	draft	potassium monophosphate
+dibasic potassium phosphate	draft	potassium phosphate dibasic
+dibasic potassium phosphate	draft	secondary potassium phosphate
+dibucaine	draft	cincaine chloride
+dibucaine	draft	dibucaine base
+dichlorine	draft	chlorine gas
+dichlorine	draft	chlorine molecule
+dichlorine	draft	diatomic chlorine
+dichlorine	draft	molecular chlorine
+dichloromethane	draft	methane dichloride
+dichloromethane	draft	methylene bichloride
+dichloromethane	draft	methylene chloride
+dichlorphenamide	draft	dichlofenamide
+didanosine	draft	dideoxyinosine
+dienogest	draft	dienogestrel
+diethyl ether	draft	diethyl oxide
+diethyl ether	draft	ether
+diethyl ether	draft	ethyl ether
+diethyl ether	draft	ethyl oxide
+diethyl ether	draft	solvent ether
+diethylene glycol monoethyl ether	draft	ethyl digol
+diethylstilbestrol	draft	stilboestrol
+difenoxin	draft	difenoxin hydrochloride
+difenoxin	draft	diphenoxilic acid
+diglycine	draft	glycine dipeptide
+dihexadecyl phosphate	draft	dipalmityl hydrogen phosphate
+dihexadecyl phosphate	draft	dipalmityl phosphate
+dihydrocodeine	draft	dihydrocodeine bitartrate
+dimethyl ether	draft	dimethyl oxide
+dimethyl ether	draft	methyl ether
+dimethyl fumarate	draft	dimethyl trans-ethylenedicarboxylate
+dimethyl fumarate	draft	fumaric acid
+dimethyl fumarate	draft	trans-butenedioic acid dimethyl ester
+dimethyl sulfone	draft	dimethyl sulphone
+dimethyl sulfone	draft	dimethylsulfone
+dimethyl sulfone	draft	dimethylsulphone
+dimethyl sulfone	draft	methanesulfonyl methane
+dimethyl sulfone	draft	methanesulfonylmethane
+dimethyl sulfone	draft	methyl sulfone
+dimethyl sulfone	draft	methyl sulfonmethane
+dimethyl sulfone	draft	methyl sulfonyl methane
+dimethyl sulfone	draft	methyl-sulfonyl-methane
+dimethyl sulfone	draft	methylsulfone
+dimethyl sulfone	draft	methylsulfonyl methane
+dimethyl sulfone	draft	methylsulfonyl-methane
+dimethyl sulfone	draft	methylsulfonylmethane
+dimethyl sulfone	draft	sulfonylbis-methane
+dimethyl sulfone	draft	sulfonylbismethane
+dimethyl sulfone	draft	sulfonyldimethane
+dimethyl sulfoxide	draft	dimethyl sulfur oxide
+dimethyl sulfoxide	draft	dimethyl sulphoxide
+dimethyl sulfoxide	draft	dimethylsulfoxid
+dimethyl sulfoxide	draft	dimethylsulfoxyde
+dimethyl sulfoxide	draft	dimetil sulfoxido
+dimethyl sulfoxide	draft	methylsulfinylmethane
+diosmin	draft	diosmine
+diosmin	draft	neodiosmin
+dioxygen	draft	diatomic oxygen
+dioxygen	draft	liquid oxygen
+dioxygen	draft	molecular oxygen
+dioxygen	draft	oxygen
+dioxygen	draft	oxygen gas
+diphenhydramine	draft	benzhydramine
+disodium L-tartrate	draft	disodium tartrate
+disulfiram	draft	tetraethylthiuram disulfide
+disulfiram	draft	tetraethylthiuram disulphide
+dobesilic acid	draft	hydroquinonesulfonic acid
+dodecane	draft	n-dodecane
+doxorubicin	draft	hydroxydaunorubicin
+doxycycline	draft	anhydrous doxycycline
+doxycycline	draft	doxycycline anhydrous
+drospirenone	draft	dihydrospirorenone
+dyclonine	draft	dyclocaine
+edetic acid	draft	ethylenediaminetetraacetic acid
+elbasvir	draft	elbasvir component of zepatier
+elbasvir	draft	zepatier component of elbasvir
+enalaprilat dihydrate	draft	enalaprilat
+enalaprilat dihydrate	draft	enalprilat hydrate
+enalaprilat dihydrate	draft	enalprilate hydrate
+entecavir hydrate	draft	entecavir monohydrate
+epinephrine	draft	levoepinephrine
+eribulin	draft	eribulin mesylate
+ertugliflozin	draft	ertugliflozine
+erythritol	draft	erythro-tetritol
+erythritol	draft	mesoerythritol
+erythromycin	draft	erthromycin
+escin Ia	draft	escin
+esomeprazole	draft	esomeprazol
+estriol	draft	oestriol
+estriol	draft	trihydroxyestrin
+estropipate	draft	piperazine estrone sulfate
+ethamsylate	draft	etamsylate
+ethanol	draft	dehydrated ethanol
+ethanol	draft	hydroxyethane
+ethinylestradiol	draft	ethinyl estradiol
+ethinylestradiol	draft	ethinyloestradiol
+ethionamide	draft	ethylisothiamide
+ethionamide	draft	etionamide
+ethosuximide	draft	alpha-ethyl-alpha-methylsuccinimide
+ethosuximide	draft	alpha-methyl-alpha-ethylsuccinimide
+ethosuximide	draft	gamma-ethyl-gamma-methyl-succinimide
+ethosuximide	draft	gamma-methyl-gamma-ethyl-succinimide
+ethyl DL-lactate	draft	ethyl hydroxypropanoate
+ethyl DL-lactate	draft	lactic acid ethyl ester
+ethyl acetate	draft	acetic acid ethyl ester
+ethyl acetate	draft	ethyl acetic ester
+ethyl acetate	draft	ethyl ester of acetic acid
+ethyl acetate	draft	ethyl ethanoate
+ethyl acrylate	draft	ethyl ester of acrylic acid
+ethyl acrylate	draft	ethyl propenoate
+ethyl butyrate	draft	butanoic acid ethyl ester
+ethyl butyrate	draft	butyric acid ethyl ester
+ethyl butyrate	draft	butyric ether
+ethyl butyrate	draft	ethyl butanoate
+ethyl eicosapentaenoate	draft	ethyl eicosapentaenoic acid
+ethyl eicosapentaenoate	draft	icosapentate
+ethyl levulinate	draft	ethyl ketovalerate
+ethyl oleate	draft	oleic acid ethyl ester
+ethylene distearamide	draft	ethylene distearylamide
+ethylene glycol	draft	ethylene alcohol
+ethylene glycol	draft	glycol
+ethylene glycol	draft	glycol alcohol
+ethylene glycol	draft	monoethylene glycol
+ethylene oxide	draft	ethene oxide
+ethylparaben	draft	ethyl para-hydroxybenzoate
+ethylparaben	draft	ethyl paraben
+ethynodiol	draft	etinodiol
+ethynodiol	draft	etynodiol
+ethynodiol	draft	etynodiolum
+etoposide	draft	trans-etoposide
+eucalyptus oil	draft	eucalyptic essential oil
+exenatide	draft	exenatide synthetic
+fentanyl	draft	phentanyl
+ferric chloride	draft	iron trichloride
+ferric subsulfate	draft	basic ferric sulfate
+ferrous gluconate dihydrate	draft	ferrous gluconate hydrate
+ferrous sulfate heptahydrate	draft	ferrous sulfate hydrate
+fexofenadine	draft	carboxyterfenadine
+fexofenadine	draft	terfenadine acid metabolite
+fexofenadine	draft	terfenadine carboxylate
+floxuridine	draft	floxidine
+flumazenil	draft	flumazepil
+flunisolide	draft	flunisolide anhydrous
+fluoride ion	draft	fluorine anion
+fluorouracil	draft	fluoro uracil
+fluorouracil	draft	fluorouracilum
+fluorouracil	draft	fluoruracil
+fluorouracil	draft	fluouracil
+fluorouracil	draft	topical fluorouracil
+fluphenazine	draft	fluorfenazine
+fluphenazine	draft	fluorophenazine
+fluphenazine	draft	fluorphenazine
+fluphenazine	draft	triflumethazine
+flurandrenolide	draft	flurandrenolone
+folic acid	draft	pteroylglutamic acid
+folic acid	draft	pteroylmonoglutamic acid
+fondaparinux	draft	natural heparin pentasaccharide
+formic acid	draft	aminic acid
+formic acid	draft	formylic acid
+formic acid	draft	hydrogen carboxylic acid
+formic acid	draft	methanoic acid
+formic acid	draft	methoic acid
+fosinoprilat	draft	fosinopril diacid
+fosinoprilat	draft	fosinoprilic acid
+fremanezumab	draft	fremanezumab-vfrm
+furazolidone	draft	nitrofurazolidone
+galactose	draft	galacto-hexose
+galantamine	draft	galanthamine
+gamma cyclodextrin	draft	cyclooctaamylose
+gatifloxacin	draft	gatifloxacin anhydrous
+gatifloxacin	draft	gatifloxacine
+gemcitabine	draft	gemcitabine hydrochloride
+gentamicin	draft	gentamicin sulfate
+gentamicin	draft	gentamicins
+gentamicin	draft	gentamycin
+geranial	draft	geranialdehyde
+geraniol	draft	geranyl alcohol
+geraniol	draft	t-geraniol
+geraniol	draft	trans-geraniol
+glucagon	draft	glucagon recombinant
+glucagon	draft	glucagone
+gluconolactone	draft	delta-gluconolactone
+gluconolactone	draft	gluconic delta-lactone
+glucose oxidase	draft	glucose aerodehydrogenase
+glucose oxidase	draft	glucose oxyhydrase
+glutathione	draft	gamma-glutamylcysteinylglycine
+glutathione	draft	glutathione reduced
+glutathione	draft	reduced glutathione
+glycerol	draft	glycerin
+glycerol	draft	glycerine
+glyceryl tristearate	draft	stearin
+glyceryl tristearate	draft	tristearin
+glyceryl tristearate	draft	tristearoyl-sn-glycerol
+glycine	draft	glycin
+glycol distearate	draft	ethylene distearate
+glycol distearate	draft	ethylene glycol dioctadecanoate
+glycol distearate	draft	ethylene glycol distearate
+glycol salicylate	draft	ethylene glycol monosalicylate
+glycol stearate	draft	ethylene glycol monostearate
+glycol stearate	draft	glycol monostearate
+glycopyrrolate	draft	glycopyrronium
+glycopyrrolate	draft	glycopyrronium cation
+glyoxal	draft	glyoxal aldehyde
+glyoxal	draft	glyoxylaldehyde
+graphite	draft	silver graphite
+grazoprevir	draft	grazoprevir anhydrous
+growth hormone	draft	artificial growth hormone
+growth hormone	draft	growth hormones
+guaiacol	draft	o-guaiacol
+guaifenesin	draft	guaiphenesin
+heparin	draft	heparin sodium
+hepatitis B immune globulin	draft	human hepatitis b immunoglobulin
+hepatitis B immune globulin	draft	human hepatitis-b immunoglobulin
+hesperidin	draft	hesperidoside
+hexyl acetate	draft	n-hexyl ethanoate
+hydralazine	draft	hydralazin
+hydralazine	draft	hydrallazine
+hydralazine	draft	hydrazinophthalazine
+hydrochlorothiazide	draft	hydrochlorthiazide
+hydrogen peroxide	draft	dihydrogen dioxide
+hydrogen peroxide	draft	peroxide
+hydromorphone	draft	hydromorphone hydrochloride
+hydroquinone	draft	a-hydroquinone
+hydroquinone	draft	alpha-hydroquinone
+hydroquinone	draft	b-quinol
+hydroquinone	draft	benzohydroquinone
+hydroquinone	draft	benzoquinol
+hydroquinone	draft	beta-quinol
+hydroquinone	draft	dihydroquinone
+hydroquinone	draft	dihydroxybenzene
+hydroquinone	draft	hydrochinone
+hydroquinone	draft	hydroquinol
+hydroquinone	draft	hydroquinoue
+hydroquinone	draft	p-dihydroxybenzene
+hydroquinone	draft	p-hydroquinone
+hydroquinone	draft	p-hydroxybenzene
+hydroquinone	draft	p-hydroxyphenol
+hydroquinone	draft	quinol
+hydroxide ion	draft	hydroxide
+hydroxychloroquine	draft	oxychlorochine
+hydroxycitronellal	draft	hydroxy citronellal
+hydroxyproline	draft	delta-hydroxyproline
+hydroxypropyl cellulose	draft	hydroxypropylcellulose
+hydroxypropyl cellulose	draft	hydroxypropylmethylcellulose phthalate
+ibandronic acid	draft	ibandronate
+ibuprofen	draft	ibuprophen
+imipramine	draft	melipramine
+indigo	draft	indigo dye
+indocyanine green	draft	cardio-green
+indocyanine green	draft	indocyanine
+inotuzumab ozogamicin	draft	inotuzumab
+irinotecan	draft	biotecan
+iron pentacarbonyl	draft	iron carbonyl
+iron pentacarbonyl	draft	pentacarbonyl iron
+isavuconazole	draft	isavuconazol
+isavuconazole	draft	isavuconazolum
+isoamyl acetate	draft	amylacetic ester
+isoamyl acetate	draft	beta-methyl butyl acetate
+isoamyl acetate	draft	i-amyl acetate
+isoamyl acetate	draft	isoamyl ethanoate
+isoamyl acetate	draft	isopentyl acetate
+isoamyl laurate	draft	isopentyl laurate
+isopropyl alcohol	draft	i-propylalkohol
+isopropyl alcohol	draft	isopropanol
+isopropyl alcohol	draft	sec-propyl alcohol
+isopropyl alcohol	draft	secondary propyl alcohol
+isopropyl palmitate	draft	isopropyl hexadecanoate
+isopropyl palmitate	draft	isopropyl n-hexadecanoate
+isopropyl palmitate	draft	palmitic acid isopropyl ester
+isotretinoin	draft	cis-retinoic acid
+isotretinoin	draft	retinoic acid
+kaolin	draft	gaoling
+kaolin	draft	gaolingtu
+kaolin	draft	kao-lin
+kaolin	draft	kao-ling
+kaolin	draft	kao-ling-t'u
+kaolin	draft	kao-ling-tu
+kaolin	draft	kaolinite clay
+lacosamide	draft	erlosamide
+lanthanum carbonate	draft	lanthanum carbonate anhydrous
+lauramidopropyl betaine	draft	dodecanamidopropyl betaine
+lauramidopropyl betaine	draft	lauramido propyl betaine
+lauramidopropyl betaine	draft	lauroylamide propylbetaine
+lauramine oxide	draft	lauryldimethylamine oxide
+levulinic acid	draft	gamma-ketovaleric acid
+levulinic acid	draft	levulic acid
+lidocaine	draft	lignocaine
+lidocaine	draft	xylocaine
+lithium	draft	lithium compound
+lithium	draft	lithium compounds
+lithium	draft	lithium drugs
+lithium	draft	lithium salts
+lithium carbonate	draft	dilithium carbonate
+lithium citrate hydrate	draft	lithium citrate tetrahydrate
+lithium citrate hydrate	draft	trilithium citrate tetrahydrate
+loxapine	draft	oxilapine
+lycopene	draft	all-trans-lycopene
+madecassic acid	draft	brahmic acid
+magnesium acetate	draft	acetic acid magnesium salt
+magnesium acetate	draft	magnesium diacetate
+magnesium chlorate	draft	magnesium dichlorate
+magnesium chlorate	draft	magnesium perchlorite
+magnesium gluconate dihydrate	draft	magnesium gluconate
+magnesium gluconate dihydrate	draft	magnesium gluconate hydrate
+magnesium glycinate	draft	magnesium diglycinate
+magnesium hydroxide	draft	magnesium dihydroxide
+magnesium hydroxide	draft	magnesium hydrate
+magnesium hydroxide	draft	milk of magnesia
+magnesium salicylate tetrahydrate	draft	magnesium salicylate hydrate
+magnesium sulfate heptahydrate	draft	hydrated magnesium sulfate
+magnesium sulfate heptahydrate	draft	magnesium sulphate heptahydrate
+magnesium trisilicate	draft	magnesium trisilicate anhydrous
+mechlorethamine	draft	chlormethine
+megestrol	draft	megestryl acetate
+mercaptopurine hydrate	draft	mercaptopurine monohydrate
+meropenem trihydrate	draft	meropenem hydrate
+metamizole sodium hydrate	draft	dipyrone monohydrate
+metamizole sodium hydrate	draft	metamizole monosodium monohydrate
+methacholine	draft	methacholine bromide
+methanol	draft	hydroxymethane
+methanol	draft	monohydroxymethane
+methazolamide	draft	methenamide
+methenamine	draft	hexamethylenamine
+methenamine	draft	hexamethylenetetramine
+methenamine	draft	hexamine
+methimazole	draft	thiamazole
+methohexital	draft	methohexitone
+methotrexate	draft	amethopterin
+methyl cellulose	draft	cellulose methyl ether
+methyl cellulose	draft	methylated cellulose
+methyl cellulose	draft	methylcellulose
+methyl methacrylate	draft	methacrylic acid methyl ester
+methyl methacrylate	draft	methyl alpha-methylacrylate
+methyl methacrylate	draft	methyl ester of methacrylic acid
+methyl methacrylate	draft	methyl methylacrylate
+methyl methacrylate	draft	methylmethacrylate
+methyl nicotinate	draft	nicotinic acid methyl ester
+methyl perfluoroisobutyl ether	draft	methyl nonafluoroisobutyl ether
+methylcobalamin	draft	mecobalamin
+methyldopa	draft	methyldopa anhydrous
+methylergonovine	draft	methylergobasin
+methylergonovine	draft	methylergometrin
+methylergonovine	draft	methylergometrine
+methylhomatropine	draft	homotropine methyl
+methylparaben	draft	methyl p-hydroxybenzoate
+methylparaben	draft	methyl para-hydroxybenzoate
+methylparaben	draft	methyl paraben
+methylparaben	draft	p-hydroxybenzoic acid methyl ester
+methylphenidate	draft	methyl phenidylacetate
+methylphenidate	draft	methylphenidan
+metirosine	draft	alpha-methyl-p-tyrosine
+metirosine	draft	alpha-methyl-para-tyrosine
+metirosine	draft	metyrosine
+metoclopramide	draft	metaclopromide
+metoclopramide	draft	methochlopramide
+metoclopramide	draft	metochlopramide
+metoclopramide	draft	metoclopramide hydrochloride
+metyrapone	draft	mepyrapone
+midostaurin	draft	benzoylstaurosporine
+molybdenum	draft	elemental molybdenum
+molybdenum	draft	metallic molybdenum
+molybdenum	draft	molybdenum atom
+monoethanolamine	draft	beta-aminoethanol
+monoethanolamine	draft	beta-aminoethyl alcohol
+monoethanolamine	draft	beta-ethanolamine
+monoethanolamine	draft	beta-hydroxyethylamine
+monoethanolamine	draft	colamine
+monoethanolamine	draft	olamine
+monothioglycerol	draft	alpha-thiolglycerol
+monothioglycerol	draft	monothioglycerin
+monothioglycerol	draft	thioglycerin
+monothioglycerol	draft	thioglycerine
+monothioglycerol	draft	thioglycerol
+morphine	draft	anhydrous morphine
+morphine	draft	morphium
+mycophenolate mofetil	draft	mycophenolic acid morpholinoethyl ester
+myristyl alcohol	draft	tetradecyl alcohol
+myristyl myristate	draft	tetradecyl myristate
+n-pentyl nitrite	draft	amyl nitrite
+n-pentyl nitrite	draft	n-amyl nitrite
+n-pentyl nitrite	draft	pentyl nitrite
+nafcillin	draft	naphcillin
+nalmefene	draft	nalmetrene
+naloxone	draft	l-naloxone
+natalizumab	draft	natalizumab-sztn
+niacinamide	draft	beta-pyridinecarboxamide
+niacinamide	draft	niacin
+niacinamide	draft	nicotinamide
+niacinamide	draft	nicotinic acid amide
+niacinamide	draft	nicotinic amide
+nicotinic acid	draft	beta-pyridinecarboxylic acid
+nicotinic acid	draft	m-pyridinecarboxylic acid
+nicotinic acid	draft	nicotinate
+nicotinic acid	draft	pyridine-beta-carboxylic acid
+nitric acid	draft	fuming nitric acid
+nitric oxide	draft	mononitrogen monoxide
+nitric oxide	draft	nitrogen monooxide
+nitric oxide	draft	nitrogen monoxide
+nitric oxide	draft	nitrogen oxide
+nitric oxide	draft	nitrogen protoxide
+nitric oxide	draft	nitroxide radical
+nitrite ion	draft	nitrite
+nitrite ion	draft	nitrite anion
+nitroglycerin	draft	glycerin trinitrate
+nitroglycerin	draft	glycerol trinitrate
+nitroglycerin	draft	glyceryl trinitrate
+nitroglycerin	draft	nitroglycerine
+nitroglycerin	draft	nitroglycerol
+nitroglycerin	draft	trinitroglycerin
+nitroglycerin	draft	trinitroglycerol
+nitrous oxide	draft	dinitrogen monoxide
+nitrous oxide	draft	hyponitrous acid anhydride
+nitrous oxide	draft	nitrious oxide
+nitrous oxide	draft	nitro
+nitrous oxide	draft	nitrogen protoxide
+nitrous oxide	draft	nitrous
+nonivamide	draft	hydroxymethoxybenzyl pelargonamide
+nonivamide	draft	pelargonyl vanillylamide
+norethisterone	draft	norethindrone
+nortriptyline	draft	demethylamitriptyline
+nortriptyline	draft	desmethylamitriptyline
+octafluoropropane	draft	perfluoropropane
+octasulfur	draft	cyclo-octasulfur
+octasulfur	draft	cyclooctasulfane
+octasulfur	draft	cyclooctasulfur
+octreotide	draft	octrotide
+oleyl oleate	draft	oleic acid oleyl ester
+orthoboric acid	draft	boracic acid
+orthoboric acid	draft	boric acid
+orthoboric acid	draft	o-boric acid
+orthosilicic acid	draft	monosilicic acid
+orthosilicic acid	draft	silicic acid
+orthosilicic acid	draft	silicon tetrahydroxide
+oseltamivir acid	draft	oseltamivir carboxylate
+oxycodone	draft	dihydrohydroxycodeinone
+oxycodone	draft	dihydroxycodeinone
+oxymetazoline	draft	oxymethazoline
+oxymorphone	draft	oxymorphone hydrochloride
+p-anisaldehyde	draft	anisaldehyde
+p-anisaldehyde	draft	anise aldehyde
+p-anisaldehyde	draft	anisic aldehyde
+p-anisaldehyde	draft	para-anisaldehyde
+pamidronic acid	draft	pamidronate
+paracetamol	draft	acetaminophen
+paracetamol	draft	p-acetamidophenol
+paracetamol	draft	p-acetaminophenol
+paracetamol	draft	p-hydroxy-acetanilid
+paracetamol	draft	p-hydroxyacetanilide
+paracetamol	draft	p-hydroxyphenolacetamide
+pembrolizumab	draft	lambrolizumab
+pentadecalactone	draft	cyclopentadecanolide
+pentadecalactone	draft	muskalactone
+pentadecalactone	draft	pentadecanolactone
+pentaerythritol	draft	monopentaerythritol
+pentaerythritol	draft	neopentanetetrol
+pethidine	draft	meperidine
+petroleum jelly	draft	petrolatum
+petroleum jelly	draft	white petrolatum
+phenelzine	draft	phenelzine sulfate
+phenelzine	draft	phenethyl-hydrazine
+phenelzine	draft	phenethylhydrazine
+phenobarbital	draft	phenobarbitol
+phenobarbital	draft	phenobarbitone
+phenobarbital	draft	phenobarbituric acid
+phenobarbital	draft	phenylethylbarbiturate
+phenobarbital	draft	phenylethylbarbituric acid
+phenol	draft	benzophenol
+phenol	draft	monophenol
+phenol	draft	phenol alcohol
+phenol	draft	phenol homopolymer
+phenol	draft	phenosmolin
+phenoxybenzamine	draft	phenoxybenzamine hydrochloride
+phentolamine	draft	fentolamin
+phenyl acetate	draft	acetic acid phenyl ester
+phenyl acetate	draft	phenol acetate
+phenyl acetate	draft	phenyl ethanoate
+phenyl salicylate	draft	phenol salicylate
+phenyl salicylate	draft	salicylic acid phenyl ester
+phenylephrine	draft	metasynephrine
+phenylethyl alcohol	draft	benzyl ethyl alcohol
+phenylethyl alcohol	draft	beta-hydroxyethylbenzene
+phenylethyl alcohol	draft	hydroxyethylbenzene
+phenylethyl alcohol	draft	phenethyl alcohol
+phenylethyl alcohol	draft	phenyl ethyl alcohol
+phenylethyl alcohol	draft	phenylethanol
+phenylethyl resorcinol	draft	phenethyl resorcinol
+phenytoin	draft	diphenylhydantoin
+phosphoric acid	draft	orthophosphoric acid
+phosphoric acid	draft	white phosphoric acid
+physostigmine	draft	physostigmine salicylate
+phytic acid	draft	fytic acid
+phytic acid	draft	phytine
+pilocarpine	draft	pilocarpine hydrochloride
+pilocarpine	draft	pilocarpine nitrate
+pilocarpine	draft	pilokarpin
+pindolol	draft	betapindol
+piperonal	draft	piperonaldehyde
+piperonal	draft	piperonyl aldehyde
+piperonal	draft	piperonylaldehyde
+pitavastatin	draft	itavastatin
+pitolisant	draft	tiprolisant
+polycarbophil calcium	draft	calcium polycarbophil
+polydimethylsiloxane	draft	dimethicone
+polyethylene glycol	draft	polyethylene glycols
+polyethylene glycol	draft	polyethylene oxide
+polyethylene glycol	draft	polyoxyethylene
+potassium carbonate	draft	carbonate of potash
+potassium carbonate	draft	potash
+potassium cation	draft	potassium ion
+potassium cation	draft	potassium monocation
+potassium chloride	draft	chloride of potash
+potassium chloride	draft	monopotassium chloride
+potassium chloride	draft	muriate of potash
+potassium hydrogen carbonate	draft	monopotassium carbonate
+potassium hydrogen carbonate	draft	potassium acid carbonate
+potassium hydrogen carbonate	draft	potassium bicarbonate
+potassium hydroxide	draft	caustic potash
+potassium hydroxide	draft	potash lye
+potassium hydroxide	draft	potassium hydrate
+potassium metabisulfite	draft	dipotassium disulfite
+potassium metabisulfite	draft	dipotassium disulphite
+potassium metabisulfite	draft	potassium metabisulphite
+potassium metabisulfite	draft	potassium pyrosulfite
+potassium sorbate	draft	sorbic acid potassium salt
+potassium sulfate	draft	dipotassium sulfate
+potassium sulfate	draft	potassium sulphate
+povidone-iodine	draft	iodopovidone
+povidone-iodine	draft	polyvinylpyrrolidone-iodine
+povidone-iodine	draft	povidone iodine
+pramoxine	draft	pramocaine
+pravastatin	draft	pravastatin acid
+pravastatin	draft	pravastatin sodium
+prazosin	draft	prazosine
+prednisone	draft	prednison
+prilocaine	draft	prilocaine base
+procaine	draft	novocaine
+progesterone	draft	progesterol
+propane	draft	n-propane
+propanthelinium	draft	propantheline
+proparacaine	draft	proparacaine hydrochloride
+proparacaine	draft	proxymetacaine hydrochloride
+propionic acid	draft	ethanecarboxylic acid
+propionic acid	draft	ethylformic acid
+propionic acid	draft	metacetonic acid
+propionic acid	draft	methylacetic acid
+propionic acid	draft	propanoic acid
+propionic acid	draft	proprionic acid
+propionic acid	draft	pseudoacetic acid
+propranolol	draft	propranolol hydrochloride
+propylene	draft	methylethylene
+propylene oxide	draft	methyl ethylene oxide
+propylene oxide	draft	propene oxide
+propylparaben	draft	n-propyl paraben
+propylparaben	draft	propyl para-hydroxybenzoate
+propylparaben	draft	propyl paraben
+prostacyclin	draft	epoprostenol
+pyrantel	draft	pirantel
+pyrilamine	draft	mepiramine
+pyrilamine	draft	mepyramine maleate
+pyrilamine	draft	pyranisamine
+pyrilamine	draft	pyrilamine tannate
+pyrithione zinc	draft	zinc pyridinethione
+quercetin	draft	quercetol
+quinidine	draft	beta-quinine
+quinidine	draft	conquinine
+quinidine	draft	quinidine hydrochloride
+quinine	draft	chinine
+rac-salbutamol	draft	albuterol
+rac-warfarin	draft	warfarin
+rasburicase	draft	uricase
+relebactam	draft	relebactam anhydrous
+resorcin	draft	resorcinol
+resveratrol	draft	trans-resveratrol
+rifampicin	draft	rifampin
+risedronic acid	draft	risedronate sodium
+rizatriptan	draft	risatriptan
+saccharin	draft	saccharimide
+salicylamide	draft	o-hydroxybenzamide
+salicylamide	draft	salicylic acid amide
+salicylic acid	draft	o-hydroxybenzoic acid
+saxagliptin	draft	saxagliptin anhydrous
+selenious acid	draft	selenous acid
+selenium disulfide	draft	selenium disulphide
+selenium disulfide	draft	selenium sulfide
+selenium disulfide	draft	selenium sulphide
+serratiopeptidase	draft	serrapeptase
+silanetriol	draft	methyltrihydroxysilane
+silanetriol	draft	trihydroxymethylsilane
+silicon dioxide	draft	silica
+silicon dioxide	draft	silicic anhydride
+silicon dioxide	draft	silicon oxide
+silver oxide	draft	argentous oxide
+silver oxide	draft	silver monoxide
+sodium acetate trihydrate	draft	hydrated sodium acetate
+sodium acetate trihydrate	draft	sodium acetate hydrate
+sodium bicarbonate	draft	bicarbonate of soda
+sodium bicarbonate	draft	carbonic acid monosodium salt
+sodium bicarbonate	draft	monosodium carbonate
+sodium bicarbonate	draft	sodium acid carbonate
+sodium bicarbonate	draft	sodium hydrogen carbonate
+sodium bicarbonate	draft	sodium hydrogencarbonate
+sodium carbonate	draft	anhydrous sodium carbonate
+sodium carbonate	draft	disodium carbonate
+sodium carbonate	draft	sodium carbonate anhydrous
+sodium carbonate	draft	sodium salt of carbonic acid
+sodium chloride	draft	sodium chloride salt
+sodium chlorite	draft	chlorite sodium
+sodium fluoride	draft	sodium monofluoride
+sodium hydroxide	draft	sodium hydrate
+sodium ion	draft	sodium cation
+sodium metabisulfite	draft	disodium pyrosulfite
+sodium metabisulfite	draft	sodium metabisulphite
+sodium metabisulfite	draft	sodium pyrosulfite
+sodium metasilicate	draft	sodium polysilicate
+sodium metasilicate	draft	sodium sesquisilicate
+sodium metasilicate	draft	sodium silicate glass
+sodium metasilicate	draft	sodium siliconate
+sodium myristyl sulfate	draft	sodium tetradecyl sulfate
+sodium percarbonate	draft	sodium carbonate perhydrate
+sodium percarbonate	draft	sodium carbonate peroxide
+sodium percarbonate	draft	sodium carbonate peroxyhydrate
+sodium propionate hydrate	draft	sodium propanoate hydrate
+sodium propionate hydrate	draft	sodium propanoate monohydrate
+sodium propionate hydrate	draft	sodium propionate monohydrate
+sodium sulfate decahydrate	draft	disodium sulfate decahydrate
+sodium sulfate decahydrate	draft	sodium sulphate decahydrate
+sodium sulfite	draft	anhydrous sodium sulfite
+sodium sulfite	draft	dried sodium sulfite
+sodium sulfite	draft	sodium sulfite anhydrous
+sodium sulfite	draft	sodium sulphite
+sorafenib	draft	sorafenibum
+soybean oil	draft	soy bean oil
+spironolactone	draft	spironolattone
+spironolactone	draft	spirotone
+stannous chloride dihydrate	draft	dihydrated stannous chloride
+stannous chloride dihydrate	draft	stannous chloride hydrate
+stearamide amp	draft	stearoyl aminomethylpropanol
+stearyl alcohol	draft	n-octadecyl alcohol
+streptomycin	draft	streomycin
+styrene	draft	styrene monomer
+succimer	draft	meso-dimercaptosuccinic acid
+succinic acid	draft	butanedioic acid
+succinic acid	draft	butanedionic acid
+succinic acid	draft	dihydrofumaric acid
+succinic acid	draft	ethylenesuccinic acid
+succinylcholine	draft	dicholine succinate
+succinylcholine	draft	succinocholine
+succinylcholine	draft	succinoylcholine
+succinylcholine	draft	succinylbischoline
+succinylcholine	draft	succinyldicholine
+sufentanil	draft	sufentanil citrate
+sulfadiazine	draft	sulfadiazin
+sulfamethoxazole	draft	acetylsulfamethoxazole
+sulfamethoxazole	draft	sulphamethoxazole
+sulfamethoxazole	draft	suphamethoxazole
+sulfate ion	draft	sulphate ion
+sulfathiazole	draft	sulfthiazole
+sulfur dioxide	draft	sulfur oxide
+sulfur dioxide	draft	sulfurous acid anhydride
+sulfur dioxide	draft	sulfurous anhydride
+sulfur dioxide	draft	sulfurous oxide
+sulfur dioxide	draft	sulphur dioxide
+sulfur hexafluoride	draft	hexafluoridosulfur
+sulfur hexafluoride	draft	sulfur fluoride
+sulfur hexafluoride	draft	sulphur hexafluoride
+sulfuric acid	draft	sulphuric acid
+sulfuric acid	draft	vitriolic acid
+sumatriptan	draft	triptan
+tacrolimus	draft	anhydrous tacrolimus
+tacrolimus	draft	tacrolimus anhydrous
+tafamidis	draft	tafamidisum
+taurine	draft	tauric acid
+tert-butyl alcohol	draft	t-butyl alcohol
+tert-butyl alcohol	draft	tert-butanol
+tetracycline	draft	tetracyclines
+tetrahydrocannabinol	draft	dronabinolen
+theophylline monohydrate	draft	theophylline
+thiomersal	draft	thiomersalate
+thioridazine	draft	thioridazin
+thiosulfate ion	draft	sulfanidesulfonate
+thiosulfate ion	draft	thiosulphate
+thiosulfate ion	draft	thiosulphate ion
+thonzylamine	draft	neohetramine
+thymol	draft	m-thymol
+thyrotropin alfa	draft	thyrotrophin-alfa
+tiagabine	draft	tiagabine hydrochloride
+tobramycin	draft	nebramycin
+tocilizumab	draft	atlizumab
+tocofersolan	draft	tocophersolan
+tofacitinib	draft	tasocitinib
+tolmetin	draft	tolmetina
+torasemide	draft	torsemide
+trametinib	draft	trametinib dimethyl sulfoxide
+trandolapril	draft	indolapril
+tranexamic acid	draft	tranexmic acid
+tranylcypromine	draft	rac-tranylcypromine
+tranylcypromine	draft	racemic tranylcypromine
+treosulfan	draft	threosulphan
+treosulfan	draft	treosulphan
+treosulfan	draft	tresulfan
+tri-N-butyl phosphate	draft	butyl phosphate
+tri-N-butyl phosphate	draft	phosphoric acid tributyl ester
+tri-N-butyl phosphate	draft	tributyl ester of phosphoric acid
+triacetin	draft	glycerin triacetate
+triamcinolone	draft	fluoxiprednisolone
+triamcinolone	draft	fluoxyprednisolone
+tribasic potassium phosphate	draft	potassium phosphate
+tribasic potassium phosphate	draft	tripotassium phosphate
+tribehenin	draft	glycerol tribehenate
+tribehenin	draft	glyceryl tribehenate
+tricaine	draft	metacaine
+tricalcium phosphate	draft	bone phosphate of lime
+tricalcium phosphate	draft	calcium orthophosphate
+tricalcium phosphate	draft	calcium phosphate
+tricalcium phosphate	draft	calcium phosphate tribasic
+tricalcium phosphate	draft	tertiary calcium phosphate
+tricalcium phosphate	draft	tribasic calcium phosphate
+tricalcium phosphate	draft	tricalcium orthophosphate
+tridecane	draft	n-tridecane
+triethylene glycol	draft	triglycol
+triethylenetetramine	draft	triethylene tetramine
+trifluoperazine	draft	trifluoperazine hydrochloride
+trifluridine	draft	trifluorothymidine
+trifluridine	draft	trifluorothymine deoxyriboside
+triiodothyronine	draft	liothyronine
+triiodothyronine	draft	liothyronine sodium
+trimagnesium dicitrate	draft	magnesium citrate
+trimagnesium dicitrate	draft	magnesium dicitrate
+trimagnesium dicitrate	draft	trimagnesium citrate
+trimethobenzamide	draft	trimethobenzamide hydrochloride
+trimipramine	draft	beta-methylimipramine
+trimyristin	draft	trimyristoylglycerol
+triptorelin	draft	triptorelina
+triptorelin	draft	triptoreline
+triptorelin	draft	triptorelinum
+trolamine	draft	triethanolamine
+tromethamine	draft	trometamol
+ultramarine	draft	dark ultramarine blue
+ultramarine	draft	ultramarine blue
+undecane	draft	hendecane
+undecane	draft	n-undecane
+undecylenic acid	draft	omega-hendecenoic acid
+undecylenic acid	draft	omega-undecenoic acid
+undecylenic acid	draft	undecelinic acid
+vanillin	draft	p-vanillin
+vanillin	draft	vanilla
+vidarabine monohydrate	draft	vidarabine
+vincristine	draft	kyocristine
+vincristine	draft	leurocristine
+vincristine	draft	leurocristine sulfate
+vinyl acetate	draft	vinyl acetate monomer
+vinyl acetate	draft	vinyl ethanoate
+voretigene neparvovec	draft	voretigene neparvovec-rzyl
+vortioxetine	draft	vortioxetinum
+water	draft	pure water
+xylitol	draft	xylite
+xylometazoline	draft	xylomethazoline
+yohimbine	draft	yohimbic acid methyl ester
+yohimbine	draft	yohimbin
+zeaxanthin	draft	anchovyxanthin
+zeaxanthin	draft	zeaxanthins
+zeaxanthin	draft	zeaxanthol
+zinc chloride	draft	dichlorozinc
+zinc chloride	draft	zinc dichloride
+zinc glycinate	draft	zinc bisglycinate
+zoledronic acid monohydrate	draft	zoladrona acid mylan
+zoledronic acid monohydrate	draft	zoledronate hydrate
+zoledronic acid monohydrate	draft	zoledronic
+zoledronic acid monohydrate	draft	zoledronic acid hydrate
