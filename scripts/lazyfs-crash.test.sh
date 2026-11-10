@@ -8,6 +8,8 @@
 # lazyfs_crash logs the writes and fsyncs LazyFS would, and fires a fault by
 # sending that SIGUSR1. Nothing touches a real mount or device.
 #
+#   0. check_left, which checks every run below, counts a zombie as gone
+#      and fails on, and kills, a process that is still running.
 #   1. An option without its value, and a bad value, fail with status 2 and
 #      say which option, before anything is built.
 #   2. A LazyFS that can't do RENAME_NOREPLACE fails with status 2 before
@@ -29,7 +31,7 @@
 # LAZYFS_CRASH_SH names the script to test (default: lazyfs-crash.sh next to
 # this one), so a deliberately broken copy can be checked to fail.
 #
-# Requires: bash, coreutils, awk, sed, grep, mkfifo.
+# Requires: Linux (/proc), bash, coreutils, awk, sed, grep, mkfifo.
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -40,7 +42,7 @@ dir=$(mktemp -d)
 # shellcheck disable=SC2329 # run by the EXIT trap
 cleanup() {
   local pid
-  cat "$dir"/state/*.pids "$dir"/decoy-state/*.pids 2>/dev/null | while read -r pid; do
+  cat "$dir"/state/*.pids "$dir"/decoy-state/*.pids "$dir"/self-holders.pids 2>/dev/null | while read -r pid; do
     kill -9 "$pid" 2>/dev/null || true
   done || true
   rm -rf "$dir"
@@ -255,18 +257,41 @@ done
   exit 2
 }
 
+# proc_state PID: the state letter in /proc/PID/stat (R, S, Z, ...), or
+# nothing once the process is gone. The command name before it is in
+# parentheses and may hold spaces and parentheses, so the state is the first
+# field after the last ") ".
+proc_state() {
+  local stat
+  { read -r stat <"/proc/$1/stat"; } 2>/dev/null || return 0
+  stat=${stat##*) }
+  echo "${stat%% *}"
+}
+
+# running PID: PID is a process that hasn't exited. kill -0 also succeeds on
+# a zombie (state Z, or X while it's being reaped), which stays until its
+# parent reaps it; a stand-in the run killed is orphaned, and where its new
+# parent never reaps (PID 1 of a PID namespace that doesn't), it stays a
+# zombie for good.
+running() {
+  local state
+  kill -0 "$1" 2>/dev/null || return 1
+  state=$(proc_state "$1")
+  [[ -n $state && $state != [ZX] ]]
+}
+
 # check_left NAME: nothing the run started is still running (whatever is
 # gets killed, by its PID), and the decoys are untouched.
 check_left() {
   local name=$1 pid
   while read -r pid; do
-    if kill -0 "$pid" 2>/dev/null; then
+    if running "$pid"; then
       fail "$name: left PID $pid running: $(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null)"
       kill -9 "$pid" 2>/dev/null || true
     fi
   done < <(cat "$FAKE_STATE"/*.pids 2>/dev/null)
-  kill -0 "$decoy_lazyfs" 2>/dev/null || fail "$name: killed a LazyFS it didn't start"
-  kill -0 "$decoy_writer" 2>/dev/null || fail "$name: killed a writer it didn't start"
+  running "$decoy_lazyfs" || fail "$name: killed a LazyFS it didn't start"
+  running "$decoy_writer" || fail "$name: killed a writer it didn't start"
   [[ -e $decoy/mnt/.fake-mounted ]] || fail "$name: unmounted a LazyFS it didn't mount"
   [[ -d $decoy/rec ]] || fail "$name: removed a directory it didn't make"
   if grep -v " $scratch/nota-lazyfs\.[A-Za-z0-9]\{6\}/[a-z0-9-]*/mnt\$" "$FAKE_STATE/fusermount.log" \
@@ -274,6 +299,57 @@ check_left() {
     fail "$name: unmounted something outside its work directory: $(cat "$dir/stray")"
   fi
 }
+
+# 0. check_left itself, against a PID file holding a zombie and then a live
+# process, each run so that its failures are its own. The zombie is
+# a short sleep started by a shell that then becomes a long sleep: the short
+# one exits after the exec (a shell about to exec reaps a child that has
+# already exited), and the long sleep never reaps it.
+self_state=$dir/self-state
+# check_left_alone NAME: check_left against $self_state's PID files,
+# returning the status its failures set and leaving the suite's alone (bash
+# scopes locals dynamically, so fail sets this function's status).
+check_left_alone() {
+  local FAKE_STATE=$self_state status=0
+  check_left "$1"
+  return "$status"
+}
+mkdir "$self_state"
+bash -c 'sleep 0.2 & echo $! >"$1"; exec sleep 60' _ "$self_state/zombie" &
+holder=$!
+disown "$holder"
+echo "$holder" >>"$dir/self-holders.pids"
+zombie=
+for _ in $(seq 200); do
+  [[ ! -s $self_state/zombie ]] || zombie=$(<"$self_state/zombie")
+  [[ -z $zombie || $(proc_state "$zombie") != Z ]] || break
+  sleep 0.05
+done
+if [[ -n $zombie && $(proc_state "$zombie") == Z ]]; then
+  echo "$zombie" >"$self_state/run.pids"
+  code=0
+  check_left_alone zombie 2>"$dir/self-zombie.err" || code=$?
+  [[ $code -eq 0 && ! -s $dir/self-zombie.err ]] ||
+    fail "check_left counted zombie PID $zombie as running (status $code): $(cat "$dir/self-zombie.err")"
+else
+  fail "check_left self-test: no zombie to check it against"
+fi
+sleep 60 &
+live=$!
+disown "$live"
+echo "$live" >>"$dir/self-holders.pids"
+echo "$live" >"$self_state/run.pids"
+code=0
+check_left_alone live 2>"$dir/self-live.err" || code=$?
+if [[ $code -ne 1 ]] || ! grep -qF "live: left PID $live running: sleep 60" "$dir/self-live.err"; then
+  fail "check_left passed live PID $live (status $code): $(cat "$dir/self-live.err")"
+fi
+for _ in $(seq 40); do
+  running "$live" || break
+  sleep 0.05
+done
+! running "$live" || fail "check_left left live PID $live running"
+kill -9 "$live" "$holder" 2>/dev/null || true
 
 # run NAME ARGS...: runs the script copy with the stand-ins and ARGS, from a
 # fresh state, leaving its status in $code and its output in $dir/NAME.out
