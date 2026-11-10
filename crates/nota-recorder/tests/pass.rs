@@ -375,8 +375,9 @@ fn a_pass_that_gets_no_answers_gives_up() {
 fn a_missing_engine_program_ends_the_pass_at_once_with_why() {
     let mut config = config(&["echo"]);
     config.engine.command.program = PathBuf::from("/nonexistent/nota-engine");
-    // Far beyond the test's run: only the early end can end it in time.
-    config.stall = Duration::from_mins(10);
+    // Far beyond the early end's few milliseconds, so only it ends the
+    // pass with this result; without it the pass stalls at 30 s instead.
+    config.stall = Duration::from_secs(30);
     let mut sink = Committed::default();
     let why = format!("couldn't start: {}", std::io::Error::from_raw_os_error(2));
     match run(&config, &mut sink, &|| false) {
@@ -411,8 +412,9 @@ fn exits_at_start(config: &mut PassConfig) {
 fn an_engine_that_exits_at_start_three_times_ends_the_pass_with_its_last_error() {
     let mut config = config(&[]);
     exits_at_start(&mut config);
-    // Far beyond the test's run: only the early end can end it in time.
-    config.stall = Duration::from_mins(10);
+    // Far beyond the early end's few milliseconds, so only it ends the
+    // pass with this result; without it the pass stalls at 30 s instead.
+    config.stall = Duration::from_secs(30);
     let mut sink = Committed::default();
     let why = "exited (exit status: 1): nota engine asr: no model at /m";
     match run(&config, &mut sink, &|| false) {

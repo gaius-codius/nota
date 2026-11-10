@@ -107,12 +107,13 @@ pub struct PassConfig {
 impl PassConfig {
     /// The final pass with the engine `command` (which cuts at 25 s):
     /// frames of 1 s, up to 60 s ahead, and a pass given up after 10
-    /// minutes without progress (sooner if the engine can't start). Each request may take 60 s; a track is
-    /// flushed only at the end of each of its runs, never for want of
-    /// audio; 25 s (one chunk) is skipped when engines keep failing on it;
-    /// and the engine is killed at once when the pass ends: a pass that's
-    /// done has nothing left to confirm, and one that's stopped (for a
-    /// recording) wouldn't use what it confirmed.
+    /// minutes without progress (sooner if the engine can't start).
+    /// Each request may take 60 s; a track is flushed only at the end of
+    /// each of its runs, never for want of audio; 25 s (one chunk) is
+    /// skipped when engines keep failing on it; and the engine is killed
+    /// at once when the pass ends: a pass that's done has nothing left to
+    /// confirm, and one that's stopped (for a recording) wouldn't use what
+    /// it confirmed.
     #[must_use]
     pub fn final_pass(command: EngineCommand) -> Self {
         let mut engine = EngineConfig::new(command);
