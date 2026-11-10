@@ -22,7 +22,7 @@ jobs:
     # rust-ci; their checks are "rust / lint", "rust / test", "rust / deps",
     # "rust / workflows" and "rust / secrets". nota's own steps go in through
     # the inputs.
-    uses: gaius-codius/rust-ci/.github/workflows/rust.yml@41d21ad47d40540d976178548e3e258bd93a7038 # v4.1.0
+    uses: gaius-codius/rust-ci/.github/workflows/rust.yml@a49205aa3a8ad3742e23432837200950f67d3f05 # v4.2.0
     with:
       # The native build dependencies (after which the package lists are
       # fresh), and the sherpa-onnx libraries from the archive pinned by
@@ -140,7 +140,7 @@ jobs:
         working-directory: fuzz
 
   mutants-shard:
-    # Every mutant of the lines this PR changes in the core and recorder
+    # Every mutant of the lines this PR changes in the core, recorder and checks
     # crates must be caught by a test. A missed or timed-out mutant fails.
     # The mutants are dealt out round-robin to five shards that run side by
     # side; the job below gathers the results. Round-robin, not cargo-mutants'
@@ -214,7 +214,7 @@ jobs:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: prlimit --as=1073741824 --
         run: >-
           cargo mutants --in-diff "$RUNNER_TEMP/pr.diff"
-          -p nota-core -p nota-recorder
+          -p nota-core -p nota-recorder -p nota-checks
           --shard "$SHARD/$SHARDS" --sharding round-robin
           --test-tool nextest --jobs 2 --output "$RUNNER_TEMP"
       - if: failure() && steps.rust.outputs.changed == 'true'

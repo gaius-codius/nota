@@ -76,7 +76,10 @@ enum Then {
     UntilStopped,
     /// Runs out of space.
     NoSpace,
+    /// Finds it has no engine.
     NoEngine,
+    /// Its engine couldn't start or stopped working, for this reason.
+    EngineDown(&'static str),
 }
 
 /// A worker that does as told per session, and notes each run.
@@ -117,6 +120,7 @@ impl Worker for Fake {
             Then::Done => JobEnd::Done,
             Then::Fail => JobEnd::Failed("it broke".into()),
             Then::NoEngine => JobEnd::Waiting(Some(Wait::Engine)),
+            Then::EngineDown(why) => JobEnd::EngineDown(why.into()),
             Then::NoSpace => JobEnd::Waiting(Some(Wait::Space)),
             Then::UntilStopped => {
                 while !(running.stop)() {
@@ -401,6 +405,27 @@ fn a_job_without_an_engine_waits_for_one() {
     assert!(worker.ran().is_empty());
 }
 
+/// A job whose engine failed, found by a nota with no engine at all,
+/// waits for one without the old reason, which no longer says why.
+#[test]
+fn a_missing_engine_replaces_an_old_engine_failure() {
+    let (dir, db) = library("engine-stale", &[(S1, None)]);
+    // An earlier run's engine failed.
+    let id = db.with(|db| db.jobs()).unwrap()[0].id;
+    db.with(|db| {
+        db.start_job(id)?;
+        db.end_job(id, &JobEnd::EngineDown("exited: no model".into()))
+    })
+    .unwrap();
+    let worker = Fake {
+        no_engine: true,
+        ..Fake::default()
+    };
+    let _runner = spawn(&dir, &db, &worker, &Switch::default(), &Switch::on());
+    until_states(&db, &[(S1, JobState::Waiting(Some(Wait::Engine)))]);
+    assert!(worker.ran().is_empty());
+}
+
 /// A job waiting for space keeps that wait while nota has no engine
 /// either, so a nota with one later still checks for room first.
 #[test]
@@ -434,7 +459,7 @@ fn an_engine_startup_failure_does_not_hold_up_other_sessions() {
     // The first session waits for an engine that could not start.
     let (_dir, db) = library("engine-next", &[(S1, None), (S2, None)]);
     let worker = Fake::default();
-    worker.script(S1, &[Then::NoEngine]);
+    worker.script(S1, &[Then::EngineDown("couldn't start")]);
     let clock = Arc::new(nota_core::FakeClock::new(SessionTime::ZERO));
     let mut runner = loop_with_clock(&db, &worker, &clock);
     let job = runner.next().unwrap().unwrap();
@@ -446,36 +471,39 @@ fn an_engine_startup_failure_does_not_hold_up_other_sessions() {
     assert_eq!(
         states(&db),
         [
-            (S1, JobState::Waiting(Some(Wait::Engine))),
+            (S1, JobState::EngineDown("couldn't start".into())),
             (S2, JobState::Done)
         ],
     );
     assert_eq!(worker.ran(), [S1, S2]);
 }
 
-/// Wakes cannot retry an engine until the supplied clock reaches the limit.
+/// Wakes cannot retry an engine until the supplied clock reaches the limit,
+/// whether the run found its engine down or found it had none.
 #[test]
 fn engine_startup_retries_wait_one_idle_interval_and_then_finish() {
-    // Keep time still so waking the runner cannot shorten the wait.
-    let (_dir, db) = library("engine-retry", &[(S1, None)]);
-    let worker = Fake::default();
-    worker.script(S1, &[Then::NoEngine, Then::Done]);
-    let clock = Arc::new(nota_core::FakeClock::new(SessionTime::ZERO));
-    let mut runner = loop_with_clock(&db, &worker, &clock);
-    let job = runner.next().unwrap().unwrap();
-    runner.run_one(&job);
-    for _ in 0..10 {
-        runner.shared.wake();
+    for first in [Then::EngineDown("couldn't start"), Then::NoEngine] {
+        // Keep time still so waking the runner cannot shorten the wait.
+        let (_dir, db) = library("engine-retry", &[(S1, None)]);
+        let worker = Fake::default();
+        worker.script(S1, &[first, Then::Done]);
+        let clock = Arc::new(nota_core::FakeClock::new(SessionTime::ZERO));
+        let mut runner = loop_with_clock(&db, &worker, &clock);
+        let job = runner.next().unwrap().unwrap();
+        runner.run_one(&job);
+        for _ in 0..10 {
+            runner.shared.wake();
+            assert!(runner.next().unwrap().is_none());
+        }
+        // Check both sides of the limit, to the nanosecond.
+        clock.advance(Duration::from_nanos(4_999_999_999));
         assert!(runner.next().unwrap().is_none());
+        clock.advance(Duration::from_nanos(1));
+        let job = runner.next().unwrap().unwrap();
+        runner.run_one(&job);
+        assert_eq!(states(&db), [(S1, JobState::Done)]);
+        assert_eq!(worker.ran(), [S1, S1]);
     }
-    // Check both sides of the limit, to the nanosecond.
-    clock.advance(Duration::from_nanos(4_999_999_999));
-    assert!(runner.next().unwrap().is_none());
-    clock.advance(Duration::from_nanos(1));
-    let job = runner.next().unwrap().unwrap();
-    runner.run_one(&job);
-    assert_eq!(states(&db), [(S1, JobState::Done)]);
-    assert_eq!(worker.ran(), [S1, S1]);
 }
 
 /// A runner loop using time the test can advance.

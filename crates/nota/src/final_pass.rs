@@ -138,13 +138,15 @@ fn final_pass(
     pass_end(ended)
 }
 
-/// Engine failures keep committed text and wait for a working engine.
+/// Engine failures keep committed text and wait for a working engine,
+/// with the reason the pass gives, so Processing can tell a nota that
+/// can't be started from a model that doesn't load.
 fn pass_end(ended: PassEnd<StoreError>) -> JobEnd {
     match ended {
         PassEnd::Done => JobEnd::Done,
         PassEnd::Stopped => JobEnd::Waiting(None),
         PassEnd::Sink(e) => stored(&e),
-        PassEnd::Stalled(_) | PassEnd::Engine(_) => JobEnd::Waiting(Some(Wait::Engine)),
+        down @ (PassEnd::Stalled(_) | PassEnd::Engine(_)) => JobEnd::EngineDown(down.to_string()),
     }
 }
 
@@ -185,6 +187,10 @@ struct Stored<'a> {
     /// Each track's published samples, and how far the pass has got.
     tracks: BTreeMap<TrackId, (Vec<SampleRange>, SampleIndex)>,
     report: &'a dyn Fn(Progress),
+    /// Tells the runner the engine has answered.
+    answered: &'a dyn Fn(),
+    /// Whether it has been told yet: once is enough.
+    told: bool,
 }
 
 impl<'a> Stored<'a> {
@@ -207,6 +213,8 @@ impl<'a> Stored<'a> {
                 })
                 .collect(),
             report: running.progress,
+            answered: running.answered,
+            told: false,
         }
     }
 
@@ -235,6 +243,9 @@ impl PassSink for Stored<'_> {
         texts: Vec<Transcript>,
         skipped: Vec<SampleRange>,
     ) -> Result<(), StoreError> {
+        // With nothing skipped, the engine itself confirmed this audio:
+        // it works, whatever stopped an earlier run.
+        let engine_answered = skipped.is_empty();
         let heard = texts.into_iter().map(|text| {
             let range = text.range();
             let (text, words) = text.into_text_and_words();
@@ -267,6 +278,10 @@ impl PassSink for Stored<'_> {
             *done = (*done).max(up_to);
         }
         (self.report)(self.progress());
+        if engine_answered && !self.told {
+            (self.answered)();
+            self.told = true;
+        }
         Ok(())
     }
 }

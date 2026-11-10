@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 
 use nota_core::{EpochId, SystemClock};
+use nota_recorder::engine::OfflineReason;
 use nota_recorder::fs::Fs as _;
 use nota_store::{JobState, NewSession, Sha256Digest};
 
@@ -124,6 +125,7 @@ fn confirmed_text_is_stored_with_its_progress() {
     let running = Running {
         stop: &stop,
         progress: &report,
+        answered: &|| {},
     };
     let mut sink = Stored::new(db.clone(), SESSION, heard_by(), &tracks, &running);
     assert_eq!(
@@ -172,6 +174,32 @@ fn confirmed_text_is_stored_with_its_progress() {
     );
 }
 
+/// The runner hears once that the engine answered, at the first audio the
+/// engine itself confirms; audio skipped without it says nothing.
+#[test]
+fn the_first_engine_confirmation_says_the_engine_answered() {
+    let dir = TestDir::new("answered");
+    let db = db(&dir);
+    let tracks = tracks(vec![row(MIC, 0, 300)], &BTreeMap::new());
+    let told = RefCell::new(0);
+    let answered = || *told.borrow_mut() += 1;
+    let stop = || false;
+    let running = Running {
+        stop: &stop,
+        progress: &|_| {},
+        answered: &answered,
+    };
+    let mut sink = Stored::new(db, SESSION, heard_by(), &tracks, &running);
+    // Skipped audio (unreadable, or dropped while the engine was down)
+    // proves nothing about the engine.
+    sink.confirmed(MIC, s(100), vec![], vec![range(0, 100)])
+        .unwrap();
+    assert_eq!(*told.borrow(), 0);
+    sink.confirmed(MIC, s(200), vec![], vec![]).unwrap();
+    sink.confirmed(MIC, s(300), vec![], vec![]).unwrap();
+    assert_eq!(*told.borrow(), 1);
+}
+
 /// Acceptance: a final pass run again over a session's stored chunks (its
 /// progress lost, so from the start) leaves them, and the session's one
 /// revision, unchanged: the same text again stores nothing, and other text
@@ -186,6 +214,7 @@ fn a_rerun_over_stored_chunks_leaves_them_unchanged() {
     let running = Running {
         stop: &stop,
         progress: &report,
+        answered: &|| {},
     };
     let heard = |text: &str| Transcript::new(MIC, range(0, 80), text.into()).unwrap();
     Stored::new(db.clone(), SESSION, heard_by(), &tracks, &running)
@@ -233,6 +262,7 @@ fn without_an_engine_the_final_pass_waits_for_one() {
     let running = Running {
         stop: &stop,
         progress: &progress,
+        answered: &|| {},
     };
     assert_eq!(
         jobs.run(&job, &running),
@@ -297,21 +327,100 @@ fn the_final_pass_waits_for_journals_to_be_published() {
     assert_eq!(jobs.lacks(&job), None);
 }
 
+/// The engine's spawn failure as the supervisor reports it when nota's
+/// executable is gone.
+fn missing_executable() -> OfflineReason {
+    OfflineReason::SpawnFailed(std::io::Error::from_raw_os_error(2).to_string())
+}
+
+/// The engine's exit as the supervisor reports it when its model doesn't
+/// load: the last line of its stderr.
+fn broken_model() -> OfflineReason {
+    OfflineReason::Exited {
+        status: None,
+        stderr: "loading\nnota engine asr: the model at /m is not a model".into(),
+    }
+}
+
+/// Acceptance: an engine that can't start or answer leaves the pass
+/// waiting for a working one, with a reason that tells a missing
+/// executable from a broken model.
 #[test]
-fn an_engine_that_cant_start_or_answer_waits_for_a_working_one() {
-    let failed = PassEnd::Engine(std::io::Error::new(
-        std::io::ErrorKind::NotFound,
-        "missing engine",
-    ));
-    assert_eq!(pass_end(failed), JobEnd::Waiting(Some(Wait::Engine)));
+fn an_engine_that_cant_start_or_answer_waits_with_its_reason() {
+    let missing = pass_end(PassEnd::Stalled(Some(missing_executable().to_string())));
+    let broken = pass_end(PassEnd::Stalled(Some(broken_model().to_string())));
     assert_eq!(
-        pass_end(PassEnd::Stalled(Some("broken model".into()))),
-        JobEnd::Waiting(Some(Wait::Engine))
+        missing,
+        JobEnd::EngineDown(format!(
+            "the transcriber stopped working: couldn't start: {}",
+            std::io::Error::from_raw_os_error(2)
+        ))
+    );
+    assert_eq!(
+        broken,
+        JobEnd::EngineDown(
+            "the transcriber stopped working: exited: \
+             nota engine asr: the model at /m is not a model"
+                .into()
+        )
     );
     assert_eq!(
         pass_end(PassEnd::Stalled(None)),
-        JobEnd::Waiting(Some(Wait::Engine))
+        JobEnd::EngineDown("the transcriber stopped answering".into())
+    );
+    // The supervisor's own thread failing to start has its own wording.
+    let failed = PassEnd::Engine(std::io::Error::new(
+        std::io::ErrorKind::OutOfMemory,
+        "no threads",
+    ));
+    assert_eq!(
+        pass_end(failed),
+        JobEnd::EngineDown("the transcriber couldn't be started: no threads".into())
     );
     assert_eq!(pass_end(PassEnd::Done), JobEnd::Done);
     assert_eq!(pass_end(PassEnd::Stopped), JobEnd::Waiting(None));
+}
+
+/// Acceptance: the two reasons stay apart once stored, while the job
+/// waits to run again.
+#[test]
+fn a_missing_executable_and_a_broken_model_are_stored_apart() {
+    let dir = TestDir::new("engine-reasons");
+    let library = Library::open(&dir.0).unwrap();
+    let db = library.db();
+    for reason in [missing_executable(), broken_model()] {
+        let paths = library.create().unwrap();
+        db.with(|db| {
+            db.create_session(&NewSession::bare(paths.id))?;
+            db.finish_recording(paths.id, None)
+        })
+        .unwrap();
+        let job = db.with(|db| db.session_jobs(paths.id)).unwrap().remove(0);
+        let end = pass_end(PassEnd::Stalled(Some(reason.to_string())));
+        db.with(|db| {
+            db.start_job(job.id)?;
+            db.end_job(job.id, &end)
+        })
+        .unwrap();
+    }
+    let states: Vec<JobState> = db
+        .with(|db| db.jobs())
+        .unwrap()
+        .into_iter()
+        .map(|job| job.state)
+        .collect();
+    assert_eq!(
+        states,
+        [
+            JobState::EngineDown(format!(
+                "the transcriber stopped working: couldn't start: {}",
+                std::io::Error::from_raw_os_error(2)
+            )),
+            JobState::EngineDown(
+                "the transcriber stopped working: exited: \
+                 nota engine asr: the model at /m is not a model"
+                    .into()
+            ),
+        ]
+    );
 }
