@@ -258,18 +258,16 @@ fn round_to(x: f64, digits: i32) -> f64 {
 pub(crate) fn tokens(text: &str) -> Vec<String> {
     let chars: Vec<char> = text.chars().flat_map(char::to_lowercase).collect();
     let mut out = Vec::new();
-    let mut from = 0;
+    let mut rest: &[char] = &chars;
     // Each token starts at the next word character; anything else between
     // tokens, an apostrophe after an elision included, is passed over.
-    while let Some(i) = (from..chars.len()).find(|&k| is_word(chars[k])) {
-        if let Some(len) = elision(&chars[i..]) {
-            out.push(chars[i..i + len].iter().collect());
-            from = i + len;
-        } else {
-            let end = word_end(&chars, i);
-            out.push(chars[i..end].iter().collect());
-            from = end;
-        }
+    // Every pass takes at least one character, so the loop always ends.
+    while let Some(start) = rest.iter().position(|&c| is_word(c)) {
+        rest = &rest[start..];
+        let len = elision(rest).unwrap_or_else(|| word_len(rest));
+        let (token, tail) = rest.split_at(len.clamp(1, rest.len()));
+        out.push(token.iter().collect());
+        rest = tail;
     }
     out
 }
@@ -296,20 +294,19 @@ fn elision(rest: &[char]) -> Option<usize> {
     })
 }
 
-/// Where the word starting at `start` ends: the first break between
-/// characters that Unicode's word rules allow there.
-fn word_end(chars: &[char], start: usize) -> usize {
+/// The length of the word at the start of `word`, which starts on a word
+/// character: up to the first break that Unicode's word rules allow there.
+fn word_len(word: &[char]) -> usize {
     // A word character, or an apostrophe that joins its neighbours, goes on
-    // the word; the first of anything else ends it. The caller starts on a
-    // word character, so `start` itself never ends it.
-    (start..chars.len())
+    // the word; the first of anything else ends it.
+    (0..word.len())
         .find(|&k| {
-            let joined = chars[k] == '\''
+            let joined = word[k] == '\''
                 && k.checked_sub(1)
-                    .is_some_and(|before| joins(chars[before], chars.get(k + 1).copied()));
-            !is_word(chars[k]) && !joined
+                    .is_some_and(|before| joins(word[before], word.get(k + 1).copied()));
+            !is_word(word[k]) && !joined
         })
-        .unwrap_or(chars.len())
+        .unwrap_or(word.len())
 }
 
 /// Whether an apostrophe between `before` and `after` stays inside a word:
