@@ -126,6 +126,7 @@ fn confirmed_text_is_stored_with_its_progress() {
         stop: &stop,
         progress: &report,
         answered: &|| {},
+        engine_down: &|_| {},
     };
     let mut sink = Stored::new(db.clone(), SESSION, heard_by(), &tracks, &running);
     assert_eq!(
@@ -188,6 +189,7 @@ fn the_first_engine_confirmation_says_the_engine_answered() {
         stop: &stop,
         progress: &|_| {},
         answered: &answered,
+        engine_down: &|_| {},
     };
     let mut sink = Stored::new(db, SESSION, heard_by(), &tracks, &running);
     // Skipped audio (unreadable, or dropped while the engine was down)
@@ -198,6 +200,34 @@ fn the_first_engine_confirmation_says_the_engine_answered() {
     sink.confirmed(MIC, s(200), vec![], vec![]).unwrap();
     sink.confirmed(MIC, s(300), vec![], vec![]).unwrap();
     assert_eq!(*told.borrow(), 1);
+}
+
+/// The runner hears why the engine is down as the pass does, and that
+/// it's back, in order, while the pass runs.
+#[test]
+fn the_runner_hears_why_the_engine_is_down_while_the_pass_runs() {
+    let dir = TestDir::new("engine-down");
+    let db = db(&dir);
+    let tracks = tracks(vec![row(MIC, 0, 300)], &BTreeMap::new());
+    let heard = RefCell::new(Vec::new());
+    let engine_down = |why: Option<&str>| heard.borrow_mut().push(why.map(str::to_owned));
+    let stop = || false;
+    let running = Running {
+        stop: &stop,
+        progress: &|_| {},
+        answered: &|| {},
+        engine_down: &engine_down,
+    };
+    let mut sink = Stored::new(db, SESSION, heard_by(), &tracks, &running);
+    sink.engine_down(Some("the transcriber stopped working: couldn't start"));
+    sink.engine_down(None);
+    assert_eq!(
+        *heard.borrow(),
+        [
+            Some("the transcriber stopped working: couldn't start".to_owned()),
+            None
+        ]
+    );
 }
 
 /// Acceptance: a final pass run again over a session's stored chunks (its
@@ -215,6 +245,7 @@ fn a_rerun_over_stored_chunks_leaves_them_unchanged() {
         stop: &stop,
         progress: &report,
         answered: &|| {},
+        engine_down: &|_| {},
     };
     let heard = |text: &str| Transcript::new(MIC, range(0, 80), text.into()).unwrap();
     Stored::new(db.clone(), SESSION, heard_by(), &tracks, &running)
@@ -263,6 +294,7 @@ fn without_an_engine_the_final_pass_waits_for_one() {
         stop: &stop,
         progress: &progress,
         answered: &|| {},
+        engine_down: &|_| {},
     };
     assert_eq!(
         jobs.run(&job, &running),

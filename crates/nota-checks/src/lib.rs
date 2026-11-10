@@ -9,6 +9,8 @@
 //! to the bench's decisions (the code checks spec, "Principles").
 //!
 //! - C1, letter similarity: [`letter_similarity`].
+//! - C2, the candidate gate: [`gate()`], whose [`AppliedFix`] is the only way
+//!   a fix is applied.
 //! - C4, the term lookup: [`Lookup`], with a [`Language`]'s rules
 //!   ([`English`]).
 //!
@@ -36,12 +38,16 @@
 //! # Ok::<(), nota_checks::WordListError>(())
 //! ```
 
+mod gate;
 mod language;
 mod lookup;
 mod phonetic;
 mod similarity;
 mod words;
 
+pub use gate::{
+    AppliedFix, Decision, Gated, Offered, Proposal, Rejection, SIMILARITY_MIN, Verdict, gate,
+};
 pub use language::{English, Language};
 pub use lookup::{
     Bar, COMMON_ZIPF, Candidate, EVERYDAY_ZIPF, FUNCTION_ZIPF, KEEP, KEEP_RARE, LENGTH_SLACK,
