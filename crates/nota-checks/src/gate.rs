@@ -35,14 +35,18 @@
 //!
 //! What it shares with the bench, which callers should know:
 //! - A word boundary is the edge of the chunk or a character other than an
-//!   ASCII letter, digit or `'`; so "up" is found in "follow-up".
+//!   ASCII letter, digit or `'` (or `İ`, `ı`, `ſ` and the Kelvin sign, which
+//!   Python's ignore-case class also matches); so "up" is found in
+//!   "follow-up", and "é" is a boundary.
 //! - The span is matched ignoring case, a character at a time: two
 //!   characters match when they're equal or have the same simple lowercase
 //!   (`İ` matches `i`). Python also folds a few pairs that don't lowercase
 //!   alike (`ſ` and `s`); those don't match here.
 //! - A term is found inside the replacement anywhere, even inside a longer
 //!   word ("NSAID" in "NSAIDs").
-//! - Words, for rule 4, are runs of `a`–`z` and `0`–`9` after lowercasing.
+//! - Words, for rule 4, are runs of `a`–`z` and `0`–`9` after lowercasing
+//!   (by simple lowercase, as the span match: `İnhale` is one word,
+//!   `inhale`, where Python's `lower()` splits it at a combining dot).
 //! - A replacement may hold words beyond the term ("amylo edema" →
 //!   "ankle oedema" through the term "oedema"), and may equal the span.
 
@@ -116,7 +120,9 @@ pub enum Rejection {
 /// # let _ = letter_similarity;
 /// ```
 ///
-/// Built any other way, it doesn't, whether by its fields:
+/// Built any other way, it doesn't, whether by its fields (rustdoc checks
+/// the error codes only on nightly; each block differs from the one above
+/// only in how it builds the fix, so privacy is what's left to fail):
 ///
 /// ```compile_fail,E0451
 /// use nota_checks::{AppliedFix, Offered, Proposal, gate, letter_similarity};
@@ -221,7 +227,7 @@ pub enum Verdict {
 /// the decision log.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Decision {
-    /// C1's score, once rule 2 was reached.
+    /// C1's score, once rule 2 was reached and C1 compared the two sides.
     similarity: Option<Similarity>,
     /// The verdict, and the rule that decided it.
     verdict: Verdict,
@@ -360,7 +366,7 @@ fn decide(
 struct Refused {
     /// The rule that refused it.
     rule: Rejection,
-    /// C1's score, once rule 2 was reached.
+    /// C1's score, once rule 2 was reached and C1 compared the two sides.
     similarity: Option<Similarity>,
 }
 
@@ -421,12 +427,18 @@ fn offered_for<'a>(offered: &'a [Offered], proposal: &Proposal) -> Result<&'a Of
     })
 }
 
-/// The words of `s` for rule 4: its runs of `a`–`z` and `0`–`9` once
-/// lowercased, as the bench's `re.findall(r"[a-z0-9]+", s.lower())`.
+/// The words of `s` for rule 4: its runs of `a`–`z` and `0`–`9` once each
+/// character is lowercased as [`fold`] does, as the bench's
+/// `re.findall(r"[a-z0-9]+", s.lower())` but for `İ`.
+///
+/// The same lowercase as the span match, so a span and the chunk text it
+/// matched always have the same words: rule 4, checked on the proposal's
+/// span, holds for the text the fix replaces. Python's `lower()` turns `İ`
+/// into `i` and a combining dot, which splits the word.
 fn words(s: &str) -> BTreeSet<Vec<u8>> {
     let mut out = BTreeSet::new();
     let mut word = Vec::new();
-    for c in s.chars().flat_map(char::to_lowercase) {
+    for c in s.chars().map(fold) {
         match u8::try_from(c) {
             Ok(b) if b.is_ascii_lowercase() || b.is_ascii_digit() => word.push(b),
             _ if !word.is_empty() => {
@@ -489,9 +501,11 @@ fn fold(c: char) -> char {
 }
 
 /// Whether `c` counts as part of a word for the boundary test: an ASCII
-/// letter or digit, or `'`.
+/// letter or digit, `'`, or one of the four other characters the bench's
+/// `[A-Za-z0-9']` matches under `re.IGNORECASE` (`İ`, `ı`, `ſ` and the
+/// Kelvin sign, which Python folds into its ASCII letters).
 fn in_word(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '\''
+    c.is_ascii_alphanumeric() || matches!(c, '\'' | '\u{130}' | '\u{131}' | '\u{17F}' | '\u{212A}')
 }
 
 /// Whether ranges `a` and `b` share a byte.

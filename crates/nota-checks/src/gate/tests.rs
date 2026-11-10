@@ -119,6 +119,11 @@ fn a_span_inside_a_word_is_not_found() {
         ("over 1000", "100"),
         ("the dose's size", "dose"),
         ("the 'dose", "dose"),
+        // Python's ignore-case word class holds these four too.
+        ("\u{130}buprofen", "buprofen"),
+        ("\u{131}buprofen", "buprofen"),
+        ("\u{17F}buprofen", "buprofen"),
+        ("x\u{212A}", "x"),
     ];
     let found: Vec<_> = inside.iter().filter(|(c, h)| found(c, h)).collect();
     assert_eq!(found, Vec::<&(&str, &str)>::new());
@@ -134,6 +139,7 @@ fn a_span_next_to_other_punctuation_is_found() {
         ("(edema)", "edema"),
         ("edema", "edema"),
         ("over 100.", "100"),
+        ("\u{e9}dema", "dema"),
     ];
     let missed: Vec<_> = edges.iter().filter(|(c, h)| !found(c, h)).collect();
     assert_eq!(missed, Vec::<&(&str, &str)>::new());
@@ -440,4 +446,19 @@ fn a_decision_reports_its_score_and_verdict() {
             ),
         ]
     );
+}
+
+/// A dotted capital I that matches "i" gives the same words as "i", so a
+/// fix through a window of "inhale" replaces text that shares its word,
+/// though Python's lowercase splits "İnhale" in two.
+#[test]
+fn a_dotted_capital_i_is_part_of_its_word() {
+    let gated = gate(
+        "İnhale then rest",
+        &[offer("inhale", "inhaler")],
+        &[propose("inhale", "inhaler")],
+    );
+    let fixes: Vec<_> = gated.applied().map(AppliedFix::heard).collect();
+    assert_eq!(fixes, ["İnhale"]);
+    assert_eq!(words("İnhale"), words("inhale"));
 }

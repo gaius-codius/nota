@@ -43,6 +43,7 @@ const VOCAB: &[&str] = &[
     "hyperprofen",
     "ibuprofen",
     "\u{212A}elvin",
+    "İnhale",
     "kelvin",
     "the",
     "and",
@@ -165,10 +166,13 @@ fn any_case() -> impl Strategy<Value = Case> {
     })
 }
 
-/// A case of any text, Unicode included: a chunk, spans cut from it or
-/// made up, and candidates of any text.
+/// A case of any text, Unicode included: a chunk of ASCII words mixed
+/// with any characters, spans cut from it or made up, candidates of any
+/// text, and some proposals that echo their span with a candidate offered
+/// for it, so fixes are applied in Unicode text too.
 fn any_text_case() -> impl Strategy<Value = Case> {
-    (".{0,40}", any_offered_text()).prop_flat_map(|(chunk, offered)| {
+    let chunk = "([a-zA-Z]{1,6}|.{1,3}|[ ,'-]){0,10}";
+    (chunk, any_offered_text()).prop_flat_map(|(chunk, offered)| {
         let len = chunk.chars().count();
         let cut = chunk.clone();
         // A span of the chunk's own characters, so it's sometimes found.
@@ -176,18 +180,32 @@ fn any_text_case() -> impl Strategy<Value = Case> {
             let (a, b) = (a.min(b), a.max(b));
             cut.chars().skip(a).take(b - a).collect::<String>()
         });
-        let heard = prop_oneof![own, ".{0,10}"];
-        let proposal =
-            (heard, ".{0,20}").prop_map(|(heard, replacement)| Proposal { heard, replacement });
+        let heard = prop_oneof![own.clone(), ".{0,10}"];
+        let made_up = (heard, ".{0,20}")
+            .prop_map(|(heard, replacement)| (Proposal { heard, replacement }, false));
+        let echo = own.prop_map(|heard| {
+            let replacement = heard.clone();
+            (Proposal { heard, replacement }, true)
+        });
+        let proposal = prop_oneof![made_up, echo];
         (
             Just(chunk),
             Just(offered),
             prop::collection::vec(proposal, 0..4),
         )
-            .prop_map(|(chunk, offered, proposals)| Case {
-                chunk,
-                offered,
-                proposals,
+            .prop_map(|(chunk, mut offered, proposals)| {
+                // An echo's own span is offered as its window and term.
+                for (p, _) in proposals.iter().filter(|(_, echo)| *echo) {
+                    offered.push(Offered {
+                        window: p.heard.clone(),
+                        term: p.heard.clone(),
+                    });
+                }
+                Case {
+                    chunk,
+                    offered,
+                    proposals: proposals.into_iter().map(|(p, _)| p).collect(),
+                }
             })
     })
 }
@@ -208,9 +226,11 @@ fn plain_letters(s: &str) -> String {
         .collect()
 }
 
-/// `s`'s words once lowercased: its runs of ASCII letters and digits.
+/// `s`'s words once each character is lowercased to its first lowercase
+/// character (so `İ` is `i`, as the gate's doc says): its runs of ASCII
+/// letters and digits.
 fn plain_words(s: &str) -> BTreeSet<String> {
-    s.to_lowercase()
+    simple_lower(s)
         .split(|c: char| !(c.is_ascii_lowercase() || c.is_ascii_digit()))
         .filter(|w| !w.is_empty())
         .map(str::to_owned)
@@ -280,15 +300,23 @@ fn splice(chunk: &str, gated: &Gated, bad: &mut Vec<String>) -> String {
     out
 }
 
+/// `s` with each character lowercased to its first lowercase character,
+/// the case rule the gate's doc gives (`İ` is `i`).
+fn simple_lower(s: &str) -> String {
+    s.chars()
+        .map(|c| c.to_lowercase().next().unwrap_or(c))
+        .collect()
+}
+
 /// The problems with each applied fix's place: its text must match the
-/// proposal's span, ASCII case aside, with no word character either side.
+/// proposal's span, case aside, with no word character either side.
 fn placement_problems(case: &Case, gated: &Gated) -> Vec<String> {
     let mut bad = Vec::new();
     for (proposal, decision) in case.proposals.iter().zip(gated.decisions()) {
         let Some(fix) = decision.applied() else {
             continue;
         };
-        if fix.heard().to_lowercase() != proposal.heard.to_lowercase() {
+        if simple_lower(fix.heard()) != simple_lower(&proposal.heard) {
             bad.push(format!("{proposal:?} placed at {fix:?}"));
         }
         let r = fix.range();
@@ -340,35 +368,62 @@ proptest! {
     }
 }
 
-/// The vocabulary's cases reach every verdict but the over-long one, so the
-/// properties above aren't passing on cases that are all refused early.
-#[test]
-fn the_cases_reach_every_verdict() {
+/// Where `rule` sits in [`reached`]'s list: an exhaustive match, so a new
+/// rule must be placed (and reached) before this compiles.
+fn rule_index(rule: Rejection) -> usize {
+    match rule {
+        Rejection::EmptySpan => 0,
+        Rejection::SpanNotFound => 1,
+        Rejection::TooLong => 2,
+        Rejection::Dissimilar => 3,
+        Rejection::NotOffered => 4,
+        Rejection::WindowElsewhere => 5,
+        Rejection::AlreadyChanged => 6,
+    }
+}
+
+/// What 512 of `strategy`'s cases reached: how many proposals were applied,
+/// how many of those in a chunk with a character of more than one byte
+/// before the fix, and which rules refused one.
+fn reached(strategy: &impl Strategy<Value = Case>) -> (usize, usize, [bool; 7]) {
     let mut runner = TestRunner::deterministic();
-    let strategy = any_case();
-    let mut applied = 0;
-    let mut seen = BTreeSet::new();
+    let (mut applied, mut multibyte, mut seen) = (0, 0, [false; 7]);
     for _ in 0..512 {
         let case = strategy.new_tree(&mut runner).unwrap().current();
         let gated = gate(&case.chunk, &case.offered, &case.proposals);
         for decision in gated.decisions() {
-            match decision.rejection() {
-                None => applied += 1,
-                Some(rule) => {
-                    seen.insert(format!("{rule:?}"));
+            match (decision.applied(), decision.rejection()) {
+                (Some(fix), _) => {
+                    applied += 1;
+                    let before = &case.chunk[..fix.range().start];
+                    multibyte += usize::from(before.len() != before.chars().count());
                 }
+                (None, Some(rule)) => seen[rule_index(rule)] = true,
+                (None, None) => {}
             }
         }
     }
+    (applied, multibyte, seen)
+}
+
+/// The vocabulary's cases reach every verdict but the over-long one, so the
+/// properties above aren't passing on cases that are all refused early.
+#[test]
+fn the_cases_reach_every_verdict() {
+    let (applied, _, seen) = reached(&any_case());
     // 44 of 512 cases' proposals are applied with this seed.
     assert!(applied >= 30, "{applied} applied"); // check-bound
-    let every = [
-        "AlreadyChanged",
-        "Dissimilar",
-        "EmptySpan",
-        "NotOffered",
-        "SpanNotFound",
-        "WindowElsewhere",
-    ];
-    assert_eq!(seen, every.iter().map(|r| (*r).to_owned()).collect()); // check-bound
+    // Every rule but TooLong, which the short vocabulary can't reach and a
+    // unit test covers.
+    assert_eq!(seen, [true, true, false, true, true, true, true]); // check-bound
+}
+
+/// The any-text cases apply fixes, some after a character of more than one
+/// byte, so the contract is checked on Unicode text, not only on refusals.
+#[test]
+fn the_text_cases_apply_fixes_in_unicode_text() {
+    let (applied, multibyte, _) = reached(&any_text_case());
+    // 43 applied, 17 of them after a multibyte character, with this seed.
+    assert!(applied >= 30, "{applied} applied"); // check-bound
+    assert!(multibyte >= 10, "{multibyte} after a multibyte character"); // check-bound
 }

@@ -101,8 +101,8 @@ fn normalise(s: &str) -> Result<Vec<u8>, TooLong> {
 }
 
 /// The ASCII letters and digits of `s`, lowercased, as bytes, with no
-/// limit: C1's normalisation, which the gate also uses to find a term inside
-/// a replacement.
+/// limit: C1's normalisation, which the gate also uses to refuse a span with
+/// none and to find a term inside a replacement.
 pub(crate) fn letters(s: &str) -> impl Iterator<Item = u8> + '_ {
     s.chars()
         .flat_map(char::to_lowercase)

@@ -71,6 +71,13 @@ fn mismatches(run: &str, chunk: &Value) -> Vec<String> {
         .collect();
     let gated = gate(&text(chunk, "text"), &offered, &proposals);
     let mut bad = Vec::new();
+    if gated.decisions().len() != fixes.len() {
+        bad.push(format!(
+            "{at}: {} decisions for {} fixes",
+            gated.decisions().len(),
+            fixes.len()
+        ));
+    }
     for (fix, decision) in fixes.iter().zip(gated.decisions()) {
         let want = expected(fix).unwrap();
         if !want.contains(&decision.rejection()) {
