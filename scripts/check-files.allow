@@ -1,0 +1,12 @@
+# Files that check-files.sh lets past its 1 MiB limit, one per line, in
+# sha256sum's format: the sha256 of the file's bytes, two spaces, then its
+# exact path from the repo root. A file passes only when both match one line;
+# the same bytes at another path, or other bytes at this path, are refused like
+# any other large file. The media rule still applies to every file.
+#
+# Adding, changing or removing a line is a check change: it goes in its own
+# change, with a "Check changes:" line in the PR. Updating a file listed here
+# means replacing its line with the new sha256, in the same way.
+
+# wordfreq v3.2's English word list, unmodified, for the C4 term lookup (#148).
+dffae8066b78dce0a6667cf5f58e567054f902674667090a7ac8a8a44628b05c  crates/nota-checks/data/wordfreq/large_en.msgpack.gz

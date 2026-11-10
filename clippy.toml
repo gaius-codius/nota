@@ -56,6 +56,9 @@ disallowed-methods = [
   { path = "rusqlite::Connection::open", reason = "the library database is opened by nota-store; anything else needs #[expect] with a reason", allow-invalid = true },
   { path = "rusqlite::Connection::open_with_flags", reason = "the library database is opened by nota-store; anything else needs #[expect] with a reason", allow-invalid = true },
   { path = "rusqlite::Connection::open_with_flags_and_vfs", reason = "the library database is opened by nota-store; anything else needs #[expect] with a reason", allow-invalid = true },
+  # An in-memory database can still write any file, by VACUUM INTO or ATTACH.
+  { path = "rusqlite::Connection::open_in_memory", reason = "an in-memory database can write files by VACUUM INTO or ATTACH; a use needs #[expect] with a reason", allow-invalid = true },
+  { path = "rusqlite::Connection::open_in_memory_with_flags", reason = "an in-memory database can write files by VACUUM INTO or ATTACH; a use needs #[expect] with a reason", allow-invalid = true },
   { path = "rusqlite::Connection::backup", reason = "the library database is opened by nota-store; anything else needs #[expect] with a reason", allow-invalid = true },
   { path = "rusqlite::Connection::restore", reason = "the library database is opened by nota-store; anything else needs #[expect] with a reason", allow-invalid = true },
   # Grows, truncates or keeps the database's files outside SQL (SizeHint, ChunkSize, PersistWal).

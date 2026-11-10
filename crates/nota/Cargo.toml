@@ -34,6 +34,9 @@ nota-recorder = { path = "../nota-recorder" }
 nota-store = { path = "../nota-store" }
 nota-tui = { path = "../nota-tui" }
 ratatui.workspace = true
+# `nota pack build`'s manifest, `pack.toml`. Already in the tree through
+# nota-tui's theme.
+toml.workspace = true
 
 # SIGHUP, SIGTERM and SIGINT, read on a thread so the recording can stop
 # in order. Already in the tree through crossterm.

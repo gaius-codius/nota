@@ -1732,6 +1732,15 @@ dependencies = [
  "rusqlite",
  "rustix",
  "signal-hook",
+ "toml",
+]
+
+[[package]]
+name = "nota-checks"
+version = "0.0.0"
+dependencies = [
+ "proptest",
+ "serde_json",
 ]
 
 [[package]]
@@ -1777,6 +1786,7 @@ name = "nota-store"
 version = "0.0.0"
 dependencies = [
  "nota-core",
+ "proptest",
  "rusqlite",
 ]
 

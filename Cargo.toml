@@ -36,6 +36,9 @@ rustix = { version = "1.1", default-features = false, features = ["std", "time"]
 ratatui = { version = "0.30", default-features = false, features = ["crossterm", "underline-color"] }
 # The store's database, with SQLite built in (no system library).
 rusqlite = { version = "0.41", features = ["bundled"] }
+# The code checks' fixtures, exported from the research bench as JSON; read
+# in tests only. Already in the tree through the sherpa-onnx bindings.
+serde_json = "1"
 # SIGHUP, SIGTERM and SIGINT, read on a thread so a recording can stop in
 # order. Already in the tree through crossterm.
 signal-hook = "0.3"
