@@ -195,6 +195,30 @@ mod tests {
         }
     }
 
+    /// A directory another nota made first (`create_dir` finds it there)
+    /// is no error: the lock is tried again, and its answer is the one
+    /// given. Here nothing was made after all, so that answer is NotFound.
+    #[test]
+    fn a_lock_directory_made_meanwhile_is_tried_again() {
+        let recordings = library();
+        recordings.fs.fail_after(0, io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            recordings.record().unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+    }
+
+    /// A lock directory that can't be made is that error.
+    #[test]
+    fn a_lock_directory_that_cant_be_made_is_its_error() {
+        let recordings = library();
+        recordings.fs.fail_after(0, io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            recordings.quiet().unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
+
     /// Without a data folder there is nowhere to make the lock: the error
     /// is the filesystem's.
     #[test]
