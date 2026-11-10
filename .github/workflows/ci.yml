@@ -140,7 +140,7 @@ jobs:
         working-directory: fuzz
 
   mutants-shard:
-    # Every mutant of the lines this PR changes in the core and recorder
+    # Every mutant of the lines this PR changes in the core, recorder and checks
     # crates must be caught by a test. A missed or timed-out mutant fails.
     # The mutants are dealt out round-robin to five shards that run side by
     # side; the job below gathers the results. Round-robin, not cargo-mutants'
@@ -214,7 +214,7 @@ jobs:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: prlimit --as=1073741824 --
         run: >-
           cargo mutants --in-diff "$RUNNER_TEMP/pr.diff"
-          -p nota-core -p nota-recorder
+          -p nota-core -p nota-recorder -p nota-checks
           --shard "$SHARD/$SHARDS" --sharding round-robin
           --test-tool nextest --jobs 2 --output "$RUNNER_TEMP"
       - if: failure() && steps.rust.outputs.changed == 'true'
