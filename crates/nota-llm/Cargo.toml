@@ -1,0 +1,41 @@
+[package]
+name = "nota-llm"
+description = "nota's model adapters: the decider on a supervised llama-server, and the prompts they send."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# `nota-fake-llama-server`, a stand-in for llama-server that the supervision
+# tests start, kill and hang. Turned on by the self dev-dependency below, so
+# it's built only with nota-llm's tests.
+fake-server = []
+
+[[bin]]
+name = "nota-fake-llama-server"
+required-features = ["fake-server"]
+
+[dependencies]
+nota-core = { path = "../nota-core" }
+# A JSON reader that refuses a key given twice, which serde_json's own
+# `Value` would quietly keep the last of (see `reply`).
+serde.workspace = true
+# The requests to llama-server and its replies, as JSON. With its keys in
+# the order written: llama-server's grammar follows the schema's order, so
+# a sorted schema makes the model answer before it names the candidate,
+# which changes its answers. Brings in indexmap, already in the tree.
+serde_json = { workspace = true, features = ["preserve_order"] }
+
+[dev-dependencies]
+nota-core = { path = "../nota-core", features = ["fake-clock"] }
+nota-llm = { path = ".", features = ["fake-server"] }
+proptest.workspace = true
+
+# Signals for the tests that kill the stand-in server by its process id.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+rustix = { workspace = true, features = ["process"] }
+
+[lints]
+workspace = true

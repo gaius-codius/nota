@@ -1,6 +1,6 @@
 [package]
 name = "nota-core"
-description = "Shared types for nota: the session clock, track epochs, time units and messages."
+description = "Shared types for nota: the session clock, track epochs, time units, messages and the decider's interface."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

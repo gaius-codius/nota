@@ -10,7 +10,9 @@
 #   1. exports the fixtures from the bench twice, into target/, and fails if
 #      the two exports differ (the export must be repeatable);
 #   2. fails if a committed fixture differs from its fresh export, so the
-#      committed copy can't drift from the bench or be edited by hand;
+#      committed copy can't drift from the bench or be edited by hand (C4's
+#      invented fixture is written by the bench's own Python packages, in
+#      its laya venv);
 #   3. runs every ignored test in nota-checks against the export.
 # A clean run is part of the acceptance of each code checks change.
 #
@@ -18,7 +20,8 @@
 #   NOTA_BENCH names the bench folder (default:
 #   working-docs/reference/2026-10-01-research-bench in this checkout).
 #
-# Requires: bash, python3 (standard library only), cargo and cargo-nextest.
+# Requires: bash, python3 (standard library only), the bench's laya venv
+# (wordfreq, metaphone and jellyfish), cargo and cargo-nextest.
 set -euo pipefail
 
 # The checkout this script is in, wherever it's run from.
@@ -58,6 +61,23 @@ for name in c1_pairs.json c2_gate.json; do
   fi
 done
 if ((stale)); then
+  exit 1
+fi
+
+venv_python=$bench/laya/.venv/bin/python
+if [[ ! -x $venv_python ]]; then
+  echo "bench-fixtures: no venv at $venv_python; C4's fixture needs the bench's wordfreq, metaphone and jellyfish" >&2
+  exit 2
+fi
+"$venv_python" -I "$bench/fixtures/c4_invented.py" "$out/first/c4_invented.json"
+"$venv_python" -I "$bench/fixtures/c4_invented.py" "$out/second/c4_invented.json"
+if ! cmp -s "$out/first/c4_invented.json" "$out/second/c4_invented.json"; then
+  echo "bench-fixtures: two exports of C4's invented fixture differ; it isn't repeatable" >&2
+  exit 1
+fi
+committed=$repo/crates/nota-checks/tests/fixtures/c4_invented.json
+if ! cmp -s "$out/first/c4_invented.json" "$committed"; then
+  echo "bench-fixtures: $committed differs from the bench's export; re-export it, or find the hand edit" >&2
   exit 1
 fi
 

@@ -584,6 +584,18 @@ impl<S: Clone> Clone for WatchedFs<S> {
     }
 }
 
+impl<S: Fs + Clone + 'static> WatchedFs<S> {
+    /// `lock`, held on `dir`, counted as the watch's own until it drops.
+    fn held(&self, lock: S::Lock, dir: &Path) -> WatchedLock<S> {
+        self.watch.lock().held.push(dir.to_path_buf());
+        WatchedLock {
+            _lock: lock,
+            dir: dir.to_path_buf(),
+            watch: Arc::clone(&self.watch),
+        }
+    }
+}
+
 /// A file opened through a [`WatchedFs`].
 #[derive(Debug)]
 pub struct WatchedFile<S: Fs> {
@@ -692,12 +704,14 @@ impl<S: Fs + Clone + 'static> Fs for WatchedFs<S> {
     /// Locks `dir`, and counts it as the watch's own while it's held.
     fn lock_dir(&self, dir: &Path) -> io::Result<Self::Lock> {
         let lock = self.inner.lock_dir(dir)?;
-        self.watch.lock().held.push(dir.to_path_buf());
-        Ok(WatchedLock {
-            _lock: lock,
-            dir: dir.to_path_buf(),
-            watch: Arc::clone(&self.watch),
-        })
+        Ok(self.held(lock, dir))
+    }
+
+    /// Takes a shared lock on `dir`, counted as the watch's own as
+    /// [`Self::lock_dir`]'s is.
+    fn lock_dir_shared(&self, dir: &Path) -> io::Result<Self::Lock> {
+        let lock = self.inner.lock_dir_shared(dir)?;
+        Ok(self.held(lock, dir))
     }
 
     fn free_space(&self, dir: &Path) -> io::Result<u64> {

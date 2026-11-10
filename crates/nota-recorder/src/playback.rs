@@ -19,13 +19,26 @@
 //!
 //! # Never while a recording runs
 //!
-//! Playing takes the session's [`SessionLock`] and keeps it until the
-//! [`Playback`] is dropped. A recording holds that lock, so
-//! playing the session being recorded is refused with
-//! [`PlaybackError::Busy`], in this process or another; and a recording or
-//! a repair can't start under a moment that is playing. The lock is the
-//! session's, so it doesn't see a recording of *another* session: whoever
-//! plays (the card) must not offer it while nota itself is recording.
+//! The speakers would be heard in the recording's tracks, so nothing plays
+//! while any session of the library records. Playing takes two locks and
+//! keeps both until the [`Playback`] is dropped:
+//!
+//! - The library's recording lock, exclusively ([`Recordings::quiet`]).
+//!   Every recording nota starts holds it shared, in this process or
+//!   another (a [`SessionWriter`](crate::session::SessionWriter) alone
+//!   doesn't take it), so
+//!   playing while any session records is refused with
+//!   [`PlaybackError::Recording`], before the session is looked at. While
+//!   a moment plays, no recording of any session can start, and no other
+//!   moment can play.
+//! - The session's [`SessionLock`], so a repair can't start under the
+//!   moment, and a session being repaired isn't played
+//!   ([`PlaybackError::Busy`]).
+//!
+//! The card shows the error's message when it refuses. It must drop the
+//! [`Playback`] once [`Playback::finished`] or when it closes: until then
+//! no recording can start. A recording into another data folder isn't
+//! seen (see [`Recordings`]).
 //!
 //! # What isn't covered
 //!
@@ -55,7 +68,7 @@ use nota_store::{SegmentRow, Store, StoreError};
 
 use crate::fs::Fs;
 use crate::segment::{ReadSegmentError, read_segment};
-use crate::session::{SessionDir, SessionLock};
+use crate::session::{QuietLock, Recordings, SessionDir, SessionLock};
 
 #[cfg(target_os = "linux")]
 mod cpal_output;
@@ -72,8 +85,15 @@ use plan::{Piece, Plan, silent_samples};
 /// Why a moment couldn't be played. The messages are for the card to show.
 #[derive(Debug)]
 pub enum PlaybackError {
-    /// The session is in use: it is being recorded or repaired, or a moment
-    /// of it is already playing. Nothing was read or played.
+    /// A session of the library is being recorded, or another moment is
+    /// playing: the library's recording lock is held. Nothing was read or
+    /// played.
+    Recording,
+    /// The library's recording lock couldn't be taken.
+    RecordingLock(io::Error),
+    /// The session is in use: it is being repaired, or recorded by
+    /// something that doesn't take the library's recording lock. Nothing
+    /// was read or played.
     Busy,
     /// The session's directory couldn't be locked.
     Session(io::Error),
@@ -109,9 +129,13 @@ pub enum PlaybackError {
 impl fmt::Display for PlaybackError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Busy => f.write_str(
-                "can't play now: the session is being recorded or repaired, or already playing",
+            Self::Recording => f.write_str(
+                "can't play now: a session is being recorded, or another moment is playing",
             ),
+            Self::RecordingLock(e) => {
+                write!(f, "couldn't check whether a session is recording: {e}")
+            }
+            Self::Busy => f.write_str("can't play now: the session is being repaired or recorded"),
             Self::Session(e) => write!(f, "couldn't open the session to play it: {e}"),
             Self::Store(e) => write!(f, "couldn't read the session from the library: {e}"),
             Self::Timeline(e) => write!(f, "the session's timing is not usable: {e}"),
@@ -130,7 +154,7 @@ impl fmt::Display for PlaybackError {
 impl std::error::Error for PlaybackError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Session(e) => Some(e),
+            Self::RecordingLock(e) | Self::Session(e) => Some(e),
             Self::Store(e) => Some(e),
             Self::Timeline(e) => Some(e),
             Self::Segment(e) => Some(e),
@@ -187,15 +211,16 @@ pub trait OutputStream {
     fn finished(&self) -> bool;
 }
 
-/// A moment playing. Dropping it stops the sound and lets the session go;
-/// until then it holds the session's lock, so nothing records or repairs
-/// the session meanwhile.
+/// A moment playing. Dropping it stops the sound and lets the locks go;
+/// until then it holds the library's recording lock and the session's, so
+/// no recording starts and nothing repairs the session meanwhile.
 #[derive(Debug)]
 pub struct Playback<S: Fs, T> {
-    /// Dropped first, so the sound stops before the lock is let go.
+    /// Dropped first, so the sound stops before the locks are let go.
     stream: T,
     length: Duration,
     _session: SessionLock<S>,
+    _quiet: QuietLock<S>,
 }
 
 impl<S: Fs, T: OutputStream> Playback<S, T> {
@@ -213,15 +238,18 @@ impl<S: Fs, T: OutputStream> Playback<S, T> {
 }
 
 /// Plays the moment at `at` of `track` in `session`, about five seconds
-/// around it, on `output`.
+/// around it, on `output`. `recordings` is the recording lock of the
+/// library `session` and `store` belong to.
 ///
 /// # Errors
 ///
-/// [`PlaybackError::Busy`] while the session is being recorded; otherwise as
-/// the variants say: the session or its library can't be read, `at` is
-/// outside the track's recording, audio the moment needs isn't saved, or the
-/// output refuses.
+/// [`PlaybackError::Recording`] while any session of the library records
+/// or another moment plays, [`PlaybackError::Busy`] while the session is
+/// being repaired; otherwise as the variants say: the locks, the session or
+/// its library can't be read, `at` is outside the track's recording, audio
+/// the moment needs isn't saved, or the output refuses.
 pub fn play_moment<S, O>(
+    recordings: &Recordings<S>,
     session: &SessionDir<S>,
     store: &Store,
     track: TrackId,
@@ -232,6 +260,12 @@ where
     S: Fs + Clone,
     O: Output,
 {
+    // The library's lock first: while a session records, that's the
+    // reason to give, whichever session it is.
+    let quiet = recordings.quiet().map_err(|e| match e.kind() {
+        io::ErrorKind::WouldBlock => PlaybackError::Recording,
+        _ => PlaybackError::RecordingLock(e),
+    })?;
     let lock = session.lock().map_err(|e| match e.kind() {
         io::ErrorKind::WouldBlock => PlaybackError::Busy,
         _ => PlaybackError::Session(e),
@@ -250,6 +284,7 @@ where
         stream,
         length,
         _session: lock,
+        _quiet: quiet,
     })
 }
 

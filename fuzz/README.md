@@ -96,3 +96,33 @@ AFL_SKIP_CPUFREQ=1 AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 \
 The property tests in
 `crates/nota-core/src/protocol/props.rs` cover the same contract on every
 `cargo nextest` run.
+
+## llm_reply
+
+Reads arbitrary bytes as llama-server's HTTP response
+(`nota_llm::http::read_response`), then its body, and the bytes alone, as
+the reply to a question about one to five candidates
+(`nota_llm::reply::parse`), and asserts on what they accept:
+
+- a response's status is from 100 to 599, and its body is within
+  `MAX_REPLY_LEN`
+- a reply gives exactly one decision per candidate
+- every probability of a yes is from 0 to 1
+
+Seeds are any responses: a short one with a reply in it, and the real
+reply in nota-llm's tests, whose token probabilities lead the fuzzer into
+the code that reads them:
+
+```sh
+mkdir -p in-reply
+printf 'HTTP/1.1 200 OK\r\nContent-Length: 106\r\n\r\n{"choices":[{"finish_reason":"stop","message":{"content":"{\\"decisions\\":[{\\"id\\":1,\\"apply\\":true}]}"}}]}' > in-reply/one
+real=../crates/nota-llm/src/reply/llama_reply.json
+{ printf 'HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n' "$(wc -c < "$real")"; cat "$real"; } > in-reply/real
+cargo afl build --release
+AFL_SKIP_CPUFREQ=1 AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 \
+  cargo afl fuzz -i in-reply -o out-reply target/release/llm_reply
+```
+
+The property tests in `crates/nota-llm/src/reply/props.rs` and
+`crates/nota-llm/src/http/props.rs` cover the same contract on every
+`cargo nextest` run.

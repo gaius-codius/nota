@@ -11,27 +11,33 @@ fn engine(list: &[&str]) -> Result<ModelPaths, String> {
 fn engine_cutting(list: &[&str]) -> Result<(ModelPaths, ChunkerConfig), String> {
     match parse(&args(list))? {
         Command::EngineAsr(paths, chunking) => Ok((paths, chunking)),
-        Command::Record(_) | Command::App(_) | Command::EngineFake(_) | Command::Pack(_) => {
-            Err("record".into())
-        }
+        Command::Record(_)
+        | Command::App(_)
+        | Command::EngineFake(_)
+        | Command::EngineLlama(_)
+        | Command::Pack(_) => Err("record".into()),
     }
 }
 
 fn record(list: &[&str]) -> Result<RecordArgs, String> {
     match parse(&args(list))? {
         Command::Record(args) => Ok(args),
-        Command::EngineAsr(..) | Command::App(_) | Command::EngineFake(_) | Command::Pack(_) => {
-            Err("engine".into())
-        }
+        Command::EngineAsr(..)
+        | Command::App(_)
+        | Command::EngineFake(_)
+        | Command::EngineLlama(_)
+        | Command::Pack(_) => Err("engine".into()),
     }
 }
 
 fn app(list: &[&str]) -> Result<RecordArgs, String> {
     match parse(&args(list))? {
         Command::App(args) => Ok(args),
-        Command::EngineAsr(..) | Command::Record(_) | Command::EngineFake(_) | Command::Pack(_) => {
-            Err("not the app".into())
-        }
+        Command::EngineAsr(..)
+        | Command::Record(_)
+        | Command::EngineFake(_)
+        | Command::EngineLlama(_)
+        | Command::Pack(_) => Err("not the app".into()),
     }
 }
 
@@ -215,4 +221,25 @@ fn no_command_opens_home() {
     assert_eq!(home.data, PathBuf::from("/d"));
     assert_eq!(home.models, Some((PathBuf::from("p"), PathBuf::from("v"))));
     assert_eq!(home.latency_log, None);
+}
+
+/// `nota engine llama-server` takes the server's program and every
+/// argument after it as they are, flags included.
+#[test]
+fn parses_engine_llama_server() {
+    let list = [
+        "engine",
+        "llama-server",
+        "/opt/llama-server",
+        "--model",
+        "/m.gguf",
+        "--host",
+        "/s.sock",
+    ];
+    let Ok(Command::EngineLlama(server)) = parse(&args(&list)) else {
+        panic!("not the llama-server launcher");
+    };
+    assert_eq!(server, args(&list[2..]));
+    let bare = parse(&args(&["engine", "llama-server"])).unwrap_err();
+    assert_eq!(bare, "nota engine llama-server needs the server's program");
 }

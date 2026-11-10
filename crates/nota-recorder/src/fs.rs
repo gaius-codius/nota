@@ -37,8 +37,10 @@
 //!   symlink, a FIFO, a device, a file too large for anything nota writes)
 //!   is an error, like a file that can't be read.
 //! - [`Fs::lock_dir`] takes an advisory lock on a directory, without
-//!   waiting: one holder at a time, across processes too. It isn't durable;
-//!   it ends when its guard drops or the process dies.
+//!   waiting: one holder at a time, across processes too.
+//!   [`Fs::lock_dir_shared`] takes a shared one, held by any number at once
+//!   but never alongside the exclusive lock. Neither is durable; each ends
+//!   when its guard drops or the process dies.
 //! - [`Fs::free_space`] says how many bytes the filesystem holding a
 //!   directory has left for nota (`statvfs`), for the disk check (see
 //!   [`disk`](crate::disk)). It changes nothing.
@@ -67,7 +69,8 @@ pub trait Fs: Send + Sync + fmt::Debug {
     /// An open file, written by appending.
     type File: FsFile;
 
-    /// A held directory lock ([`Fs::lock_dir`]); dropping it unlocks.
+    /// A held directory lock ([`Fs::lock_dir`] or [`Fs::lock_dir_shared`]);
+    /// dropping it unlocks.
     type Lock: Send + Sync + fmt::Debug;
 
     /// Creates a new, empty file at `path` for appending. Fails with
@@ -212,6 +215,18 @@ pub trait Fs: Send + Sync + fmt::Debug {
     /// [`io::ErrorKind::WouldBlock`] if the lock is held; any I/O error,
     /// including a missing directory or one that's a file.
     fn lock_dir(&self, dir: &Path) -> io::Result<Self::Lock>;
+
+    /// Takes a shared lock on the directory `dir` for whoever holds the
+    /// returned guard: any number of shared guards are held at once, here
+    /// and in other processes, but none while [`Fs::lock_dir`]'s exclusive
+    /// lock is held, and that one is refused while any shared guard is. It
+    /// never waits, is advisory and lasts as [`Fs::lock_dir`]'s does.
+    ///
+    /// # Errors
+    ///
+    /// [`io::ErrorKind::WouldBlock`] if the exclusive lock is held; any I/O
+    /// error, including a missing directory or one that's a file.
+    fn lock_dir_shared(&self, dir: &Path) -> io::Result<Self::Lock>;
 
     /// The bytes free for an unprivileged user on the filesystem holding
     /// `dir`: what files nota writes there can still take. It changes
