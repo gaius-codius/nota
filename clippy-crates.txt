@@ -180,6 +180,9 @@ serde_core@1 serde_json@1 serde_spanned@1 sha2@0.10 signal-hook@0.3
 signal-hook-registry@1 thread-priority@3 toml@1 toml_datetime@1 typenum@1
 unicode-segmentation@1 unicode-width@0.2
 
+[none: text algorithms and gzip over byte streams; no function reads the clock or writes files (rphonetic's Beider-Morse reads rule files, which nota doesn't use)]
+flate2@1 rphonetic@4 strsim@0.11
+
 [indirect: only a dependency of a dependency, and no direct dependency re-exports it]
 adler2 aes aho-corasick allocator-api2 alsa alsa-sys annotate-snippets
 anstyle anyhow approx arbitrary atomic audio_thread_priority autocfg base64
@@ -190,8 +193,8 @@ cookie-factory coreaudio-rs cpufeatures crc crc-catalog crossbeam-utils
 crossterm_winapi csscolorparser darling darling_core darling_macro
 deflate64 defmt defmt-macros defmt-parser deltae deranged derive_arbitrary
 derive_more derive_more-impl dirs-sys dispatch2 displaydoc document-features
-either equivalent euclid fancy-regex fastrand filedescriptor filetime
-find-msvc-tools finl_unicode fixedbitset flate2 fnv foldhash form_urlencoded
+either enum-iterator enum-iterator-derive equivalent euclid fancy-regex fastrand filedescriptor filetime
+find-msvc-tools finl_unicode fixedbitset fnv foldhash form_urlencoded
 enum-primitive-derive futures futures-channel futures-core futures-executor
 futures-io futures-macro futures-sink futures-task futures-util getrandom glob hash32 hashbrown
 hashlink heapless heck hex hmac home icu_collections icu_locale_core
@@ -214,7 +217,7 @@ r-efi regex regex-automata regex-syntax ring rustc-hash rustc_version
 rustls rustls-pki-types rustls-webpki rustversion ryu same-file scopeguard
 semver seq-macro serde serde_derive sha1 sherpa-onnx-sys shlex
 signal-hook-mio simd-adler32 simd_cesu8 simdutf8 similar siphasher slab
-smallvec stable_deref_trait static_assertions strsim strum strum_macros
+smallvec stable_deref_trait static_assertions strum strum_macros
 subtle syn synstructure system-deps tar target-lexicon tempfile terminfo
 termios thiserror thiserror-impl time time-core tinystr toml_edit
 toml_parser toml_writer ucd-trie unarray unicode-ident unicode-truncate
