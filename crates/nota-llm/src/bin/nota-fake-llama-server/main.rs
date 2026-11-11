@@ -24,10 +24,15 @@
 //! nota uses (`nota_llm::lifeline::exec_tied`), so the tests can start it
 //! as nota starts the real server.
 //!
+//! It ends within a second of its parent's death, so a test that's killed
+//! (nextest stopping a hang) leaves no server running.
+//!
 //! Unix only, as the decider is: elsewhere it exits at once with an error.
 
 use std::process::ExitCode;
 
+#[cfg(unix)]
+mod parent_watch;
 #[cfg(unix)]
 mod unix;
 

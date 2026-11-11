@@ -5,6 +5,9 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -137,11 +140,11 @@ fn trickle(mut stream: &UnixStream, body: &[u8]) -> io::Result<()> {
         body.len()
     );
     // Nothing is ever sent: the channel only gives a wait.
-    let (_keep, ticks) = std::sync::mpsc::channel::<()>();
+    let (_keep, ticks) = mpsc::channel::<()>();
     for byte in head.as_bytes().iter().chain(body) {
         stream.write_all(&[*byte])?;
         stream.flush()?;
-        let _ = ticks.recv_timeout(std::time::Duration::from_millis(20));
+        let _ = ticks.recv_timeout(Duration::from_millis(20));
     }
     Ok(())
 }
@@ -211,7 +214,7 @@ fn handle(stream: &UnixStream, dir: &Path, plan: Plan, healthy: &mut u32) -> io:
         }
         Plan::Hang => loop {
             // Holds the question, unanswered, until killed.
-            std::thread::park();
+            thread::park();
         },
         Plan::Exit => {
             let _ = writeln!(io::stderr(), "fake: exiting on a question");
@@ -249,6 +252,10 @@ pub(crate) fn main() -> ExitCode {
     if args.first().is_some_and(|a| a == "exec-tied") {
         let err = nota_llm::lifeline::exec_tied(args.get(1..).unwrap_or_default());
         let _ = writeln!(io::stderr(), "fake: {err}");
+        return ExitCode::from(2);
+    }
+    if let Err(e) = crate::parent_watch::end_with_parent() {
+        let _ = writeln!(io::stderr(), "fake: couldn't watch its parent: {e}");
         return ExitCode::from(2);
     }
     let (Some(dir), Some(socket)) = (value(&args, "--model"), value(&args, "--host")) else {

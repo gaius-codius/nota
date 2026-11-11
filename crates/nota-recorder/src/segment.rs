@@ -94,8 +94,8 @@ pub use publish::DurableSegment;
 pub use publisher::{PublishQueue, PublishReport, Publisher, PublisherPanicked, Stopped};
 pub use read::{ReadSegmentError, read_segment};
 pub use salvage::{
-    Depth, Integrity, PublishError, Published, needs_salvage, publish_journals, salvage,
-    salvage_start, scan,
+    Depth, Integrity, PublishError, Published, RunStopped, needs_salvage, publish_journals,
+    salvage, salvage_start, scan,
 };
 #[cfg(any(test, feature = "fake-fs"))]
 pub use store::FakeStore;

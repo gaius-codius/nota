@@ -209,34 +209,139 @@ fn home_names_an_undeletable_published_journal() {
     );
     assert_eq!(shown.status, Status::NeedsYou);
     assert_eq!(
-        shown.detail.as_deref(),
-        Some("journal-000000: couldn't delete it (permission denied); all its audio is published")
+        shown.detail,
+        ["journal-000000: couldn't delete it (permission denied); all its audio is published"]
     );
 }
 
+/// What Home says of a session salvage held files in, as `beside` holds
+/// them: why a run that stops stopped, then each held file.
+fn held_detail(beside: crate::library::held::Beside) -> Vec<String> {
+    let stopped = beside
+        .stops()
+        .then(|| format!("salvage failed: {}", crate::library::held::STOPPED));
+    stopped
+        .into_iter()
+        .chain(beside.held_at_start().into_iter().map(str::to_owned))
+        .collect()
+}
+
+/// The session `held` holds as Home shows it after startup salvage, read
+/// from the fake disk as salvage left it.
+fn shown_after_salvage(held: &crate::library::held::Held) -> Session {
+    // Salvage first: the listing reads the disk as salvage left it.
+    let salvaged = held.salvaged();
+    let listed = Listed {
+        id: SessionId::new(1),
+        title: Some("Joinery · dovetails by hand".into()),
+        started_at: None,
+        recorded: None,
+        needs: held.needs(),
+    };
+    session(listed, &[salvaged], &dates())
+}
+
 /// Home names each file salvage holds once, with its cause, however the
-/// failures combine, and the session needs the user.
+/// failures combine, even when salvage stopped on an error, and the
+/// session needs the user.
 #[test]
 fn home_names_each_held_file_once_across_combined_failures() {
     use crate::library::held::{Beside, Held};
     for beside in Beside::ALL {
-        let held = Held::new(beside);
-        let salvaged = held.salvaged();
-        // The listing reads the disk as salvage left it.
-        let listed = Listed {
-            id: SessionId::new(1),
-            title: None,
-            started_at: None,
-            recorded: None,
-            needs: held.needs(),
-        };
-        let shown = session(listed, &[salvaged], &dates());
+        let shown = shown_after_salvage(&Held::new(beside));
         assert_eq!(
             (shown.status, shown.detail),
-            (Status::NeedsYou, Some(beside.held_at_start().join("; "))),
+            (Status::NeedsYou, held_detail(beside)),
             "{beside:?}"
         );
     }
+}
+
+/// Drawn at 80 columns, Home's detail for each combined failure names
+/// every held file with its cause in full: each from a row of its own, the
+/// rest of a long one on the rows after it.
+#[test]
+fn home_draws_each_held_file_in_full_at_80_columns() {
+    use crate::library::held::{Beside, Held};
+    for beside in Beside::ALL {
+        let mut home = Home::new(
+            vec![shown_after_salvage(&Held::new(beside))],
+            "",
+            Theme::default(),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| home.draw(frame)).unwrap();
+        let buf = terminal.backend().buffer();
+        // The detail starts under the session's row (13); the frame's
+        // bottom border ends the list.
+        let rows: Vec<String> = (13..23)
+            .map(|y| (1..79).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .map(|row| row.trim_end().to_owned())
+            .filter(|row| !row.is_empty())
+            .collect();
+        // Items start at column 5 and the rows they wrap onto at 7.
+        let mut drawn: Vec<String> = Vec::new();
+        for row in &rows {
+            match (row.strip_prefix("       "), drawn.last_mut()) {
+                (Some(more), Some(item)) => {
+                    item.push(' ');
+                    item.push_str(more);
+                }
+                _ => drawn.push(row.trim_start().to_owned()),
+            }
+        }
+        assert_eq!(drawn, held_detail(beside), "{beside:?}: {rows:#?}");
+    }
+}
+
+/// A session salvage recovered whole but for a segment temp file it
+/// couldn't remove is ready, with nothing lost, and names the temp file
+/// with its cause.
+#[test]
+fn home_names_a_kept_temp_when_it_is_all_salvage_held() {
+    use crate::library::held::Held;
+    let shown = shown_after_salvage(&Held::only_a_kept_temp());
+    assert_eq!(
+        (shown.status, shown.detail),
+        (
+            Status::Ready,
+            vec![
+                "recovered after a crash · nothing lost".to_owned(),
+                "seg-t5-000000000000.flac.tmp: couldn't remove the temporary file \
+                 (permission denied)"
+                    .to_owned(),
+            ]
+        )
+    );
+}
+
+/// A salvage that failed after keeping a temp file names it once nothing
+/// is left to save, and the session is ready.
+#[test]
+fn home_names_a_failed_salvages_kept_temp_once_nothing_is_left() {
+    use crate::library::held::Held;
+    let salvaged = Held::a_kept_temp_and_a_stop().salvaged();
+    assert!(matches!(salvaged, Salvaged::Failed(..)), "{salvaged:?}");
+    // A later salvage published the rest: the listing finds nothing.
+    let listed = Listed {
+        id: SessionId::new(1),
+        title: None,
+        started_at: None,
+        recorded: None,
+        needs: Needs::Nothing,
+    };
+    let shown = session(listed, &[salvaged], &dates());
+    assert_eq!(
+        (shown.status, shown.detail),
+        (
+            Status::Ready,
+            vec![
+                "seg-t5-000000000000.flac.tmp: couldn't remove the temporary file \
+                 (permission denied)"
+                    .to_owned()
+            ]
+        )
+    );
 }
 
 #[test]
@@ -254,50 +359,53 @@ fn each_session_shows_what_salvage_found() {
     };
     let id = SessionId::new(4);
     let other = SessionId::new(5);
-    assert_eq!(shown(Needs::Nothing, &[]), (Status::Ready, None));
+    assert_eq!(shown(Needs::Nothing, &[]), (Status::Ready, Vec::new()));
     assert_eq!(
         shown(Needs::Nothing, &[Salvaged::Done(id, Vec::new())]),
         (
             Status::Ready,
-            Some("recovered after a crash · nothing lost".into())
+            vec!["recovered after a crash · nothing lost".to_owned()]
         )
     );
     // A journal set aside as damaged: recovered, but not "nothing lost".
     let aside = vec![PathBuf::from("journal-000003.unreadable")];
     assert_eq!(
         shown(Needs::Nothing, &[Salvaged::Left(id, aside, Box::default())]),
-        (Status::Ready, Some("recovered after a crash".into()))
+        (Status::Ready, vec!["recovered after a crash".to_owned()])
     );
     // Another session's salvage says nothing about this one.
     assert_eq!(
         shown(Needs::Nothing, &[Salvaged::Done(other, Vec::new())]),
-        (Status::Ready, None)
+        (Status::Ready, Vec::new())
     );
     // Salvage at start failed, and its journals are still there: its
     // error says why.
     assert_eq!(
         shown(
             Needs::Attention("audio still to save".into()),
-            &[Salvaged::Failed(id, "disk".into())]
+            &[Salvaged::Failed(id, "disk".into(), Box::default())]
         ),
-        (Status::NeedsYou, Some("salvage failed: disk".into()))
+        (Status::NeedsYou, vec!["salvage failed: disk".to_owned()])
     );
     // A later salvage (a recording's start) left nothing to save: the old
     // failure isn't shown.
     assert_eq!(
-        shown(Needs::Nothing, &[Salvaged::Failed(id, "disk".into())]),
-        (Status::Ready, None)
+        shown(
+            Needs::Nothing,
+            &[Salvaged::Failed(id, "disk".into(), Box::default())]
+        ),
+        (Status::Ready, Vec::new())
     );
     assert_eq!(
         shown(
             Needs::Attention("why".into()),
             &[Salvaged::Done(id, Vec::new())]
         ),
-        (Status::NeedsYou, Some("why".into()))
+        (Status::NeedsYou, vec!["why".to_owned()])
     );
     assert_eq!(
         shown(Needs::InUse, &[]),
-        (Status::Processing, Some("being recorded".into()))
+        (Status::Processing, vec!["being recorded".to_owned()])
     );
     let untitled = session(listed(Needs::Nothing), &[], &dates());
     assert_eq!(untitled.title, "session 4");
@@ -603,6 +711,27 @@ fn shown_job(library: &Library) -> Session {
         .unwrap()
 }
 
+/// A session's processing status comes before what salvage said of it,
+/// which stays: a kept temp file is still named.
+#[test]
+fn a_processing_status_keeps_what_salvage_said() {
+    let tmp = TestDir::new("job-after-salvage");
+    let library = library_of_three(&tmp.0);
+    stopped_job(&library);
+    let jobs = library.db().with(|db| db.jobs()).unwrap();
+    let recovered = vec![
+        "recovered after a crash · nothing lost".to_owned(),
+        "seg-t5-000000000000.flac.tmp: couldn't remove the temporary file".to_owned(),
+    ];
+    let mut shown = shown_job(&library);
+    shown.detail.clone_from(&recovered);
+    shown.status = Status::Ready;
+    job_status(&mut shown, &jobs, |_| None);
+    let mut expected = vec!["final transcript queued or running".to_owned()];
+    expected.extend(recovered);
+    assert_eq!((shown.status, shown.detail), (Status::Processing, expected));
+}
+
 /// A queued final pass shows that the session is still being processed.
 #[test]
 fn home_shows_waiting_job() {
@@ -637,7 +766,7 @@ fn home_shows_failed_job_reason() {
         .unwrap();
     let shown = shown_job(&library);
     assert_eq!(shown.status, Status::NeedsYou);
-    assert_eq!(shown.detail.as_deref(), Some("processing failed: broken"));
+    assert_eq!(shown.detail, ["processing failed: broken"]);
 }
 
 /// A finished final pass makes the session ready.
@@ -735,8 +864,8 @@ fn home_shows_a_session_a_full_disk_stopped_as_stopped_early() {
     let shown = shown_job(&library);
     assert_eq!(shown.status, Status::NeedsYou);
     assert_eq!(
-        shown.detail.as_deref(),
-        Some("stopped early: disk full · free space to finish")
+        shown.detail,
+        ["stopped early: disk full · free space to finish"]
     );
 }
 
@@ -749,10 +878,7 @@ fn home_shows_jobs_waiting_for_space_without_a_full_disk_stop() {
     stopped_on_a_full_disk(&library, false);
     let shown = shown_job(&library);
     assert_eq!(shown.status, Status::NeedsYou);
-    assert_eq!(
-        shown.detail.as_deref(),
-        Some("the disk is full · free space to finish")
-    );
+    assert_eq!(shown.detail, ["the disk is full · free space to finish"]);
 }
 
 /// Once there's space, jobs that still wait (for an engine, say) show as

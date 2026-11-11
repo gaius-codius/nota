@@ -1016,7 +1016,17 @@ fn salvage_note(salvaged: &Salvaged) -> String {
             )
         }
         Salvaged::InUse(id) => format!("session {} is in use; not salvaged", id.get()),
-        Salvaged::Failed(id, e) => format!("salvaging session {} failed: {e}", id.get()),
+        Salvaged::Failed(id, e, done) => {
+            // What it did before it failed: a published journal it couldn't
+            // delete is named as published, not left to look unsaved.
+            let notes = held_notes(done);
+            let held = if notes.is_empty() {
+                String::new()
+            } else {
+                format!("; {}", notes.join("; "))
+            };
+            format!("salvaging session {} failed: {e}{held}", id.get())
+        }
     }
 }
 
@@ -2087,16 +2097,21 @@ mod salvage_note_tests {
     }
 
     /// Startup names each file salvage holds once, with its cause, however
-    /// the failures combine; the published journal is never called
-    /// unpublished.
+    /// the failures combine, even beside the error a salvage stopped on;
+    /// the published journal is never called unpublished.
     #[test]
     fn startup_names_each_held_file_once_across_combined_failures() {
-        use crate::library::held::{Beside, Held};
+        use crate::library::held::{Beside, Held, STOPPED};
         for beside in Beside::ALL {
             let note = salvage_note(&Held::new(beside).salvaged());
             // The whole note: a lost or changed cause, or a file named
             // twice, fails it.
-            let expected = format!("salvaged session 1: {}", beside.held_at_start().join("; "));
+            let held = beside.held_at_start().join("; ");
+            let expected = if beside.stops() {
+                format!("salvaging session 1 failed: {STOPPED}; {held}")
+            } else {
+                format!("salvaged session 1: {held}")
+            };
             assert_eq!(note, expected, "{beside:?}");
         }
     }

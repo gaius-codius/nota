@@ -12,6 +12,7 @@ use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -25,7 +26,7 @@ use nota_llm::endpoint::{Endpoint, EndpointConfig, EndpointDecider, EndpointErro
 use nota_llm::prompt::English;
 use nota_llm::reply::ReplyError;
 use nota_llm::server::Launcher;
-use rustix::process::{Pid, test_kill_process};
+use rustix::process::{Pid, Signal, kill_process, test_kill_process};
 
 /// The stand-in CLI.
 const FAKE: &str = env!("CARGO_BIN_EXE_nota-fake-cli");
@@ -39,6 +40,9 @@ const PROMPTLY: Duration = Duration::from_secs(5); // check-bound
 
 /// How long a hang test waits for an answer that never comes.
 const HANG_LIMIT: Duration = Duration::from_secs(1);
+
+/// How soon a stand-in CLI whose parent has died is gone.
+const ORPHAN_ENDS_WITHIN: Duration = Duration::from_secs(1); // check-bound
 
 /// The words of the question that must never be in a reason or the CLI's
 /// arguments: both chunks, the heard words and the terms. Made up, and
@@ -384,6 +388,61 @@ fn a_stop_kills_the_cli() {
     waiter.join().unwrap();
     assert!(matches!(e, DecideError::Stopped), "{e:?}");
     assert!(fixture.gone(), "the CLI still runs");
+}
+
+/// A stand-in CLI whose parent is killed, as nextest kills a hung test,
+/// ends within a second, so a killed test leaves no CLI behind: the
+/// decider starts it in a process group of its own, which the signal
+/// misses. The parent here is a shell standing in for the test process,
+/// killed with SIGKILL; the CLI hangs on its question, so only its own
+/// watch on its parent can end it. The shell is started through the
+/// launch shim, so it dies with this test if this test is killed first.
+#[test]
+fn a_stand_in_cli_ends_soon_after_its_parent_is_killed() {
+    let fixture = Fixture::new("orphan", "hang");
+    let mut parent = Command::new(SHIM)
+        .args([
+            "exec-tied",
+            "/bin/sh",
+            "-c",
+            r#""$@" </dev/null & wait"#,
+            "sh",
+        ])
+        .args([FAKE, "-p"])
+        .current_dir(fixture.work())
+        .spawn()
+        .unwrap();
+    let pid = fixture.work().join("pid");
+    let started = clock();
+    let (_keep, ticks) = mpsc::channel::<()>();
+    while !pid.exists() {
+        assert!(started.now().elapsed() < PROMPTLY, "the CLI never started");
+        let _ = ticks.recv_timeout(Duration::from_millis(10));
+    }
+    let pid: i32 = fixture.read("pid").parse().unwrap();
+    parent.kill().unwrap();
+    parent.wait().unwrap();
+    let since = clock();
+    while running(pid) {
+        if since.now().elapsed() >= ORPHAN_ENDS_WITHIN {
+            if let Some(pid) = Pid::from_raw(pid) {
+                let _ = kill_process(pid, Signal::KILL);
+            }
+            panic!("the CLI {pid} outlived its parent");
+        }
+        let _ = ticks.recv_timeout(Duration::from_millis(10));
+    }
+}
+
+/// Whether process `pid` still runs: it exists and isn't a zombie waiting
+/// for its new parent to reap it.
+fn running(pid: i32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    // The state follows the command's name, which is in parentheses.
+    let state = stat.rsplit_once(')').map(|(_, rest)| rest.trim_start());
+    !state.is_some_and(|rest| rest.starts_with('Z'))
 }
 
 /// A CLI that isn't installed makes the decider unavailable, naming the
