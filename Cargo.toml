@@ -27,6 +27,9 @@ directories = "6"
 crc32fast = { version = "1.5", default-features = false, features = ["std"] }
 # FLAC segments: a pure-Rust encoder, without its logging, threading and serde.
 flacenc = { version = "0.5", default-features = false }
+# Gzip, to unpack the word list built into nota-checks (C4). Already in the
+# tree through ureq; the pure-Rust backend only.
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 # Golden tests for screens: Ratatui's TestBackend output, compared as text.
 insta = { version = "1.49", default-features = false }
 proptest = { version = "1.11", default-features = false, features = ["std"] }
@@ -36,9 +39,20 @@ rustix = { version = "1.1", default-features = false, features = ["std", "time"]
 ratatui = { version = "0.30", default-features = false, features = ["crossterm", "underline-color"] }
 # The store's database, with SQLite built in (no system library).
 rusqlite = { version = "0.41", features = ["bundled"] }
-# The code checks' fixtures, exported from the research bench as JSON; read
-# in tests only. Already in the tree through the sherpa-onnx bindings.
+# Double Metaphone for the term lookup (C4), from Apache commons-codec. Its
+# other encoders' rule files stay out (no `embedded` features).
+rphonetic = { version = "=4.0.0", default-features = false }
+# Reading JSON with its own visitor, to refuse a key given twice (nota-llm's
+# replies); serde_json's `Value` keeps only the last. Already in the tree
+# through serde_json.
+serde = "1"
+# JSON: the requests to llama-server and its replies (nota-llm), and the
+# code checks' fixtures exported from the research bench (read in tests).
+# Already in the tree through the sherpa-onnx bindings.
 serde_json = "1"
+# Levenshtein and Jaro-Winkler for the term lookup (C4). Already in the tree
+# through darling and wezterm-dynamic.
+strsim = "0.11"
 # SIGHUP, SIGTERM and SIGINT, read on a thread so a recording can stop in
 # order. Already in the tree through crossterm.
 signal-hook = "0.3"
@@ -103,6 +117,9 @@ mod_module_files = "warn"
 redundant_clone = "warn"
 use_self = "warn"
 
+# The word list nota-checks unpacks in every test that looks a word up.
+[profile.dev.package.miniz_oxide]
+opt-level = 3
 # The crash tests encode thousands of short FLAC segments; unoptimised, the
 # encoder and its hashes dominate the test run.
 [profile.dev.package.flacenc]

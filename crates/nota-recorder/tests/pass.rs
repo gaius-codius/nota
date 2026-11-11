@@ -286,6 +286,10 @@ fn a_pass_says_how_it_ended() {
         "the transcriber stopped working: exited"
     );
     assert_eq!(
+        said(PassEnd::CantStart("couldn't start: not found".into())),
+        "the transcriber stopped working: couldn't start: not found"
+    );
+    assert_eq!(
         said(PassEnd::Stalled(None)),
         "the transcriber stopped answering"
     );
@@ -364,29 +368,33 @@ fn a_pass_that_gets_no_answers_gives_up() {
     assert!(sink.texts.is_empty());
 }
 
-/// An engine program that's gone stalls the pass with the reason the
-/// spawn gave, not a guess.
+/// Acceptance (#237): an engine program that's gone ends the pass at its
+/// first failed spawn, with the reason the spawn gave, not after the
+/// stall.
 #[test]
-fn a_missing_engine_program_stalls_with_why() {
+fn a_missing_engine_program_ends_the_pass_at_once_with_why() {
     let mut config = config(&["echo"]);
     config.engine.command.program = PathBuf::from("/nonexistent/nota-engine");
-    config.stall = Duration::from_secs(2);
+    // Far beyond the early end's few milliseconds, so only it ends the
+    // pass with this result; without it the pass stalls at 30 s instead.
+    config.stall = Duration::from_secs(30);
     let mut sink = Committed::default();
+    let why = format!("couldn't start: {}", std::io::Error::from_raw_os_error(2));
     match run(&config, &mut sink, &|| false) {
-        PassEnd::Stalled(Some(why)) => assert_eq!(
-            why,
-            format!("couldn't start: {}", std::io::Error::from_raw_os_error(2))
-        ),
+        PassEnd::CantStart(said) => assert_eq!(said, why),
         other => panic!("{other:?}"),
     }
+    // One spawn, one failure: no restart was waited for.
+    assert_eq!(
+        *sink.downs.borrow(),
+        [Some(format!("the transcriber stopped working: {why}"))]
+    );
     assert!(sink.texts.is_empty());
 }
 
-/// An engine that exits at start (a model that doesn't load) stalls the
-/// pass with the last line it wrote to stderr.
-#[test]
-fn an_engine_that_exits_at_start_stalls_with_its_last_error() {
-    let mut config = config(&[]);
+/// An engine that exits as it starts, with what a model that doesn't load
+/// writes to stderr.
+fn exits_at_start(config: &mut PassConfig) {
     config.engine.command.program = PathBuf::from("/bin/sh");
     config.engine.command.args = [
         "-c",
@@ -395,34 +403,73 @@ fn an_engine_that_exits_at_start_stalls_with_its_last_error() {
     .iter()
     .map(OsString::from)
     .collect();
-    config.stall = Duration::from_secs(2);
+}
+
+/// Acceptance (#237): engines that exit before hello (a model that doesn't
+/// load) end the pass at the third in a row, with the last line the last
+/// one wrote to stderr, not after the stall.
+#[test]
+fn an_engine_that_exits_at_start_three_times_ends_the_pass_with_its_last_error() {
+    let mut config = config(&[]);
+    exits_at_start(&mut config);
+    // Far beyond the early end's few milliseconds, so only it ends the
+    // pass with this result; without it the pass stalls at 30 s instead.
+    config.stall = Duration::from_secs(30);
     let mut sink = Committed::default();
+    let why = "exited (exit status: 1): nota engine asr: no model at /m";
     match run(&config, &mut sink, &|| false) {
-        PassEnd::Stalled(Some(why)) => assert_eq!(
-            why,
-            "exited (exit status: 1): nota engine asr: no model at /m"
-        ),
+        PassEnd::CantStart(said) => assert_eq!(said, why),
         other => panic!("{other:?}"),
     }
+    // Three engines were tried, and the pass ended at the third.
+    let down = Some(format!("the transcriber stopped working: {why}"));
+    assert_eq!(*sink.downs.borrow(), [down.clone(), down.clone(), down]);
     assert!(sink.texts.is_empty());
+}
+
+/// Acceptance (#237): an engine that says hello and then dies, every time,
+/// isn't given up on early: it started, so its audio is struck and skipped
+/// as before and the pass goes on.
+#[test]
+fn an_engine_that_dies_after_each_hello_does_not_end_the_pass_early() {
+    // Every engine dies on the first audio it's sent.
+    let mut sink = Committed::default();
+    let end = run(
+        &config(&["crash-after", "--after", "0"]),
+        &mut sink,
+        &|| false,
+    );
+    assert!(!matches!(end, PassEnd::CantStart(_)), "{end:?}");
+    // More engines died than the early end allows before hello.
+    let deaths = sink
+        .downs
+        .borrow()
+        .iter()
+        .flatten()
+        .filter(|why| why.starts_with("the transcriber stopped working: exited"))
+        .count();
+    assert!(deaths > 3, "{:?}", sink.downs.borrow());
 }
 
 /// Acceptance (#224): the sink hears why the engine is down while the
 /// pass runs, in the words its stall would give, not only once it ends.
 #[test]
 fn a_pass_says_why_its_engine_is_down_before_it_ends() {
-    let mut config = config(&["echo"]);
-    config.engine.command.program = PathBuf::from("/nonexistent/nota-engine");
+    let mut config = config(&[]);
+    // One exit at start leaves the pass running, so it's still going when
+    // the sink first hears why.
+    exits_at_start(&mut config);
     let mut sink = Committed::default();
     let downs = Rc::clone(&sink.downs);
     let end = run(&config, &mut sink, &move || !downs.borrow().is_empty());
     assert!(matches!(end, PassEnd::Stopped), "{end:?}");
     assert_eq!(
         sink.downs.borrow()[0],
-        Some(format!(
-            "the transcriber stopped working: couldn't start: {}",
-            std::io::Error::from_raw_os_error(2)
-        ))
+        Some(
+            "the transcriber stopped working: exited (exit status: 1): \
+             nota engine asr: no model at /m"
+                .to_owned()
+        )
     );
 }
 

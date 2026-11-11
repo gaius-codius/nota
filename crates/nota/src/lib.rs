@@ -9,6 +9,9 @@
 //! - `nota engine asr`: the speech engine child, which `nota record`
 //!   starts and talks to over stdin and stdout, and the app starts for the
 //!   final pass after each recording (see `jobs` and `final_pass`);
+//! - `nota engine llama-server PROGRAM ARGS…`: starts the local decider's
+//!   llama-server tied to the nota that ran it, so it ends when nota does
+//!   (see `nota_llm::lifeline`).
 //! - `nota pack`: builds term packs, from the committed lists of a shipped
 //!   pack or from a user's glossary, and writes a pack's credits (see
 //!   `pack`).
@@ -41,6 +44,16 @@ mod library;
 mod live;
 mod pack;
 mod record;
+// The clean-up job (#159) and the engines screen (#163) will read it.
+#[cfg(unix)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the clean-up job and the engines screen, still to come, read it"
+    )
+)]
+mod settings;
 mod terminal;
 #[cfg(feature = "fake-capture")]
 mod tone;
@@ -52,6 +65,7 @@ usage: nota [--data DIR] [--parakeet DIR --vad FILE]
        nota record [--title TEXT] [--data DIR] [--parakeet DIR --vad FILE]
                    [--mic NODE] [--system NODE]
        nota engine asr --parakeet DIR --vad FILE [--threads N] [--pass live|final]
+       nota engine llama-server PROGRAM [ARGS...]
        nota pack build DIR --out FILE
        nota pack glossary FILE --out FILE --author NAME [--name NAME]
                           [--version TEXT] [--language CODE]
@@ -64,6 +78,8 @@ enum Command {
     App(RecordArgs),
     Record(RecordArgs),
     EngineAsr(ModelPaths, ChunkerConfig),
+    /// `nota engine llama-server`: the server program and its arguments.
+    EngineLlama(Vec<OsString>),
     /// `nota pack`: builds a pack, or writes its credits.
     Pack(pack::PackCommand),
     /// `nota engine fake`: the engine child with stand-in models (tests
@@ -97,6 +113,11 @@ pub fn main(args: &[OsString]) -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => fail(&format!("nota engine asr: {err}"), 1),
         },
+        // Returns only if the server couldn't be started in its place.
+        Command::EngineLlama(server) => {
+            let err = nota_llm::lifeline::exec_tied(&server);
+            fail(&format!("nota engine llama-server: {err}"), 1)
+        }
         #[cfg(feature = "fake-capture")]
         Command::EngineFake(chunking) => match fake_engine::run(chunking) {
             Ok(()) => ExitCode::SUCCESS,
@@ -147,6 +168,12 @@ fn parse(args: &[OsString]) -> Result<Command, String> {
         Some("engine") if words.next().and_then(|a| a.to_str()) == Some("asr") => {
             parse_engine(words.as_slice())
                 .map(|(paths, chunking)| Command::EngineAsr(paths, chunking))
+        }
+        Some("engine") if args.get(1).and_then(|a| a.to_str()) == Some("llama-server") => {
+            match args.get(2..) {
+                Some(server) if !server.is_empty() => Ok(Command::EngineLlama(server.to_vec())),
+                _ => Err("nota engine llama-server needs the server's program".into()),
+            }
         }
         #[cfg(feature = "fake-capture")]
         Some("engine") if args.get(1).and_then(|a| a.to_str()) == Some("fake") => {

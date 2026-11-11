@@ -15,6 +15,7 @@ publish = false
 afl = "0.18"
 crc32fast = "1.5"
 nota-core = { path = "../crates/nota-core" }
+nota-llm = { path = "../crates/nota-llm" }
 nota-recorder = { path = "../crates/nota-recorder" }
 
 # The root workspace's lints, copied: this is a workspace of its own, so it
