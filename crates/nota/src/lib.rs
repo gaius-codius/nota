@@ -44,6 +44,16 @@ mod library;
 mod live;
 mod pack;
 mod record;
+// The clean-up job (#159) and the engines screen (#163) will read it.
+#[cfg(unix)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the clean-up job and the engines screen, still to come, read it"
+    )
+)]
+mod settings;
 mod terminal;
 #[cfg(feature = "fake-capture")]
 mod tone;

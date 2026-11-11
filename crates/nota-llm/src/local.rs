@@ -206,7 +206,7 @@ impl Decider for LocalDecider {
             self.stop_server();
             return Err(DecideError::Stopped);
         }
-        let body = request::body(&*self.prompt, question);
+        let body = request::body(&*self.prompt, question, None);
         let mut failures = 0;
         loop {
             let trouble = match self.try_once(&body, stop) {

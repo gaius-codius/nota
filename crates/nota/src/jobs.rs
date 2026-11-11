@@ -22,7 +22,18 @@
 //! session's audio, all published. The queue moves on past one that's
 //! waiting, and past one that fails (it keeps its reason), to the next
 //! session's.
+//!
+//! **Engine retries take turns and slow down.** A job whose engine
+//! couldn't start or stopped working is tried again [`IDLE`] after its run
+//! ended, then twice as long after each further failure, up to
+//! [`RETRY_CAP`]. Once any job's engine confirms audio, every waiting job
+//! goes back to the shortest spacing. Jobs not waiting on an engine retry
+//! go first, in queue order; then the retries take turns, the one whose
+//! last run ended longest ago first, and none runs before an older one that
+//! isn't due yet. So each waiting session is tried before any is tried
+//! again, however long the runs take and however far each has backed off.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
@@ -42,9 +53,79 @@ pub(crate) const MAX_ATTEMPTS: u32 = 3;
 /// space may have come back, or a recording elsewhere stopped.
 const IDLE: Duration = Duration::from_secs(5);
 
+/// The longest a job whose engine keeps failing waits before it's tried
+/// again: five minutes, so a model that won't load isn't loaded every few
+/// seconds all the time nota is idle.
+const RETRY_CAP: Duration = Duration::from_secs(300);
+
 /// How often a runner held off by a recording checks whether it has
 /// stopped, and one waiting for another nota's runner tries its lock.
 const HELD: Duration = Duration::from_secs(1);
+
+/// When a job whose engine failed may be tried again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Retry {
+    /// When its last run ended.
+    ended: SessionTime,
+    /// The failures since its engine last answered, past the first: each
+    /// doubles the spacing.
+    again: u32,
+}
+
+impl Retry {
+    /// A job's first failure, or its first since an engine answered,
+    /// ended `now`: it waits [`IDLE`].
+    fn first(now: SessionTime) -> Self {
+        Self {
+            ended: now,
+            again: 0,
+        }
+    }
+
+    /// This job failing again, its run ended `now`: it waits twice as long
+    /// as last time, up to [`RETRY_CAP`].
+    fn failed_again(self, now: SessionTime) -> Self {
+        Self {
+            ended: now,
+            again: self.again.saturating_add(1),
+        }
+    }
+
+    /// How long after its run ended it waits.
+    fn spacing(self) -> Duration {
+        IDLE.saturating_mul(2_u32.saturating_pow(self.again))
+            .min(RETRY_CAP)
+    }
+
+    /// Whether it may be tried at `now`.
+    fn due(self, now: SessionTime) -> bool {
+        now.checked_duration_since(self.ended).unwrap_or_default() >= self.spacing()
+    }
+
+    /// An engine has answered: it waits the shortest spacing again, from
+    /// when its run ended.
+    fn reset(&mut self) {
+        self.again = 0;
+    }
+}
+
+/// Whether engine retries may still run in this look at the queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Turn {
+    /// No retry met so far is waiting out its spacing.
+    Open,
+    /// One is: the retries after it wait their turn.
+    Closed,
+}
+
+/// How a run went, as the runner needs to know it.
+#[derive(Debug)]
+struct Ran {
+    /// How it ended.
+    end: JobEnd,
+    /// Whether its engine confirmed audio at some point.
+    answered: bool,
+}
 
 /// What a job is given while it runs.
 pub(crate) struct Running<'a> {
@@ -190,7 +271,7 @@ impl Runner {
                     room,
                     shared: looping,
                     clock,
-                    retry_after: BTreeMap::new(),
+                    retries: BTreeMap::new(),
                 }
                 .run();
             })?;
@@ -249,9 +330,10 @@ struct Loop<W, C, R> {
     shared: Arc<Shared>,
     /// The app's clock, used to space engine retries.
     clock: Arc<dyn Clock>,
-    /// When each job last stopped because its engine couldn't start or
-    /// stopped working, or it had none.
-    retry_after: BTreeMap<JobId, SessionTime>,
+    /// The jobs whose last run stopped because their engine couldn't
+    /// start or stopped working, or they had none, and when each may be
+    /// tried again.
+    retries: BTreeMap<JobId, Retry>,
 }
 
 impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
@@ -276,24 +358,26 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
         }
     }
 
-    /// The first job that can run now, in queue order. A waiting job
-    /// that lacks what it needs is marked as waiting for it, so the
-    /// Processing screen can say why.
+    /// The first job that can run now: those not waiting on an engine
+    /// retry in queue order, then the retries, the one that last ran
+    /// longest ago first, as long as no older one is still waiting out its
+    /// spacing. A waiting job that lacks what it needs is marked as waiting
+    /// for it, so the Processing screen can say why.
     fn next(&self) -> Result<Option<Job>, StoreError> {
-        let jobs = self.db.with(|db| db.jobs())?;
+        let mut jobs = self.db.with(|db| db.jobs())?;
+        // A stable sort: jobs with no retry (`None`) keep queue order
+        // ahead of the rest, and retries that ended together keep it too.
+        // Taking the oldest retry first means a session tried a while ago
+        // isn't passed over by one whose runs keep ending sooner.
+        jobs.sort_by_key(|job| self.retries.get(&job.id).map(|retry| retry.ended));
+        let mut turn = Turn::Open;
         for job in jobs {
             let waits = match &job.state {
                 JobState::Waiting(waits) => *waits,
                 JobState::EngineDown(_) => Some(Wait::Engine),
                 _ => continue,
             };
-            if self.retry_after.get(&job.id).is_some_and(|at| {
-                self.clock
-                    .now()
-                    .checked_duration_since(*at)
-                    .unwrap_or_default()
-                    < IDLE
-            }) {
+            if !self.has_turn(job.id, &mut turn) {
                 continue;
             }
             // A job waiting for space keeps waiting for it until there's
@@ -316,6 +400,22 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
         Ok(None)
     }
 
+    /// Whether job `id` may run now as far as engine retries go, given the
+    /// retries before it in turn order; a retry not due yet closes `turn`
+    /// to every retry after it.
+    fn has_turn(&self, id: JobId, turn: &mut Turn) -> bool {
+        let Some(retry) = self.retries.get(&id) else {
+            return true;
+        };
+        // Without this, a session that backed off less (queued later, say)
+        // would be retried again and again while an older one waits.
+        if *turn == Turn::Closed || !retry.due(self.clock.now()) {
+            *turn = Turn::Closed;
+            return false;
+        }
+        true
+    }
+
     fn run_one(&mut self, job: &Job) {
         // Taken, or ended, meanwhile; or the database can't be written (a
         // full disk): look again in a while, not at once.
@@ -323,18 +423,11 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
             self.shared.sleep(IDLE);
             return;
         }
-        let end = self.work(job);
+        let Ran { end, answered } = self.work(job);
         if !self.note_end(job.id, &end) {
             return;
         }
-        if matches!(
-            end,
-            JobEnd::EngineDown(_) | JobEnd::Waiting(Some(Wait::Engine))
-        ) {
-            self.retry_after.insert(job.id, self.clock.now());
-        } else {
-            self.retry_after.remove(&job.id);
-        }
+        self.note_retry(job.id, &end, answered);
         // Out of space by SQLite's count though the disk check finds room
         // (a quota, a full temp store): don't start it again at once.
         if end == JobEnd::Waiting(Some(Wait::Space)) {
@@ -342,8 +435,36 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
         }
     }
 
+    /// Notes when job `id`, whose run ended with `end`, may be tried
+    /// again, and resets every retry's spacing if its engine `answered`.
+    fn note_retry(&mut self, id: JobId, end: &JobEnd, answered: bool) {
+        // The engine is the same for every session: one that answers for
+        // this job is worth trying again soon for the others too.
+        if answered {
+            self.retries.values_mut().for_each(Retry::reset);
+        }
+        match end {
+            JobEnd::EngineDown(_) | JobEnd::Waiting(Some(Wait::Engine)) => {}
+            // Stopped by a recording or by nota closing: a retry keeps its
+            // place and its spacing, since nothing said the engine works.
+            JobEnd::Waiting(None) => return,
+            _ => {
+                self.retries.remove(&id);
+                return;
+            }
+        }
+        let now = self.clock.now();
+        let retry = match self.retries.get(&id) {
+            // An engine that answered in this run and then went down
+            // starts the spacing again.
+            Some(retry) if !answered => retry.failed_again(now),
+            _ => Retry::first(now),
+        };
+        self.retries.insert(id, retry);
+    }
+
     /// Runs the job with this recording check and progress callback.
-    fn work(&mut self, job: &Job) -> JobEnd {
+    fn work(&mut self, job: &Job) -> Ran {
         let shared = Arc::clone(&self.shared);
         let capture = &self.capture;
         let stop = move || shared.stopping() || capture.recording();
@@ -356,9 +477,12 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
                 let _ = db.with(|db| db.job_progress(id, progress));
             }
         };
+        let confirmed = Cell::new(false);
         let answered = {
             let db = db.clone();
+            let confirmed = &confirmed;
             move || {
+                confirmed.set(true);
                 // Only shown too: the reason goes at the run's end anyway.
                 let _ = db.with(|db| db.engine_answered(id));
             }
@@ -370,7 +494,7 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
                 None => db.engine_answered(id),
             });
         };
-        self.worker.run(
+        let end = self.worker.run(
             job,
             &Running {
                 stop: &stop,
@@ -378,7 +502,11 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
                 answered: &answered,
                 engine_down: &engine_down,
             },
-        )
+        );
+        Ran {
+            end,
+            answered: confirmed.get(),
+        }
     }
 
     /// Notes the result before another job can run.

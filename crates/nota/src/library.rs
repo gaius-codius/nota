@@ -178,37 +178,13 @@ impl Library {
     }
 
     /// Whether a session is being recorded, by this nota or another: its
-    /// directory is locked and it has journals. Sessions the database
-    /// holds as stopped aren't looked at. Only sessions with journals are
-    /// tried, as [`Library::listing`] does: a recording takes its lock
-    /// before it makes its first journal, so trying the lock never gets in
-    /// the way of a recording starting. (Between the two, a recording isn't
-    /// seen here; the app knows of its own before it starts.)
+    /// recording counted in the library's recording lock, from before it
+    /// makes its session (see [`Recordings::running`]). A moment playing
+    /// isn't a recording, and asking keeps out neither a recording nor a
+    /// moment. A lock that can't be read is taken for none running, so
+    /// the jobs aren't held up for good by it.
     pub(crate) fn recording(&self) -> bool {
-        let stopped: Vec<SessionId> = self
-            .db
-            .with(|db| db.sessions())
-            .map(|sessions| {
-                sessions
-                    .into_iter()
-                    .filter(|s| s.state == SessionState::Stopped)
-                    .map(|s| s.id)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let Ok(sessions) = self.existing() else {
-            return false;
-        };
-        sessions
-            .iter()
-            .filter(|session| !stopped.contains(&session.id))
-            .any(|session| {
-                let dir = SessionDir::new(session.id, StdFs, &session.audio());
-                needs_salvage(&dir).unwrap_or(false)
-                    && dir
-                        .lock()
-                        .is_err_and(|e| e.kind() == io::ErrorKind::WouldBlock)
-            })
+        self.recordings_on(StdFs).running(&[]).unwrap_or(false)
     }
 
     /// Every session on disk, in number order.
@@ -548,34 +524,71 @@ pub(crate) fn startup_watch<S: Fs + Clone + 'static>(
 ) -> io::Result<Arc<DiskWatch<S>>> {
     let watch = DiskWatch::new(fs.clone());
     // Recovery mustn't spend a live recording's finishing room.
-    if startup_in_use(fs, root, &[])? {
+    if recording_elsewhere(fs, root, &[])? {
         return Ok(watch);
     }
     if let Some(ballast) = Ballast::find(fs, root, len)? {
         watch.hold(ballast);
         // Recovery takes a while: look again before freeing it, past the
-        // sessions startup locked itself. Sessions that can't be listed
-        // may hold a recording, so they keep it.
+        // recording this start may have counted by then. A lock that can't
+        // be read may hide a recording, so it keeps it.
         let (fs, root) = (fs.clone(), root.to_path_buf());
-        watch.share(move |own| startup_in_use(&fs, &root, own).unwrap_or(true));
+        watch.share(move |own| recording_elsewhere(&fs, &root, own).unwrap_or(true));
     }
     Ok(watch)
 }
 
-/// Checks locks even before a recording has made its first journal,
-/// passing over the audio directories in `own`, which startup holds itself.
-pub(crate) fn startup_in_use<S: Fs>(fs: &S, root: &Path, own: &[PathBuf]) -> io::Result<bool> {
-    for session in fs.list(&root.join(SESSIONS))? {
-        let audio = session.join(AUDIO);
-        if !own.contains(&audio)
-            && fs
-                .lock_dir(&audio)
-                .is_err_and(|e| e.kind() == io::ErrorKind::WouldBlock)
-        {
-            return Ok(true);
-        }
+/// Whether a recording runs in the library at `root` on `fs`, besides
+/// those whose recording-lock entries are in `own`: the directories the
+/// caller's [`DiskWatch`] holds itself, its own recording among them. A
+/// moment playing and another nota's salvage aren't recordings.
+///
+/// # Errors
+///
+/// [`LockUnreadable`], of the kind of its cause, if the lock can't be read.
+pub(crate) fn recording_elsewhere<S: Fs + Clone>(
+    fs: &S,
+    root: &Path,
+    own: &[PathBuf],
+) -> io::Result<bool> {
+    let recordings = Recordings::new(fs.clone(), root);
+    recordings.running(own).map_err(|source| {
+        let kind = source.kind();
+        io::Error::new(
+            kind,
+            LockUnreadable {
+                dir: recordings.dir().to_path_buf(),
+                source,
+            },
+        )
+    })
+}
+
+/// The library's recording lock couldn't be read, so whether a recording
+/// runs isn't known: its directory, and why.
+#[derive(Debug)]
+pub(crate) struct LockUnreadable {
+    /// The lock's directory, for the user to look at.
+    dir: PathBuf,
+    /// Why it couldn't be read.
+    source: io::Error,
+}
+
+impl std::fmt::Display for LockUnreadable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the library's recording lock {} can't be read: {}",
+            self.dir.display(),
+            self.source
+        )
     }
-    Ok(false)
+}
+
+impl std::error::Error for LockUnreadable {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
 }
 
 /// Removes only empty scaffolding that this start just created. Never
