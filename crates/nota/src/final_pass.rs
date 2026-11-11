@@ -30,6 +30,7 @@ use nota_store::{
     Writer,
 };
 
+use crate::cleanup::CleanUp;
 use crate::jobs::{Running, Worker};
 use crate::library::Library;
 use crate::record::RATE;
@@ -44,24 +45,31 @@ pub(crate) struct Engine {
     pub(crate) heard_by: HeardBy,
 }
 
-/// Runs the jobs queued after a stop: for now, the final pass.
+/// Runs the jobs queued after a stop: the final pass, then term clean-up
+/// ([`crate::cleanup`]).
 pub(crate) struct Jobs {
     library: Library,
     /// `None` without a speech engine: its jobs wait for one.
     engine: Option<Engine>,
     clock: Arc<dyn Clock>,
+    /// Runs term clean-up.
+    clean_up: CleanUp,
 }
 
 impl Jobs {
+    /// The jobs of `library`, the final pass run by `engine` (if there is
+    /// one) and timed by `clock`, and clean-up run by `clean_up`.
     pub(crate) const fn new(
         library: Library,
         engine: Option<Engine>,
         clock: Arc<dyn Clock>,
+        clean_up: CleanUp,
     ) -> Self {
         Self {
             library,
             engine,
             clock,
+            clean_up,
         }
     }
 }
@@ -75,6 +83,7 @@ impl Worker for Jobs {
                 }
                 None => JobEnd::Waiting(Some(Wait::Engine)),
             },
+            JobKind::CleanUp => self.clean_up.run(self.library.db(), job.session, running),
         }
     }
 
@@ -98,6 +107,7 @@ impl Worker for Jobs {
                     self.engine.is_none().then_some(Wait::Engine)
                 }
             }
+            JobKind::CleanUp => self.clean_up.lacks(self.library.db(), job.session),
         }
     }
 }
@@ -156,7 +166,7 @@ fn pass_end(ended: PassEnd<StoreError>) -> JobEnd {
 
 /// How a job ends on a store error: waiting for space if the disk is
 /// full, failed otherwise.
-fn stored(e: &StoreError) -> JobEnd {
+pub(crate) fn stored(e: &StoreError) -> JobEnd {
     if e.is_disk_full() {
         JobEnd::Waiting(Some(Wait::Space))
     } else {

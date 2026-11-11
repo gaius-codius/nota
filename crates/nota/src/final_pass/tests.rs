@@ -294,7 +294,7 @@ fn without_an_engine_the_final_pass_waits_for_one() {
         (JobKind::FinalPass, JobState::Waiting(None))
     );
     let clock: Arc<dyn Clock> = Arc::new(SystemClock::start().unwrap());
-    let mut jobs = Jobs::new(library, None, clock);
+    let mut jobs = Jobs::new(library, None, clock, crate::cleanup::fake::idle());
     assert_eq!(jobs.lacks(&job), Some(Wait::Engine));
     let stop = || false;
     let progress = |_| {};
@@ -354,7 +354,7 @@ fn the_final_pass_waits_for_journals_to_be_published() {
         },
         heard_by: heard_by(),
     };
-    let jobs = Jobs::new(library, Some(engine), clock);
+    let jobs = Jobs::new(library, Some(engine), clock, crate::cleanup::fake::idle());
     assert_eq!(jobs.lacks(&job), None);
     drop(StdFs.create(&audio.join("journal-000003")).unwrap());
     assert_eq!(jobs.lacks(&job), Some(Wait::Audio));
@@ -453,6 +453,7 @@ fn a_missing_executable_and_a_broken_model_are_stored_apart() {
         .with(|db| db.jobs())
         .unwrap()
         .into_iter()
+        .filter(|job| job.kind == JobKind::FinalPass)
         .map(|job| job.state)
         .collect();
     assert_eq!(

@@ -49,6 +49,11 @@ impl RevisionNumber {
     pub const fn get(self) -> u32 {
         self.0
     }
+
+    /// Revision `number`, as the database holds it.
+    pub(crate) const fn stored(number: u32) -> Self {
+        Self(number)
+    }
 }
 
 /// A chunk of the final pass's text: its track and first sample, as
@@ -183,7 +188,7 @@ fn revision_exists(conn: &Connection, key: i64, number: u32) -> Result<bool, Sto
 }
 
 /// Whether the session's chunk has both ends of `words` among its words.
-fn has_words(conn: &Connection, key: i64, change: &Change) -> Result<bool, StoreError> {
+pub(crate) fn has_words(conn: &Connection, key: i64, change: &Change) -> Result<bool, StoreError> {
     let found: i64 = conn.query_row(
         "SELECT count(*) FROM final_word \
          WHERE session_id = ?1 AND track = ?2 AND start_sample = ?3 AND position IN (?4, ?5)",
@@ -407,6 +412,60 @@ fn in_session_order(lines: &mut [FinalLine]) {
     });
 }
 
+/// Adds a revision of `session`'s text, `parent` with `changes`, inside
+/// the caller's transaction, as [`Store::add_revision`] describes, and
+/// gives its number.
+pub(crate) fn insert_revision(
+    conn: &Connection,
+    session: SessionId,
+    parent: RevisionNumber,
+    changes: &[Change],
+) -> Result<RevisionNumber, StoreError> {
+    let key = session_key(session)?;
+    if !revision_exists(conn, key, parent.0)? {
+        return Err(StoreError::NoRevision(session, parent.0));
+    }
+    for change in changes {
+        if !has_words(conn, key, change)? {
+            return Err(StoreError::NoWords {
+                session,
+                chunk: change.chunk,
+                words: change.words,
+            });
+        }
+    }
+    let highest: i64 = conn.query_row(
+        "SELECT max(number) FROM revision WHERE session_id = ?1",
+        [key],
+        |r| r.get(0),
+    )?;
+    let number = u32::try_from(highest)
+        .ok()
+        .and_then(|n| n.checked_add(1))
+        .ok_or(StoreError::OutOfRange)?;
+    conn.execute(
+        "INSERT INTO revision (session_id, number, parent) VALUES (?1, ?2, ?3)",
+        params![key, i64::from(number), i64::from(parent.0)],
+    )?;
+    for change in changes {
+        conn.execute(
+            "INSERT INTO revision_text \
+             (session_id, revision, track, start_sample, first_word, last_word, text) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                key,
+                i64::from(number),
+                i64::from(change.chunk.track.get()),
+                sample(change.chunk.start)?,
+                i64::from(change.words.first),
+                i64::from(change.words.last),
+                change.text
+            ],
+        )?;
+    }
+    Ok(RevisionNumber(number))
+}
+
 impl Store {
     /// The session's revisions, in number order: none before its first
     /// final-text row, then revision 0, the final text, and each made since.
@@ -450,53 +509,12 @@ impl Store {
         parent: RevisionNumber,
         changes: &[Change],
     ) -> Result<RevisionNumber, StoreError> {
-        let key = session_key(session)?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if !revision_exists(&tx, key, parent.0)? {
-            return Err(StoreError::NoRevision(session, parent.0));
-        }
-        for change in changes {
-            if !has_words(&tx, key, change)? {
-                return Err(StoreError::NoWords {
-                    session,
-                    chunk: change.chunk,
-                    words: change.words,
-                });
-            }
-        }
-        let highest: i64 = tx.query_row(
-            "SELECT max(number) FROM revision WHERE session_id = ?1",
-            [key],
-            |r| r.get(0),
-        )?;
-        let number = u32::try_from(highest)
-            .ok()
-            .and_then(|n| n.checked_add(1))
-            .ok_or(StoreError::OutOfRange)?;
-        tx.execute(
-            "INSERT INTO revision (session_id, number, parent) VALUES (?1, ?2, ?3)",
-            params![key, i64::from(number), i64::from(parent.0)],
-        )?;
-        for change in changes {
-            tx.execute(
-                "INSERT INTO revision_text \
-                 (session_id, revision, track, start_sample, first_word, last_word, text) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    key,
-                    i64::from(number),
-                    i64::from(change.chunk.track.get()),
-                    sample(change.chunk.start)?,
-                    i64::from(change.words.first),
-                    i64::from(change.words.last),
-                    change.text
-                ],
-            )?;
-        }
+        let number = insert_revision(&tx, session, parent, changes)?;
         tx.commit()?;
-        Ok(RevisionNumber(number))
+        Ok(number)
     }
 
     /// The session's text as revision `number` shows it, in session order

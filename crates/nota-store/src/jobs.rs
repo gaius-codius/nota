@@ -43,21 +43,25 @@ use crate::{Store, StoreError, parse_session, session_key};
 pub enum JobKind {
     /// The final transcription pass over the session's published audio.
     FinalPass,
+    /// Term clean-up over the final pass's text, once that's done.
+    CleanUp,
 }
 
 impl JobKind {
     /// Every kind, in the order a stopped session's jobs are queued.
-    pub const ALL: [Self; 1] = [Self::FinalPass];
+    pub const ALL: [Self; 2] = [Self::FinalPass, Self::CleanUp];
 
     const fn as_str(self) -> &'static str {
         match self {
             Self::FinalPass => "final-pass",
+            Self::CleanUp => "clean-up",
         }
     }
 
     fn parse(text: &str) -> Result<Self, StoreError> {
         match text {
             "final-pass" => Ok(Self::FinalPass),
+            "clean-up" => Ok(Self::CleanUp),
             other => Err(StoreError::Corrupt(format!("unknown job kind {other:?}"))),
         }
     }
@@ -69,12 +73,17 @@ pub enum Wait {
     /// Free space: its session stopped on a full disk, or the job ran out
     /// of space. It runs once there's space again.
     Space,
-    /// A speech engine: nota was started without its models, or (with
-    /// a reason, [`JobState::EngineDown`]) the last one tried failed.
+    /// A working engine: nota was started without its speech models, or
+    /// (with a reason, [`JobState::EngineDown`]) the last speech engine or
+    /// decider tried failed.
     Engine,
     /// The session's audio: journals it still has are published (by
     /// salvage, at the next start) before its audio is worked on.
     Audio,
+    /// A decider to answer on the candidates: none is set up.
+    Decider,
+    /// The session's final pass, whose text term clean-up works on.
+    FinalText,
 }
 
 impl Wait {
@@ -83,6 +92,8 @@ impl Wait {
             Self::Space => "space",
             Self::Engine => "engine",
             Self::Audio => "audio",
+            Self::Decider => "decider",
+            Self::FinalText => "final-text",
         }
     }
 
@@ -91,6 +102,8 @@ impl Wait {
             "space" => Ok(Self::Space),
             "engine" => Ok(Self::Engine),
             "audio" => Ok(Self::Audio),
+            "decider" => Ok(Self::Decider),
+            "final-text" => Ok(Self::FinalText),
             other => Err(StoreError::Corrupt(format!("unknown job wait {other:?}"))),
         }
     }

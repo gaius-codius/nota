@@ -13,7 +13,8 @@
 #      committed copy can't drift from the bench or be edited by hand (C4's
 #      invented fixture is written by the bench's own Python packages, in
 #      its laya venv);
-#   3. runs every ignored test in nota-checks against the export.
+#   3. runs every ignored test in nota-checks, and clean-up's bench test in
+#      nota, against the export.
 # A clean run is part of the acceptance of each code checks change.
 #
 # Usage: scripts/bench-fixtures.sh
@@ -83,3 +84,5 @@ fi
 
 NOTA_BENCH_FIXTURES=$out/first cargo nextest run -p nota-checks --all-targets --locked \
   --run-ignored only --no-tests=fail
+NOTA_BENCH_FIXTURES=$out/first cargo nextest run -p nota --lib --locked \
+  --run-ignored only --no-tests=fail -E 'test(/^cleanup::tests::bench::/)'

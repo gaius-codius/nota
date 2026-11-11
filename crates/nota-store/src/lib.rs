@@ -5,7 +5,8 @@
 //! has published, the heard text ([`transcript`]), the marks and notes
 //! made while recording ([`annotations`]), the work queued after a stop
 //! ([`jobs`]), the final pass's text ([`final_text`]) and its revisions
-//! ([`revisions`]), the term packs each session chose and the learned
+//! ([`revisions`]), term clean-up's proposals ([`proposals`]), the term
+//! packs each session chose and the learned
 //! pairs ([`vocabulary`], [`learned`]), and
 //! the tables later work fills (the timeline). Term packs themselves are
 //! separate read-only files ([`packs`]). The tables are in [`schema`]; versions
@@ -48,6 +49,7 @@ pub mod jobs;
 pub mod learned;
 pub mod migrate;
 pub mod packs;
+pub mod proposals;
 pub mod revisions;
 pub mod schema;
 mod segments;
@@ -64,6 +66,10 @@ pub use jobs::{Job, JobEnd, JobId, JobKind, JobState, Progress, Wait};
 pub use learned::{Learned, LearnedPair, Verdict};
 pub use migrate::Adopted;
 pub use packs::{Pack, PackDigest, PackError, PackRef};
+pub use proposals::{
+    Decided, DecidedBy, Found, NewProposal, Origin, Outcome, Placing, Proposal, ProposalId,
+    Proposed, Refusal, Reviewed,
+};
 pub use revisions::{Applied, Change, ChunkKey, FinalLine, RevisionNumber, Timed, WordSpan};
 pub use segments::{AudioDigest, Inserted, RowKey, SegmentRow, Sha256Digest};
 pub use sessions::{NewSession, Session, SessionState, Track, TrackKind};
@@ -129,6 +135,9 @@ pub enum StoreError {
     },
     /// There's no job with this number.
     NoJob(i64),
+    /// There's no proposal with this number, or not one in the state the
+    /// call needs (one to rank, or applied and not yet written).
+    NoProposal(i64),
     /// The session's packs are recorded already: they're recorded once.
     PacksRecorded(SessionId),
     /// A pack the session recorded isn't installed with its recorded name,
@@ -223,6 +232,7 @@ impl fmt::Display for StoreError {
                 )
             }
             Self::NoJob(id) => write!(f, "there is no job {id}"),
+            Self::NoProposal(id) => write!(f, "there is no proposal {id} in that state"),
             Self::PacksRecorded(id) => {
                 write!(f, "session {}'s packs are recorded already", id.get())
             }

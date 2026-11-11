@@ -1742,6 +1742,7 @@ dependencies = [
  "directories",
  "jiff",
  "nota",
+ "nota-checks",
  "nota-core",
  "nota-engine",
  "nota-llm",
@@ -1752,6 +1753,7 @@ dependencies = [
  "ratatui",
  "rusqlite",
  "rustix",
+ "serde_json",
  "signal-hook",
  "toml",
 ]

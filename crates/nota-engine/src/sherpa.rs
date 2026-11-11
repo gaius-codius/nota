@@ -626,6 +626,19 @@ mod tests {
         }
     }
 
+    /// The detector is told the rate, threads and provider outright. With
+    /// any of them left unset, sherpa-onnx's own default detects the same
+    /// segments in the fixture, so only this test notices one going.
+    #[test]
+    fn the_detector_is_configured_outright() {
+        let Some((models, _)) = models_and_fixture() else {
+            return;
+        };
+        assert_eq!(models.vad.sample_rate, RATE_HZ);
+        assert_eq!(models.vad.num_threads, 1);
+        assert_eq!(models.vad.provider.as_deref(), Some("cpu"));
+    }
+
     /// With the real model, every word comes with a log-probability: the
     /// linked library's result gives one per token, and the patched crate
     /// reads them, one for one with the tokens.
