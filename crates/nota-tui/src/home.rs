@@ -9,14 +9,21 @@
 //! │                                                            │
 //! │ recent                                                     │
 //! │ ▸ ! Pharmacy law · scheduling                  58m  2 Oct  │  selected, pinned
-//! │     stopped early: disk full · free space to finish        │  what it needs
+//! │     salvage failed: publishing a segment failed: a disk    │  what it needs,
+//! │       error                                                │  wrapped
+//! │     journal-000000: couldn't delete it (permission         │  one held file
+//! │       denied); all its audio is published                  │  per item
 //! │   ✓ Pharmacy workshop · chronic conditions  2h 42m  today  │
 //! ╰─ r record  R last settings  ⏎ open ──────────────── parakeet ─╯
 //! ```
 //!
 //! Sessions that need you (`!`) are pinned to the top, however old; the
 //! rest follow newest first. The selected session's detail (what it needs,
-//! or how it was recovered) shows on the line below it.
+//! or how it was recovered, such as each file a failed salvage held and
+//! why) shows below it: each item starts a row of its own, and one too
+//! long for a row wraps onto the rows after it, indented. The session's own
+//! row stays in view however tall its detail is: a detail taller than the
+//! list ends in a row saying how many more rows it has.
 //!
 //! A problem (a recording that couldn't start, the sessions not listed)
 //! shows on the line above `recent` until a key is pressed once it has been
@@ -36,7 +43,7 @@ use ratatui::text::{Line, Span};
 
 use crate::logo;
 use crate::render::{Keep, MIN_HEIGHT, MIN_WIDTH, frame_row, too_small, truncate};
-use crate::text::{display_width, is_drawn};
+use crate::text::{display_width, is_drawn, wrap_hanging};
 use crate::theme::Theme;
 
 /// Rows inside the frame above the logo, and between it and the list.
@@ -44,6 +51,9 @@ const LOGO_GAP: u16 = 2;
 /// Columns left of a session's title: a space, `▸`, a space, its status
 /// glyph, a space.
 const ROW_LEAD: usize = 5;
+/// Further columns in front of the rows a detail item wraps onto, so each
+/// item's first row stands out.
+const WRAP_INDENT: usize = 2;
 
 /// Where a session is, as Home shows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,9 +79,10 @@ pub struct Session {
     pub duration: Option<Duration>,
     /// When it was recorded, as Home words it (`today`, `2 Oct`), if known.
     pub date: Option<String>,
-    /// What it needs, or how it was recovered, in words: shown under it
-    /// when it's selected.
-    pub detail: Option<String>,
+    /// What it needs, or how it was recovered, in words, one item per
+    /// entry (each file salvage held, say): shown under it when it's
+    /// selected, each item from a row of its own. Empty for none.
+    pub detail: Vec<String>,
 }
 
 /// What Home asks for.
@@ -332,7 +343,7 @@ impl Home {
             );
             return;
         }
-        let lines = self.list_lines(usize::from(list.width));
+        let mut lines = self.list_lines(usize::from(list.width));
         // Keep the selected row and its detail in view.
         let rows = usize::from(list.height);
         let (top, bottom) = lines
@@ -347,12 +358,32 @@ impl Home {
         } else if bottom >= self.scroll + rows {
             self.scroll = bottom + 1 - rows;
         }
+        // A detail taller than the list shows its first rows: the
+        // session's own row stays at the top, and the last row says how
+        // many more there are.
+        self.scroll = self.scroll.min(top);
+        // The list is at least 7 rows (`draw` refuses a frame under
+        // `MIN_HEIGHT`), so the last row shown is always below the session's.
+        let last_shown = self.scroll + rows - 1;
+        if bottom > last_shown {
+            let more = bottom - last_shown + 1;
+            lines[last_shown].1 = self.more_line(more);
+        }
         for (y, (index, line)) in (list.y..list.bottom()).zip(lines.iter().skip(self.scroll)) {
             if *index == self.selected {
                 buf.set_style(Rect::new(list.x, y, list.width, 1), self.theme.highlight);
             }
             buf.set_line(list.x, y, line, list.width);
         }
+    }
+
+    /// The row that stands for the last `more` rows of a detail too tall for
+    /// the list.
+    fn more_line(&self, more: usize) -> Line<'static> {
+        Line::from(vec![
+            Span::raw(" ".repeat(ROW_LEAD)),
+            Span::styled(format!("… {more} more rows"), self.theme.text_hint),
+        ])
     }
 
     /// Every row of the list, each with the index of its session: a row per
@@ -362,17 +393,40 @@ impl Home {
         for (index, session) in self.sessions.iter().enumerate() {
             let selected = index == self.selected;
             lines.push((index, self.session_line(session, selected, width)));
-            if let Some(detail) = session.detail.as_ref().filter(|_| selected) {
-                let room = width.saturating_sub(ROW_LEAD + 2);
-                let detail = truncate(vec![Span::raw(detail.clone())], room);
-                let mut spans = vec![Span::raw(" ".repeat(ROW_LEAD))];
-                spans.extend(
-                    detail
+            if selected {
+                lines.extend(
+                    self.detail_lines(&session.detail, width)
                         .into_iter()
-                        .map(|s| Span::styled(s.content.into_owned(), self.theme.text_secondary)),
+                        .map(|line| (index, line)),
                 );
-                lines.push((index, Line::from(spans)));
             }
+        }
+        lines
+    }
+
+    /// The rows of `detail` in a list `width` columns wide: each item from
+    /// a row of its own, under the title, and wrapped between words onto
+    /// indented rows after it, so nothing in it is cut off.
+    fn detail_lines(&self, detail: &[String], width: usize) -> Vec<Line<'static>> {
+        // Short of the frame's padding column and the column before it.
+        let room = width.saturating_sub(ROW_LEAD + 2);
+        let row = |lead: usize, text: String| {
+            Line::from(vec![
+                Span::raw(" ".repeat(lead)),
+                Span::styled(text, self.theme.text_secondary),
+            ])
+        };
+        let mut lines = Vec::new();
+        for item in detail {
+            let rows = wrap_hanging(item, room, room.saturating_sub(WRAP_INDENT));
+            lines.extend(rows.into_iter().enumerate().map(|(at, text)| {
+                let lead = if at == 0 {
+                    ROW_LEAD
+                } else {
+                    ROW_LEAD + WRAP_INDENT
+                };
+                row(lead, text)
+            }));
         }
         lines
     }
@@ -426,7 +480,7 @@ fn listed(mut sessions: Vec<Session>) -> Vec<Session> {
     for session in &mut sessions {
         session.title = drawn(&session.title);
         session.date = session.date.as_deref().map(drawn);
-        session.detail = session.detail.as_deref().map(drawn);
+        session.detail = session.detail.iter().map(|item| drawn(item)).collect();
     }
     sessions.sort_by_key(|s| (s.status != Status::NeedsYou, std::cmp::Reverse(s.id)));
     sessions

@@ -1,0 +1,26 @@
+---
+source: crates/nota-tui/tests/home_screen.rs
+expression: terminal.backend()
+---
+"╭─ ≈ nota ───────────────────────────────────────────────────── ! 1 needs you ─╮"
+"│                                                                              │"
+"│                                                                              │"
+"│                     ⠀⣀⣀⣀⣀⣀⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀                                 │"
+"│                     ⠛⠉⠉⠉⠉⠉⠉⠛⠳⠶⣤⣀⡀⠀⠀⠀⠀⠀⢀⣀⣤⡴⠶⠛                                 │"
+"│                     ⣤⠶⠶⠶⠶⠶⠶⣤⣄⣀⠀⠉⠙⠛⠛⠛⠛⠛⠋⠉⠀⢀⣀⣤                                 │"
+"│                     ⠀⣀⣀⣀⣀⣀⣀⠀⠈⠉⠛⠶⢦⣤⣤⣤⣤⣤⡴⠶⠛⠋⠉⠀     n o t a                     │"
+"│                     ⠛⠉⠉⠉⠉⠉⠉⠛⠳⠶⣤⣀⡀⠀⠀⠀⠀⠀⢀⣀⣤⡴⠶⠛                                 │"
+"│                     ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠙⠛⠛⠛⠛⠛⠋⠉⠀⠀⠀⠀                                 │"
+"│                                                                              │"
+"│                                                                              │"
+"│ recent                                                                       │"
+"│ ▸ ! Joinery · dovetails by hand                                  47m  4 Oct  │"
+"│     salvage failed: publishing a segment failed: a disk error                │"
+"│     journal-000000: couldn't delete it (permission denied); all its audio    │"
+"│       is published                                                           │"
+"│     seg-t1-000000000000.flac.tmp: couldn't remove the temporary file         │"
+"│       (permission denied); its audio is still to publish                     │"
+"│   ✓ Woodwork workshop · hand planes                           2h 42m  today  │"
+"│                                                                              │"
+"│                                                                              │"
+"╰─ r record  R last settings  ⏎ open ─────────────────────────────── parakeet ─╯"

@@ -161,7 +161,7 @@ fn a_library_that_cant_open_leaves_journals_for_later() {
     let library = Library::open(&tmp.0).unwrap();
     let done = library.salvage_all(length()).unwrap();
     assert!(
-        matches!(&done[..], [Salvaged::Failed(id, why)] if *id == session.id && why.contains("library")),
+        matches!(&done[..], [Salvaged::Failed(id, why, _)] if *id == session.id && why.contains("library")),
         "{done:?}"
     );
     assert!(needs_salvage(&SessionDir::new(session.id, StdFs, &session.audio())).unwrap());
@@ -672,7 +672,7 @@ fn a_session_directory_that_cant_be_listed_is_adopted_later() {
     let done = library.salvage_all(length()).unwrap();
     set_mode(&old.dir, 0o700);
     assert!(
-        matches!(&done[..], [Salvaged::Failed(id, why)] if *id == old.id && why.contains("listing")),
+        matches!(&done[..], [Salvaged::Failed(id, why, _)] if *id == old.id && why.contains("listing")),
         "{done:?}"
     );
     assert_eq!(library.db().with(|db| db.session(old.id)).unwrap(), None);
@@ -1002,7 +1002,7 @@ fn a_kept_row_that_cant_be_read_yet_is_read_at_a_later_start() {
     let done = library.salvage_all(length()).unwrap();
     set_mode(&file, 0o600);
     assert!(
-        matches!(&done[..], [Salvaged::Failed(id, why)] if *id == session.id && why.contains("title and tracks")),
+        matches!(&done[..], [Salvaged::Failed(id, why, _)] if *id == session.id && why.contains("title and tracks")),
         "{done:?}"
     );
     assert_eq!(
@@ -1559,22 +1559,28 @@ fn a_moment_playing_is_not_a_recording() {
 
 /// Each combined failure leaves the session for the next start, with the
 /// mic's journal reported as published but kept, and the system track's
-/// file held for its own cause.
+/// file held for its own cause. A salvage that stops on an error still
+/// reports the mic's journal beside the error.
 #[test]
 fn combined_failures_leave_the_session_with_each_held_file_reported() {
     use nota_recorder::journal::JournalId;
     use nota_recorder::segment::Problem;
 
-    use super::held::{Beside, Held, SESSION, stray_temp, system_segment, system_temp};
+    use super::held::{Beside, Held, SESSION, STOPPED, stray_temp, system_segment, system_temp};
 
     let refused = io::ErrorKind::PermissionDenied;
     for beside in Beside::ALL {
         let salvaged = Held::new(beside).salvaged();
         // Journals are still on disk, so this start isn't done with it.
-        let Salvaged::Left(id, aside, held) = &salvaged else {
-            panic!("{beside:?}: {salvaged:?}");
+        let (id, aside, held) = match &salvaged {
+            Salvaged::Left(id, aside, held) if !beside.stops() => (*id, aside.as_slice(), held),
+            Salvaged::Failed(id, why, held) if beside.stops() => {
+                assert_eq!(why, STOPPED);
+                (*id, &[][..], held)
+            }
+            _ => panic!("{beside:?}: {salvaged:?}"),
         };
-        assert_eq!((*id, aside.as_slice()), (SESSION, &[][..]), "{beside:?}");
+        assert_eq!((id, aside), (SESSION, &[][..]), "{beside:?}");
         assert_eq!(
             held.not_deleted(),
             [(JournalId::new(0), refused)],
@@ -1590,7 +1596,7 @@ fn combined_failures_leave_the_session_with_each_held_file_reported() {
         let blocked = match beside {
             Beside::Blocked => vec![(system_segment(), io::ErrorKind::IsADirectory)],
             Beside::TempKept => vec![(system_temp(), refused)],
-            Beside::StrayTemp | Beside::Unread | Beside::Unrepaired => Vec::new(),
+            Beside::StrayTemp | Beside::Unread | Beside::Unrepaired | Beside::Fails => Vec::new(),
         };
         assert_eq!(held.blocked(), blocked, "{beside:?}");
         let temps = match beside {

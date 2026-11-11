@@ -105,8 +105,10 @@ pub(crate) enum Salvaged {
     InUse(SessionId),
     /// Salvage failed, or couldn't start because the session couldn't be
     /// added to the library database; the journals are still there for the
-    /// next start.
-    Failed(SessionId, String),
+    /// next start. Also what salvage did before it failed, such as a
+    /// journal whose audio it published but couldn't delete; empty if it
+    /// never started.
+    Failed(SessionId, String, Box<Published>),
 }
 
 /// A session as Home lists it.
@@ -272,7 +274,11 @@ impl Library {
                     needs_salvage(&SessionDir::new(s.id, StdFs, &s.audio())).unwrap_or(false)
                 })
                 .map(|s| {
-                    Salvaged::Failed(s.id, format!("the library database can't be opened: {e}"))
+                    Salvaged::Failed(
+                        s.id,
+                        format!("the library database can't be opened: {e}"),
+                        Box::default(),
+                    )
                 })
                 .collect());
         }
@@ -307,7 +313,7 @@ impl Library {
             Err(e) => {
                 return journals.then(|| match e.kind() {
                     io::ErrorKind::WouldBlock => Salvaged::InUse(session.id),
-                    _ => Salvaged::Failed(session.id, e.to_string()),
+                    _ => Salvaged::Failed(session.id, e.to_string(), Box::default()),
                 });
             }
         };
@@ -316,6 +322,7 @@ impl Library {
                 Salvaged::Failed(
                     session.id,
                     format!("adding it to the library database: {e}"),
+                    Box::default(),
                 )
             });
         }
@@ -510,7 +517,11 @@ fn salvage_result<S: Fs + Clone + 'static, T: SegmentStore>(
                 Salvaged::Done(dir.id(), aside)
             }
         }
-        Err(e) => Salvaged::Failed(dir.id(), e.to_string()),
+        Err(stopped) => {
+            let why = stopped.to_string();
+            let (_, done) = stopped.into_parts();
+            Salvaged::Failed(dir.id(), why, Box::new(done))
+        }
     }
 }
 

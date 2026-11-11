@@ -65,7 +65,8 @@ pub struct PublishReport {
 impl PublishReport {
     /// Every row in the session's store once publishing finished, in
     /// order: those committed by runs that went on to fail too. If the
-    /// store couldn't be read then, the rows the successful runs reported.
+    /// store couldn't be read then, the rows the runs reported committing,
+    /// those that stopped on an error included.
     #[must_use]
     pub fn rows(&self) -> &[SegmentRow] {
         &self.rows
@@ -80,14 +81,18 @@ impl PublishReport {
 
     /// Journals still needing publication after the last try. A journal
     /// whose audio is all in saved segments but couldn't be deleted is
-    /// reported by [`Self::held`] instead.
+    /// reported by [`Self::held`] instead, even if the last try stopped on
+    /// an error after finding it.
     #[must_use]
     pub fn left(&self) -> &[FinishedJournal] {
         &self.left
     }
 
-    /// The last run's held names and their error kinds. Earlier failures
-    /// that a later run got past aren't reported here.
+    /// The last run's held names and their error kinds, and the journals it
+    /// couldn't delete though their audio is all published. A last run that
+    /// stopped on an error reports what it found before it stopped; what it
+    /// would have found after isn't known. Earlier failures that a later
+    /// run got past aren't reported here.
     #[must_use]
     pub const fn held(&self) -> &Published {
         &self.held
@@ -262,24 +267,25 @@ fn publish_pending<S: Fs, T: SegmentStore>(
     pending: &mut Vec<FinishedJournal>,
     report: &mut PublishReport,
 ) {
-    match publish_journals(session, length, pending) {
-        Ok(published) => {
-            report.rows.extend_from_slice(published.segments());
-            report.set_aside.extend_from_slice(published.quarantined());
-            if let Some(kind) = published.set_aside_unsynced() {
-                report.errors.push(PublishError::Io(io::Error::new(
-                    kind,
-                    "syncing the directory after setting journals aside failed",
-                )));
-            }
-            report.held = published;
+    // A run that stopped reports what it did before it stopped as a whole
+    // run does: each journal it calls settled, it settled.
+    let (published, stopped) = match publish_journals(session, length, pending) {
+        Ok(published) => (published, None),
+        Err(stopped) => {
+            let (error, done) = stopped.into_parts();
+            (done, Some(error))
         }
-        Err(error) => {
-            // A failed run gives no proof of which journals are settled.
-            report.held = Published::default();
-            report.errors.push(error);
-        }
+    };
+    report.rows.extend_from_slice(published.segments());
+    report.set_aside.extend_from_slice(published.quarantined());
+    if let Some(kind) = published.set_aside_unsynced() {
+        report.errors.push(PublishError::Io(io::Error::new(
+            kind,
+            "syncing the directory after setting journals aside failed",
+        )));
     }
+    report.errors.extend(stopped);
+    report.held = published;
     let dir = session.session();
     if let Ok(there) = dir.fs().list(dir.dir()) {
         pending.retain(|journal| there.contains(&dir.dir().join(journal.id().file_name())));
