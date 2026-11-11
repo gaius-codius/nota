@@ -231,12 +231,16 @@ fn a_salvage_stopped_during_repairs_keeps_every_finding() {
     salvage(&mut session_store(&probe), length()).unwrap();
     let ops = probe.attempted();
 
-    let mut held_back = 0;
+    // An outcome per point: whether it stopped holding back a row it
+    // couldn't repair.
+    let mut sweep = Sweep::with_outcomes();
     for at in 0..ops {
         let run = disk.copy_disk();
         run.fail_on(&stuck_path, Fault::Rename, io::ErrorKind::PermissionDenied);
         run.fail_after(at, io::ErrorKind::Other);
-        let Err(stopped) = salvage(&mut session_store(&run), length()) else {
+        let salvaged = salvage(&mut session_store(&run), length());
+        sweep.failure_point(&run);
+        let Err(stopped) = salvaged else {
             continue;
         };
         let done = stopped.done();
@@ -245,11 +249,11 @@ fn a_salvage_stopped_during_repairs_keeps_every_finding() {
                 done.findings().iter().any(|f| f.row() == row),
                 "after {at} ops: {row:?} isn't a finding: {done:?}"
             );
-            held_back += 1;
         }
+        sweep.saw(!done.not_repaired().is_empty());
     }
     // Not vacuous: some runs stopped after a row couldn't be repaired.
-    assert!(held_back > 0); // check-bound
+    sweep.saw_each([true]); // check-bound
 }
 
 /// Salvage of `disk` crashed after every operation, under every standard
