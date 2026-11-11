@@ -32,6 +32,8 @@
 use std::process::ExitCode;
 
 #[cfg(unix)]
+mod parent_watch;
+#[cfg(unix)]
 mod unix;
 
 #[cfg(unix)]
