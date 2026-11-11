@@ -828,6 +828,28 @@ mod tests {
         assert!(recordings.running(&[]).unwrap());
     }
 
+    /// A recording that can't tell whether its entry is still there, for
+    /// another reason than its being gone, stops with that error instead of
+    /// taking the next name, and leaves no entry behind.
+    #[test]
+    fn an_entry_that_cant_be_checked_is_its_error() {
+        let fs = Meddling::new();
+        fs.with(|m| m.unlisted = Some(io::ErrorKind::PermissionDenied));
+        let recordings = Recordings::new(fs.clone(), Path::new("/data"));
+        assert_eq!(
+            recordings.record().unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        // One try only: a name passed over would have made a second.
+        let entry_locks = fs
+            .locks()
+            .into_iter()
+            .filter(|(dir, _)| is_entry(dir))
+            .count();
+        assert_eq!(entry_locks, 1);
+        assert_eq!(entries(&fs), Vec::<PathBuf>::new());
+    }
+
     /// Recordings, their clean-ups and checks on the real filesystem, from
     /// three threads at once: every recording starts, each check while one
     /// is held finds it, and an entry a crash left is gone by the end.
@@ -886,6 +908,9 @@ mod tests {
         /// between the lock's open and its `flock`: the lock is taken, on a
         /// directory no longer there.
         unlinked: usize,
+        /// The error listing an entry fails with, if any: what the start's
+        /// check that its entry is still there meets.
+        unlisted: Option<io::ErrorKind>,
         /// Every lock asked for: its directory, and whether shared.
         locks: Vec<(PathBuf, bool)>,
     }
@@ -975,6 +1000,9 @@ mod tests {
         }
 
         fn list(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
+            if let Some(kind) = self.with(|m| m.unlisted.filter(|_| is_entry(dir))) {
+                return Err(kind.into());
+            }
             self.inner.list(dir)
         }
 
