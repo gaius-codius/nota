@@ -1,6 +1,7 @@
-# Weekly mutation testing of the whole core, recorder, checks and LLM crates. Each PR
-# tests only the mutants of its own changes (ci.yml); this catches tests that
-# have weakened since, and code a PR's diff didn't reach.
+# Weekly mutation testing of the whole core, recorder, checks, LLM, store and
+# engine crates. Each PR tests only the mutants of its own changes (ci.yml);
+# this catches tests that have weakened since, and code a PR's diff didn't
+# reach.
 name: Mutation testing
 
 on:
@@ -20,13 +21,16 @@ env:
 
 jobs:
   mutants:
-    name: Mutation testing (shard ${{ matrix.shard }} of 8)
+    # The mutants are dealt out round-robin, as in ci.yml: consecutive slices
+    # left one shard with 256 of its 300 minutes used, and the store and
+    # engine add about a fifth more mutants.
+    name: Mutation testing (shard ${{ strategy.job-index }} of ${{ strategy.job-total }})
     runs-on: ubuntu-latest
     timeout-minutes: 300
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -41,8 +45,10 @@ jobs:
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: cargo-mutants@27.1.0,cargo-nextest
-      - env:
-          SHARD: ${{ matrix.shard }}
+      - name: Mutate the crates other than the engine
+        env:
+          SHARD: ${{ strategy.job-index }}
+          SHARDS: ${{ strategy.job-total }}
           # Each test process gets at most 1 GiB of address space. A mutant
           # that makes a test grow without end (one that keeps the engine's
           # reader thread queueing after its output ends, say) would
@@ -51,15 +57,48 @@ jobs:
           # caught. Two jobs of four tests each stay under the runner's
           # 16 GB at the cap, and the tests pass under half of it.
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: prlimit --as=1073741824 --
-        run: >-
-          cargo mutants -p nota-core -p nota-recorder -p nota-checks -p nota-llm
-          --shard "$SHARD/8"
-          --test-tool nextest --jobs 2 --output "$RUNNER_TEMP"
+        run: |
+          mkdir -p "$RUNNER_TEMP/crates"
+          cargo mutants \
+            -p nota-core -p nota-recorder -p nota-checks -p nota-llm -p nota-store \
+            --shard "$SHARD/$SHARDS" --sharding round-robin \
+            --test-tool nextest --jobs 2 --output "$RUNNER_TEMP/crates"
+      # The engine links the pinned sherpa-onnx libraries, and its tests load
+      # the speech models (.github/actions/pre-test, which also makes a test
+      # whose models are missing fail rather than skip). These run even when
+      # the step above found a missed mutant, so a run reports every one.
+      - name: Fetch the pinned sherpa-onnx libraries
+        if: ${{ !cancelled() }}
+        # An absolute path: cargo-mutants copies the tree without target/,
+        # where .cargo/config.toml's relative one points.
+        run: |
+          lib=$(scripts/sherpa-onnx.sh)
+          echo "SHERPA_ONNX_LIB_DIR=$lib" >>"$GITHUB_ENV"
+      - if: ${{ !cancelled() }}
+        # zizmor's self-repository form ($/) fails actionlint 1.7.12, CI's.
+        uses: ./.github/actions/pre-test # zizmor: ignore[self-repository]
+      - name: Mutate the engine
+        if: ${{ !cancelled() }}
+        env:
+          SHARD: ${{ strategy.job-index }}
+          SHARDS: ${{ strategy.job-total }}
+          # An engine test that loads the models needs about 1.75 GiB of
+          # address space (2 GiB passes, 1.5 GiB fails), so the engine's
+          # tests get 3 GiB each, two at a time in each of the two jobs:
+          # 12 GiB at the cap, under the runner's 16 GB.
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: prlimit --as=3221225472 --
+          NEXTEST_TEST_THREADS: "2"
+        run: |
+          mkdir -p "$RUNNER_TEMP/engine"
+          cargo mutants \
+            -p nota-engine \
+            --shard "$SHARD/$SHARDS" --sharding round-robin \
+            --test-tool nextest --jobs 2 --output "$RUNNER_TEMP/engine"
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: mutants-shard-${{ matrix.shard }}
-          path: ${{ runner.temp }}/mutants.out
+          name: mutants-shard-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/*/mutants.out
 
   report-failure:
     # A red run opens an issue labelled mutants-weekly, or comments on the
@@ -87,8 +126,8 @@ jobs:
             --description "A weekly mutation testing run failed"
           body="[Mutation testing run]($RUN_URL) on \`$REF\` failed. Each shard's
           missed and timed-out mutants are in its mutants-shard-N artifact
-          (missed.txt, timeout.txt); a shard that stopped without one lists them
-          in its log."
+          (missed.txt, timeout.txt, under crates/ and engine/); a shard that
+          stopped without one lists them in its log."
           open=$(gh issue list --label mutants-weekly --state open --limit 1 \
             --json number --jq '.[0].number // empty')
           if [ -n "$open" ]; then
