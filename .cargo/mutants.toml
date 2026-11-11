@@ -49,16 +49,18 @@ exclude_globs = [
 # on M7's VM (GAI-207). What they decide, from the device split and names to
 # the host choice, is in functions with unit tests; those stay mutated.
 #
-# nota-engine's Parakeet::transcribe only drives the real recogniser:
-# decoding needs the speech model, which the mutation runs don't fetch.
-# What it does with the result is heard_in, which has unit tests and stays
-# mutated; with the test models, parakeet_gives_every_word_a_log_probability
-# catches an empty transcribe too.
+# nota-engine's run_asr is the engine child's whole process: it ties the
+# child to its recorder's life, then hands the process's own stdin and stdout
+# to child::run. Only a real child process can run it, and nota's tests start
+# one (`nota engine asr`, in tests/engine_kill.rs and tests/record.rs), but a
+# mutation run tests only the mutated crate. What it calls has its own tests
+# in nota-engine (child::run, the lifeline in nota-core) and stays mutated.
 #
 # cargo-mutants edits the source whatever its cfg, so a mutant in a function
 # built only off Linux changes nothing CI's Linux runners build, and no test
 # there can catch it: the other platforms' monotonic_now in nota-core's
-# clock.rs, sync_dir in fs/real.rs, and exec in nota-llm's lifeline.rs.
+# clock.rs, sync_dir in fs/real.rs, exec in nota-llm's lifeline.rs, and
+# protocol_output in nota-engine's lib.rs.
 # Each is named by its line, since its Linux twin has the same name and the
 # same mutants; if the function moves, move the line here too.
 #
@@ -98,7 +100,6 @@ exclude_re = [
   "replace <impl HostProbe for SystemProbe>::pulse_reachable -> bool",
   "impl .*Debug for PlainStream",
   "replace promote_current_thread -> bool with false",
-  "replace <impl Transcriber for Parakeet>::transcribe -> Heard with Default::default\\(\\)$",
   "replace <impl Clock for SystemClock>::suspended -> Duration with Default::default\\(\\)",
   "replace asleep_now -> Duration with Default::default\\(\\)",
   "nota-core/src/clock\\.rs:200:5: replace monotonic_now -> ",
@@ -108,6 +109,8 @@ exclude_re = [
   "replace <impl Source for Runs<'_>>::len_hint -> Option<usize> with None$",
   "replace Question::is_empty -> bool with false$",
   "nota-llm/src/lifeline\\.rs:46:5: replace exec -> ",
+  "nota-engine/src/lib\\.rs:138:5: replace protocol_output -> ",
+  "nota-engine/src/lib\\.rs:.* (replace run_asr -> |in run_asr$)",
   "replace <impl Drop for Spawner>::drop with \\(\\)$",
   "replace <impl Visitor<'de> for StrictVisitor>::expecting -> fmt::Result with Ok\\(Default::default\\(\\)\\)$",
   "replace <impl Visitor<'de> for StrictVisitor>::visit_unit -> Result<Value, E> with Ok\\(Default::default\\(\\)\\)$",
