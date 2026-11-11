@@ -748,6 +748,11 @@ fn version_9_upgrades_to_10_refusing_packs_recorded_without_a_digest() {
             matches!(&err, StoreError::PackMissing { pack, .. } if *pack == old),
             "{err:?}"
         );
+        // The message says why: not that the pack is gone.
+        assert!(
+            err.to_string().contains("before packs had digests"),
+            "{err}"
+        );
     }
 
     // A session recorded now keeps its pack's digest.
@@ -759,6 +764,14 @@ fn version_9_upgrades_to_10_refusing_packs_recorded_without_a_digest() {
     assert_eq!(
         store.session_packs(two).unwrap(),
         [RecordedPack::from(&installed.pack_ref())]
+    );
+    // And its pack is found again in the upgraded library.
+    assert_eq!(
+        store
+            .session_terms(two, std::slice::from_ref(&installed))
+            .unwrap()
+            .terms,
+        installed.offered()
     );
     drop(store);
     let conn = raw(&dir.db());

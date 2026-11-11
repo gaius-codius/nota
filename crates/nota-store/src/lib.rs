@@ -133,7 +133,9 @@ pub enum StoreError {
     PacksRecorded(SessionId),
     /// A pack the session recorded isn't installed with its recorded name,
     /// version and digest: it's missing, at another version, or rebuilt
-    /// with other contents.
+    /// with other contents; or the session recorded it with no digest
+    /// (before library version 10), so no installed build can be shown to
+    /// be the one it used.
     PackMissing {
         /// The session.
         session: SessionId,
@@ -224,6 +226,13 @@ impl fmt::Display for StoreError {
             Self::PacksRecorded(id) => {
                 write!(f, "session {}'s packs are recorded already", id.get())
             }
+            Self::PackMissing { session, pack } if pack.digest.is_none() => write!(
+                f,
+                "session {} used pack {} {}, recorded before packs had digests, so the build it used can't be confirmed",
+                session.get(),
+                pack.name,
+                pack.version
+            ),
             Self::PackMissing { session, pack } => write!(
                 f,
                 "session {} used pack {} {}, which is not installed as it was then",

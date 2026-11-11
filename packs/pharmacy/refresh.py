@@ -30,7 +30,9 @@ RxNorm's names and Wikidata's labels count as reviewed by their source
 (decided on #228); every alias is a draft until a person checks it. A row
 already in a list keeps the status it has there, so a review made by
 editing rows survives a refresh; REVIEW below gives the status of new rows. After a refresh, give
-pack.toml a new version: a session tells packs apart by name and version.
+pack.toml a new version: a session tells packs apart by name, version and
+the digest of their rows, so a build with other rows under the old version
+is refused for sessions that used the old one.
 """
 
 import json
