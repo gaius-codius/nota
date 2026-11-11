@@ -36,6 +36,11 @@ pub enum ProcessingWait {
     Space,
     /// A place in the queue, or the end of a recording.
     Queued,
+    /// A decider to be set up. Nothing else waits on such a step, so the
+    /// session counts as ready while it does.
+    Decider,
+    /// The final transcript, which the step reads.
+    FinalText,
 }
 
 impl ProcessingWait {
@@ -52,11 +57,26 @@ impl ProcessingWait {
             Self::Audio => "waiting for audio to be saved".into(),
             Self::Space => "waiting for free space".into(),
             Self::Queued => "queued or paused for a recording".into(),
+            Self::Decider => "waiting for a decider to be set up".into(),
+            Self::FinalText => "waiting for the final transcript".into(),
         }
     }
 }
 
 impl ProcessingState {
+    /// Whether the step leaves the session ready: it has finished, or it
+    /// waits for a decider that nothing else needs.
+    fn settled(&self) -> bool {
+        matches!(
+            self,
+            Self::Done
+                | Self::Waiting {
+                    reason: ProcessingWait::Decider,
+                    ..
+                }
+        )
+    }
+
     /// Why the speech engine failed, on an earlier try or the one running
     /// now, if it's waiting for, or trying, the engine again.
     fn engine_failure(&self) -> Option<&str> {
@@ -532,12 +552,7 @@ impl Processing {
             .any(|job| matches!(job.state, ProcessingState::Failed { .. }))
         {
             ProcessingStatus::NeedsYou
-        } else if !self.jobs.is_empty()
-            && self
-                .jobs
-                .iter()
-                .all(|job| job.state == ProcessingState::Done)
-        {
+        } else if !self.jobs.is_empty() && self.jobs.iter().all(|job| job.state.settled()) {
             ProcessingStatus::Ready
         } else {
             ProcessingStatus::Processing

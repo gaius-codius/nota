@@ -263,6 +263,8 @@ fn step(job: Job, engine: &str) -> ProcessingJob {
                 Some(Wait::Engine) => ProcessingWait::Engine,
                 Some(Wait::Audio) => ProcessingWait::Audio,
                 Some(Wait::Space) => ProcessingWait::Space,
+                Some(Wait::Decider) => ProcessingWait::Decider,
+                Some(Wait::FinalText) => ProcessingWait::FinalText,
                 None => ProcessingWait::Queued,
             },
             progress,
@@ -282,6 +284,7 @@ fn step(job: Job, engine: &str) -> ProcessingJob {
     ProcessingJob {
         name: match job.kind {
             JobKind::FinalPass => "Final transcript",
+            JobKind::CleanUp => "Fixing terms",
         }
         .into(),
         engine: engine.into(),

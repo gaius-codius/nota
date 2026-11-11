@@ -10,7 +10,7 @@ use crate::packs::{Manifest, PackKind, Review, Source, TermRow};
 use crate::test_dir::TestDir;
 use crate::tests::{new_session, raw, refused, row};
 use crate::vocabulary::RecordedPack;
-use crate::{Pack, SegmentRow, SessionState};
+use crate::{JobKind, JobState, Pack, SegmentRow, SessionState};
 
 /// A per-session store at `path`, as M1 made one, holding `rows`.
 fn per_session_store(path: &Path, rows: &[SegmentRow]) {
@@ -41,7 +41,7 @@ fn a_new_file_gets_the_current_schema() {
     let dir = TestDir::new("fresh");
     let store = Store::open(&dir.db()).unwrap();
     assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
-    assert_eq!(STEPS.len(), 10);
+    assert_eq!(STEPS.len(), 11);
     assert_eq!(STEPS.len(), usize::try_from(VERSION - FIRST + 1).unwrap());
     // Opening again changes nothing.
     drop(store);
@@ -427,10 +427,13 @@ fn version_4_upgrades_to_5_keeping_its_jobs() {
     assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
     let jobs = store.jobs().unwrap();
     assert_eq!(jobs.len(), 1);
-    assert_eq!(jobs[0].state, crate::JobState::Waiting(None));
+    assert_eq!(jobs[0].state, JobState::Waiting(None));
     assert_eq!(jobs[0].progress, crate::Progress::default());
+    // Stopped again, it keeps its final pass and gains only the clean-up
+    // it lacked.
     store.finish_recording(SessionId::new(1), None).unwrap();
-    assert_eq!(store.jobs().unwrap().len(), 1);
+    let kinds: Vec<JobKind> = store.jobs().unwrap().iter().map(|j| j.kind).collect();
+    assert_eq!(kinds, [JobKind::FinalPass, JobKind::CleanUp]);
     assert!(store.final_texts(SessionId::new(1)).unwrap().is_empty());
 }
 
@@ -669,9 +672,11 @@ fn version_8_upgrades_to_9_with_no_packs_or_pairs() {
     // that are there.
     let conn = raw(&dir.db());
     let proposal: (String, String) = conn
-        .query_row("SELECT replacement, pack_version FROM proposal", [], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })
+        .query_row(
+            "SELECT replacement, pack_version FROM proposal_v8",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
         .unwrap();
     assert_eq!(proposal, ("ibuprofen".to_owned(), "2026.11".to_owned()));
     let broken: i64 = conn
@@ -866,4 +871,90 @@ fn version_10_upgrades_to_11_with_old_words_unknown() {
     ] {
         assert!(refused(&conn, sql), "{sql} was allowed");
     }
+}
+
+/// Acceptance (#159): a version 11 library keeps its sessions, jobs and
+/// final text; its unused V8 `proposal` table gives way to clean-up's,
+/// which then takes proposals on the old final text; the session already
+/// stopped keeps only its final pass (sessions stopped before the upgrade
+/// get no clean-up job), and one stopped after it gets both jobs.
+#[test]
+fn version_11_upgrades_to_12_with_clean_up_proposals() {
+    let dir = TestDir::new("v11");
+    {
+        let conn = crate::tests::library_at(&dir.db(), 11);
+        conn.execute_batch(
+            "INSERT INTO session (id, state, language) VALUES (1, 'stopped', 'en'), \
+                 (2, 'recording', 'en');
+             INSERT INTO job (session_id, kind, state) VALUES (1, 'final-pass', 'done');
+             INSERT INTO final_text VALUES (1, 0, 0, 100, 'amylo diping', 'e', 'm');
+             INSERT INTO revision VALUES (1, 0, NULL);
+             INSERT INTO final_word VALUES (1, 0, 0, 0, 'amylo', 0, 50, -0.5), \
+                 (1, 0, 0, 1, 'diping', 50, 100, NULL);
+             INSERT INTO final_progress VALUES (1, 0, 100);",
+        )
+        .unwrap();
+    }
+    let mut store = Store::open(&dir.db()).unwrap();
+    assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
+    let (one, two) = (SessionId::new(1), SessionId::new(2));
+    let kinds = |store: &Store, session| -> Vec<(JobKind, JobState)> {
+        store
+            .session_jobs(session)
+            .unwrap()
+            .into_iter()
+            .map(|job| (job.kind, job.state))
+            .collect()
+    };
+    assert_eq!(kinds(&store, one), [(JobKind::FinalPass, JobState::Done)]);
+    store.finish_recording(two, None).unwrap();
+    assert_eq!(
+        kinds(&store, two),
+        [
+            (JobKind::FinalPass, JobState::Waiting(None)),
+            (JobKind::CleanUp, JobState::Waiting(None))
+        ]
+    );
+    assert_eq!(store.proposals(one).unwrap(), []);
+    // A proposal on the old final text goes in, naming its words.
+    let chunk = crate::ChunkKey {
+        track: TrackId::new(0),
+        start: SampleIndex::new(0),
+    };
+    let words = crate::WordSpan::new(0, 1).unwrap();
+    let new = crate::NewProposal {
+        proposed: crate::Proposed {
+            chunk,
+            words,
+            offered: words,
+            heard: "amylo diping".to_owned(),
+            term: "amlodipine".to_owned(),
+            replacement: "amlodipine".to_owned(),
+            origin: crate::Origin::Learned,
+            found: crate::Found::Alias,
+            decided_by: crate::DecidedBy {
+                name: "llama-server".to_owned(),
+                model: "qwen".to_owned(),
+                place: nota_core::decide::Place::Local,
+            },
+            log_prob: nota_core::LogProb::new(-0.5),
+            thresholds: "similarity=0.6".to_owned(),
+        },
+        decided: crate::Decided::No { yes: None },
+    };
+    store
+        .add_proposals(one, std::slice::from_ref(&new))
+        .unwrap();
+    let read = store.proposals(one).unwrap();
+    assert_eq!(read[0].proposed, new.proposed);
+    drop(store);
+    let conn = raw(&dir.db());
+    // The new table's foreign keys hold, and its rows can't be removed.
+    let broken: i64 = conn
+        .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(broken, 0);
+    assert!(refused(&conn, "DELETE FROM proposal"));
 }

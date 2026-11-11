@@ -28,6 +28,8 @@ directories.workspace = true
 # Home's dates in the local time zone (the TZ variable, /etc/localtime and
 # the system's zoneinfo), without unsafe code or a C library.
 jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
+# Term clean-up's lookup (C4) and gate (C2).
+nota-checks = { path = "../nota-checks" }
 nota-core = { path = "../nota-core" }
 nota-engine = { path = "../nota-engine" }
 nota-llm = { path = "../nota-llm" }

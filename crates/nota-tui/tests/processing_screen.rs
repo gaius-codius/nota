@@ -189,6 +189,37 @@ fn waiting_is_visible_without_colour() {
     );
 }
 
+/// A step waiting for a decider says so, and leaves the session ready
+/// once the rest is done; one waiting for the final transcript doesn't.
+#[test]
+fn a_step_waiting_for_a_decider_leaves_the_session_ready() {
+    let mut screen = Processing::new("Test".into(), "engine".into(), Theme::no_color());
+    let waiting = |reason| ProcessingState::Waiting {
+        reason,
+        progress: 0,
+    };
+    screen.set_jobs(vec![
+        job("Transcript", ProcessingState::Done),
+        job("Fixing terms", waiting(ProcessingWait::Decider)),
+    ]);
+    let output = draw(&mut screen, 100, 20);
+    assert!(output.contains("✓ ready"), "{output}");
+    assert!(
+        output.contains("○  Fixing terms · parakeet · waiting: waiting for a decider to be set up"),
+        "{output}"
+    );
+    screen.set_jobs(vec![
+        job("Transcript", ProcessingState::Running { progress: 10 }),
+        job("Fixing terms", waiting(ProcessingWait::FinalText)),
+    ]);
+    let output = draw(&mut screen, 100, 20);
+    assert!(output.contains("◐ processing"), "{output}");
+    assert!(
+        output.contains("waiting: waiting for the final transcript"),
+        "{output}"
+    );
+}
+
 /// A failed step keeps its explanation.
 #[test]
 fn failure_is_visible_without_colour() {

@@ -19,7 +19,7 @@
 //! | `epoch` | each epoch's first sample, rate, session-time anchor and drift (V7) ([`Store::insert_epoch`](crate::Store::insert_epoch)) | the recorder's publish step, before each segment row |
 //! | `utterance`, `word` | the heard text, as the engine confirmed it, with word times and log-probabilities (V11; unknown before); never changed (V4's triggers) | `nota record`'s live text ([`crate::transcript`]) |
 //! | `revision`, `revision_text` | the displayed text: revision 0 is the final pass's text, each later one a new row holding only what it changes, as runs of a chunk's words; never changed (V8) | revision 0 with the first final-text row, later ones by term clean-up ([`crate::revisions`]) |
-//! | `proposal` | a proposed fix to a run of a chunk's words, with the revision, model, pack and thresholds it came from (V8) | term clean-up |
+//! | `proposal` | each candidate term clean-up offered for a run of a chunk's words: where its term came from, the decider's answer, the gate's rule and scores, its outcome and its review (V12; V8's table, which nothing wrote, is kept closed as `proposal_v8`); only its outcome's ranking, the revision that applied it and its review are ever changed, once each | term clean-up ([`crate::proposals`]) |
 //! | `heard_revision`, `heard_revision_text`, `heard_proposal` | the heard text's revisions and proposals from before V8, kept as they were and never added to | nothing since V8 |
 //! | `mark`, `note` | marks and notes made while recording, in session time | `nota record`, as each is made ([`crate::annotations`]) |
 //! | `job` | work queued after a stop: its kind, state, progress and what it waits for (V5) | the job queue ([`crate::jobs`]) |
@@ -674,6 +674,131 @@ BEGIN SELECT RAISE(ABORT, 'a session''s pack is never recorded without its diges
 pub(crate) const V11: &str = "
 ALTER TABLE word ADD COLUMN log_prob REAL CHECK (log_prob IS NULL OR log_prob <= 0);
 ALTER TABLE final_word ADD COLUMN log_prob REAL CHECK (log_prob IS NULL OR log_prob <= 0);
+";
+
+/// Version 12: term clean-up's proposals and the decisions on them
+/// ([`crate::proposals`]), and its job ([`crate::jobs::JobKind::CleanUp`]).
+///
+/// **`proposal` is replaced.** V8 made a `proposal` table that nothing in
+/// nota ever wrote. It's kept, rows and all, as `proposal_v8`, and closed
+/// as the heard text's old proposals are; `proposal` is made again with
+/// what clean-up records.
+/// One row is one candidate the lookup offered: the words it names in a
+/// chunk of the final text (`first_word` to `last_word`, where the outcome
+/// is; `offered_first` to `offered_last`, where the lookup offered it,
+/// which tells a candidate already proposed from a new one; every end a
+/// foreign key to `final_word`, as a change's are), the heard span and
+/// term, the text that would replace
+/// the words, where the term came from (a pack by name, version and
+/// digest, or the learned pairs), how the lookup found it and its scores,
+/// the decider and model that answered and the answer (`none` with its
+/// reason when it gave none), the gate's rule and C1 score for a yes, the
+/// lowest log-probability of the words, the thresholds in force, and the
+/// row's own format version (`log_version`).
+///
+/// **Its outcome is one of five, and moves once.** `applied` (with the
+/// revision that applied it, `applied_in`, once the run writes it),
+/// `rejected` with the rule that rejected it, or `to-rank`: a yes the gate
+/// refused, until the run's end ranks it as a `card` or `over-cap`. A
+/// review (`accepted` or `rejected`) is set once. Triggers refuse every
+/// other change, any delete, and a replacing insert.
+///
+/// Sessions stopped before this version get no clean-up job from it, as
+/// V5 gave them no final pass.
+pub(crate) const V12: &str = "
+ALTER TABLE proposal RENAME TO proposal_v8;
+CREATE TRIGGER proposal_v8_never_added BEFORE INSERT ON proposal_v8
+BEGIN SELECT RAISE(ABORT, 'the old proposals are never added to'); END;
+CREATE TRIGGER proposal_v8_never_updated BEFORE UPDATE ON proposal_v8
+BEGIN SELECT RAISE(ABORT, 'an old proposal is never changed'); END;
+CREATE TRIGGER proposal_v8_never_deleted BEFORE DELETE ON proposal_v8
+BEGIN SELECT RAISE(ABORT, 'an old proposal is never deleted'); END;
+
+CREATE TABLE proposal (
+    id INTEGER PRIMARY KEY,
+    session_id INTEGER NOT NULL,
+    revision INTEGER NOT NULL,
+    track INTEGER NOT NULL,
+    start_sample INTEGER NOT NULL,
+    first_word INTEGER NOT NULL,
+    last_word INTEGER NOT NULL CHECK (last_word >= first_word),
+    offered_first INTEGER NOT NULL,
+    offered_last INTEGER NOT NULL CHECK (offered_last >= offered_first),
+    heard TEXT NOT NULL,
+    term TEXT NOT NULL,
+    replacement TEXT NOT NULL,
+    source TEXT NOT NULL CHECK (source IN ('lookup')),
+    pack_name TEXT,
+    pack_version TEXT,
+    pack_digest BLOB CHECK (pack_digest IS NULL OR length(pack_digest) = 32),
+    matched TEXT NOT NULL CHECK (matched IN ('alias', 'scored')),
+    score REAL,
+    sounds REAL,
+    trigrams REAL,
+    jaro_winkler REAL,
+    bar TEXT CHECK (bar IS NULL OR bar IN ('usual', 'rare')),
+    decider TEXT NOT NULL,
+    decider_model TEXT NOT NULL,
+    decider_place TEXT NOT NULL CHECK (decider_place IN ('local', 'cloud')),
+    answer TEXT NOT NULL CHECK (answer IN ('yes', 'no', 'none')),
+    no_answer TEXT,
+    yes_probability REAL CHECK (yes_probability IS NULL OR yes_probability BETWEEN 0 AND 1),
+    gate TEXT CHECK (gate IS NULL OR gate IN ('applied', 'empty-span', 'span-not-found',
+        'too-long', 'dissimilar', 'not-offered', 'window-elsewhere', 'already-changed')),
+    similarity REAL CHECK (similarity IS NULL OR similarity BETWEEN 0 AND 1),
+    log_prob REAL CHECK (log_prob IS NULL OR log_prob <= 0),
+    outcome TEXT NOT NULL
+        CHECK (outcome IN ('applied', 'rejected', 'to-rank', 'card', 'over-cap')),
+    rule TEXT CHECK (rule IS NULL OR rule IN ('no', 'no-answer', 'no-change', 'covered')),
+    applied_in INTEGER,
+    review TEXT CHECK (review IS NULL OR review IN ('accepted', 'rejected')),
+    thresholds TEXT NOT NULL,
+    log_version INTEGER NOT NULL CHECK (log_version >= 1),
+    CHECK ((pack_name IS NULL) = (pack_version IS NULL)
+        AND (pack_name IS NULL) = (pack_digest IS NULL)),
+    CHECK ((matched = 'scored') = (score IS NOT NULL) AND (score IS NULL) = (sounds IS NULL)
+        AND (score IS NULL) = (trigrams IS NULL) AND (score IS NULL) = (jaro_winkler IS NULL)
+        AND (score IS NULL) = (bar IS NULL)),
+    CHECK ((answer = 'none') = (no_answer IS NOT NULL)),
+    CHECK ((answer = 'yes') = (gate IS NOT NULL)),
+    CHECK ((outcome = 'rejected') = (rule IS NOT NULL)),
+    CHECK (applied_in IS NULL OR outcome = 'applied'),
+    FOREIGN KEY (session_id, revision) REFERENCES revision(session_id, number),
+    FOREIGN KEY (session_id, applied_in) REFERENCES revision(session_id, number),
+    FOREIGN KEY (session_id, track, start_sample, first_word)
+        REFERENCES final_word(session_id, track, start_sample, position),
+    FOREIGN KEY (session_id, track, start_sample, last_word)
+        REFERENCES final_word(session_id, track, start_sample, position),
+    FOREIGN KEY (session_id, track, start_sample, offered_first)
+        REFERENCES final_word(session_id, track, start_sample, position),
+    FOREIGN KEY (session_id, track, start_sample, offered_last)
+        REFERENCES final_word(session_id, track, start_sample, position)
+) STRICT;
+
+CREATE INDEX proposal_by_session ON proposal (session_id);
+
+CREATE TRIGGER proposal_never_deleted BEFORE DELETE ON proposal
+BEGIN SELECT RAISE(ABORT, 'a proposal is never deleted'); END;
+CREATE TRIGGER proposal_never_replaced BEFORE INSERT ON proposal
+WHEN EXISTS (SELECT 1 FROM proposal WHERE id = NEW.id)
+BEGIN SELECT RAISE(ABORT, 'a proposal is never replaced'); END;
+CREATE TRIGGER proposal_record_never_changed BEFORE UPDATE OF
+    id, session_id, revision, track, start_sample, first_word, last_word, offered_first,
+    offered_last, heard, term,
+    replacement, source, pack_name, pack_version, pack_digest, matched, score, sounds,
+    trigrams, jaro_winkler, bar, decider, decider_model, decider_place, answer, no_answer,
+    yes_probability, gate, similarity, log_prob, rule, thresholds, log_version ON proposal
+BEGIN SELECT RAISE(ABORT, 'what a proposal records is never changed'); END;
+CREATE TRIGGER proposal_ranked_once BEFORE UPDATE OF outcome ON proposal
+WHEN NEW.outcome IS NOT OLD.outcome
+    AND NOT (OLD.outcome = 'to-rank' AND NEW.outcome IN ('card', 'over-cap'))
+BEGIN SELECT RAISE(ABORT, 'a proposal''s outcome is never changed'); END;
+CREATE TRIGGER proposal_applied_once BEFORE UPDATE OF applied_in ON proposal
+WHEN NEW.applied_in IS NOT OLD.applied_in AND OLD.applied_in IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'the revision that applied a proposal is never changed'); END;
+CREATE TRIGGER proposal_reviewed_once BEFORE UPDATE OF review ON proposal
+WHEN NEW.review IS NOT OLD.review AND OLD.review IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'a proposal is never reviewed twice'); END;
 ";
 
 #[cfg(test)]

@@ -21,6 +21,7 @@
 //! | 9 | the packs each session chose, `session_pack`, and the learned pairs, `learned_pair` |
 //! | 10 | each session pack's digest, `session_pack.digest` |
 //! | 11 | each word's log-probability, `word.log_prob` and `final_word.log_prob` |
+//! | 12 | term clean-up's proposals, `proposal` (replacing V8's unused table), and its job |
 //!
 //! # The per-session stores
 //!
@@ -42,7 +43,7 @@ use crate::sessions::{NewSession, SessionState, insert_session, insert_tracks};
 use crate::{Store, StoreError, session_key};
 
 /// The schema version this code writes and understands.
-pub const VERSION: i64 = 11;
+pub const VERSION: i64 = 12;
 
 /// The first library version: what [`STEPS`]' first step makes.
 const FIRST: i64 = 2;
@@ -64,6 +65,7 @@ const STEPS: &[&str] = &[
     schema::V9,
     schema::V10,
     schema::V11,
+    schema::V12,
 ];
 
 fn version(conn: &Connection) -> Result<i64, StoreError> {
