@@ -2,7 +2,8 @@
 
 nota's clean-up job asks a language model, the **local decider**, which
 terms the transcript got wrong. It runs on your machine, in llama.cpp's
-`llama-server`. For now you tell nota where that server and its model are,
+`llama-server`. The clean-up job is still being built: this version reads
+the settings below, but doesn't start the decider yet. For now you tell nota where that server and its model are,
 in a settings file. A later version will download its own.
 
 ## Where the file is
@@ -16,12 +17,12 @@ The file is `settings.toml` in nota's config folder:
 nota doesn't create it. Without the file, the local decider is simply not
 set up, and nota doesn't start a server.
 
-nota reads the file each time it needs the decider. A change takes effect at
-the next clean-up job; there's no need to restart nota.
+nota reads the file each time it needs the decider, so a change takes
+effect the next time, with no need to restart nota.
 
 ## A complete example
 
-Copy this into `~/.config/nota/settings.toml` and change the paths to yours:
+Copy this into the settings file (see above) and change the paths to yours:
 
 ```toml
 [local_decider]
