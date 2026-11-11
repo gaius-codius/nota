@@ -46,7 +46,8 @@ pub struct TimedWord {
     pub from: SampleCount,
     /// The sample after its last.
     pub to: SampleCount,
-    /// The lowest log-probability of its tokens; `None` if the recogniser
+    /// The lowest log-probability of its tokens, punctuation left out;
+    /// `None` if the recogniser
     /// didn't give one.
     pub log_prob: Option<LogProb>,
 }
@@ -198,10 +199,9 @@ fn answer(
 }
 
 /// `transcript` with `words`, located from its start, each with its
-/// log-probability. If they don't fit
-/// it (a word with no text, outside the audio, or out of order), it goes
-/// without them: the text is what matters, and the recogniser's timing is
-/// then not to be trusted.
+/// log-probability. If they don't fit it (a word with no text, outside the
+/// audio, or out of order), it goes without them: the text is what
+/// matters, and the recogniser's timing is then not to be trusted.
 fn with_words(transcript: Transcript, words: Vec<TimedWord>) -> Transcript {
     let start = transcript.range().start();
     let words: Option<Vec<HeardWord>> = words

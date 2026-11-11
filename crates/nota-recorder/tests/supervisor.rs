@@ -619,7 +619,7 @@ fn an_engine_without_log_probabilities_is_refused() {
         matches!(reason, OfflineReason::Version(v) if v == ProtocolVersion::WITHOUT_LOG_PROBS),
         "{reason:?}"
     );
-    assert_eq!(reason.to_string(), "speaks protocol v1");
+    assert_eq!(reason.to_string(), "speaks protocol v1, nota needs v2");
 }
 
 /// An engine from before transcripts carried their words is refused, not

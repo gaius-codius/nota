@@ -163,7 +163,8 @@ impl HeardWord {
         self.range
     }
 
-    /// The lowest log-probability of its tokens; `None` if unknown.
+    /// The lowest log-probability of its tokens, punctuation left out;
+    /// `None` if unknown.
     #[must_use]
     pub const fn log_prob(&self) -> Option<LogProb> {
         self.log_prob

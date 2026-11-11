@@ -661,7 +661,8 @@ BEGIN SELECT RAISE(ABORT, 'a session''s pack is never recorded without its diges
 ";
 
 /// Version 11: each word's log-probability, `word.log_prob` and
-/// `final_word.log_prob`: the lowest of its tokens' log-probabilities, as
+/// `final_word.log_prob`: the lowest of its tokens' log-probabilities
+/// (punctuation left out), as
 /// the engine gave it ([`nota_core::LogProb`]), never above zero.
 ///
 /// Null is unknown: every word stored before this version, and a word the

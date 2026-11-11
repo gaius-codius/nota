@@ -38,12 +38,11 @@ impl Utterance {
     }
 
     /// Places `transcript` as [`Utterance::place`] does, and each of its
-    /// words through the same timeline, keeping its log-probability.
-    /// Every word lies within the
-    /// utterance's span, in order: each starts no earlier than the one
-    /// before ended, and a word the timeline can't time (which needs a time
-    /// past what a [`SessionTime`] holds) runs from there to the
-    /// utterance's end.
+    /// words through the same timeline, keeping its log-probability. Every
+    /// word lies within the utterance's span, in order: each starts no
+    /// earlier than the one before ended, and a word the timeline can't
+    /// time (which needs a time past what a [`SessionTime`] holds) runs
+    /// from there to the utterance's end.
     #[must_use]
     pub fn place_with_words(
         transcript: Transcript,
@@ -189,8 +188,8 @@ impl Word {
         self.end
     }
 
-    /// The lowest log-probability of its tokens, as the engine gave it;
-    /// `None` if unknown.
+    /// The lowest log-probability of its tokens, punctuation left out, as
+    /// the engine gave it; `None` if unknown.
     #[must_use]
     pub const fn log_prob(&self) -> Option<LogProb> {
         self.log_prob

@@ -305,40 +305,63 @@ fn token_log_prob(value: f32) -> Option<LogProb> {
 
 /// A word's score, built a token at a time: the lowest log-probability of
 /// its tokens with a letter or digit, so punctuation glued to the word
-/// doesn't count (as T10 left it out). A word of punctuation alone is
-/// scored by all its tokens.
+/// doesn't count (as T10 left it out), not even when its value is missing.
+/// A word of punctuation alone is scored by all its tokens.
 #[derive(Debug, Clone, Copy, Default)]
 struct Lowest {
-    /// The lowest of the tokens with a letter or digit.
-    of_text: Option<LogProb>,
-    /// The lowest of all the tokens.
-    of_all: Option<LogProb>,
-    /// Whether a token had no log-probability: the word's is then unknown,
-    /// since the one missing might have been the lowest.
-    missing: bool,
+    /// The tokens with a letter or digit.
+    of_text: Least,
+    /// All the tokens.
+    of_all: Least,
 }
 
 impl Lowest {
     /// Adds `token`, whose log-probability is `log_prob`: `None` if the
     /// recogniser gave none, or gave a value that isn't one.
     fn add(&mut self, token: &str, log_prob: Option<LogProb>) {
-        let Some(value) = log_prob else {
-            self.missing = true;
-            return;
-        };
-        let lower = |lowest: Option<LogProb>| Some(lowest.map_or(value, |l| l.min(value)));
-        self.of_all = lower(self.of_all);
+        self.of_all.add(log_prob);
         if token.chars().any(char::is_alphanumeric) {
-            self.of_text = lower(self.of_text);
+            self.of_text.add(log_prob);
         }
     }
 
-    /// The word's score; `None` if a token had none.
+    /// The word's score: its text tokens', or all its tokens' if it has
+    /// none with text; `None` if one of those had no value.
     fn get(self) -> Option<LogProb> {
-        if self.missing {
-            return None;
+        if self.of_text.seen {
+            self.of_text.get()
+        } else {
+            self.of_all.get()
         }
-        self.of_text.or(self.of_all)
+    }
+}
+
+/// The lowest of some tokens' log-probabilities.
+#[derive(Debug, Clone, Copy, Default)]
+struct Least {
+    /// The lowest value so far.
+    lowest: Option<LogProb>,
+    /// Whether a token had no value: the lowest is then unknown, since
+    /// the one missing might have been lower.
+    missing: bool,
+    /// Whether any token was added.
+    seen: bool,
+}
+
+impl Least {
+    /// Adds a token whose log-probability is `log_prob`; `None` if it had
+    /// none.
+    fn add(&mut self, log_prob: Option<LogProb>) {
+        self.seen = true;
+        match log_prob {
+            Some(value) => self.lowest = Some(self.lowest.map_or(value, |l| l.min(value))),
+            None => self.missing = true,
+        }
+    }
+
+    /// The lowest; `None` if a token had no value, or none was added.
+    fn get(self) -> Option<LogProb> {
+        if self.missing { None } else { self.lowest }
     }
 }
 
@@ -729,6 +752,33 @@ mod tests {
         assert_eq!(scores(&words), [None, None, None, Some(0.0), Some(0.0)]);
         // Zero is the one zero, whatever its sign came as.
         assert_eq!(words[4].log_prob.map(LogProb::to_bits), Some(0));
+    }
+
+    /// The rounding allowance ends at [`ROUNDING_ABOVE_ZERO`]: that value is
+    /// zero, and the next `f32` above it isn't a log-probability.
+    #[test]
+    fn rounding_above_zero_stops_at_its_bound() {
+        let past = f32::from_bits(ROUNDING_ABOVE_ZERO.to_bits() + 1);
+        assert_eq!(token_log_prob(ROUNDING_ABOVE_ZERO), Some(LogProb::CERTAIN));
+        assert_eq!(token_log_prob(past), None);
+    }
+
+    /// Punctuation without a value doesn't take its word's score away,
+    /// since punctuation doesn't count toward it; in a word of punctuation
+    /// alone, it does.
+    #[test]
+    fn punctuation_without_a_value_leaves_its_words_score() {
+        let t = tokens(&[" amy", "lo", ".", " ?"]);
+        let starts = [0.0, 0.1, 0.2, 0.3];
+        let log_probs = [-0.2, -1.954, f32::NAN, f32::NAN];
+        let tokens = Tokens {
+            text: &t,
+            starts: &starts,
+            durations: None,
+            log_probs: Some(&log_probs),
+        };
+        let words = words_of(&tokens, SampleCount::new(16_000));
+        assert_eq!(scores(&words), [Some(-1.954), None]);
     }
 
     /// Log-probabilities that don't match the tokens one for one, or none

@@ -24,7 +24,10 @@ against the release:
 
 ```sh
 mkdir -p ~/.cache/sherpa-onnx-crate && cd ~/.cache/sherpa-onnx-crate
-curl -sL https://static.crates.io/crates/sherpa-onnx/sherpa-onnx-1.13.8.crate | tar -xz
+curl -sLO https://static.crates.io/crates/sherpa-onnx/sherpa-onnx-1.13.8.crate
+# The checksum Cargo.lock held for the registry's copy.
+echo "efaa98d5f08380f3d47026e00f60fed182f6edaf4c0af290d88ac0e08d6e3b90  sherpa-onnx-1.13.8.crate" | sha256sum -c
+tar -xzf sherpa-onnx-1.13.8.crate
 cd - && diff -r ~/.cache/sherpa-onnx-crate/sherpa-onnx-1.13.8/src vendor/sherpa-onnx/src
 ```
 

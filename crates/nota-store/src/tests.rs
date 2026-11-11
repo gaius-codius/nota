@@ -558,7 +558,7 @@ pub(crate) fn refused(conn: &Connection, sql: &str) -> bool {
     }
 }
 
-/// An empty library at `path` as version `version` (2 to 9) made it, and a
+/// An empty library at `path` as version `version` (2 to 10) made it, and a
 /// plain connection to it for filling it in by hand.
 pub(crate) fn library_at(path: &Path, version: usize) -> Connection {
     let steps = [

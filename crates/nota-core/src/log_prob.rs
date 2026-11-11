@@ -1,9 +1,10 @@
 //! How sure the engine was of what it heard: a log-probability.
 //!
 //! The engine gives each token it decodes a log-probability, and each word
-//! the lowest of its tokens' (T10, gaius-codius/nota#149, found the lowest
-//! marks misheard terms better than the mean). The value is kept with the
-//! word as heard and never changed. A word may have none, from an engine
+//! the lowest of its tokens' with a letter or digit (T10,
+//! gaius-codius/nota#149, found the lowest marks misheard terms better
+//! than the mean). The value is kept with the word as heard and never
+//! changed. A word may have none, from an engine
 //! that didn't give one or stored before they were kept: that is unknown,
 //! never zero, since zero means the model was certain.
 
