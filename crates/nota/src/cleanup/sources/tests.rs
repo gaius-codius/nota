@@ -157,3 +157,28 @@ fn the_installed_packs_are_the_folders_valid_pack_files() {
         .collect();
     assert_eq!(names, ["first", "second"]);
 }
+
+/// The app's sources give the packs in the data directory's `packs/`
+/// folder, and say which folder couldn't be read.
+#[test]
+fn the_app_reads_packs_from_the_data_directory() {
+    let dir = TestDir::new("app-packs");
+    let app = Installed::new(&dir.0, clock());
+    assert_eq!(app.packs(), Ok(Vec::new()));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test scaffolding outside the recorder's write path"
+    )]
+    std::fs::create_dir(dir.0.join(PACKS)).unwrap();
+    pack("pharmacy")
+        .write(&dir.0.join(PACKS).join("pharmacy.pack"))
+        .unwrap();
+    assert_eq!(app.packs(), Ok(vec![pack("pharmacy")]));
+    let blocked = TestDir::new("app-packs-blocked");
+    blocked.file(PACKS, "not a folder");
+    let app = Installed::new(&blocked.0, clock());
+    assert!(matches!(
+        app.packs(),
+        Err(why) if why.starts_with(&format!("the packs in {} can't be read: ", blocked.0.join(PACKS).display()))
+    ));
+}
