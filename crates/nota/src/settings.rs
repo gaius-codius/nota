@@ -137,7 +137,9 @@ impl fmt::Display for Unavailable {
             Self::Invalid(path, why) => {
                 write!(f, "the settings {} aren't usable: {why}", path.display())
             }
-            Self::ProgramMissing(path) => write!(f, "llama-server isn't at {}", path.display()),
+            Self::ProgramMissing(path) => {
+                write!(f, "there's no llama-server to run at {}", path.display())
+            }
             Self::ProgramNotOnPath(name) => {
                 write!(f, "{} isn't in any PATH folder", name.display())
             }
@@ -199,13 +201,16 @@ fn read(path: &Path) -> Result<Option<String>, Unavailable> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(Unavailable::Unreadable(path.to_path_buf(), e)),
     };
-    let mut text = String::new();
+    // Bytes first: a cut through a character mustn't read as broken text.
+    let mut bytes = Vec::new();
     file.take(MAX_LEN + 1)
-        .read_to_string(&mut text)
+        .read_to_end(&mut bytes)
         .map_err(|e| Unavailable::Unreadable(path.to_path_buf(), e))?;
-    if u64::try_from(text.len()).map_or(true, |len| len > MAX_LEN) {
+    if u64::try_from(bytes.len()).map_or(true, |len| len > MAX_LEN) {
         return Err(Unavailable::TooLarge(path.to_path_buf()));
     }
+    let text = String::from_utf8(bytes)
+        .map_err(|_| Unavailable::Invalid(path.to_path_buf(), "not UTF-8 text".to_owned()))?;
     Ok(Some(text))
 }
 

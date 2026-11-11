@@ -1,7 +1,5 @@
 use std::fs::Permissions;
 
-use std::sync::Arc;
-
 use super::*;
 
 /// A fresh folder under the system temp dir, removed when dropped.
@@ -33,6 +31,14 @@ impl TestDir {
         path
     }
 
+    /// A new empty folder named `name` in the folder, returning its path.
+    #[expect(clippy::disallowed_methods, reason = "test scaffolding")]
+    fn folder(&self, name: &str) -> PathBuf {
+        let path = self.0.join(name);
+        std::fs::create_dir(&path).unwrap();
+        path
+    }
+
     /// The settings file, `settings.toml`, holding `text`.
     fn settings(&self, text: &str) -> PathBuf {
         self.file(FILE, text)
@@ -59,6 +65,14 @@ impl Drop for TestDir {
     }
 }
 
+/// `path` as a TOML literal string, which takes any text but `'` and line
+/// breaks as written (Rust's `{:?}` escapes aren't all TOML's).
+fn toml_path(path: &Path) -> String {
+    let text = path.display().to_string();
+    assert!(!text.contains(['\'', '\n', '\r']), "{text}");
+    format!("'{text}'")
+}
+
 /// The config of a decider that's ready, or a panic naming what it was.
 fn ready_config(decider: LocalDecider) -> ServerConfig {
     match decider {
@@ -83,7 +97,9 @@ fn named_program_model_and_device_make_a_config_with_nota_s_launcher() {
     let program = dir.program("llama-server");
     let model = dir.file("model.gguf", "");
     dir.settings(&format!(
-        "[local_decider]\nprogram = {program:?}\nmodel = {model:?}\ndevice = \"Vulkan0\"\n"
+        "[local_decider]\nprogram = {}\nmodel = {}\ndevice = \"Vulkan0\"\n",
+        toml_path(&program),
+        toml_path(&model)
     ));
 
     let config = ready_config(local_decider(&dir.env()));
@@ -109,14 +125,18 @@ fn a_bare_program_name_runs_the_first_one_on_path() {
     let dir = TestDir::new("on-path");
     let model = dir.file("model.gguf", "");
     dir.settings(&format!(
-        "[local_decider]\nprogram = \"llama-server\"\nmodel = {model:?}\n"
+        "[local_decider]\nprogram = \"llama-server\"\nmodel = {}\n",
+        toml_path(&model)
     ));
     let mut env = dir.env();
-    // The first folder has none, so the second's is the one.
-    let first = dir.0.join("empty");
-    let second = dir.0.clone();
-    dir.program("llama-server");
-    env.path = Some(std::env::join_paths([&first, &second]).unwrap());
+    // The first folder has none; the second and third both have one, and
+    // the second's is the one that runs.
+    let empty = dir.folder("empty");
+    let second = dir.folder("second");
+    let third = dir.folder("third");
+    dir.program("second/llama-server");
+    dir.program("third/llama-server");
+    env.path = Some(std::env::join_paths([&empty, &second, &third]).unwrap());
 
     let config = ready_config(local_decider(&env));
 
@@ -223,7 +243,7 @@ fn a_missing_program_is_reported_with_its_path() {
     );
     assert_eq!(
         why.to_string(),
-        format!("llama-server isn't at {}", path.display())
+        format!("there's no llama-server to run at {}", path.display())
     );
 }
 
@@ -260,13 +280,20 @@ fn a_bare_name_not_on_path_is_reported_with_its_name() {
     assert_eq!(why.to_string(), "llama-server isn't in any PATH folder");
 }
 
-/// An empty `PATH` entry is the working folder, which isn't searched.
+/// A relative `PATH` entry (an empty one too) depends on the working
+/// folder, so it isn't searched.
 #[test]
-fn an_empty_path_entry_isnt_searched() {
-    let found = find_program(Path::new("sh"), Some(OsStr::new("")));
+fn a_relative_path_entry_isnt_searched() {
+    // Tests run in the package's folder, where this holds a program that
+    // a search of relative entries would find.
+    let relative = Path::new("../../scripts");
+    assert!(is_program(&relative.join("check-files.sh")));
+    let path = std::env::join_paths([Path::new(""), relative]).unwrap();
+
+    let found = find_program(Path::new("check-files.sh"), Some(&path));
 
     assert!(
-        matches!(found, Err(Unavailable::ProgramNotOnPath(ref n)) if n == "sh"),
+        matches!(found, Err(Unavailable::ProgramNotOnPath(ref n)) if n == "check-files.sh"),
         "{found:?}"
     );
 }
@@ -465,6 +492,42 @@ fn a_huge_settings_file_is_refused() {
     );
 }
 
+/// A settings file over the limit is too big even when the limit cuts
+/// through a character.
+#[test]
+fn a_huge_file_cut_through_a_character_is_too_big() {
+    let dir = TestDir::new("huge-utf8");
+    let file = dir.settings(&"é".repeat(usize::try_from(MAX_LEN).unwrap()));
+
+    let why = unavailable(local_decider(&dir.env()));
+
+    assert!(
+        matches!(&why, Unavailable::TooLarge(p) if *p == file),
+        "{why:?}"
+    );
+}
+
+/// A settings file that isn't UTF-8 text is refused, naming the file.
+#[test]
+fn a_file_that_isnt_text_is_refused() {
+    let dir = TestDir::new("not-utf8");
+    let file = dir.0.join(FILE);
+    write_bytes(&file, &[0xff, 0xfe]);
+
+    let why = unavailable(local_decider(&dir.env()));
+
+    assert!(
+        matches!(&why, Unavailable::Invalid(p, w) if *p == file && w == "not UTF-8 text"),
+        "{why:?}"
+    );
+}
+
+/// Writes `bytes` to `path`.
+#[expect(clippy::disallowed_methods, reason = "test scaffolding")]
+fn write_bytes(path: &Path, bytes: &[u8]) {
+    std::fs::write(path, bytes).unwrap();
+}
+
 /// A settings file exactly at the limit is read.
 #[test]
 fn a_settings_file_at_the_limit_is_read() {
@@ -478,10 +541,9 @@ fn a_settings_file_at_the_limit_is_read() {
 /// A settings path that can't be read as a file is reported with its
 /// cause.
 #[test]
-#[expect(clippy::disallowed_methods, reason = "test scaffolding")]
 fn an_unreadable_settings_file_is_reported() {
     let dir = TestDir::new("unreadable");
-    std::fs::create_dir(dir.0.join(FILE)).unwrap();
+    dir.folder(FILE);
 
     let why = unavailable(local_decider(&dir.env()));
 
@@ -518,8 +580,10 @@ fn the_current_environment_reads_nota_s_settings_file() {
         );
     }
     assert!(env.exe.is_ok());
-    // The socket's default folder is nota's, under XDG_RUNTIME_DIR.
-    if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR") {
-        assert_eq!(env.runtime_dir, Some(PathBuf::from(run).join("nota")));
+    // The socket's default folder is nota's, under XDG_RUNTIME_DIR, which
+    // only Linux reads, and only when it's absolute.
+    let run = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+    if let Some(run) = run.filter(|run| cfg!(target_os = "linux") && run.is_absolute()) {
+        assert_eq!(env.runtime_dir, Some(run.join("nota")));
     }
 }
