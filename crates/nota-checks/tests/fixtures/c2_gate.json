@@ -1,0 +1,9100 @@
+{
+ "about": "C2, the candidate gate, on bench fixes: each distinct fix from the bench's 16 fix runs whose heard span, replacement and every offered window and term are at most 32 characters and 4 words, gated alone. `chunk` is the heard span where the bench found it, or empty where it didn't (invented: the workshop's text never is). `offered` is every candidate offered for the fix's chunk, in order. `decision` is gate U's (regate.py), with no offered term ever inside the replacement where it found none; `via` is the candidate that let an accepted fix through (null otherwise); `sim` is C1's score at full precision (null where the span wasn't found) and `result` the chunk with an accepted fix placed. `runs` names the fix runs that proposed it. Written by the research bench's fixtures/export.py; don't edit by hand.",
+ "fixes": [
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "DLP one",
+   "offered": [],
+   "repl": "DLP one",
+   "result": "",
+   "runs": [
+    "q9-fx-both",
+    "q9-fx-gloss"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "DLP one",
+   "offered": [],
+   "repl": "DPI one",
+   "result": "",
+   "runs": [
+    "c-fx-both"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "DLP",
+   "offered": [],
+   "repl": "DPI",
+   "result": "",
+   "runs": [
+    "c-fx-gloss",
+    "q4-fx-both",
+    "q4-fx-gloss",
+    "q4-fx-lookup",
+    "q4-fx-none",
+    "q5-fx-both",
+    "q5-fx-gloss",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-both",
+    "t-fx-gloss",
+    "t-fx-lookup"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "Hinailer",
+   "offered": [],
+   "repl": "inhaler",
+   "result": "",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "q9-fx-gloss",
+    "q9-fx-none",
+    "t-fx-gloss"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "amylo diping",
+   "offered": [],
+   "repl": "amlodipine",
+   "result": "",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "amyloidipin",
+   "offered": [],
+   "repl": "amlodipine",
+   "result": "",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "anemia any",
+   "offered": [
+    {
+     "term": "angina",
+     "window": "anemia any"
+    }
+   ],
+   "repl": "angina",
+   "result": "",
+   "runs": [
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-lookup"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "anemia any",
+   "offered": [
+    {
+     "term": "pravastatin",
+     "window": "present in"
+    },
+    {
+     "term": "angina",
+     "window": "anemia any"
+    }
+   ],
+   "repl": "any cardiovascular",
+   "result": "",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "bloody pine",
+   "offered": [],
+   "repl": "blood pressure",
+   "result": "",
+   "runs": [
+    "q4-fx-none",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "q9-fx-none",
+    "t-fx-lookup"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "chops",
+   "offered": [],
+   "repl": "chairs",
+   "result": "",
+   "runs": [
+    "c-fx-gloss"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "console there",
+   "offered": [],
+   "repl": "consultation there",
+   "result": "",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "electoral levels",
+   "offered": [],
+   "repl": "electrolyte levels",
+   "result": "",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-both",
+    "q5-fx-gloss",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-both",
+    "t-fx-gloss",
+    "t-fx-lookup"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "flu",
+   "offered": [
+    {
+     "term": "clonidine",
+     "window": "clinician"
+    },
+    {
+     "term": "adrenaline",
+     "window": "it During an"
+    },
+    {
+     "term": "type 2 diabetes",
+     "window": "the patient's"
+    },
+    {
+     "term": "type 2 diabetes",
+     "window": "the patient's"
+    }
+   ],
+   "repl": "flu",
+   "result": "",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "glycata hemoglobin",
+   "offered": [
+    {
+     "term": "chronic kidney disease",
+     "window": "chronic conditions"
+    }
+   ],
+   "repl": "glycated haemoglobin",
+   "result": "",
+   "runs": [
+    "q9-fx-both"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "glycata hemoglobin",
+   "offered": [],
+   "repl": "glycated haemoglobin",
+   "result": "",
+   "runs": [
+    "q9-fx-gloss"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "glycata hemoglobin",
+   "offered": [],
+   "repl": "glycated hemoglobin",
+   "result": "",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "glycata",
+   "offered": [],
+   "repl": "glycated",
+   "result": "",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "hemoglobin",
+   "offered": [],
+   "repl": "haemoglobin",
+   "result": "",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "hyperprofen",
+   "offered": [],
+   "repl": "hydrochlorothiazide",
+   "result": "",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "insulin But",
+   "offered": [
+    {
+     "term": "semaglutide",
+     "window": "semaglotide"
+    },
+    {
+     "term": "GLP-1",
+     "window": "GLP 1 is"
+    },
+    {
+     "term": "insulin aspart",
+     "window": "insulin But"
+    },
+    {
+     "term": "amiodarone",
+     "window": "older one"
+    }
+   ],
+   "repl": "insulin aspart",
+   "result": "",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "insulin they",
+   "offered": [
+    {
+     "term": "type 2 diabetes",
+     "window": "them had diabetes"
+    },
+    {
+     "term": "insulin detemir",
+     "window": "insulin there"
+    },
+    {
+     "term": "insulin aspart",
+     "window": "insulin they"
+    }
+   ],
+   "repl": "insulin aspart",
+   "result": "",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "months most",
+   "offered": [
+    {
+     "term": "inhaler",
+     "window": "Inhale"
+    },
+    {
+     "term": "montelukast",
+     "window": "months most"
+    },
+    {
+     "term": "codeine",
+     "window": "guideline"
+    }
+   ],
+   "repl": "montelukast",
+   "result": "",
+   "runs": [
+    "q5-fx-both",
+    "t-fx-both"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "only ankle swelling makes",
+   "offered": [
+    {
+     "term": "pulmonary oedema",
+     "window": "pulmonary edema"
+    },
+    {
+     "term": "pulmonary oedema",
+     "window": "Pulmonary edema"
+    },
+    {
+     "term": "ankle swelling",
+     "window": "only ankle swelling"
+    },
+    {
+     "term": "ankle swelling",
+     "window": "ankle swelling makes"
+    },
+    {
+     "term": "adherence",
+     "window": "other regions"
+    }
+   ],
+   "repl": "only ankle swelling makes",
+   "result": "",
+   "runs": [
+    "q5-fx-lookup",
+    "t-fx-lookup"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "polypharmacy",
+   "offered": [
+    {
+     "term": "polypharmacy",
+     "window": "the pharmacy"
+    },
+    {
+     "term": "MedsCheck",
+     "window": "to check"
+    }
+   ],
+   "repl": "polypharmacy",
+   "result": "",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "rechalling",
+   "offered": [],
+   "repl": "re-challenge",
+   "result": "",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "regulator",
+   "offered": [],
+   "repl": "regarding",
+   "result": "",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "regulator",
+   "offered": [],
+   "repl": "regulator",
+   "result": "",
+   "runs": [
+    "q4-fx-none"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "studying",
+   "offered": [],
+   "repl": "studying",
+   "result": "",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "value right",
+   "offered": [
+    {
+     "term": "valproate",
+     "window": "value right"
+    },
+    {
+     "term": "clonidine",
+     "window": "clinician"
+    },
+    {
+     "term": "clonidine",
+     "window": "clinician"
+    }
+   ],
+   "repl": "valproate right",
+   "result": "",
+   "runs": [
+    "q4-fx-both",
+    "q5-fx-both",
+    "t-fx-both"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "value right",
+   "offered": [
+    {
+     "term": "valproate",
+     "window": "value right"
+    },
+    {
+     "term": "clonidine",
+     "window": "clinician"
+    },
+    {
+     "term": "clonidine",
+     "window": "clinician"
+    }
+   ],
+   "repl": "value, right",
+   "result": "",
+   "runs": [
+    "c-fx-both",
+    "q4-fx-lookup",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-lookup"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "value right",
+   "offered": [
+    {
+     "term": "valproate",
+     "window": "value right"
+    }
+   ],
+   "repl": "value, right",
+   "result": "",
+   "runs": [
+    "c-fx-both",
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "walking leaders",
+   "offered": [],
+   "repl": "walking leaders",
+   "result": "",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "",
+   "decision": "span not found",
+   "heard": "weight So",
+   "offered": [
+    {
+     "term": "terbutaline",
+     "window": "their baseline"
+    },
+    {
+     "term": "wheeze",
+     "window": "weight So"
+    },
+    {
+     "term": "inhaler",
+     "window": "in their"
+    },
+    {
+     "term": "angina",
+     "window": "are gonna"
+    }
+   ],
+   "repl": "wheeze",
+   "result": "",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": null,
+   "via": null
+  },
+  {
+   "chunk": "50 meters",
+   "decision": "no offered term in the replacement",
+   "heard": "50 meters",
+   "offered": [],
+   "repl": "50 metres",
+   "result": "50 meters",
+   "runs": [
+    "q4-fx-none"
+   ],
+   "sim": 0.875,
+   "via": null
+  },
+  {
+   "chunk": "7067-year-old",
+   "decision": "no offered term in the replacement",
+   "heard": "7067-year-old",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "hydrochlorothiazide",
+     "window": "hydrochlorothiacy"
+    },
+    {
+     "term": "angina",
+     "window": "ankyl"
+    }
+   ],
+   "repl": "70-67-year-old",
+   "result": "7067-year-old",
+   "runs": [
+    "q9-fx-both"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "7067-year-old",
+   "decision": "no offered term in the replacement",
+   "heard": "7067-year-old",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "hydrochlorothiazide",
+     "window": "hydrochlorothiacy"
+    },
+    {
+     "term": "montelukast",
+     "window": "months The"
+    }
+   ],
+   "repl": "70-67-year-old",
+   "result": "7067-year-old",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "7067-year-old",
+   "decision": "no offered term in the replacement",
+   "heard": "7067-year-old",
+   "offered": [],
+   "repl": "70-67-year-old",
+   "result": "7067-year-old",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-gloss",
+    "q9-fx-gloss",
+    "q9-fx-none",
+    "t-fx-gloss"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "ACI",
+   "decision": "no offered term in the replacement",
+   "heard": "ACI",
+   "offered": [
+    {
+     "term": "blood pressure",
+     "window": "blood pressure if"
+    },
+    {
+     "term": "angina",
+     "window": "and again"
+    },
+    {
+     "term": "potassium chloride",
+     "window": "potassium is too"
+    },
+    {
+     "term": "aciclovir",
+     "window": "ACI for"
+    },
+    {
+     "term": "type 2 diabetes",
+     "window": "the patient's"
+    }
+   ],
+   "repl": "ACEI",
+   "result": "ACI",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.8571428571428571,
+   "via": null
+  },
+  {
+   "chunk": "ACI",
+   "decision": "no offered term in the replacement",
+   "heard": "ACI",
+   "offered": [],
+   "repl": "ACEI",
+   "result": "ACI",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": 0.8571428571428571,
+   "via": null
+  },
+  {
+   "chunk": "ACI",
+   "decision": "no offered term in the replacement",
+   "heard": "ACI",
+   "offered": [
+    {
+     "term": "potassium chloride",
+     "window": "potassium is too"
+    }
+   ],
+   "repl": "ACEi",
+   "result": "ACI",
+   "runs": [
+    "q9-fx-both"
+   ],
+   "sim": 0.8571428571428571,
+   "via": null
+  },
+  {
+   "chunk": "ACI",
+   "decision": "no offered term in the replacement",
+   "heard": "ACI",
+   "offered": [],
+   "repl": "ACEi",
+   "result": "ACI",
+   "runs": [
+    "q9-fx-gloss"
+   ],
+   "sim": 0.8571428571428571,
+   "via": null
+  },
+  {
+   "chunk": "Administering work",
+   "decision": "no offered term in the replacement",
+   "heard": "Administering work",
+   "offered": [],
+   "repl": "Adherence work",
+   "result": "Administering work",
+   "runs": [
+    "q9-fx-both",
+    "q9-fx-gloss",
+    "q9-fx-none"
+   ],
+   "sim": 0.6,
+   "via": null
+  },
+  {
+   "chunk": "CPD",
+   "decision": "no offered term in the replacement",
+   "heard": "CPD",
+   "offered": [],
+   "repl": "COPD",
+   "result": "CPD",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-gloss",
+    "q9-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 0.8571428571428571,
+   "via": null
+  },
+  {
+   "chunk": "Continue almen's like normal",
+   "decision": "no offered term in the replacement",
+   "heard": "Continue almen's like normal",
+   "offered": [],
+   "repl": "Continue amlodipine like normal",
+   "result": "Continue almen's like normal",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 0.8076923076923077,
+   "via": null
+  },
+  {
+   "chunk": "Continue almen's",
+   "decision": "no offered term in the replacement",
+   "heard": "Continue almen's",
+   "offered": [
+    {
+     "term": "adherence",
+     "window": "almen's"
+    }
+   ],
+   "repl": "Continue medicines",
+   "result": "Continue almen's",
+   "runs": [
+    "q9-fx-both"
+   ],
+   "sim": 0.7741935483870968,
+   "via": null
+  },
+  {
+   "chunk": "DED",
+   "decision": "no offered term in the replacement",
+   "heard": "DED",
+   "offered": [
+    {
+     "term": "MedsCheck",
+     "window": "to check"
+    },
+    {
+     "term": "warfarin",
+     "window": "we referring"
+    }
+   ],
+   "repl": "ED",
+   "result": "DED",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.8,
+   "via": null
+  },
+  {
+   "chunk": "DED",
+   "decision": "no offered term in the replacement",
+   "heard": "DED",
+   "offered": [],
+   "repl": "ED",
+   "result": "DED",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-both",
+    "q5-fx-gloss",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-both",
+    "t-fx-gloss",
+    "t-fx-lookup"
+   ],
+   "sim": 0.8,
+   "via": null
+  },
+  {
+   "chunk": "DLP one",
+   "decision": "no offered term in the replacement",
+   "heard": "DLP one",
+   "offered": [
+    {
+     "term": "insulin lispro",
+     "window": "insulin for"
+    },
+    {
+     "term": "stroke",
+     "window": "store the"
+    }
+   ],
+   "repl": "DLP one",
+   "result": "DLP one",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "DLP one",
+   "decision": "no offered term in the replacement",
+   "heard": "DLP one",
+   "offered": [],
+   "repl": "DLP pen",
+   "result": "DLP one",
+   "runs": [
+    "q9-fx-both",
+    "q9-fx-gloss"
+   ],
+   "sim": 0.6666666666666666,
+   "via": null
+  },
+  {
+   "chunk": "DLP one",
+   "decision": "no offered term in the replacement",
+   "heard": "DLP one",
+   "offered": [],
+   "repl": "DLP",
+   "result": "DLP one",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": 0.6666666666666666,
+   "via": null
+  },
+  {
+   "chunk": "DLP one",
+   "decision": "no offered term in the replacement",
+   "heard": "DLP one",
+   "offered": [
+    {
+     "term": "insulin lispro",
+     "window": "insulin for"
+    },
+    {
+     "term": "stroke",
+     "window": "store the"
+    }
+   ],
+   "repl": "DPI one",
+   "result": "DLP one",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": 0.8333333333333334,
+   "via": null
+  },
+  {
+   "chunk": "DLP one",
+   "decision": "no offered term in the replacement",
+   "heard": "DLP one",
+   "offered": [],
+   "repl": "DPI one",
+   "result": "DLP one",
+   "runs": [
+    "c-fx-both",
+    "c-fx-gloss",
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-both",
+    "q5-fx-gloss",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-both",
+    "t-fx-gloss",
+    "t-fx-lookup"
+   ],
+   "sim": 0.8333333333333334,
+   "via": null
+  },
+  {
+   "chunk": "DVT",
+   "decision": "no offered term in the replacement",
+   "heard": "DVT",
+   "offered": [],
+   "repl": "DVT",
+   "result": "DVT",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "GLP 1",
+   "decision": "no offered term in the replacement",
+   "heard": "GLP 1",
+   "offered": [],
+   "repl": "GLP-1",
+   "result": "GLP 1",
+   "runs": [
+    "q9-fx-gloss",
+    "q9-fx-none"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "GP, the usual GP.",
+   "decision": "no offered term in the replacement",
+   "heard": "GP, the usual GP.",
+   "offered": [
+    {
+     "term": "COPD",
+     "window": "GP the"
+    },
+    {
+     "term": "COPD",
+     "window": "GP but"
+    },
+    {
+     "term": "chronic kidney disease",
+     "window": "chronic conditions"
+    }
+   ],
+   "repl": "GP, the usual GP.",
+   "result": "GP, the usual GP.",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "Hinailer",
+   "decision": "accepted",
+   "heard": "Hinailer",
+   "offered": [
+    {
+     "term": "inhaler",
+     "window": "Hinailer"
+    },
+    {
+     "term": "polypharmacy",
+     "window": "the pharmacy"
+    },
+    {
+     "term": "MedsCheck",
+     "window": "to check"
+    }
+   ],
+   "repl": "inhaler",
+   "result": "inhaler",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.8,
+   "via": {
+    "term": "inhaler",
+    "window": "Hinailer"
+   }
+  },
+  {
+   "chunk": "Hinailer",
+   "decision": "accepted",
+   "heard": "Hinailer",
+   "offered": [
+    {
+     "term": "inhaler",
+     "window": "Hinailer"
+    }
+   ],
+   "repl": "inhaler",
+   "result": "inhaler",
+   "runs": [
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "q9-fx-both",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.8,
+   "via": {
+    "term": "inhaler",
+    "window": "Hinailer"
+   }
+  },
+  {
+   "chunk": "Hinailer",
+   "decision": "no offered term in the replacement",
+   "heard": "Hinailer",
+   "offered": [],
+   "repl": "inhaler",
+   "result": "Hinailer",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-gloss",
+    "q9-fx-gloss",
+    "q9-fx-none",
+    "t-fx-gloss"
+   ],
+   "sim": 0.8,
+   "via": null
+  },
+  {
+   "chunk": "I don't know",
+   "decision": "similarity below 0.6",
+   "heard": "I don't know",
+   "offered": [],
+   "repl": "I'd like to",
+   "result": "I don't know",
+   "runs": [
+    "c-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-lookup"
+   ],
+   "sim": 0.35294117647058826,
+   "via": null
+  },
+  {
+   "chunk": "I don't know",
+   "decision": "similarity below 0.6",
+   "heard": "I don't know",
+   "offered": [],
+   "repl": "I'd like",
+   "result": "I don't know",
+   "runs": [
+    "c-fx-both",
+    "q4-fx-gloss",
+    "q5-fx-both",
+    "q5-fx-gloss",
+    "t-fx-both",
+    "t-fx-gloss"
+   ],
+   "sim": 0.4,
+   "via": null
+  },
+  {
+   "chunk": "I don't know",
+   "decision": "similarity below 0.6",
+   "heard": "I don't know",
+   "offered": [
+    {
+     "term": "polypharmacy",
+     "window": "the pharmacy"
+    }
+   ],
+   "repl": "let's say",
+   "result": "I don't know",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.125,
+   "via": null
+  },
+  {
+   "chunk": "I normally are stable",
+   "decision": "no offered term in the replacement",
+   "heard": "I normally are stable",
+   "offered": [],
+   "repl": "I normally am stable",
+   "result": "I normally are stable",
+   "runs": [
+    "q4-fx-none"
+   ],
+   "sim": 0.9142857142857143,
+   "via": null
+  },
+  {
+   "chunk": "I will it's definitely",
+   "decision": "no offered term in the replacement",
+   "heard": "I will it's definitely",
+   "offered": [],
+   "repl": "I'll definitely",
+   "result": "I will it's definitely",
+   "runs": [
+    "c-fx-both",
+    "c-fx-gloss"
+   ],
+   "sim": 0.8387096774193549,
+   "via": null
+  },
+  {
+   "chunk": "I will it's definitely",
+   "decision": "no offered term in the replacement",
+   "heard": "I will it's definitely",
+   "offered": [],
+   "repl": "I'll it's definitely",
+   "result": "I will it's definitely",
+   "runs": [
+    "q4-fx-none",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-lookup"
+   ],
+   "sim": 0.9411764705882353,
+   "via": null
+  },
+  {
+   "chunk": "I will it's definitely",
+   "decision": "no offered term in the replacement",
+   "heard": "I will it's definitely",
+   "offered": [],
+   "repl": "it's definitely",
+   "result": "I will it's definitely",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-both",
+    "q5-fx-gloss",
+    "t-fx-both",
+    "t-fx-gloss"
+   ],
+   "sim": 0.8387096774193549,
+   "via": null
+  },
+  {
+   "chunk": "I2 diagnosis",
+   "decision": "no offered term in the replacement",
+   "heard": "I2 diagnosis",
+   "offered": [],
+   "repl": "I2 diagnosis",
+   "result": "I2 diagnosis",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-both",
+    "q5-fx-gloss",
+    "t-fx-both",
+    "t-fx-gloss"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "I2 diagnosis",
+   "decision": "no offered term in the replacement",
+   "heard": "I2 diagnosis",
+   "offered": [],
+   "repl": "ICD diagnosis",
+   "result": "I2 diagnosis",
+   "runs": [
+    "q4-fx-none",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-lookup"
+   ],
+   "sim": 0.8695652173913043,
+   "via": null
+  },
+  {
+   "chunk": "I2",
+   "decision": "similarity below 0.6",
+   "heard": "I2",
+   "offered": [
+    {
+     "term": "inhaler",
+     "window": "in three"
+    }
+   ],
+   "repl": "ICD",
+   "result": "I2",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 0.4,
+   "via": null
+  },
+  {
+   "chunk": "I2",
+   "decision": "similarity below 0.6",
+   "heard": "I2",
+   "offered": [
+    {
+     "term": "inhaler",
+     "window": "in three"
+    }
+   ],
+   "repl": "leading",
+   "result": "I2",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": 0.2222222222222222,
+   "via": null
+  },
+  {
+   "chunk": "Inhale and increase",
+   "decision": "no offered term in the replacement",
+   "heard": "Inhale and increase",
+   "offered": [],
+   "repl": "Inhale and increase",
+   "result": "Inhale and increase",
+   "runs": [
+    "q4-fx-none"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "Inhale and increase",
+   "decision": "no offered term in the replacement",
+   "heard": "Inhale and increase",
+   "offered": [],
+   "repl": "Inhaled and increased",
+   "result": "Inhale and increase",
+   "runs": [
+    "q9-fx-gloss",
+    "q9-fx-none"
+   ],
+   "sim": 0.9444444444444444,
+   "via": null
+  },
+  {
+   "chunk": "Inhale and increase",
+   "decision": "similarity below 0.6",
+   "heard": "Inhale and increase",
+   "offered": [],
+   "repl": "Inhaled corticosteroids",
+   "result": "Inhale and increase",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 0.5641025641025641,
+   "via": null
+  },
+  {
+   "chunk": "Inhale",
+   "decision": "no offered term in the replacement",
+   "heard": "Inhale",
+   "offered": [
+    {
+     "term": "inhaler",
+     "window": "Inhale"
+    },
+    {
+     "term": "montelukast",
+     "window": "months most"
+    },
+    {
+     "term": "codeine",
+     "window": "guideline"
+    }
+   ],
+   "repl": "Inhaled",
+   "result": "Inhale",
+   "runs": [
+    "q9-fx-both"
+   ],
+   "sim": 0.9230769230769231,
+   "via": null
+  },
+  {
+   "chunk": "Inhale",
+   "decision": "accepted",
+   "heard": "Inhale",
+   "offered": [
+    {
+     "term": "inhaler",
+     "window": "Inhale"
+    },
+    {
+     "term": "montelukast",
+     "window": "months most"
+    },
+    {
+     "term": "codeine",
+     "window": "guideline"
+    }
+   ],
+   "repl": "inhaler",
+   "result": "inhaler",
+   "runs": [
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.9230769230769231,
+   "via": {
+    "term": "inhaler",
+    "window": "Inhale"
+   }
+  },
+  {
+   "chunk": "Inhale",
+   "decision": "accepted",
+   "heard": "Inhale",
+   "offered": [
+    {
+     "term": "inhaler",
+     "window": "Inhale"
+    },
+    {
+     "term": "montelukast",
+     "window": "months most"
+    },
+    {
+     "term": "inhaler",
+     "window": "in every"
+    },
+    {
+     "term": "formoterol",
+     "window": "frame there"
+    },
+    {
+     "term": "codeine",
+     "window": "guideline"
+    },
+    {
+     "term": "type 2 diabetes",
+     "window": "the patients"
+    }
+   ],
+   "repl": "inhaler",
+   "result": "inhaler",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.9230769230769231,
+   "via": {
+    "term": "inhaler",
+    "window": "Inhale"
+   }
+  },
+  {
+   "chunk": "Maybe as two is",
+   "decision": "no offered term in the replacement",
+   "heard": "Maybe as two is",
+   "offered": [
+    {
+     "term": "preventer",
+     "window": "prevented use"
+    },
+    {
+     "term": "angina",
+     "window": "doing in"
+    }
+   ],
+   "repl": "Maybe as two is",
+   "result": "Maybe as two is",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "Medicine satisfy evidence",
+   "decision": "no offered term in the replacement",
+   "heard": "Medicine satisfy evidence",
+   "offered": [],
+   "repl": "Medicine safety evidence",
+   "result": "Medicine satisfy evidence",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": 0.8888888888888888,
+   "via": null
+  },
+  {
+   "chunk": "Medicine satisfy evidence",
+   "decision": "no offered term in the replacement",
+   "heard": "Medicine satisfy evidence",
+   "offered": [
+    {
+     "term": "chronic kidney disease",
+     "window": "chronic patient"
+    }
+   ],
+   "repl": "Medicine satisfies evidence",
+   "result": "Medicine satisfy evidence",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup",
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "q9-fx-both",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.9166666666666666,
+   "via": null
+  },
+  {
+   "chunk": "Medicine satisfy evidence",
+   "decision": "no offered term in the replacement",
+   "heard": "Medicine satisfy evidence",
+   "offered": [],
+   "repl": "Medicine satisfies evidence",
+   "result": "Medicine satisfy evidence",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-gloss",
+    "q9-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 0.9166666666666666,
+   "via": null
+  },
+  {
+   "chunk": "NSAIDs",
+   "decision": "accepted",
+   "heard": "NSAIDs",
+   "offered": [
+    {
+     "term": "NSAID",
+     "window": "NSAIDs"
+    },
+    {
+     "term": "heart failure",
+     "window": "Heart failure could"
+    },
+    {
+     "term": "breathlessness",
+     "window": "breadness"
+    },
+    {
+     "term": "reliever",
+     "window": "really severe"
+    },
+    {
+     "term": "oxycodone",
+     "window": "octognea"
+    }
+   ],
+   "repl": "NSAIDs",
+   "result": "NSAIDs",
+   "runs": [
+    "q5-fx-both",
+    "t-fx-both"
+   ],
+   "sim": 1.0,
+   "via": {
+    "term": "NSAID",
+    "window": "NSAIDs"
+   }
+  },
+  {
+   "chunk": "Narancos",
+   "decision": "accepted",
+   "heard": "Narancos",
+   "offered": [
+    {
+     "term": "Naranjo",
+     "window": "Narancos"
+    },
+    {
+     "term": "insulin aspart",
+     "window": "rechalling part"
+    }
+   ],
+   "repl": "Naranjo",
+   "result": "Naranjo",
+   "runs": [
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "q9-fx-both",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.8,
+   "via": {
+    "term": "Naranjo",
+    "window": "Narancos"
+   }
+  },
+  {
+   "chunk": "Narancos",
+   "decision": "accepted",
+   "heard": "Narancos",
+   "offered": [
+    {
+     "term": "Naranjo",
+     "window": "Narancos"
+    }
+   ],
+   "repl": "Naranjo",
+   "result": "Naranjo",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.8,
+   "via": {
+    "term": "Naranjo",
+    "window": "Narancos"
+   }
+  },
+  {
+   "chunk": "Narancos",
+   "decision": "no offered term in the replacement",
+   "heard": "Narancos",
+   "offered": [],
+   "repl": "Naranjo",
+   "result": "Narancos",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-gloss",
+    "q9-fx-gloss",
+    "q9-fx-none",
+    "t-fx-gloss"
+   ],
+   "sim": 0.8,
+   "via": null
+  },
+  {
+   "chunk": "Owner",
+   "decision": "no offered term in the replacement",
+   "heard": "Owner",
+   "offered": [],
+   "repl": "Owner",
+   "result": "Owner",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "Owner",
+   "decision": "no offered term in the replacement",
+   "heard": "Owner",
+   "offered": [],
+   "repl": "owner",
+   "result": "Owner",
+   "runs": [
+    "q9-fx-both",
+    "q9-fx-gloss"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "Present",
+   "decision": "accepted",
+   "heard": "Present",
+   "offered": [
+    {
+     "term": "MedsCheck",
+     "window": "me check"
+    },
+    {
+     "term": "preventer",
+     "window": "Present So"
+    },
+    {
+     "term": "angina",
+     "window": "are gonna"
+    }
+   ],
+   "repl": "Preventer",
+   "result": "Preventer",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.75,
+   "via": {
+    "term": "preventer",
+    "window": "Present So"
+   }
+  },
+  {
+   "chunk": "Taxi drivers",
+   "decision": "no offered term in the replacement",
+   "heard": "Taxi drivers",
+   "offered": [],
+   "repl": "taxi drivers",
+   "result": "Taxi drivers",
+   "runs": [
+    "q9-fx-gloss"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "Taxi drivers",
+   "decision": "similarity below 0.6",
+   "heard": "Taxi drivers",
+   "offered": [
+    {
+     "term": "type 2 diabetes",
+     "window": "them had diabetes"
+    },
+    {
+     "term": "insulin detemir",
+     "window": "insulin they didn't"
+    }
+   ],
+   "repl": "type 2 diabetes",
+   "result": "Taxi drivers",
+   "runs": [
+    "q9-fx-both"
+   ],
+   "sim": 0.3333333333333333,
+   "via": null
+  },
+  {
+   "chunk": "Unavailable",
+   "decision": "similarity below 0.6",
+   "heard": "Unavailable",
+   "offered": [],
+   "repl": "Inhaled",
+   "result": "Unavailable",
+   "runs": [
+    "q9-fx-gloss"
+   ],
+   "sim": 0.4444444444444444,
+   "via": null
+  },
+  {
+   "chunk": "Unavailable",
+   "decision": "no offered term in the replacement",
+   "heard": "Unavailable",
+   "offered": [],
+   "repl": "Unavailability",
+   "result": "Unavailable",
+   "runs": [
+    "q5-fx-gloss"
+   ],
+   "sim": 0.8,
+   "via": null
+  },
+  {
+   "chunk": "Unavailable",
+   "decision": "no offered term in the replacement",
+   "heard": "Unavailable",
+   "offered": [],
+   "repl": "Unavailable",
+   "result": "Unavailable",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "t-fx-gloss"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "a couple of squares",
+   "decision": "no offered term in the replacement",
+   "heard": "a couple of squares",
+   "offered": [],
+   "repl": "a couple of squares",
+   "result": "a couple of squares",
+   "runs": [
+    "c-fx-gloss",
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "after one",
+   "decision": "similarity below 0.6",
+   "heard": "after one",
+   "offered": [
+    {
+     "term": "MedsCheck",
+     "window": "time to check"
+    },
+    {
+     "term": "amiodarone",
+     "window": "after one"
+    },
+    {
+     "term": "chronic kidney disease",
+     "window": "chronic condition"
+    }
+   ],
+   "repl": "amiodarone",
+   "result": "after one",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.5555555555555556,
+   "via": null
+  },
+  {
+   "chunk": "again a",
+   "decision": "no offered term in the replacement",
+   "heard": "again a",
+   "offered": [
+    {
+     "term": "angina",
+     "window": "again a"
+    },
+    {
+     "term": "valproate",
+     "window": "value right"
+    }
+   ],
+   "repl": "again a couple of",
+   "result": "again a",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": 0.6,
+   "via": null
+  },
+  {
+   "chunk": "again a",
+   "decision": "no offered term in the replacement",
+   "heard": "again a",
+   "offered": [
+    {
+     "term": "angina",
+     "window": "again a"
+    },
+    {
+     "term": "codeine",
+     "window": "guideline"
+    }
+   ],
+   "repl": "again at",
+   "result": "again a",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 0.9230769230769231,
+   "via": null
+  },
+  {
+   "chunk": "again a",
+   "decision": "no offered term in the replacement",
+   "heard": "again a",
+   "offered": [
+    {
+     "term": "angina",
+     "window": "again a"
+    },
+    {
+     "term": "codeine",
+     "window": "guideline"
+    }
+   ],
+   "repl": "again with",
+   "result": "again a",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": 0.6666666666666666,
+   "via": null
+  },
+  {
+   "chunk": "again a",
+   "decision": "no offered term in the replacement",
+   "heard": "again a",
+   "offered": [
+    {
+     "term": "angina",
+     "window": "again a"
+    },
+    {
+     "term": "valproate",
+     "window": "value right"
+    }
+   ],
+   "repl": "again",
+   "result": "again a",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 0.9090909090909091,
+   "via": null
+  },
+  {
+   "chunk": "almen's",
+   "decision": "similarity below 0.6",
+   "heard": "almen's",
+   "offered": [
+    {
+     "term": "gentamicin",
+     "window": "cannot miss and"
+    }
+   ],
+   "repl": "allopurinol",
+   "result": "almen's",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 0.35294117647058826,
+   "via": null
+  },
+  {
+   "chunk": "almen's",
+   "decision": "no offered term in the replacement",
+   "heard": "almen's",
+   "offered": [],
+   "repl": "almonds",
+   "result": "almen's",
+   "runs": [
+    "q9-fx-gloss",
+    "q9-fx-none"
+   ],
+   "sim": 0.7692307692307693,
+   "via": null
+  },
+  {
+   "chunk": "almen's",
+   "decision": "similarity below 0.6",
+   "heard": "almen's",
+   "offered": [
+    {
+     "term": "adherence",
+     "window": "almen's"
+    }
+   ],
+   "repl": "amlodipine",
+   "result": "almen's",
+   "runs": [
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.375,
+   "via": null
+  },
+  {
+   "chunk": "almen's",
+   "decision": "similarity below 0.6",
+   "heard": "almen's",
+   "offered": [
+    {
+     "term": "gentamicin",
+     "window": "cannot miss and"
+    }
+   ],
+   "repl": "amlodipine",
+   "result": "almen's",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": 0.375,
+   "via": null
+  },
+  {
+   "chunk": "almen's",
+   "decision": "similarity below 0.6",
+   "heard": "almen's",
+   "offered": [
+    {
+     "term": "adherence",
+     "window": "almen's"
+    }
+   ],
+   "repl": "medicines",
+   "result": "almen's",
+   "runs": [
+    "q9-fx-both"
+   ],
+   "sim": 0.5333333333333333,
+   "via": null
+  },
+  {
+   "chunk": "amylo diping",
+   "decision": "accepted",
+   "heard": "amylo diping",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "amlodipine",
+     "window": "amylo diping"
+    },
+    {
+     "term": "ankle swelling",
+     "window": "ankle swelling could"
+    },
+    {
+     "term": "amlodipine",
+     "window": "amylo"
+    }
+   ],
+   "repl": "amlodipine",
+   "result": "amlodipine",
+   "runs": [
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "q9-fx-both",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.8571428571428571,
+   "via": {
+    "term": "amlodipine",
+    "window": "amylo diping"
+   }
+  },
+  {
+   "chunk": "amylo diping",
+   "decision": "accepted",
+   "heard": "amylo diping",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "amlodipine",
+     "window": "amylo diping"
+    },
+    {
+     "term": "breathlessness",
+     "window": "breadliness"
+    },
+    {
+     "term": "ibuprofen",
+     "window": "hyperprofen"
+    },
+    {
+     "term": "ankle swelling",
+     "window": "ankles for"
+    },
+    {
+     "term": "preventer",
+     "window": "present with"
+    }
+   ],
+   "repl": "amlodipine",
+   "result": "amlodipine",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.8571428571428571,
+   "via": {
+    "term": "amlodipine",
+    "window": "amylo diping"
+   }
+  },
+  {
+   "chunk": "amylo diping",
+   "decision": "accepted",
+   "heard": "amylo diping",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "amlodipine",
+     "window": "amylo diping"
+    },
+    {
+     "term": "breathlessness",
+     "window": "breadliness"
+    },
+    {
+     "term": "ibuprofen",
+     "window": "hyperprofen"
+    },
+    {
+     "term": "indapamide",
+     "window": "endside"
+    }
+   ],
+   "repl": "amlodipine",
+   "result": "amlodipine",
+   "runs": [
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "q9-fx-both",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.8571428571428571,
+   "via": {
+    "term": "amlodipine",
+    "window": "amylo diping"
+   }
+  },
+  {
+   "chunk": "amylo diping",
+   "decision": "accepted",
+   "heard": "amylo diping",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "ankle swelling",
+     "window": "the ankle swelling"
+    },
+    {
+     "term": "amlodipine",
+     "window": "amylo diping"
+    },
+    {
+     "term": "depression",
+     "window": "there is no"
+    }
+   ],
+   "repl": "amlodipine",
+   "result": "amlodipine",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.8571428571428571,
+   "via": {
+    "term": "amlodipine",
+    "window": "amylo diping"
+   }
+  },
+  {
+   "chunk": "amylo diping",
+   "decision": "no offered term in the replacement",
+   "heard": "amylo diping",
+   "offered": [],
+   "repl": "amlodipine",
+   "result": "amylo diping",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-gloss",
+    "q9-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 0.8571428571428571,
+   "via": null
+  },
+  {
+   "chunk": "amylo diping",
+   "decision": "similarity below 0.6",
+   "heard": "amylo diping",
+   "offered": [],
+   "repl": "amyloid oedema",
+   "result": "amylo diping",
+   "runs": [
+    "q9-fx-gloss"
+   ],
+   "sim": 0.5,
+   "via": null
+  },
+  {
+   "chunk": "amylo diping",
+   "decision": "no offered term in the replacement",
+   "heard": "amylo diping",
+   "offered": [],
+   "repl": "amyloidosis",
+   "result": "amylo diping",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": 0.6363636363636364,
+   "via": null
+  },
+  {
+   "chunk": "amylo diping",
+   "decision": "similarity below 0.6",
+   "heard": "amylo diping",
+   "offered": [],
+   "repl": "diltiazem",
+   "result": "amylo diping",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 0.3,
+   "via": null
+  },
+  {
+   "chunk": "amylo edema",
+   "decision": "accepted",
+   "heard": "amylo edema",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "amlodipine",
+     "window": "amylo diping"
+    },
+    {
+     "term": "ankle swelling",
+     "window": "ankle swelling could"
+    },
+    {
+     "term": "amlodipine",
+     "window": "amylo"
+    }
+   ],
+   "repl": "amlodipine oedema",
+   "result": "amlodipine oedema",
+   "runs": [
+    "q9-fx-both"
+   ],
+   "sim": 0.6923076923076923,
+   "via": {
+    "term": "oedema",
+    "window": "edema"
+   }
+  },
+  {
+   "chunk": "amylo edema",
+   "decision": "no offered term in the replacement",
+   "heard": "amylo edema",
+   "offered": [],
+   "repl": "amyloid edema",
+   "result": "amylo edema",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": 0.9090909090909091,
+   "via": null
+  },
+  {
+   "chunk": "amylo edema",
+   "decision": "no offered term in the replacement",
+   "heard": "amylo edema",
+   "offered": [],
+   "repl": "amyloid oedema",
+   "result": "amylo edema",
+   "runs": [
+    "q9-fx-gloss"
+   ],
+   "sim": 0.8695652173913043,
+   "via": null
+  },
+  {
+   "chunk": "amylo edema",
+   "decision": "no offered term in the replacement",
+   "heard": "amylo edema",
+   "offered": [],
+   "repl": "anatomical edema",
+   "result": "amylo edema",
+   "runs": [
+    "q4-fx-none"
+   ],
+   "sim": 0.64,
+   "via": null
+  },
+  {
+   "chunk": "amylo edema",
+   "decision": "accepted",
+   "heard": "amylo edema",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "amlodipine",
+     "window": "amylo diping"
+    },
+    {
+     "term": "ankle swelling",
+     "window": "ankle swelling could"
+    },
+    {
+     "term": "amlodipine",
+     "window": "amylo"
+    }
+   ],
+   "repl": "ankle oedema",
+   "result": "ankle oedema",
+   "runs": [
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.7619047619047619,
+   "via": {
+    "term": "oedema",
+    "window": "edema"
+   }
+  },
+  {
+   "chunk": "amylo edema",
+   "decision": "accepted",
+   "heard": "amylo edema",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "ankle swelling",
+     "window": "the ankle swelling"
+    },
+    {
+     "term": "amlodipine",
+     "window": "amylo diping"
+    },
+    {
+     "term": "depression",
+     "window": "there is no"
+    }
+   ],
+   "repl": "ankle oedema",
+   "result": "ankle oedema",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.7619047619047619,
+   "via": {
+    "term": "oedema",
+    "window": "edema"
+   }
+  },
+  {
+   "chunk": "amylo edema",
+   "decision": "no offered term in the replacement",
+   "heard": "amylo edema",
+   "offered": [],
+   "repl": "bilateral oedema",
+   "result": "amylo edema",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 0.64,
+   "via": null
+  },
+  {
+   "chunk": "amylo edema",
+   "decision": "accepted",
+   "heard": "amylo edema",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "amlodipine",
+     "window": "amylo diping"
+    },
+    {
+     "term": "ankle swelling",
+     "window": "ankle swelling could"
+    },
+    {
+     "term": "amlodipine",
+     "window": "amylo"
+    }
+   ],
+   "repl": "oedema",
+   "result": "oedema",
+   "runs": [
+    "q5-fx-lookup-nofacts"
+   ],
+   "sim": 0.75,
+   "via": {
+    "term": "oedema",
+    "window": "edema"
+   }
+  },
+  {
+   "chunk": "amyloidipin",
+   "decision": "accepted",
+   "heard": "amyloidipin",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "amlodipine",
+     "window": "amyloidipin"
+    },
+    {
+     "term": "varicose veins",
+     "window": "baricus veins"
+    },
+    {
+     "term": "MedsCheck",
+     "window": "to check"
+    },
+    {
+     "term": "MedsCheck",
+     "window": "to check"
+    },
+    {
+     "term": "MedsCheck",
+     "window": "to check"
+    }
+   ],
+   "repl": "amlodipine",
+   "result": "amlodipine",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.8571428571428571,
+   "via": {
+    "term": "amlodipine",
+    "window": "amyloidipin"
+   }
+  },
+  {
+   "chunk": "amyloidipin",
+   "decision": "accepted",
+   "heard": "amyloidipin",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "amlodipine",
+     "window": "amyloidipin"
+    },
+    {
+     "term": "varicose veins",
+     "window": "baricus veins"
+    }
+   ],
+   "repl": "amlodipine",
+   "result": "amlodipine",
+   "runs": [
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "q9-fx-both",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.8571428571428571,
+   "via": {
+    "term": "amlodipine",
+    "window": "amyloidipin"
+   }
+  },
+  {
+   "chunk": "amyloidipin",
+   "decision": "no offered term in the replacement",
+   "heard": "amyloidipin",
+   "offered": [],
+   "repl": "amlodipine",
+   "result": "amyloidipin",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-gloss",
+    "q9-fx-gloss",
+    "q9-fx-none",
+    "t-fx-gloss"
+   ],
+   "sim": 0.8571428571428571,
+   "via": null
+  },
+  {
+   "chunk": "and again",
+   "decision": "no offered term in the replacement",
+   "heard": "and again",
+   "offered": [
+    {
+     "term": "blood pressure",
+     "window": "blood pressure if"
+    },
+    {
+     "term": "angina",
+     "window": "and again"
+    },
+    {
+     "term": "potassium chloride",
+     "window": "potassium is too"
+    },
+    {
+     "term": "aciclovir",
+     "window": "ACI for"
+    },
+    {
+     "term": "type 2 diabetes",
+     "window": "the patient's"
+    }
+   ],
+   "repl": "and again",
+   "result": "and again",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "anemia case",
+   "decision": "no offered term in the replacement",
+   "heard": "anemia case",
+   "offered": [
+    {
+     "term": "angina",
+     "window": "anemia any"
+    }
+   ],
+   "repl": "anaemia case",
+   "result": "anemia case",
+   "runs": [
+    "q5-fx-both",
+    "q9-fx-both",
+    "t-fx-both"
+   ],
+   "sim": 0.9523809523809523,
+   "via": null
+  },
+  {
+   "chunk": "anemia case",
+   "decision": "no offered term in the replacement",
+   "heard": "anemia case",
+   "offered": [
+    {
+     "term": "pravastatin",
+     "window": "present in"
+    },
+    {
+     "term": "angina",
+     "window": "anemia any"
+    }
+   ],
+   "repl": "anaemia case",
+   "result": "anemia case",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": 0.9523809523809523,
+   "via": null
+  },
+  {
+   "chunk": "anemia case",
+   "decision": "no offered term in the replacement",
+   "heard": "anemia case",
+   "offered": [],
+   "repl": "anaemia case",
+   "result": "anemia case",
+   "runs": [
+    "q5-fx-gloss"
+   ],
+   "sim": 0.9523809523809523,
+   "via": null
+  },
+  {
+   "chunk": "anemia case",
+   "decision": "no offered term in the replacement",
+   "heard": "anemia case",
+   "offered": [],
+   "repl": "anemia cases",
+   "result": "anemia case",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": 0.9523809523809523,
+   "via": null
+  },
+  {
+   "chunk": "anemia case",
+   "decision": "no offered term in the replacement",
+   "heard": "anemia case",
+   "offered": [
+    {
+     "term": "candesartan",
+     "window": "confuser with an"
+    }
+   ],
+   "repl": "anemia",
+   "result": "anemia case",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": 0.75,
+   "via": null
+  },
+  {
+   "chunk": "anemia case",
+   "decision": "no offered term in the replacement",
+   "heard": "anemia case",
+   "offered": [
+    {
+     "term": "blood pressure",
+     "window": "could be confuser"
+    }
+   ],
+   "repl": "anemia",
+   "result": "anemia case",
+   "runs": [
+    "q5-fx-both",
+    "t-fx-both"
+   ],
+   "sim": 0.75,
+   "via": null
+  },
+  {
+   "chunk": "anemia case",
+   "decision": "no offered term in the replacement",
+   "heard": "anemia case",
+   "offered": [],
+   "repl": "anemia",
+   "result": "anemia case",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 0.75,
+   "via": null
+  },
+  {
+   "chunk": "anemia risk",
+   "decision": "no offered term in the replacement",
+   "heard": "anemia risk",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    }
+   ],
+   "repl": "anaemia risk",
+   "result": "anemia risk",
+   "runs": [
+    "q4-fx-both",
+    "q5-fx-both",
+    "t-fx-both"
+   ],
+   "sim": 0.9523809523809523,
+   "via": null
+  },
+  {
+   "chunk": "anemia",
+   "decision": "similarity below 0.6",
+   "heard": "anemia",
+   "offered": [],
+   "repl": "asthma",
+   "result": "anemia",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-gloss",
+    "q9-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 0.5,
+   "via": null
+  },
+  {
+   "chunk": "ankle swelling",
+   "decision": "accepted",
+   "heard": "ankle swelling",
+   "offered": [
+    {
+     "term": "pulmonary oedema",
+     "window": "pulmonary edema"
+    },
+    {
+     "term": "pulmonary oedema",
+     "window": "Pulmonary edema"
+    },
+    {
+     "term": "ankle swelling",
+     "window": "only ankle swelling"
+    },
+    {
+     "term": "ankle swelling",
+     "window": "ankle swelling makes"
+    },
+    {
+     "term": "adherence",
+     "window": "other regions"
+    }
+   ],
+   "repl": "ankle swelling",
+   "result": "ankle swelling",
+   "runs": [
+    "q9-fx-both"
+   ],
+   "sim": 1.0,
+   "via": {
+    "term": "ankle swelling",
+    "window": "only ankle swelling"
+   }
+  },
+  {
+   "chunk": "ankle swelling",
+   "decision": "similarity below 0.6",
+   "heard": "ankle swelling",
+   "offered": [
+    {
+     "term": "pulmonary oedema",
+     "window": "pulmonary edema"
+    },
+    {
+     "term": "pulmonary oedema",
+     "window": "Pulmonary edema"
+    },
+    {
+     "term": "ankle swelling",
+     "window": "only ankle swelling"
+    },
+    {
+     "term": "ankle swelling",
+     "window": "ankle swelling makes"
+    },
+    {
+     "term": "adherence",
+     "window": "other regions"
+    }
+   ],
+   "repl": "bilateral ankle oedema",
+   "result": "ankle swelling",
+   "runs": [
+    "q5-fx-both"
+   ],
+   "sim": 0.36363636363636365,
+   "via": null
+  },
+  {
+   "chunk": "ankyl edema",
+   "decision": "no offered term in the replacement",
+   "heard": "ankyl edema",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "hydrochlorothiazide",
+     "window": "hydrochlorothiacy"
+    },
+    {
+     "term": "montelukast",
+     "window": "months The"
+    }
+   ],
+   "repl": "ankle edema",
+   "result": "ankyl edema",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 0.9,
+   "via": null
+  },
+  {
+   "chunk": "ankyl edema",
+   "decision": "no offered term in the replacement",
+   "heard": "ankyl edema",
+   "offered": [],
+   "repl": "ankle edema",
+   "result": "ankyl edema",
+   "runs": [
+    "q4-fx-none",
+    "q9-fx-none"
+   ],
+   "sim": 0.9,
+   "via": null
+  },
+  {
+   "chunk": "ankyl edema",
+   "decision": "no offered term in the replacement",
+   "heard": "ankyl edema",
+   "offered": [],
+   "repl": "ankle oedema",
+   "result": "ankyl edema",
+   "runs": [
+    "q9-fx-gloss"
+   ],
+   "sim": 0.8571428571428571,
+   "via": null
+  },
+  {
+   "chunk": "ankyl",
+   "decision": "no offered term in the replacement",
+   "heard": "ankyl",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "hydrochlorothiazide",
+     "window": "hydrochlorothiacy"
+    },
+    {
+     "term": "angina",
+     "window": "ankyl"
+    }
+   ],
+   "repl": "ankle",
+   "result": "ankyl",
+   "runs": [
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q9-fx-both",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.8,
+   "via": null
+  },
+  {
+   "chunk": "ankyl",
+   "decision": "no offered term in the replacement",
+   "heard": "ankyl",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "hydrochlorothiazide",
+     "window": "hydrochlorothiacy"
+    },
+    {
+     "term": "montelukast",
+     "window": "months The"
+    }
+   ],
+   "repl": "ankle",
+   "result": "ankyl",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": 0.8,
+   "via": null
+  },
+  {
+   "chunk": "ankyl",
+   "decision": "no offered term in the replacement",
+   "heard": "ankyl",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "hydrochlorothiazide",
+     "window": "hydrochlorothiacy"
+    },
+    {
+     "term": "angina",
+     "window": "ankyl"
+    }
+   ],
+   "repl": "ankylotic",
+   "result": "ankyl",
+   "runs": [
+    "q5-fx-lookup-nofacts"
+   ],
+   "sim": 0.7142857142857143,
+   "via": null
+  },
+  {
+   "chunk": "ankyl",
+   "decision": "similarity below 0.6",
+   "heard": "ankyl",
+   "offered": [],
+   "repl": "bilateral ankle",
+   "result": "ankyl",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 0.42105263157894735,
+   "via": null
+  },
+  {
+   "chunk": "anormal",
+   "decision": "no offered term in the replacement",
+   "heard": "anormal",
+   "offered": [
+    {
+     "term": "type 2 diabetes",
+     "window": "have diabetes"
+    },
+    {
+     "term": "depression",
+     "window": "there is no"
+    }
+   ],
+   "repl": "abnormal",
+   "result": "anormal",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.9333333333333333,
+   "via": null
+  },
+  {
+   "chunk": "anormal",
+   "decision": "no offered term in the replacement",
+   "heard": "anormal",
+   "offered": [],
+   "repl": "abnormal",
+   "result": "anormal",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-both",
+    "q5-fx-gloss",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-both",
+    "t-fx-gloss",
+    "t-fx-lookup"
+   ],
+   "sim": 0.9333333333333333,
+   "via": null
+  },
+  {
+   "chunk": "are gonna",
+   "decision": "no offered term in the replacement",
+   "heard": "are gonna",
+   "offered": [
+    {
+     "term": "terbutaline",
+     "window": "their baseline"
+    },
+    {
+     "term": "wheeze",
+     "window": "weight So"
+    },
+    {
+     "term": "inhaler",
+     "window": "in their"
+    },
+    {
+     "term": "angina",
+     "window": "are gonna"
+    }
+   ],
+   "repl": "are gonna",
+   "result": "are gonna",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "are not gonna",
+   "decision": "no offered term in the replacement",
+   "heard": "are not gonna",
+   "offered": [
+    {
+     "term": "terbutaline",
+     "window": "their baseline"
+    },
+    {
+     "term": "wheeze",
+     "window": "weight So"
+    },
+    {
+     "term": "inhaler",
+     "window": "in their"
+    },
+    {
+     "term": "angina",
+     "window": "are gonna"
+    }
+   ],
+   "repl": "are not gonna",
+   "result": "are not gonna",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "as two is",
+   "decision": "no offered term in the replacement",
+   "heard": "as two is",
+   "offered": [
+    {
+     "term": "preventer",
+     "window": "prevented use"
+    },
+    {
+     "term": "angina",
+     "window": "doing in"
+    }
+   ],
+   "repl": "as two is",
+   "result": "as two is",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "as two is",
+   "decision": "no offered term in the replacement",
+   "heard": "as two is",
+   "offered": [
+    {
+     "term": "preventer",
+     "window": "prevented use"
+    }
+   ],
+   "repl": "as two is",
+   "result": "as two is",
+   "runs": [
+    "q5-fx-both"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "as two is",
+   "decision": "no offered term in the replacement",
+   "heard": "as two is",
+   "offered": [],
+   "repl": "asthma is",
+   "result": "as two is",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": 0.6666666666666666,
+   "via": null
+  },
+  {
+   "chunk": "as two",
+   "decision": "similarity below 0.6",
+   "heard": "as two",
+   "offered": [
+    {
+     "term": "preventer",
+     "window": "prevented use"
+    }
+   ],
+   "repl": "asthma",
+   "result": "as two",
+   "runs": [
+    "t-fx-both"
+   ],
+   "sim": 0.5454545454545454,
+   "via": null
+  },
+  {
+   "chunk": "as two",
+   "decision": "similarity below 0.6",
+   "heard": "as two",
+   "offered": [],
+   "repl": "asthma",
+   "result": "as two",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 0.5454545454545454,
+   "via": null
+  },
+  {
+   "chunk": "asis",
+   "decision": "similarity below 0.6",
+   "heard": "asis",
+   "offered": [],
+   "repl": "anaemia",
+   "result": "asis",
+   "runs": [
+    "q9-fx-gloss"
+   ],
+   "sim": 0.36363636363636365,
+   "via": null
+  },
+  {
+   "chunk": "asis",
+   "decision": "similarity below 0.6",
+   "heard": "asis",
+   "offered": [
+    {
+     "term": "preventer",
+     "window": "prevented use"
+    },
+    {
+     "term": "angina",
+     "window": "doing in"
+    }
+   ],
+   "repl": "anemia",
+   "result": "asis",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": 0.4,
+   "via": null
+  },
+  {
+   "chunk": "asis",
+   "decision": "similarity below 0.6",
+   "heard": "asis",
+   "offered": [
+    {
+     "term": "preventer",
+     "window": "prevented use"
+    }
+   ],
+   "repl": "anemia",
+   "result": "asis",
+   "runs": [
+    "q5-fx-both",
+    "q9-fx-both",
+    "t-fx-both"
+   ],
+   "sim": 0.4,
+   "via": null
+  },
+  {
+   "chunk": "asis",
+   "decision": "similarity below 0.6",
+   "heard": "asis",
+   "offered": [],
+   "repl": "anemia",
+   "result": "asis",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": 0.4,
+   "via": null
+  },
+  {
+   "chunk": "asis",
+   "decision": "similarity below 0.6",
+   "heard": "asis",
+   "offered": [
+    {
+     "term": "preventer",
+     "window": "prevented use"
+    },
+    {
+     "term": "angina",
+     "window": "doing in"
+    }
+   ],
+   "repl": "asthma",
+   "result": "asis",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 0.4,
+   "via": null
+  },
+  {
+   "chunk": "asis",
+   "decision": "similarity below 0.6",
+   "heard": "asis",
+   "offered": [],
+   "repl": "asthma",
+   "result": "asis",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 0.4,
+   "via": null
+  },
+  {
+   "chunk": "atropastatin",
+   "decision": "accepted",
+   "heard": "atropastatin",
+   "offered": [
+    {
+     "term": "atorvastatin",
+     "window": "atropastatin"
+    },
+    {
+     "term": "hyperthyroidism",
+     "window": "hypertherylism"
+    },
+    {
+     "term": "montelukast",
+     "window": "months They"
+    },
+    {
+     "term": "type 2 diabetes",
+     "window": "Diabetes we"
+    },
+    {
+     "term": "depression",
+     "window": "There is no"
+    }
+   ],
+   "repl": "atorvastatin",
+   "result": "atorvastatin",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.8333333333333334,
+   "via": {
+    "term": "atorvastatin",
+    "window": "atropastatin"
+   }
+  },
+  {
+   "chunk": "atropastatin",
+   "decision": "accepted",
+   "heard": "atropastatin",
+   "offered": [
+    {
+     "term": "atorvastatin",
+     "window": "atropastatin"
+    },
+    {
+     "term": "hyperthyroidism",
+     "window": "hypertherylism"
+    }
+   ],
+   "repl": "atorvastatin",
+   "result": "atorvastatin",
+   "runs": [
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "q9-fx-both",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.8333333333333334,
+   "via": {
+    "term": "atorvastatin",
+    "window": "atropastatin"
+   }
+  },
+  {
+   "chunk": "atropastatin",
+   "decision": "no offered term in the replacement",
+   "heard": "atropastatin",
+   "offered": [],
+   "repl": "atorvastatin",
+   "result": "atropastatin",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-gloss",
+    "q9-fx-gloss",
+    "q9-fx-none",
+    "t-fx-gloss"
+   ],
+   "sim": 0.8333333333333334,
+   "via": null
+  },
+  {
+   "chunk": "baricus veins",
+   "decision": "accepted",
+   "heard": "baricus veins",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "amlodipine",
+     "window": "amyloidipin"
+    },
+    {
+     "term": "varicose veins",
+     "window": "baricus veins"
+    }
+   ],
+   "repl": "varicose veins",
+   "result": "varicose veins",
+   "runs": [
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "q9-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.8,
+   "via": {
+    "term": "varicose veins",
+    "window": "baricus veins"
+   }
+  },
+  {
+   "chunk": "baricus",
+   "decision": "no offered term in the replacement",
+   "heard": "baricus",
+   "offered": [],
+   "repl": "varicose",
+   "result": "baricus",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": 0.6666666666666666,
+   "via": null
+  },
+  {
+   "chunk": "better reading all day",
+   "decision": "no offered term in the replacement",
+   "heard": "better reading all day",
+   "offered": [
+    {
+     "term": "semaglutide",
+     "window": "semaglotide"
+    },
+    {
+     "term": "insulin aspart",
+     "window": "insulin But now"
+    }
+   ],
+   "repl": "better all day",
+   "result": "better reading all day",
+   "runs": [
+    "c-fx-both",
+    "q5-fx-both",
+    "t-fx-both"
+   ],
+   "sim": 0.7741935483870968,
+   "via": null
+  },
+  {
+   "chunk": "better reading all day",
+   "decision": "no offered term in the replacement",
+   "heard": "better reading all day",
+   "offered": [],
+   "repl": "better all day",
+   "result": "better reading all day",
+   "runs": [
+    "c-fx-gloss",
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 0.7741935483870968,
+   "via": null
+  },
+  {
+   "chunk": "better reading all day",
+   "decision": "no offered term in the replacement",
+   "heard": "better reading all day",
+   "offered": [],
+   "repl": "better sleeping all day",
+   "result": "better reading all day",
+   "runs": [
+    "q4-fx-none"
+   ],
+   "sim": 0.8205128205128205,
+   "via": null
+  },
+  {
+   "chunk": "better reading",
+   "decision": "no offered term in the replacement",
+   "heard": "better reading",
+   "offered": [
+    {
+     "term": "semaglutide",
+     "window": "semaglotide"
+    },
+    {
+     "term": "GLP-1",
+     "window": "GLP 1 is"
+    },
+    {
+     "term": "insulin aspart",
+     "window": "insulin But"
+    },
+    {
+     "term": "amiodarone",
+     "window": "older one"
+    }
+   ],
+   "repl": "better sleeping",
+   "result": "better reading",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 0.7407407407407407,
+   "via": null
+  },
+  {
+   "chunk": "blood pressure is",
+   "decision": "accepted",
+   "heard": "blood pressure is",
+   "offered": [
+    {
+     "term": "blood pressure",
+     "window": "blood pressure is"
+    },
+    {
+     "term": "blood pressure",
+     "window": "blood pressure is"
+    },
+    {
+     "term": "morphine",
+     "window": "more than 180"
+    }
+   ],
+   "repl": "blood pressure is",
+   "result": "blood pressure is",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 1.0,
+   "via": {
+    "term": "blood pressure",
+    "window": "blood pressure is"
+   }
+  },
+  {
+   "chunk": "blood pressure is",
+   "decision": "accepted",
+   "heard": "blood pressure is",
+   "offered": [
+    {
+     "term": "blood pressure",
+     "window": "blood pressure is"
+    }
+   ],
+   "repl": "blood pressure is",
+   "result": "blood pressure is",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 1.0,
+   "via": {
+    "term": "blood pressure",
+    "window": "blood pressure is"
+   }
+  },
+  {
+   "chunk": "blood pressure",
+   "decision": "accepted",
+   "heard": "blood pressure",
+   "offered": [
+    {
+     "term": "blood pressure",
+     "window": "blood pressure is"
+    },
+    {
+     "term": "blood pressure",
+     "window": "blood pressure is"
+    },
+    {
+     "term": "morphine",
+     "window": "more than 180"
+    }
+   ],
+   "repl": "blood pressure",
+   "result": "blood pressure",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": 1.0,
+   "via": {
+    "term": "blood pressure",
+    "window": "blood pressure is"
+   }
+  },
+  {
+   "chunk": "bloody pine",
+   "decision": "accepted",
+   "heard": "bloody pine",
+   "offered": [
+    {
+     "term": "orthopnoea",
+     "window": "orthopny"
+    },
+    {
+     "term": "amlodipine",
+     "window": "a bloody pine"
+    },
+    {
+     "term": "type 2 diabetes",
+     "window": "have diabetes"
+    },
+    {
+     "term": "ferrous sulfate",
+     "window": "for safety"
+    }
+   ],
+   "repl": "amlodipine",
+   "result": "amlodipine",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": 0.7,
+   "via": {
+    "term": "amlodipine",
+    "window": "a bloody pine"
+   }
+  },
+  {
+   "chunk": "bloody pine",
+   "decision": "accepted",
+   "heard": "bloody pine",
+   "offered": [
+    {
+     "term": "orthopnoea",
+     "window": "orthopny"
+    },
+    {
+     "term": "amlodipine",
+     "window": "a bloody pine"
+    }
+   ],
+   "repl": "amlodipine",
+   "result": "amlodipine",
+   "runs": [
+    "q5-fx-both",
+    "q9-fx-both",
+    "t-fx-both"
+   ],
+   "sim": 0.7,
+   "via": {
+    "term": "amlodipine",
+    "window": "a bloody pine"
+   }
+  },
+  {
+   "chunk": "bloody pine",
+   "decision": "no offered term in the replacement",
+   "heard": "bloody pine",
+   "offered": [
+    {
+     "term": "orthopnoea",
+     "window": "orthopny"
+    },
+    {
+     "term": "amlodipine",
+     "window": "a bloody pine"
+    },
+    {
+     "term": "type 2 diabetes",
+     "window": "have diabetes"
+    },
+    {
+     "term": "ferrous sulfate",
+     "window": "for safety"
+    }
+   ],
+   "repl": "blood pressure",
+   "result": "bloody pine",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 0.6086956521739131,
+   "via": null
+  },
+  {
+   "chunk": "bloody pine",
+   "decision": "no offered term in the replacement",
+   "heard": "bloody pine",
+   "offered": [
+    {
+     "term": "orthopnoea",
+     "window": "orthopny"
+    },
+    {
+     "term": "amlodipine",
+     "window": "a bloody pine"
+    }
+   ],
+   "repl": "blood pressure",
+   "result": "bloody pine",
+   "runs": [
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-lookup"
+   ],
+   "sim": 0.6086956521739131,
+   "via": null
+  },
+  {
+   "chunk": "bloody pine",
+   "decision": "no offered term in the replacement",
+   "heard": "bloody pine",
+   "offered": [],
+   "repl": "blood pressure",
+   "result": "bloody pine",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-gloss",
+    "q9-fx-gloss",
+    "q9-fx-none",
+    "t-fx-gloss"
+   ],
+   "sim": 0.6086956521739131,
+   "via": null
+  },
+  {
+   "chunk": "breadliness",
+   "decision": "accepted",
+   "heard": "breadliness",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "amlodipine",
+     "window": "amylo diping"
+    },
+    {
+     "term": "breathlessness",
+     "window": "breadliness"
+    },
+    {
+     "term": "ibuprofen",
+     "window": "hyperprofen"
+    },
+    {
+     "term": "ankle swelling",
+     "window": "ankles for"
+    },
+    {
+     "term": "preventer",
+     "window": "present with"
+    }
+   ],
+   "repl": "breathlessness",
+   "result": "breathlessness",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.72,
+   "via": {
+    "term": "breathlessness",
+    "window": "breadliness"
+   }
+  },
+  {
+   "chunk": "breadliness",
+   "decision": "accepted",
+   "heard": "breadliness",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "amlodipine",
+     "window": "amylo diping"
+    },
+    {
+     "term": "breathlessness",
+     "window": "breadliness"
+    },
+    {
+     "term": "ibuprofen",
+     "window": "hyperprofen"
+    },
+    {
+     "term": "indapamide",
+     "window": "endside"
+    }
+   ],
+   "repl": "breathlessness",
+   "result": "breathlessness",
+   "runs": [
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "q9-fx-both",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.72,
+   "via": {
+    "term": "breathlessness",
+    "window": "breadliness"
+   }
+  },
+  {
+   "chunk": "breadliness",
+   "decision": "no offered term in the replacement",
+   "heard": "breadliness",
+   "offered": [],
+   "repl": "breathlessness",
+   "result": "breadliness",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-gloss",
+    "q9-fx-gloss",
+    "q9-fx-none",
+    "t-fx-gloss"
+   ],
+   "sim": 0.72,
+   "via": null
+  },
+  {
+   "chunk": "breadness",
+   "decision": "accepted",
+   "heard": "breadness",
+   "offered": [
+    {
+     "term": "NSAID",
+     "window": "NSAIDs"
+    },
+    {
+     "term": "heart failure",
+     "window": "Heart failure could"
+    },
+    {
+     "term": "breathlessness",
+     "window": "breadness"
+    },
+    {
+     "term": "reliever",
+     "window": "really severe"
+    },
+    {
+     "term": "oxycodone",
+     "window": "octognea"
+    }
+   ],
+   "repl": "breathlessness",
+   "result": "breathlessness",
+   "runs": [
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "q9-fx-both",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.6956521739130435,
+   "via": {
+    "term": "breathlessness",
+    "window": "breadness"
+   }
+  },
+  {
+   "chunk": "breadness",
+   "decision": "accepted",
+   "heard": "breadness",
+   "offered": [
+    {
+     "term": "NSAID",
+     "window": "NSAIDs"
+    },
+    {
+     "term": "heart failure",
+     "window": "Heart failure could"
+    },
+    {
+     "term": "breathlessness",
+     "window": "breadness"
+    },
+    {
+     "term": "reliever",
+     "window": "really severe"
+    },
+    {
+     "term": "fluoxetine",
+     "window": "will examine"
+    },
+    {
+     "term": "depression",
+     "window": "there is no"
+    }
+   ],
+   "repl": "breathlessness",
+   "result": "breathlessness",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.6956521739130435,
+   "via": {
+    "term": "breathlessness",
+    "window": "breadness"
+   }
+  },
+  {
+   "chunk": "breadness",
+   "decision": "no offered term in the replacement",
+   "heard": "breadness",
+   "offered": [],
+   "repl": "breathlessness",
+   "result": "breadness",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "q9-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 0.6956521739130435,
+   "via": null
+  },
+  {
+   "chunk": "breadness",
+   "decision": "no offered term in the replacement",
+   "heard": "breadness",
+   "offered": [],
+   "repl": "broadness",
+   "result": "breadness",
+   "runs": [
+    "q4-fx-none",
+    "q9-fx-none"
+   ],
+   "sim": 0.8888888888888888,
+   "via": null
+  },
+  {
+   "chunk": "cardiovascular one",
+   "decision": "no offered term in the replacement",
+   "heard": "cardiovascular one",
+   "offered": [],
+   "repl": "cardiovascular disease",
+   "result": "cardiovascular one",
+   "runs": [
+    "q4-fx-none"
+   ],
+   "sim": 0.7894736842105263,
+   "via": null
+  },
+  {
+   "chunk": "care plan",
+   "decision": "no offered term in the replacement",
+   "heard": "care plan",
+   "offered": [],
+   "repl": "care plan",
+   "result": "care plan",
+   "runs": [
+    "c-fx-gloss",
+    "q4-fx-none"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "challenge point",
+   "decision": "similarity below 0.6",
+   "heard": "challenge point",
+   "offered": [],
+   "repl": "checklist point",
+   "result": "challenge point",
+   "runs": [
+    "q4-fx-none",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-lookup"
+   ],
+   "sim": 0.5714285714285714,
+   "via": null
+  },
+  {
+   "chunk": "challenge point",
+   "decision": "no offered term in the replacement",
+   "heard": "challenge point",
+   "offered": [
+    {
+     "term": "blood pressure",
+     "window": "blood pressure is"
+    }
+   ],
+   "repl": "dechallenge point",
+   "result": "challenge point",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": 0.9333333333333333,
+   "via": null
+  },
+  {
+   "chunk": "challenge point",
+   "decision": "no offered term in the replacement",
+   "heard": "challenge point",
+   "offered": [],
+   "repl": "dechallenge point",
+   "result": "challenge point",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-both",
+    "q5-fx-gloss",
+    "t-fx-both",
+    "t-fx-gloss"
+   ],
+   "sim": 0.9333333333333333,
+   "via": null
+  },
+  {
+   "chunk": "change in",
+   "decision": "no offered term in the replacement",
+   "heard": "change in",
+   "offered": [
+    {
+     "term": "spirometry",
+     "window": "So parameters"
+    },
+    {
+     "term": "angina",
+     "window": "change in"
+    }
+   ],
+   "repl": "change in",
+   "result": "change in",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "chronic condition programs",
+   "decision": "no offered term in the replacement",
+   "heard": "chronic condition programs",
+   "offered": [],
+   "repl": "chronic care programs",
+   "result": "chronic condition programs",
+   "runs": [
+    "c-fx-gloss",
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 0.7441860465116279,
+   "via": null
+  },
+  {
+   "chunk": "chronic conditions",
+   "decision": "no offered term in the replacement",
+   "heard": "chronic conditions",
+   "offered": [
+    {
+     "term": "COPD",
+     "window": "GP the"
+    },
+    {
+     "term": "COPD",
+     "window": "GP but"
+    },
+    {
+     "term": "chronic kidney disease",
+     "window": "chronic conditions"
+    }
+   ],
+   "repl": "chronic conditions",
+   "result": "chronic conditions",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "chronic conditions",
+   "decision": "no offered term in the replacement",
+   "heard": "chronic conditions",
+   "offered": [
+    {
+     "term": "chronic kidney disease",
+     "window": "chronic conditions"
+    }
+   ],
+   "repl": "chronic conditions",
+   "result": "chronic conditions",
+   "runs": [
+    "c-fx-both",
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "q9-fx-both",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "chronic conditions",
+   "decision": "no offered term in the replacement",
+   "heard": "chronic conditions",
+   "offered": [],
+   "repl": "chronic conditions",
+   "result": "chronic conditions",
+   "runs": [
+    "c-fx-gloss"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "chronic conditions",
+   "decision": "similarity below 0.6",
+   "heard": "chronic conditions",
+   "offered": [
+    {
+     "term": "chronic kidney disease",
+     "window": "chronic conditions"
+    }
+   ],
+   "repl": "chronic kidney disease",
+   "result": "chronic conditions",
+   "runs": [
+    "c-fx-both",
+    "q4-fx-both",
+    "q4-fx-lookup",
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.5945945945945946,
+   "via": null
+  },
+  {
+   "chunk": "cite",
+   "decision": "no offered term in the replacement",
+   "heard": "cite",
+   "offered": [],
+   "repl": "cite",
+   "result": "cite",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "confuser",
+   "decision": "no offered term in the replacement",
+   "heard": "confuser",
+   "offered": [
+    {
+     "term": "candesartan",
+     "window": "confuser with an"
+    }
+   ],
+   "repl": "confuse",
+   "result": "confuser",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.9333333333333333,
+   "via": null
+  },
+  {
+   "chunk": "confuser",
+   "decision": "no offered term in the replacement",
+   "heard": "confuser",
+   "offered": [
+    {
+     "term": "blood pressure",
+     "window": "could be confuser"
+    }
+   ],
+   "repl": "confuse",
+   "result": "confuser",
+   "runs": [
+    "q5-fx-both",
+    "t-fx-both"
+   ],
+   "sim": 0.9333333333333333,
+   "via": null
+  },
+  {
+   "chunk": "confuser",
+   "decision": "no offered term in the replacement",
+   "heard": "confuser",
+   "offered": [],
+   "repl": "confuse",
+   "result": "confuser",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 0.9333333333333333,
+   "via": null
+  },
+  {
+   "chunk": "confuser",
+   "decision": "no offered term in the replacement",
+   "heard": "confuser",
+   "offered": [],
+   "repl": "confused",
+   "result": "confuser",
+   "runs": [
+    "q4-fx-none"
+   ],
+   "sim": 0.875,
+   "via": null
+  },
+  {
+   "chunk": "confuser",
+   "decision": "no offered term in the replacement",
+   "heard": "confuser",
+   "offered": [
+    {
+     "term": "blood pressure",
+     "window": "could be confuser"
+    }
+   ],
+   "repl": "confusing",
+   "result": "confuser",
+   "runs": [
+    "q9-fx-both"
+   ],
+   "sim": 0.7058823529411765,
+   "via": null
+  },
+  {
+   "chunk": "confuser",
+   "decision": "no offered term in the replacement",
+   "heard": "confuser",
+   "offered": [],
+   "repl": "confusing",
+   "result": "confuser",
+   "runs": [
+    "q9-fx-gloss",
+    "q9-fx-none"
+   ],
+   "sim": 0.7058823529411765,
+   "via": null
+  },
+  {
+   "chunk": "console there",
+   "decision": "no offered term in the replacement",
+   "heard": "console there",
+   "offered": [
+    {
+     "term": "MedsCheck",
+     "window": "need to check"
+    }
+   ],
+   "repl": "consult there",
+   "result": "console there",
+   "runs": [
+    "q9-fx-both"
+   ],
+   "sim": 0.8333333333333334,
+   "via": null
+  },
+  {
+   "chunk": "console there",
+   "decision": "no offered term in the replacement",
+   "heard": "console there",
+   "offered": [],
+   "repl": "consult there",
+   "result": "console there",
+   "runs": [
+    "q9-fx-gloss",
+    "q9-fx-none"
+   ],
+   "sim": 0.8333333333333334,
+   "via": null
+  },
+  {
+   "chunk": "console",
+   "decision": "no offered term in the replacement",
+   "heard": "console",
+   "offered": [
+    {
+     "term": "MedsCheck",
+     "window": "need to check"
+    }
+   ],
+   "repl": "consult",
+   "result": "console",
+   "runs": [
+    "c-fx-both",
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.7142857142857143,
+   "via": null
+  },
+  {
+   "chunk": "console",
+   "decision": "no offered term in the replacement",
+   "heard": "console",
+   "offered": [
+    {
+     "term": "MedsCheck",
+     "window": "to check"
+    }
+   ],
+   "repl": "consult",
+   "result": "console",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.7142857142857143,
+   "via": null
+  },
+  {
+   "chunk": "console",
+   "decision": "no offered term in the replacement",
+   "heard": "console",
+   "offered": [],
+   "repl": "consult",
+   "result": "console",
+   "runs": [
+    "c-fx-gloss",
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 0.7142857142857143,
+   "via": null
+  },
+  {
+   "chunk": "console",
+   "decision": "similarity below 0.6",
+   "heard": "console",
+   "offered": [],
+   "repl": "consultation",
+   "result": "console",
+   "runs": [
+    "q4-fx-none"
+   ],
+   "sim": 0.5263157894736842,
+   "via": null
+  },
+  {
+   "chunk": "control",
+   "decision": "similarity below 0.6",
+   "heard": "control",
+   "offered": [],
+   "repl": "course",
+   "result": "control",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-both",
+    "q5-fx-gloss",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-both",
+    "t-fx-gloss",
+    "t-fx-lookup"
+   ],
+   "sim": 0.46153846153846156,
+   "via": null
+  },
+  {
+   "chunk": "could be confuser",
+   "decision": "no offered term in the replacement",
+   "heard": "could be confuser",
+   "offered": [
+    {
+     "term": "blood pressure",
+     "window": "could be confuser"
+    }
+   ],
+   "repl": "could be confused",
+   "result": "could be confuser",
+   "runs": [
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-lookup"
+   ],
+   "sim": 0.9333333333333333,
+   "via": null
+  },
+  {
+   "chunk": "couple more",
+   "decision": "no offered term in the replacement",
+   "heard": "couple more",
+   "offered": [],
+   "repl": "couple more weeks",
+   "result": "couple more",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": 0.8,
+   "via": null
+  },
+  {
+   "chunk": "couple more",
+   "decision": "no offered term in the replacement",
+   "heard": "couple more",
+   "offered": [
+    {
+     "term": "valproate",
+     "window": "value right"
+    }
+   ],
+   "repl": "couple more",
+   "result": "couple more",
+   "runs": [
+    "q9-fx-both"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "couple of squares",
+   "decision": "no offered term in the replacement",
+   "heard": "couple of squares",
+   "offered": [],
+   "repl": "couple of squares",
+   "result": "couple of squares",
+   "runs": [
+    "q9-fx-gloss",
+    "q9-fx-none"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "decondition",
+   "decision": "no offered term in the replacement",
+   "heard": "decondition",
+   "offered": [
+    {
+     "term": "lercanidipine",
+     "window": "decondition"
+    }
+   ],
+   "repl": "deconditioning",
+   "result": "decondition",
+   "runs": [
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.88,
+   "via": null
+  },
+  {
+   "chunk": "decondition",
+   "decision": "no offered term in the replacement",
+   "heard": "decondition",
+   "offered": [],
+   "repl": "deconditioning",
+   "result": "decondition",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-gloss",
+    "q4-fx-lookup",
+    "q4-fx-none",
+    "q5-fx-gloss",
+    "q9-fx-gloss",
+    "q9-fx-none",
+    "t-fx-gloss"
+   ],
+   "sim": 0.88,
+   "via": null
+  },
+  {
+   "chunk": "did not anormal this",
+   "decision": "no offered term in the replacement",
+   "heard": "did not anormal this",
+   "offered": [],
+   "repl": "did not have abnormal",
+   "result": "did not anormal this",
+   "runs": [
+    "q9-fx-both",
+    "q9-fx-gloss",
+    "q9-fx-none"
+   ],
+   "sim": 0.7428571428571429,
+   "via": null
+  },
+  {
+   "chunk": "discharge",
+   "decision": "no offered term in the replacement",
+   "heard": "discharge",
+   "offered": [],
+   "repl": "discharge",
+   "result": "discharge",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "during the full month",
+   "decision": "no offered term in the replacement",
+   "heard": "during the full month",
+   "offered": [],
+   "repl": "during the full month",
+   "result": "during the full month",
+   "runs": [
+    "q4-fx-none",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-lookup"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "edema",
+   "decision": "similarity below 0.6",
+   "heard": "edema",
+   "offered": [],
+   "repl": "asthma",
+   "result": "edema",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 0.36363636363636365,
+   "via": null
+  },
+  {
+   "chunk": "edema",
+   "decision": "similarity below 0.6",
+   "heard": "edema",
+   "offered": [],
+   "repl": "epinephrine",
+   "result": "edema",
+   "runs": [
+    "q4-fx-none"
+   ],
+   "sim": 0.25,
+   "via": null
+  },
+  {
+   "chunk": "edema",
+   "decision": "similarity below 0.6",
+   "heard": "edema",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    }
+   ],
+   "repl": "inhaled",
+   "result": "edema",
+   "runs": [
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-lookup"
+   ],
+   "sim": 0.3333333333333333,
+   "via": null
+  },
+  {
+   "chunk": "edema",
+   "decision": "similarity below 0.6",
+   "heard": "edema",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "inhaler",
+     "window": "in-help for"
+    }
+   ],
+   "repl": "inhaler",
+   "result": "edema",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 0.16666666666666666,
+   "via": null
+  },
+  {
+   "chunk": "edema",
+   "decision": "accepted",
+   "heard": "edema",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "inhaler",
+     "window": "in-help for"
+    }
+   ],
+   "repl": "oedema",
+   "result": "oedema",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": 0.9090909090909091,
+   "via": {
+    "term": "oedema",
+    "window": "edema"
+   }
+  },
+  {
+   "chunk": "edema",
+   "decision": "accepted",
+   "heard": "edema",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    }
+   ],
+   "repl": "oedema",
+   "result": "oedema",
+   "runs": [
+    "q4-fx-lookup",
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "q9-fx-both",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.9090909090909091,
+   "via": {
+    "term": "oedema",
+    "window": "edema"
+   }
+  },
+  {
+   "chunk": "edema",
+   "decision": "no offered term in the replacement",
+   "heard": "edema",
+   "offered": [],
+   "repl": "oedema",
+   "result": "edema",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 0.9090909090909091,
+   "via": null
+  },
+  {
+   "chunk": "electoral levels",
+   "decision": "no offered term in the replacement",
+   "heard": "electoral levels",
+   "offered": [
+    {
+     "term": "potassium chloride",
+     "window": "potassium is too"
+    }
+   ],
+   "repl": "electrolyte levels",
+   "result": "electoral levels",
+   "runs": [
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "q9-fx-both",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.8125,
+   "via": null
+  },
+  {
+   "chunk": "electoral levels",
+   "decision": "no offered term in the replacement",
+   "heard": "electoral levels",
+   "offered": [],
+   "repl": "electrolyte levels",
+   "result": "electoral levels",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "q9-fx-gloss",
+    "q9-fx-none",
+    "t-fx-gloss"
+   ],
+   "sim": 0.8125,
+   "via": null
+  },
+  {
+   "chunk": "electoral",
+   "decision": "no offered term in the replacement",
+   "heard": "electoral",
+   "offered": [
+    {
+     "term": "blood pressure",
+     "window": "blood pressure if"
+    },
+    {
+     "term": "angina",
+     "window": "and again"
+    },
+    {
+     "term": "potassium chloride",
+     "window": "potassium is too"
+    },
+    {
+     "term": "aciclovir",
+     "window": "ACI for"
+    },
+    {
+     "term": "type 2 diabetes",
+     "window": "the patient's"
+    }
+   ],
+   "repl": "electrolyte",
+   "result": "electoral",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.7,
+   "via": null
+  },
+  {
+   "chunk": "electoral",
+   "decision": "no offered term in the replacement",
+   "heard": "electoral",
+   "offered": [],
+   "repl": "electrolyte",
+   "result": "electoral",
+   "runs": [
+    "q4-fx-none"
+   ],
+   "sim": 0.7,
+   "via": null
+  },
+  {
+   "chunk": "endside",
+   "decision": "no offered term in the replacement",
+   "heard": "endside",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "amlodipine",
+     "window": "amylo diping"
+    },
+    {
+     "term": "breathlessness",
+     "window": "breadliness"
+    },
+    {
+     "term": "ibuprofen",
+     "window": "hyperprofen"
+    },
+    {
+     "term": "ankle swelling",
+     "window": "ankles for"
+    },
+    {
+     "term": "preventer",
+     "window": "present with"
+    }
+   ],
+   "repl": "end-stage",
+   "result": "endside",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.6666666666666666,
+   "via": null
+  },
+  {
+   "chunk": "endside",
+   "decision": "no offered term in the replacement",
+   "heard": "endside",
+   "offered": [],
+   "repl": "end-stage",
+   "result": "endside",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-gloss",
+    "q9-fx-none",
+    "t-fx-gloss"
+   ],
+   "sim": 0.6666666666666666,
+   "via": null
+  },
+  {
+   "chunk": "endside",
+   "decision": "similarity below 0.6",
+   "heard": "endside",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "amlodipine",
+     "window": "amylo diping"
+    },
+    {
+     "term": "breathlessness",
+     "window": "breadliness"
+    },
+    {
+     "term": "ibuprofen",
+     "window": "hyperprofen"
+    },
+    {
+     "term": "indapamide",
+     "window": "endside"
+    }
+   ],
+   "repl": "indapamide",
+   "result": "endside",
+   "runs": [
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q9-fx-both",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.5882352941176471,
+   "via": null
+  },
+  {
+   "chunk": "endside",
+   "decision": "no offered term in the replacement",
+   "heard": "endside",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "amlodipine",
+     "window": "amylo diping"
+    },
+    {
+     "term": "breathlessness",
+     "window": "breadliness"
+    },
+    {
+     "term": "ibuprofen",
+     "window": "hyperprofen"
+    },
+    {
+     "term": "indapamide",
+     "window": "endside"
+    }
+   ],
+   "repl": "indside",
+   "result": "endside",
+   "runs": [
+    "q5-fx-lookup-nofacts"
+   ],
+   "sim": 0.8571428571428571,
+   "via": null
+  },
+  {
+   "chunk": "endside",
+   "decision": "similarity below 0.6",
+   "heard": "endside",
+   "offered": [],
+   "repl": "peripheral",
+   "result": "endside",
+   "runs": [
+    "q9-fx-gloss"
+   ],
+   "sim": 0.35294117647058826,
+   "via": null
+  },
+  {
+   "chunk": "especially something going on",
+   "decision": "no offered term in the replacement",
+   "heard": "especially something going on",
+   "offered": [],
+   "repl": "especially something going wrong",
+   "result": "especially something going on",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": 0.9454545454545454,
+   "via": null
+  },
+  {
+   "chunk": "extension",
+   "decision": "no offered term in the replacement",
+   "heard": "extension",
+   "offered": [
+    {
+     "term": "breathlessness",
+     "window": "breath extension"
+    },
+    {
+     "term": "gentamicin",
+     "window": "generate this in"
+    },
+    {
+     "term": "preventer",
+     "window": "present with"
+    }
+   ],
+   "repl": "exertion",
+   "result": "extension",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 0.7058823529411765,
+   "via": null
+  },
+  {
+   "chunk": "extension",
+   "decision": "no offered term in the replacement",
+   "heard": "extension",
+   "offered": [
+    {
+     "term": "breathlessness",
+     "window": "breath extension"
+    }
+   ],
+   "repl": "exertion",
+   "result": "extension",
+   "runs": [
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-lookup"
+   ],
+   "sim": 0.7058823529411765,
+   "via": null
+  },
+  {
+   "chunk": "extension",
+   "decision": "no offered term in the replacement",
+   "heard": "extension",
+   "offered": [],
+   "repl": "exertion",
+   "result": "extension",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-gloss",
+    "q9-fx-gloss",
+    "q9-fx-none",
+    "t-fx-gloss"
+   ],
+   "sim": 0.7058823529411765,
+   "via": null
+  },
+  {
+   "chunk": "extension",
+   "decision": "similarity below 0.6",
+   "heard": "extension",
+   "offered": [
+    {
+     "term": "breathlessness",
+     "window": "breath extension"
+    },
+    {
+     "term": "gentamicin",
+     "window": "generate this in"
+    },
+    {
+     "term": "preventer",
+     "window": "present with"
+    }
+   ],
+   "repl": "exertional breathlessness",
+   "result": "extension",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": 0.36363636363636365,
+   "via": null
+  },
+  {
+   "chunk": "extension",
+   "decision": "similarity below 0.6",
+   "heard": "extension",
+   "offered": [
+    {
+     "term": "breathlessness",
+     "window": "breath extension"
+    }
+   ],
+   "repl": "exertional breathlessness",
+   "result": "extension",
+   "runs": [
+    "q5-fx-both",
+    "q9-fx-both",
+    "t-fx-both"
+   ],
+   "sim": 0.36363636363636365,
+   "via": null
+  },
+  {
+   "chunk": "filtration rate",
+   "decision": "no offered term in the replacement",
+   "heard": "filtration rate",
+   "offered": [],
+   "repl": "filtration rate",
+   "result": "filtration rate",
+   "runs": [
+    "q9-fx-both",
+    "q9-fx-gloss"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "fluid overload",
+   "decision": "similarity below 0.6",
+   "heard": "fluid overload",
+   "offered": [
+    {
+     "term": "pulmonary oedema",
+     "window": "pulmonary edema"
+    },
+    {
+     "term": "pulmonary oedema",
+     "window": "Pulmonary edema"
+    },
+    {
+     "term": "ankle swelling",
+     "window": "with ankle swelling"
+    },
+    {
+     "term": "ankle swelling",
+     "window": "only ankle swelling"
+    },
+    {
+     "term": "inhaler",
+     "window": "in other"
+    },
+    {
+     "term": "preventer",
+     "window": "present For"
+    }
+   ],
+   "repl": "fluid accumulation",
+   "result": "fluid overload",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": 0.4,
+   "via": null
+  },
+  {
+   "chunk": "full blood test",
+   "decision": "no offered term in the replacement",
+   "heard": "full blood test",
+   "offered": [],
+   "repl": "full blood count",
+   "result": "full blood test",
+   "runs": [
+    "q9-fx-gloss",
+    "q9-fx-none"
+   ],
+   "sim": 0.7407407407407407,
+   "via": null
+  },
+  {
+   "chunk": "generate this in",
+   "decision": "no offered term in the replacement",
+   "heard": "generate this in",
+   "offered": [
+    {
+     "term": "breathlessness",
+     "window": "breath extension"
+    },
+    {
+     "term": "gentamicin",
+     "window": "generate this in"
+    },
+    {
+     "term": "preventer",
+     "window": "present with"
+    }
+   ],
+   "repl": "generate these in",
+   "result": "generate this in",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": 0.896551724137931,
+   "via": null
+  },
+  {
+   "chunk": "generate this in",
+   "decision": "no offered term in the replacement",
+   "heard": "generate this in",
+   "offered": [
+    {
+     "term": "breathlessness",
+     "window": "breath extension"
+    },
+    {
+     "term": "gentamicin",
+     "window": "generate this in"
+    },
+    {
+     "term": "preventer",
+     "window": "present with"
+    }
+   ],
+   "repl": "generate this in",
+   "result": "generate this in",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "get another GP",
+   "decision": "no offered term in the replacement",
+   "heard": "get another GP",
+   "offered": [],
+   "repl": "get another GP",
+   "result": "get another GP",
+   "runs": [
+    "q4-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "glycata hemoglobin",
+   "decision": "accepted",
+   "heard": "glycata hemoglobin",
+   "offered": [
+    {
+     "term": "glycated haemoglobin",
+     "window": "glycata hemoglobin"
+    },
+    {
+     "term": "budesonide",
+     "window": "diabetes you need"
+    }
+   ],
+   "repl": "glycated haemoglobin",
+   "result": "glycated haemoglobin",
+   "runs": [
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "q9-fx-both",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.8888888888888888,
+   "via": {
+    "term": "glycated haemoglobin",
+    "window": "glycata hemoglobin"
+   }
+  },
+  {
+   "chunk": "glycata hemoglobin",
+   "decision": "accepted",
+   "heard": "glycata hemoglobin",
+   "offered": [
+    {
+     "term": "glycated haemoglobin",
+     "window": "glycata hemoglobin"
+    },
+    {
+     "term": "type 2 diabetes",
+     "window": "for diabetes"
+    }
+   ],
+   "repl": "glycated haemoglobin",
+   "result": "glycated haemoglobin",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.8888888888888888,
+   "via": {
+    "term": "glycated haemoglobin",
+    "window": "glycata hemoglobin"
+   }
+  },
+  {
+   "chunk": "glycata hemoglobin",
+   "decision": "no offered term in the replacement",
+   "heard": "glycata hemoglobin",
+   "offered": [],
+   "repl": "glycated haemoglobin",
+   "result": "glycata hemoglobin",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "q9-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 0.8888888888888888,
+   "via": null
+  },
+  {
+   "chunk": "glycata hemoglobin",
+   "decision": "no offered term in the replacement",
+   "heard": "glycata hemoglobin",
+   "offered": [],
+   "repl": "glycated hemoglobin",
+   "result": "glycata hemoglobin",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": 0.9142857142857143,
+   "via": null
+  },
+  {
+   "chunk": "glycata",
+   "decision": "no offered term in the replacement",
+   "heard": "glycata",
+   "offered": [],
+   "repl": "glycated",
+   "result": "glycata",
+   "runs": [
+    "q4-fx-none"
+   ],
+   "sim": 0.8,
+   "via": null
+  },
+  {
+   "chunk": "gonna",
+   "decision": "similarity below 0.6",
+   "heard": "gonna",
+   "offered": [
+    {
+     "term": "finasteride",
+     "window": "gonna start"
+    },
+    {
+     "term": "angina",
+     "window": "are gonna"
+    },
+    {
+     "term": "type 2 diabetes",
+     "window": "the patient's"
+    }
+   ],
+   "repl": "going to",
+   "result": "gonna",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.5,
+   "via": null
+  },
+  {
+   "chunk": "gonna",
+   "decision": "similarity below 0.6",
+   "heard": "gonna",
+   "offered": [
+    {
+     "term": "finasteride",
+     "window": "gonna start"
+    }
+   ],
+   "repl": "going to",
+   "result": "gonna",
+   "runs": [
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "q9-fx-both",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.5,
+   "via": null
+  },
+  {
+   "chunk": "got it",
+   "decision": "no offered term in the replacement",
+   "heard": "got it",
+   "offered": [],
+   "repl": "got them",
+   "result": "got it",
+   "runs": [
+    "q4-fx-none"
+   ],
+   "sim": 0.6666666666666666,
+   "via": null
+  },
+  {
+   "chunk": "guideline",
+   "decision": "no offered term in the replacement",
+   "heard": "guideline",
+   "offered": [
+    {
+     "term": "codeine",
+     "window": "guideline"
+    }
+   ],
+   "repl": "guideline",
+   "result": "guideline",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup",
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "half a square",
+   "decision": "similarity below 0.6",
+   "heard": "half a square",
+   "offered": [
+    {
+     "term": "clonidine",
+     "window": "clinician"
+    }
+   ],
+   "repl": "half a block",
+   "result": "half a square",
+   "runs": [
+    "q5-fx-lookup-nofacts",
+    "q9-fx-both"
+   ],
+   "sim": 0.47619047619047616,
+   "via": null
+  },
+  {
+   "chunk": "half a square",
+   "decision": "similarity below 0.6",
+   "heard": "half a square",
+   "offered": [],
+   "repl": "half a block",
+   "result": "half a square",
+   "runs": [
+    "c-fx-gloss",
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "q9-fx-gloss",
+    "q9-fx-none",
+    "t-fx-gloss"
+   ],
+   "sim": 0.47619047619047616,
+   "via": null
+  },
+  {
+   "chunk": "half a square",
+   "decision": "no offered term in the replacement",
+   "heard": "half a square",
+   "offered": [],
+   "repl": "half a square",
+   "result": "half a square",
+   "runs": [
+    "q4-fx-none"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "have diabetes",
+   "decision": "accepted",
+   "heard": "have diabetes",
+   "offered": [
+    {
+     "term": "orthopnoea",
+     "window": "orthopny"
+    },
+    {
+     "term": "amlodipine",
+     "window": "a bloody pine"
+    },
+    {
+     "term": "type 2 diabetes",
+     "window": "have diabetes"
+    },
+    {
+     "term": "ferrous sulfate",
+     "window": "for safety"
+    }
+   ],
+   "repl": "have type 2 diabetes",
+   "result": "have type 2 diabetes",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": 0.8275862068965517,
+   "via": {
+    "term": "type 2 diabetes",
+    "window": "have diabetes"
+   }
+  },
+  {
+   "chunk": "haven't",
+   "decision": "no offered term in the replacement",
+   "heard": "haven't",
+   "offered": [],
+   "repl": "have",
+   "result": "haven't",
+   "runs": [
+    "q9-fx-both",
+    "q9-fx-gloss",
+    "q9-fx-none"
+   ],
+   "sim": 0.8,
+   "via": null
+  },
+  {
+   "chunk": "hideo bottom",
+   "decision": "no offered term in the replacement",
+   "heard": "hideo bottom",
+   "offered": [],
+   "repl": "hideout",
+   "result": "hideo bottom",
+   "runs": [
+    "q9-fx-both",
+    "q9-fx-gloss",
+    "q9-fx-none"
+   ],
+   "sim": 0.6666666666666666,
+   "via": null
+  },
+  {
+   "chunk": "hideo",
+   "decision": "no offered term in the replacement",
+   "heard": "hideo",
+   "offered": [
+    {
+     "term": "polypharmacy",
+     "window": "the pharmacy"
+    }
+   ],
+   "repl": "video",
+   "result": "hideo",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.8,
+   "via": null
+  },
+  {
+   "chunk": "hideo",
+   "decision": "no offered term in the replacement",
+   "heard": "hideo",
+   "offered": [],
+   "repl": "video",
+   "result": "hideo",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-both",
+    "q5-fx-gloss",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-both",
+    "t-fx-gloss",
+    "t-fx-lookup"
+   ],
+   "sim": 0.8,
+   "via": null
+  },
+  {
+   "chunk": "hydrochlorothiacy",
+   "decision": "accepted",
+   "heard": "hydrochlorothiacy",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "hydrochlorothiazide",
+     "window": "hydrochlorothiacy"
+    },
+    {
+     "term": "angina",
+     "window": "ankyl"
+    }
+   ],
+   "repl": "hydrochlorothiazide",
+   "result": "hydrochlorothiazide",
+   "runs": [
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "q9-fx-both",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.8333333333333334,
+   "via": {
+    "term": "hydrochlorothiazide",
+    "window": "hydrochlorothiacy"
+   }
+  },
+  {
+   "chunk": "hydrochlorothiacy",
+   "decision": "accepted",
+   "heard": "hydrochlorothiacy",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "hydrochlorothiazide",
+     "window": "hydrochlorothiacy"
+    },
+    {
+     "term": "montelukast",
+     "window": "months The"
+    }
+   ],
+   "repl": "hydrochlorothiazide",
+   "result": "hydrochlorothiazide",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.8333333333333334,
+   "via": {
+    "term": "hydrochlorothiazide",
+    "window": "hydrochlorothiacy"
+   }
+  },
+  {
+   "chunk": "hydrochlorothiacy",
+   "decision": "no offered term in the replacement",
+   "heard": "hydrochlorothiacy",
+   "offered": [],
+   "repl": "hydrochlorothiazide",
+   "result": "hydrochlorothiacy",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "q9-fx-none",
+    "t-fx-gloss"
+   ],
+   "sim": 0.8333333333333334,
+   "via": null
+  },
+  {
+   "chunk": "hyperprofen",
+   "decision": "similarity below 0.6",
+   "heard": "hyperprofen",
+   "offered": [],
+   "repl": "NSAID",
+   "result": "hyperprofen",
+   "runs": [
+    "q9-fx-gloss"
+   ],
+   "sim": 0.125,
+   "via": null
+  },
+  {
+   "chunk": "hyperprofen",
+   "decision": "similarity below 0.6",
+   "heard": "hyperprofen",
+   "offered": [],
+   "repl": "NSAIDs",
+   "result": "hyperprofen",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": 0.11764705882352941,
+   "via": null
+  },
+  {
+   "chunk": "hyperprofen",
+   "decision": "similarity below 0.6",
+   "heard": "hyperprofen",
+   "offered": [],
+   "repl": "hydrochlorothiazide",
+   "result": "hyperprofen",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 0.3333333333333333,
+   "via": null
+  },
+  {
+   "chunk": "hyperprofen",
+   "decision": "accepted",
+   "heard": "hyperprofen",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "amlodipine",
+     "window": "amylo diping"
+    },
+    {
+     "term": "breathlessness",
+     "window": "breadliness"
+    },
+    {
+     "term": "ibuprofen",
+     "window": "hyperprofen"
+    },
+    {
+     "term": "ankle swelling",
+     "window": "ankles for"
+    },
+    {
+     "term": "preventer",
+     "window": "present with"
+    }
+   ],
+   "repl": "ibuprofen",
+   "result": "ibuprofen",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.6,
+   "via": {
+    "term": "ibuprofen",
+    "window": "hyperprofen"
+   }
+  },
+  {
+   "chunk": "hyperprofen",
+   "decision": "accepted",
+   "heard": "hyperprofen",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "amlodipine",
+     "window": "amylo diping"
+    },
+    {
+     "term": "breathlessness",
+     "window": "breadliness"
+    },
+    {
+     "term": "ibuprofen",
+     "window": "hyperprofen"
+    },
+    {
+     "term": "indapamide",
+     "window": "endside"
+    }
+   ],
+   "repl": "ibuprofen",
+   "result": "ibuprofen",
+   "runs": [
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "q9-fx-both",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.6,
+   "via": {
+    "term": "ibuprofen",
+    "window": "hyperprofen"
+   }
+  },
+  {
+   "chunk": "hypertherylism",
+   "decision": "similarity below 0.6",
+   "heard": "hypertherylism",
+   "offered": [],
+   "repl": "hyperlipidemia",
+   "result": "hypertherylism",
+   "runs": [
+    "q4-fx-none"
+   ],
+   "sim": 0.5714285714285714,
+   "via": null
+  },
+  {
+   "chunk": "hypertherylism",
+   "decision": "accepted",
+   "heard": "hypertherylism",
+   "offered": [
+    {
+     "term": "atorvastatin",
+     "window": "atropastatin"
+    },
+    {
+     "term": "hyperthyroidism",
+     "window": "hypertherylism"
+    },
+    {
+     "term": "montelukast",
+     "window": "months They"
+    },
+    {
+     "term": "type 2 diabetes",
+     "window": "Diabetes we"
+    },
+    {
+     "term": "depression",
+     "window": "There is no"
+    }
+   ],
+   "repl": "hyperthyroidism",
+   "result": "hyperthyroidism",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.7586206896551724,
+   "via": {
+    "term": "hyperthyroidism",
+    "window": "hypertherylism"
+   }
+  },
+  {
+   "chunk": "hypertherylism",
+   "decision": "accepted",
+   "heard": "hypertherylism",
+   "offered": [
+    {
+     "term": "atorvastatin",
+     "window": "atropastatin"
+    },
+    {
+     "term": "hyperthyroidism",
+     "window": "hypertherylism"
+    }
+   ],
+   "repl": "hyperthyroidism",
+   "result": "hyperthyroidism",
+   "runs": [
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "q9-fx-both",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.7586206896551724,
+   "via": {
+    "term": "hyperthyroidism",
+    "window": "hypertherylism"
+   }
+  },
+  {
+   "chunk": "hypertherylism",
+   "decision": "no offered term in the replacement",
+   "heard": "hypertherylism",
+   "offered": [],
+   "repl": "hyperthyroidism",
+   "result": "hypertherylism",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "q9-fx-gloss",
+    "q9-fx-none",
+    "t-fx-gloss"
+   ],
+   "sim": 0.7586206896551724,
+   "via": null
+  },
+  {
+   "chunk": "in other",
+   "decision": "no offered term in the replacement",
+   "heard": "in other",
+   "offered": [
+    {
+     "term": "pulmonary oedema",
+     "window": "pulmonary edema"
+    },
+    {
+     "term": "pulmonary oedema",
+     "window": "Pulmonary edema"
+    },
+    {
+     "term": "ankle swelling",
+     "window": "with ankle swelling"
+    },
+    {
+     "term": "ankle swelling",
+     "window": "only ankle swelling"
+    },
+    {
+     "term": "inhaler",
+     "window": "in other"
+    },
+    {
+     "term": "preventer",
+     "window": "present For"
+    }
+   ],
+   "repl": "in other regions",
+   "result": "in other",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": 0.6666666666666666,
+   "via": null
+  },
+  {
+   "chunk": "in their perception",
+   "decision": "no offered term in the replacement",
+   "heard": "in their perception",
+   "offered": [
+    {
+     "term": "terbutaline",
+     "window": "their baseline"
+    },
+    {
+     "term": "wheeze",
+     "window": "weight So"
+    },
+    {
+     "term": "inhaler",
+     "window": "in their"
+    },
+    {
+     "term": "angina",
+     "window": "are gonna"
+    }
+   ],
+   "repl": "in their perception",
+   "result": "in their perception",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "in their",
+   "decision": "accepted",
+   "heard": "in their",
+   "offered": [
+    {
+     "term": "terbutaline",
+     "window": "their baseline"
+    },
+    {
+     "term": "wheeze",
+     "window": "weight So"
+    },
+    {
+     "term": "inhaler",
+     "window": "in their"
+    },
+    {
+     "term": "angina",
+     "window": "are gonna"
+    }
+   ],
+   "repl": "inhaler",
+   "result": "inhaler",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 0.7142857142857143,
+   "via": {
+    "term": "inhaler",
+    "window": "in their"
+   }
+  },
+  {
+   "chunk": "in-help",
+   "decision": "accepted",
+   "heard": "in-help",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    },
+    {
+     "term": "inhaler",
+     "window": "in-help for"
+    }
+   ],
+   "repl": "inhaler",
+   "result": "inhaler",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.6153846153846154,
+   "via": {
+    "term": "inhaler",
+    "window": "in-help for"
+   }
+  },
+  {
+   "chunk": "in-help",
+   "decision": "no offered term in the replacement",
+   "heard": "in-help",
+   "offered": [
+    {
+     "term": "oedema",
+     "window": "edema"
+    }
+   ],
+   "repl": "inhaler",
+   "result": "in-help",
+   "runs": [
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "q9-fx-both",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.6153846153846154,
+   "via": null
+  },
+  {
+   "chunk": "in-help",
+   "decision": "no offered term in the replacement",
+   "heard": "in-help",
+   "offered": [],
+   "repl": "inhaler",
+   "result": "in-help",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-gloss",
+    "q9-fx-gloss",
+    "q9-fx-none",
+    "t-fx-gloss"
+   ],
+   "sim": 0.6153846153846154,
+   "via": null
+  },
+  {
+   "chunk": "inconsistent",
+   "decision": "no offered term in the replacement",
+   "heard": "inconsistent",
+   "offered": [],
+   "repl": "inconsistent",
+   "result": "inconsistent",
+   "runs": [
+    "q4-fx-none"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "instant scripts",
+   "decision": "no offered term in the replacement",
+   "heard": "instant scripts",
+   "offered": [
+    {
+     "term": "clonidine",
+     "window": "clinician"
+    }
+   ],
+   "repl": "instant scripts",
+   "result": "instant scripts",
+   "runs": [
+    "c-fx-both",
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "instant scripts",
+   "decision": "no offered term in the replacement",
+   "heard": "instant scripts",
+   "offered": [
+    {
+     "term": "gout",
+     "window": "quite a"
+    },
+    {
+     "term": "clonidine",
+     "window": "clinician"
+    }
+   ],
+   "repl": "instant scripts",
+   "result": "instant scripts",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "instant scripts",
+   "decision": "no offered term in the replacement",
+   "heard": "instant scripts",
+   "offered": [],
+   "repl": "instant scripts",
+   "result": "instant scripts",
+   "runs": [
+    "c-fx-gloss",
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "insulin there",
+   "decision": "accepted",
+   "heard": "insulin there",
+   "offered": [
+    {
+     "term": "type 2 diabetes",
+     "window": "them had diabetes"
+    },
+    {
+     "term": "insulin detemir",
+     "window": "insulin there"
+    },
+    {
+     "term": "insulin aspart",
+     "window": "insulin they"
+    }
+   ],
+   "repl": "insulin detemir",
+   "result": "insulin detemir",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": 0.7692307692307693,
+   "via": {
+    "term": "insulin detemir",
+    "window": "insulin there"
+   }
+  },
+  {
+   "chunk": "insulin there",
+   "decision": "no offered term in the replacement",
+   "heard": "insulin there",
+   "offered": [
+    {
+     "term": "type 2 diabetes",
+     "window": "them had diabetes"
+    },
+    {
+     "term": "insulin detemir",
+     "window": "insulin there"
+    },
+    {
+     "term": "insulin aspart",
+     "window": "insulin they"
+    }
+   ],
+   "repl": "insulin in",
+   "result": "insulin there",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 0.6666666666666666,
+   "via": null
+  },
+  {
+   "chunk": "is",
+   "decision": "no offered term in the replacement",
+   "heard": "is",
+   "offered": [],
+   "repl": "is",
+   "result": "is",
+   "runs": [
+    "q4-fx-none"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "it doesn't use",
+   "decision": "no offered term in the replacement",
+   "heard": "it doesn't use",
+   "offered": [],
+   "repl": "it doesn't usually use",
+   "result": "it doesn't use",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": 0.7586206896551724,
+   "via": null
+  },
+  {
+   "chunk": "kidney function",
+   "decision": "no offered term in the replacement",
+   "heard": "kidney function",
+   "offered": [
+    {
+     "term": "spirometry",
+     "window": "So parameters"
+    },
+    {
+     "term": "angina",
+     "window": "change in"
+    }
+   ],
+   "repl": "liver function",
+   "result": "kidney function",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 0.7407407407407407,
+   "via": null
+  },
+  {
+   "chunk": "last documented bowl",
+   "decision": "no offered term in the replacement",
+   "heard": "last documented bowl",
+   "offered": [
+    {
+     "term": "polypharmacy",
+     "window": "the pharmacy"
+    },
+    {
+     "term": "MedsCheck",
+     "window": "to check"
+    },
+    {
+     "term": "bioavailability",
+     "window": "usual ability"
+    }
+   ],
+   "repl": "last documented baseline",
+   "result": "last documented bowl",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": 0.8,
+   "via": null
+  },
+  {
+   "chunk": "last documented bowl",
+   "decision": "no offered term in the replacement",
+   "heard": "last documented bowl",
+   "offered": [],
+   "repl": "last documented baseline",
+   "result": "last documented bowl",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 0.8,
+   "via": null
+  },
+  {
+   "chunk": "last documented bowl",
+   "decision": "no offered term in the replacement",
+   "heard": "last documented bowl",
+   "offered": [],
+   "repl": "last documented goal",
+   "result": "last documented bowl",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": 0.8888888888888888,
+   "via": null
+  },
+  {
+   "chunk": "last documented bowl",
+   "decision": "no offered term in the replacement",
+   "heard": "last documented bowl",
+   "offered": [
+    {
+     "term": "polypharmacy",
+     "window": "the pharmacy"
+    },
+    {
+     "term": "MedsCheck",
+     "window": "to check"
+    },
+    {
+     "term": "bioavailability",
+     "window": "usual ability"
+    }
+   ],
+   "repl": "last documented value",
+   "result": "last documented bowl",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 0.8108108108108109,
+   "via": null
+  },
+  {
+   "chunk": "last documented bowl",
+   "decision": "no offered term in the replacement",
+   "heard": "last documented bowl",
+   "offered": [
+    {
+     "term": "bioavailability",
+     "window": "usual ability"
+    }
+   ],
+   "repl": "last documented value",
+   "result": "last documented bowl",
+   "runs": [
+    "c-fx-both",
+    "q5-fx-both",
+    "q5-fx-lookup-nofacts",
+    "q9-fx-both",
+    "t-fx-both"
+   ],
+   "sim": 0.8108108108108109,
+   "via": null
+  },
+  {
+   "chunk": "last documented bowl",
+   "decision": "no offered term in the replacement",
+   "heard": "last documented bowl",
+   "offered": [],
+   "repl": "last documented value",
+   "result": "last documented bowl",
+   "runs": [
+    "q9-fx-gloss"
+   ],
+   "sim": 0.8108108108108109,
+   "via": null
+  },
+  {
+   "chunk": "last documented bowl",
+   "decision": "no offered term in the replacement",
+   "heard": "last documented bowl",
+   "offered": [],
+   "repl": "last documented walk",
+   "result": "last documented bowl",
+   "runs": [
+    "c-fx-gloss",
+    "q4-fx-none"
+   ],
+   "sim": 0.8888888888888888,
+   "via": null
+  },
+  {
+   "chunk": "leaders",
+   "decision": "no offered term in the replacement",
+   "heard": "leaders",
+   "offered": [
+    {
+     "term": "polypharmacy",
+     "window": "the pharmacy"
+    },
+    {
+     "term": "MedsCheck",
+     "window": "to check"
+    }
+   ],
+   "repl": "leaders",
+   "result": "leaders",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "leaders",
+   "decision": "no offered term in the replacement",
+   "heard": "leaders",
+   "offered": [],
+   "repl": "leaders",
+   "result": "leaders",
+   "runs": [
+    "c-fx-gloss",
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "many",
+   "decision": "no offered term in the replacement",
+   "heard": "many",
+   "offered": [],
+   "repl": "many",
+   "result": "many",
+   "runs": [
+    "q4-fx-none"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "more than 180",
+   "decision": "no offered term in the replacement",
+   "heard": "more than 180",
+   "offered": [
+    {
+     "term": "blood pressure",
+     "window": "blood pressure is"
+    },
+    {
+     "term": "blood pressure",
+     "window": "blood pressure is"
+    },
+    {
+     "term": "morphine",
+     "window": "more than 180"
+    }
+   ],
+   "repl": "more than 180",
+   "result": "more than 180",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "more than 200",
+   "decision": "no offered term in the replacement",
+   "heard": "more than 200",
+   "offered": [
+    {
+     "term": "morphine",
+     "window": "more than 200"
+    }
+   ],
+   "repl": "more than 200",
+   "result": "more than 200",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "new medication maybe",
+   "decision": "no offered term in the replacement",
+   "heard": "new medication maybe",
+   "offered": [],
+   "repl": "new medication may be",
+   "result": "new medication maybe",
+   "runs": [
+    "c-fx-both",
+    "c-fx-gloss",
+    "q4-fx-gloss",
+    "q5-fx-both",
+    "q5-fx-gloss",
+    "t-fx-both",
+    "t-fx-gloss"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "night",
+   "decision": "no offered term in the replacement",
+   "heard": "night",
+   "offered": [],
+   "repl": "night",
+   "result": "night",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-both",
+    "q5-fx-gloss",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-both",
+    "t-fx-gloss",
+    "t-fx-lookup"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "no studying associated",
+   "decision": "no offered term in the replacement",
+   "heard": "no studying associated",
+   "offered": [
+    {
+     "term": "type 2 diabetes",
+     "window": "2 diabetes"
+    }
+   ],
+   "repl": "no statin associated",
+   "result": "no studying associated",
+   "runs": [
+    "q9-fx-both"
+   ],
+   "sim": 0.8421052631578947,
+   "via": null
+  },
+  {
+   "chunk": "no studying",
+   "decision": "accepted",
+   "heard": "no studying",
+   "offered": [
+    {
+     "term": "type 2 diabetes",
+     "window": "2 diabetes"
+    },
+    {
+     "term": "nystatin",
+     "window": "no studying"
+    }
+   ],
+   "repl": "no nystatin",
+   "result": "no nystatin",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 0.6,
+   "via": {
+    "term": "nystatin",
+    "window": "no studying"
+   }
+  },
+  {
+   "chunk": "no studying",
+   "decision": "no offered term in the replacement",
+   "heard": "no studying",
+   "offered": [
+    {
+     "term": "type 2 diabetes",
+     "window": "2 diabetes"
+    },
+    {
+     "term": "nystatin",
+     "window": "no studying"
+    }
+   ],
+   "repl": "no statin",
+   "result": "no studying",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": 0.6666666666666666,
+   "via": null
+  },
+  {
+   "chunk": "nodes",
+   "decision": "no offered term in the replacement",
+   "heard": "nodes",
+   "offered": [],
+   "repl": "nodes",
+   "result": "nodes",
+   "runs": [
+    "q4-fx-none",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-lookup"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "nodes",
+   "decision": "no offered term in the replacement",
+   "heard": "nodes",
+   "offered": [],
+   "repl": "notes",
+   "result": "nodes",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-both",
+    "q5-fx-gloss",
+    "q9-fx-both",
+    "q9-fx-gloss",
+    "t-fx-both",
+    "t-fx-gloss"
+   ],
+   "sim": 0.8,
+   "via": null
+  },
+  {
+   "chunk": "normal activities",
+   "decision": "no offered term in the replacement",
+   "heard": "normal activities",
+   "offered": [
+    {
+     "term": "MedsCheck",
+     "window": "need to check"
+    }
+   ],
+   "repl": "normal activities",
+   "result": "normal activities",
+   "runs": [
+    "q9-fx-both"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "normal hygiene process",
+   "decision": "no offered term in the replacement",
+   "heard": "normal hygiene process",
+   "offered": [],
+   "repl": "hygiene practices",
+   "result": "normal hygiene process",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": 0.6666666666666666,
+   "via": null
+  },
+  {
+   "chunk": "normal hygiene process",
+   "decision": "no offered term in the replacement",
+   "heard": "normal hygiene process",
+   "offered": [],
+   "repl": "normal hygiene practices",
+   "result": "normal hygiene process",
+   "runs": [
+    "q9-fx-both",
+    "q9-fx-gloss"
+   ],
+   "sim": 0.8571428571428571,
+   "via": null
+  },
+  {
+   "chunk": "not control",
+   "decision": "no offered term in the replacement",
+   "heard": "not control",
+   "offered": [
+    {
+     "term": "type 2 diabetes",
+     "window": "them had diabetes"
+    },
+    {
+     "term": "insulin detemir",
+     "window": "insulin they didn't"
+    }
+   ],
+   "repl": "under control",
+   "result": "not control",
+   "runs": [
+    "c-fx-both",
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.7272727272727273,
+   "via": null
+  },
+  {
+   "chunk": "not control",
+   "decision": "no offered term in the replacement",
+   "heard": "not control",
+   "offered": [],
+   "repl": "under control",
+   "result": "not control",
+   "runs": [
+    "c-fx-gloss",
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 0.7272727272727273,
+   "via": null
+  },
+  {
+   "chunk": "objectivize",
+   "decision": "no offered term in the replacement",
+   "heard": "objectivize",
+   "offered": [
+    {
+     "term": "valproate",
+     "window": "value right"
+    },
+    {
+     "term": "clonidine",
+     "window": "clinician"
+    },
+    {
+     "term": "clonidine",
+     "window": "clinician"
+    }
+   ],
+   "repl": "objectify",
+   "result": "objectivize",
+   "runs": [
+    "q9-fx-both"
+   ],
+   "sim": 0.7,
+   "via": null
+  },
+  {
+   "chunk": "objectivize",
+   "decision": "no offered term in the replacement",
+   "heard": "objectivize",
+   "offered": [],
+   "repl": "objectivise",
+   "result": "objectivize",
+   "runs": [
+    "c-fx-gloss",
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-gloss",
+    "q9-fx-gloss",
+    "q9-fx-none",
+    "t-fx-gloss"
+   ],
+   "sim": 0.9090909090909091,
+   "via": null
+  },
+  {
+   "chunk": "octognea",
+   "decision": "similarity below 0.6",
+   "heard": "octognea",
+   "offered": [
+    {
+     "term": "NSAID",
+     "window": "NSAIDs"
+    },
+    {
+     "term": "heart failure",
+     "window": "Heart failure could"
+    },
+    {
+     "term": "breathlessness",
+     "window": "breadness"
+    },
+    {
+     "term": "reliever",
+     "window": "really severe"
+    },
+    {
+     "term": "oxycodone",
+     "window": "octognea"
+    }
+   ],
+   "repl": "oedema",
+   "result": "octognea",
+   "runs": [
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.42857142857142855,
+   "via": null
+  },
+  {
+   "chunk": "octognea",
+   "decision": "similarity below 0.6",
+   "heard": "octognea",
+   "offered": [
+    {
+     "term": "NSAID",
+     "window": "NSAIDs"
+    },
+    {
+     "term": "heart failure",
+     "window": "Heart failure could"
+    },
+    {
+     "term": "breathlessness",
+     "window": "breadness"
+    },
+    {
+     "term": "reliever",
+     "window": "really severe"
+    },
+    {
+     "term": "fluoxetine",
+     "window": "will examine"
+    },
+    {
+     "term": "depression",
+     "window": "there is no"
+    }
+   ],
+   "repl": "oedema",
+   "result": "octognea",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 0.42857142857142855,
+   "via": null
+  },
+  {
+   "chunk": "octognea",
+   "decision": "similarity below 0.6",
+   "heard": "octognea",
+   "offered": [],
+   "repl": "oedema",
+   "result": "octognea",
+   "runs": [
+    "q4-fx-none",
+    "q9-fx-none"
+   ],
+   "sim": 0.42857142857142855,
+   "via": null
+  },
+  {
+   "chunk": "octognea",
+   "decision": "no offered term in the replacement",
+   "heard": "octognea",
+   "offered": [
+    {
+     "term": "NSAID",
+     "window": "NSAIDs"
+    },
+    {
+     "term": "heart failure",
+     "window": "Heart failure could"
+    },
+    {
+     "term": "breathlessness",
+     "window": "breadness"
+    },
+    {
+     "term": "reliever",
+     "window": "really severe"
+    },
+    {
+     "term": "oxycodone",
+     "window": "octognea"
+    }
+   ],
+   "repl": "orthopnoea",
+   "result": "octognea",
+   "runs": [
+    "q9-fx-both"
+   ],
+   "sim": 0.6666666666666666,
+   "via": null
+  },
+  {
+   "chunk": "octognea",
+   "decision": "no offered term in the replacement",
+   "heard": "octognea",
+   "offered": [
+    {
+     "term": "NSAID",
+     "window": "NSAIDs"
+    },
+    {
+     "term": "heart failure",
+     "window": "Heart failure could"
+    },
+    {
+     "term": "breathlessness",
+     "window": "breadness"
+    },
+    {
+     "term": "reliever",
+     "window": "really severe"
+    },
+    {
+     "term": "fluoxetine",
+     "window": "will examine"
+    },
+    {
+     "term": "depression",
+     "window": "there is no"
+    }
+   ],
+   "repl": "orthopnoea",
+   "result": "octognea",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": 0.6666666666666666,
+   "via": null
+  },
+  {
+   "chunk": "octognea",
+   "decision": "no offered term in the replacement",
+   "heard": "octognea",
+   "offered": [],
+   "repl": "orthopnoea",
+   "result": "octognea",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "q9-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 0.6666666666666666,
+   "via": null
+  },
+  {
+   "chunk": "one big large square",
+   "decision": "no offered term in the replacement",
+   "heard": "one big large square",
+   "offered": [],
+   "repl": "one big large square",
+   "result": "one big large square",
+   "runs": [
+    "c-fx-gloss",
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "only ankle swelling",
+   "decision": "no offered term in the replacement",
+   "heard": "only ankle swelling",
+   "offered": [
+    {
+     "term": "pulmonary oedema",
+     "window": "pulmonary edema"
+    },
+    {
+     "term": "pulmonary oedema",
+     "window": "Pulmonary edema"
+    },
+    {
+     "term": "ankle swelling",
+     "window": "only ankle swelling"
+    },
+    {
+     "term": "ankle swelling",
+     "window": "ankle swelling makes"
+    },
+    {
+     "term": "adherence",
+     "window": "other regions"
+    }
+   ],
+   "repl": "only ankle oedema",
+   "result": "only ankle swelling",
+   "runs": [
+    "t-fx-both"
+   ],
+   "sim": 0.625,
+   "via": null
+  },
+  {
+   "chunk": "only ankle swelling",
+   "decision": "accepted",
+   "heard": "only ankle swelling",
+   "offered": [
+    {
+     "term": "pulmonary oedema",
+     "window": "pulmonary edema"
+    },
+    {
+     "term": "pulmonary oedema",
+     "window": "Pulmonary edema"
+    },
+    {
+     "term": "ankle swelling",
+     "window": "only ankle swelling"
+    },
+    {
+     "term": "ankle swelling",
+     "window": "ankle swelling makes"
+    },
+    {
+     "term": "adherence",
+     "window": "other regions"
+    }
+   ],
+   "repl": "only ankle swelling",
+   "result": "only ankle swelling",
+   "runs": [
+    "q5-fx-lookup-nofacts"
+   ],
+   "sim": 1.0,
+   "via": {
+    "term": "ankle swelling",
+    "window": "only ankle swelling"
+   }
+  },
+  {
+   "chunk": "only ankle swelling",
+   "decision": "accepted",
+   "heard": "only ankle swelling",
+   "offered": [
+    {
+     "term": "pulmonary oedema",
+     "window": "pulmonary edema"
+    },
+    {
+     "term": "pulmonary oedema",
+     "window": "Pulmonary edema"
+    },
+    {
+     "term": "ankle swelling",
+     "window": "with ankle swelling"
+    },
+    {
+     "term": "ankle swelling",
+     "window": "only ankle swelling"
+    },
+    {
+     "term": "inhaler",
+     "window": "in other"
+    },
+    {
+     "term": "preventer",
+     "window": "present For"
+    }
+   ],
+   "repl": "only ankle swelling",
+   "result": "only ankle swelling",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 1.0,
+   "via": {
+    "term": "ankle swelling",
+    "window": "with ankle swelling"
+   }
+  },
+  {
+   "chunk": "optopnea",
+   "decision": "similarity below 0.6",
+   "heard": "optopnea",
+   "offered": [],
+   "repl": "dyspnoea",
+   "result": "optopnea",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": 0.5,
+   "via": null
+  },
+  {
+   "chunk": "optopnea",
+   "decision": "no offered term in the replacement",
+   "heard": "optopnea",
+   "offered": [],
+   "repl": "orthopnea",
+   "result": "optopnea",
+   "runs": [
+    "q4-fx-none"
+   ],
+   "sim": 0.8235294117647058,
+   "via": null
+  },
+  {
+   "chunk": "optopnea",
+   "decision": "accepted",
+   "heard": "optopnea",
+   "offered": [
+    {
+     "term": "orthopnoea",
+     "window": "optopnea"
+    }
+   ],
+   "repl": "orthopnoea",
+   "result": "orthopnoea",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup",
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "q9-fx-both",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.7777777777777778,
+   "via": {
+    "term": "orthopnoea",
+    "window": "optopnea"
+   }
+  },
+  {
+   "chunk": "optopnea",
+   "decision": "no offered term in the replacement",
+   "heard": "optopnea",
+   "offered": [],
+   "repl": "orthopnoea",
+   "result": "optopnea",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "q9-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 0.7777777777777778,
+   "via": null
+  },
+  {
+   "chunk": "orthopny",
+   "decision": "no offered term in the replacement",
+   "heard": "orthopny",
+   "offered": [],
+   "repl": "orthopnea",
+   "result": "orthopny",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": 0.8235294117647058,
+   "via": null
+  },
+  {
+   "chunk": "orthopny",
+   "decision": "accepted",
+   "heard": "orthopny",
+   "offered": [
+    {
+     "term": "orthopnoea",
+     "window": "orthopny"
+    },
+    {
+     "term": "amlodipine",
+     "window": "a bloody pine"
+    },
+    {
+     "term": "type 2 diabetes",
+     "window": "have diabetes"
+    },
+    {
+     "term": "ferrous sulfate",
+     "window": "for safety"
+    }
+   ],
+   "repl": "orthopnoea",
+   "result": "orthopnoea",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.7777777777777778,
+   "via": {
+    "term": "orthopnoea",
+    "window": "orthopny"
+   }
+  },
+  {
+   "chunk": "orthopny",
+   "decision": "accepted",
+   "heard": "orthopny",
+   "offered": [
+    {
+     "term": "orthopnoea",
+     "window": "orthopny"
+    },
+    {
+     "term": "amlodipine",
+     "window": "a bloody pine"
+    }
+   ],
+   "repl": "orthopnoea",
+   "result": "orthopnoea",
+   "runs": [
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "q9-fx-both",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.7777777777777778,
+   "via": {
+    "term": "orthopnoea",
+    "window": "orthopny"
+   }
+  },
+  {
+   "chunk": "orthopny",
+   "decision": "no offered term in the replacement",
+   "heard": "orthopny",
+   "offered": [],
+   "repl": "orthopnoea",
+   "result": "orthopny",
+   "runs": [
+    "q9-fx-gloss"
+   ],
+   "sim": 0.7777777777777778,
+   "via": null
+  },
+  {
+   "chunk": "other regions",
+   "decision": "no offered term in the replacement",
+   "heard": "other regions",
+   "offered": [
+    {
+     "term": "pulmonary oedema",
+     "window": "pulmonary edema"
+    },
+    {
+     "term": "pulmonary oedema",
+     "window": "Pulmonary edema"
+    },
+    {
+     "term": "ankle swelling",
+     "window": "only ankle swelling"
+    },
+    {
+     "term": "ankle swelling",
+     "window": "ankle swelling makes"
+    },
+    {
+     "term": "adherence",
+     "window": "other regions"
+    }
+   ],
+   "repl": "other regions",
+   "result": "other regions",
+   "runs": [
+    "q5-fx-lookup-nofacts",
+    "q9-fx-both"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "over 100",
+   "decision": "no offered term in the replacement",
+   "heard": "over 100",
+   "offered": [],
+   "repl": "over 100 mmHg",
+   "result": "over 100",
+   "runs": [
+    "q9-fx-both",
+    "q9-fx-gloss",
+    "q9-fx-none"
+   ],
+   "sim": 0.7777777777777778,
+   "via": null
+  },
+  {
+   "chunk": "over 100",
+   "decision": "no offered term in the replacement",
+   "heard": "over 100",
+   "offered": [],
+   "repl": "over 180",
+   "result": "over 100",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-both",
+    "q5-fx-gloss",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-both",
+    "t-fx-gloss",
+    "t-fx-lookup"
+   ],
+   "sim": 0.8571428571428571,
+   "via": null
+  },
+  {
+   "chunk": "parameters",
+   "decision": "no offered term in the replacement",
+   "heard": "parameters",
+   "offered": [
+    {
+     "term": "spirometry",
+     "window": "So parameters"
+    },
+    {
+     "term": "angina",
+     "window": "change in"
+    }
+   ],
+   "repl": "parameters",
+   "result": "parameters",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "part number four",
+   "decision": "no offered term in the replacement",
+   "heard": "part number four",
+   "offered": [],
+   "repl": "part four",
+   "result": "part number four",
+   "runs": [
+    "q9-fx-both",
+    "q9-fx-gloss"
+   ],
+   "sim": 0.7272727272727273,
+   "via": null
+  },
+  {
+   "chunk": "patient in",
+   "decision": "no offered term in the replacement",
+   "heard": "patient in",
+   "offered": [
+    {
+     "term": "gabapentin",
+     "window": "patient in"
+    }
+   ],
+   "repl": "patient is",
+   "result": "patient in",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.8888888888888888,
+   "via": null
+  },
+  {
+   "chunk": "potassium is increasing",
+   "decision": "no offered term in the replacement",
+   "heard": "potassium is increasing",
+   "offered": [],
+   "repl": "potassium is increasing",
+   "result": "potassium is increasing",
+   "runs": [
+    "q9-fx-both",
+    "q9-fx-gloss"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "potassium is too",
+   "decision": "no offered term in the replacement",
+   "heard": "potassium is too",
+   "offered": [
+    {
+     "term": "blood pressure",
+     "window": "blood pressure if"
+    },
+    {
+     "term": "angina",
+     "window": "and again"
+    },
+    {
+     "term": "potassium chloride",
+     "window": "potassium is too"
+    },
+    {
+     "term": "aciclovir",
+     "window": "ACI for"
+    },
+    {
+     "term": "type 2 diabetes",
+     "window": "the patient's"
+    }
+   ],
+   "repl": "potassium is too",
+   "result": "potassium is too",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "present with anemia",
+   "decision": "no offered term in the replacement",
+   "heard": "present with anemia",
+   "offered": [
+    {
+     "term": "breathlessness",
+     "window": "breath extension"
+    },
+    {
+     "term": "gentamicin",
+     "window": "generate this in"
+    },
+    {
+     "term": "preventer",
+     "window": "present with"
+    }
+   ],
+   "repl": "present with anemia",
+   "result": "present with anemia",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "prevented use",
+   "decision": "accepted",
+   "heard": "prevented use",
+   "offered": [
+    {
+     "term": "preventer",
+     "window": "prevented use"
+    },
+    {
+     "term": "angina",
+     "window": "doing in"
+    }
+   ],
+   "repl": "preventer use",
+   "result": "preventer use",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.9166666666666666,
+   "via": {
+    "term": "preventer",
+    "window": "prevented use"
+   }
+  },
+  {
+   "chunk": "prevented use",
+   "decision": "accepted",
+   "heard": "prevented use",
+   "offered": [
+    {
+     "term": "preventer",
+     "window": "prevented use"
+    }
+   ],
+   "repl": "preventer use",
+   "result": "preventer use",
+   "runs": [
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.9166666666666666,
+   "via": {
+    "term": "preventer",
+    "window": "prevented use"
+   }
+  },
+  {
+   "chunk": "prevented",
+   "decision": "no offered term in the replacement",
+   "heard": "prevented",
+   "offered": [],
+   "repl": "prevented",
+   "result": "prevented",
+   "runs": [
+    "q4-fx-none"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "prevented",
+   "decision": "no offered term in the replacement",
+   "heard": "prevented",
+   "offered": [],
+   "repl": "preventer",
+   "result": "prevented",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "q9-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 0.8888888888888888,
+   "via": null
+  },
+  {
+   "chunk": "pulmonary edema",
+   "decision": "accepted",
+   "heard": "pulmonary edema",
+   "offered": [
+    {
+     "term": "pulmonary oedema",
+     "window": "pulmonary edema"
+    },
+    {
+     "term": "pulmonary oedema",
+     "window": "Pulmonary edema"
+    },
+    {
+     "term": "ankle swelling",
+     "window": "only ankle swelling"
+    },
+    {
+     "term": "ankle swelling",
+     "window": "ankle swelling makes"
+    },
+    {
+     "term": "adherence",
+     "window": "other regions"
+    }
+   ],
+   "repl": "pulmonary oedema",
+   "result": "pulmonary oedema",
+   "runs": [
+    "q5-fx-both",
+    "q9-fx-both",
+    "t-fx-both"
+   ],
+   "sim": 0.9655172413793104,
+   "via": {
+    "term": "pulmonary oedema",
+    "window": "pulmonary edema"
+   }
+  },
+  {
+   "chunk": "pulmonary edema",
+   "decision": "accepted",
+   "heard": "pulmonary edema",
+   "offered": [
+    {
+     "term": "pulmonary oedema",
+     "window": "pulmonary edema"
+    },
+    {
+     "term": "pulmonary oedema",
+     "window": "Pulmonary edema"
+    },
+    {
+     "term": "ankle swelling",
+     "window": "with ankle swelling"
+    },
+    {
+     "term": "ankle swelling",
+     "window": "only ankle swelling"
+    },
+    {
+     "term": "inhaler",
+     "window": "in other"
+    },
+    {
+     "term": "preventer",
+     "window": "present For"
+    }
+   ],
+   "repl": "pulmonary oedema",
+   "result": "pulmonary oedema",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.9655172413793104,
+   "via": {
+    "term": "pulmonary oedema",
+    "window": "pulmonary edema"
+   }
+  },
+  {
+   "chunk": "pulmonary edema",
+   "decision": "no offered term in the replacement",
+   "heard": "pulmonary edema",
+   "offered": [],
+   "repl": "pulmonary oedema",
+   "result": "pulmonary edema",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "q9-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 0.9655172413793104,
+   "via": null
+  },
+  {
+   "chunk": "pulmonary findings",
+   "decision": "no offered term in the replacement",
+   "heard": "pulmonary findings",
+   "offered": [],
+   "repl": "pulmonary oedema",
+   "result": "pulmonary findings",
+   "runs": [
+    "q9-fx-gloss"
+   ],
+   "sim": 0.625,
+   "via": null
+  },
+  {
+   "chunk": "reach the chops",
+   "decision": "no offered term in the replacement",
+   "heard": "reach the chops",
+   "offered": [
+    {
+     "term": "polypharmacy",
+     "window": "the pharmacy"
+    },
+    {
+     "term": "MedsCheck",
+     "window": "to check"
+    },
+    {
+     "term": "bioavailability",
+     "window": "usual ability"
+    }
+   ],
+   "repl": "reach the 50 meters",
+   "result": "reach the chops",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 0.6206896551724138,
+   "via": null
+  },
+  {
+   "chunk": "reach the chops",
+   "decision": "no offered term in the replacement",
+   "heard": "reach the chops",
+   "offered": [
+    {
+     "term": "bioavailability",
+     "window": "usual ability"
+    }
+   ],
+   "repl": "reach the 50 meters",
+   "result": "reach the chops",
+   "runs": [
+    "q5-fx-lookup-nofacts"
+   ],
+   "sim": 0.6206896551724138,
+   "via": null
+  },
+  {
+   "chunk": "reach the chops",
+   "decision": "no offered term in the replacement",
+   "heard": "reach the chops",
+   "offered": [],
+   "repl": "reach the chair",
+   "result": "reach the chops",
+   "runs": [
+    "c-fx-gloss",
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 0.7692307692307693,
+   "via": null
+  },
+  {
+   "chunk": "reach the chops",
+   "decision": "no offered term in the replacement",
+   "heard": "reach the chops",
+   "offered": [
+    {
+     "term": "bioavailability",
+     "window": "usual ability"
+    }
+   ],
+   "repl": "reach the shops",
+   "result": "reach the chops",
+   "runs": [
+    "q9-fx-both"
+   ],
+   "sim": 0.9230769230769231,
+   "via": null
+  },
+  {
+   "chunk": "reach the chops",
+   "decision": "no offered term in the replacement",
+   "heard": "reach the chops",
+   "offered": [],
+   "repl": "reach the shops",
+   "result": "reach the chops",
+   "runs": [
+    "q4-fx-none",
+    "q9-fx-gloss",
+    "q9-fx-none"
+   ],
+   "sim": 0.9230769230769231,
+   "via": null
+  },
+  {
+   "chunk": "really severe",
+   "decision": "no offered term in the replacement",
+   "heard": "really severe",
+   "offered": [
+    {
+     "term": "NSAID",
+     "window": "NSAIDs"
+    },
+    {
+     "term": "heart failure",
+     "window": "Heart failure could"
+    },
+    {
+     "term": "breathlessness",
+     "window": "breadness"
+    },
+    {
+     "term": "reliever",
+     "window": "really severe"
+    },
+    {
+     "term": "fluoxetine",
+     "window": "will examine"
+    },
+    {
+     "term": "depression",
+     "window": "there is no"
+    }
+   ],
+   "repl": "relieve",
+   "result": "really severe",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 0.631578947368421,
+   "via": null
+  },
+  {
+   "chunk": "rechalling part",
+   "decision": "no offered term in the replacement",
+   "heard": "rechalling part",
+   "offered": [
+    {
+     "term": "Naranjo",
+     "window": "Narancos"
+    },
+    {
+     "term": "insulin aspart",
+     "window": "rechalling part"
+    }
+   ],
+   "repl": "re-challenging part",
+   "result": "rechalling part",
+   "runs": [
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-lookup"
+   ],
+   "sim": 0.9032258064516129,
+   "via": null
+  },
+  {
+   "chunk": "rechalling part",
+   "decision": "no offered term in the replacement",
+   "heard": "rechalling part",
+   "offered": [
+    {
+     "term": "Naranjo",
+     "window": "Narancos"
+    },
+    {
+     "term": "insulin aspart",
+     "window": "rechalling part"
+    }
+   ],
+   "repl": "rechallenge part",
+   "result": "rechalling part",
+   "runs": [
+    "q5-fx-both",
+    "t-fx-both"
+   ],
+   "sim": 0.896551724137931,
+   "via": null
+  },
+  {
+   "chunk": "rechalling",
+   "decision": "no offered term in the replacement",
+   "heard": "rechalling",
+   "offered": [],
+   "repl": "re-challenge",
+   "result": "rechalling",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": 0.8571428571428571,
+   "via": null
+  },
+  {
+   "chunk": "rechalling",
+   "decision": "no offered term in the replacement",
+   "heard": "rechalling",
+   "offered": [
+    {
+     "term": "Naranjo",
+     "window": "Narancos"
+    },
+    {
+     "term": "insulin aspart",
+     "window": "rechalling part"
+    }
+   ],
+   "repl": "rechallenge",
+   "result": "rechalling",
+   "runs": [
+    "q9-fx-both"
+   ],
+   "sim": 0.8571428571428571,
+   "via": null
+  },
+  {
+   "chunk": "rechalling",
+   "decision": "no offered term in the replacement",
+   "heard": "rechalling",
+   "offered": [],
+   "repl": "rechallenge",
+   "result": "rechalling",
+   "runs": [
+    "q9-fx-gloss"
+   ],
+   "sim": 0.8571428571428571,
+   "via": null
+  },
+  {
+   "chunk": "reconnect it",
+   "decision": "no offered term in the replacement",
+   "heard": "reconnect it",
+   "offered": [],
+   "repl": "reconnect them",
+   "result": "reconnect it",
+   "runs": [
+    "c-fx-gloss",
+    "q5-fx-gloss"
+   ],
+   "sim": 0.8333333333333334,
+   "via": null
+  },
+  {
+   "chunk": "red",
+   "decision": "no offered term in the replacement",
+   "heard": "red",
+   "offered": [],
+   "repl": "red",
+   "result": "red",
+   "runs": [
+    "q4-fx-none"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "regulator vaccination use",
+   "decision": "no offered term in the replacement",
+   "heard": "regulator vaccination use",
+   "offered": [
+    {
+     "term": "type 2 diabetes",
+     "window": "2 diabetes"
+    }
+   ],
+   "repl": "atorvastatin use",
+   "result": "regulator vaccination use",
+   "runs": [
+    "q9-fx-both"
+   ],
+   "sim": 0.6842105263157895,
+   "via": null
+  },
+  {
+   "chunk": "regulator vaccination use",
+   "decision": "no offered term in the replacement",
+   "heard": "regulator vaccination use",
+   "offered": [],
+   "repl": "atorvastatin use",
+   "result": "regulator vaccination use",
+   "runs": [
+    "q9-fx-gloss"
+   ],
+   "sim": 0.6842105263157895,
+   "via": null
+  },
+  {
+   "chunk": "regulator vaccination use",
+   "decision": "no offered term in the replacement",
+   "heard": "regulator vaccination use",
+   "offered": [],
+   "repl": "regular medication use",
+   "result": "regulator vaccination use",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": 0.7441860465116279,
+   "via": null
+  },
+  {
+   "chunk": "regulator vaccination",
+   "decision": "no offered term in the replacement",
+   "heard": "regulator vaccination",
+   "offered": [
+    {
+     "term": "type 2 diabetes",
+     "window": "2 diabetes"
+    },
+    {
+     "term": "nystatin",
+     "window": "no studying"
+    }
+   ],
+   "repl": "regimen vaccination",
+   "result": "regulator vaccination",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.7368421052631579,
+   "via": null
+  },
+  {
+   "chunk": "regulator vaccination",
+   "decision": "no offered term in the replacement",
+   "heard": "regulator vaccination",
+   "offered": [
+    {
+     "term": "type 2 diabetes",
+     "window": "2 diabetes"
+    }
+   ],
+   "repl": "regimen vaccination",
+   "result": "regulator vaccination",
+   "runs": [
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.7368421052631579,
+   "via": null
+  },
+  {
+   "chunk": "regulator vaccination",
+   "decision": "no offered term in the replacement",
+   "heard": "regulator vaccination",
+   "offered": [],
+   "repl": "regimen vaccination",
+   "result": "regulator vaccination",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 0.7368421052631579,
+   "via": null
+  },
+  {
+   "chunk": "residual diagnosis",
+   "decision": "no offered term in the replacement",
+   "heard": "residual diagnosis",
+   "offered": [],
+   "repl": "residual diagnoses",
+   "result": "residual diagnosis",
+   "runs": [
+    "q4-fx-none"
+   ],
+   "sim": 0.9411764705882353,
+   "via": null
+  },
+  {
+   "chunk": "residual diagnosis",
+   "decision": "no offered term in the replacement",
+   "heard": "residual diagnosis",
+   "offered": [],
+   "repl": "residual diagnosis",
+   "result": "residual diagnosis",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "respiratory red",
+   "decision": "no offered term in the replacement",
+   "heard": "respiratory red",
+   "offered": [],
+   "repl": "respiratory rate",
+   "result": "respiratory red",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": 0.896551724137931,
+   "via": null
+  },
+  {
+   "chunk": "respiratory red",
+   "decision": "no offered term in the replacement",
+   "heard": "respiratory red",
+   "offered": [
+    {
+     "term": "preventer",
+     "window": "prevented use"
+    },
+    {
+     "term": "angina",
+     "window": "doing in"
+    }
+   ],
+   "repl": "respiratory red flags",
+   "result": "respiratory red",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.8484848484848485,
+   "via": null
+  },
+  {
+   "chunk": "respiratory red",
+   "decision": "no offered term in the replacement",
+   "heard": "respiratory red",
+   "offered": [
+    {
+     "term": "preventer",
+     "window": "prevented use"
+    }
+   ],
+   "repl": "respiratory red flags",
+   "result": "respiratory red",
+   "runs": [
+    "q5-fx-both",
+    "t-fx-both"
+   ],
+   "sim": 0.8484848484848485,
+   "via": null
+  },
+  {
+   "chunk": "respiratory red",
+   "decision": "no offered term in the replacement",
+   "heard": "respiratory red",
+   "offered": [],
+   "repl": "respiratory red flags",
+   "result": "respiratory red",
+   "runs": [
+    "q5-fx-gloss",
+    "q9-fx-gloss"
+   ],
+   "sim": 0.8484848484848485,
+   "via": null
+  },
+  {
+   "chunk": "respiratory red",
+   "decision": "no offered term in the replacement",
+   "heard": "respiratory red",
+   "offered": [],
+   "repl": "respiratory red",
+   "result": "respiratory red",
+   "runs": [
+    "q4-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "respiratory",
+   "decision": "no offered term in the replacement",
+   "heard": "respiratory",
+   "offered": [],
+   "repl": "respiratory",
+   "result": "respiratory",
+   "runs": [
+    "q4-fx-none"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "same",
+   "decision": "no offered term in the replacement",
+   "heard": "same",
+   "offered": [
+    {
+     "term": "SGLT2",
+     "window": "so could"
+    },
+    {
+     "term": "chronic kidney disease",
+     "window": "chronic conditions"
+    }
+   ],
+   "repl": "same",
+   "result": "same",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "semaglal diet",
+   "decision": "accepted",
+   "heard": "semaglal diet",
+   "offered": [
+    {
+     "term": "semaglutide",
+     "window": "semaglal diet"
+    },
+    {
+     "term": "chronic kidney disease",
+     "window": "chronic conditions"
+    },
+    {
+     "term": "chronic kidney disease",
+     "window": "chronic conditions"
+    }
+   ],
+   "repl": "semaglutide",
+   "result": "semaglutide",
+   "runs": [
+    "c-fx-both",
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "q9-fx-both",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.6956521739130435,
+   "via": {
+    "term": "semaglutide",
+    "window": "semaglal diet"
+   }
+  },
+  {
+   "chunk": "semaglal diet",
+   "decision": "accepted",
+   "heard": "semaglal diet",
+   "offered": [
+    {
+     "term": "semaglutide",
+     "window": "semaglal diet"
+    },
+    {
+     "term": "gout",
+     "window": "quite a"
+    },
+    {
+     "term": "candesartan",
+     "window": "can treat"
+    },
+    {
+     "term": "chronic kidney disease",
+     "window": "chronic conditions"
+    },
+    {
+     "term": "chronic kidney disease",
+     "window": "chronic conditions"
+    },
+    {
+     "term": "type 2 diabetes",
+     "window": "the patients"
+    }
+   ],
+   "repl": "semaglutide",
+   "result": "semaglutide",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.6956521739130435,
+   "via": {
+    "term": "semaglutide",
+    "window": "semaglal diet"
+   }
+  },
+  {
+   "chunk": "semaglal diet",
+   "decision": "no offered term in the replacement",
+   "heard": "semaglal diet",
+   "offered": [],
+   "repl": "semaglutide",
+   "result": "semaglal diet",
+   "runs": [
+    "q9-fx-gloss",
+    "q9-fx-none"
+   ],
+   "sim": 0.6956521739130435,
+   "via": null
+  },
+  {
+   "chunk": "semaglal",
+   "decision": "no offered term in the replacement",
+   "heard": "semaglal",
+   "offered": [],
+   "repl": "semaglutide",
+   "result": "semaglal",
+   "runs": [
+    "c-fx-gloss",
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 0.631578947368421,
+   "via": null
+  },
+  {
+   "chunk": "semaglotide",
+   "decision": "accepted",
+   "heard": "semaglotide",
+   "offered": [
+    {
+     "term": "semaglutide",
+     "window": "semaglotide"
+    },
+    {
+     "term": "GLP-1",
+     "window": "GLP 1 is"
+    },
+    {
+     "term": "insulin aspart",
+     "window": "insulin But"
+    },
+    {
+     "term": "amiodarone",
+     "window": "older one"
+    }
+   ],
+   "repl": "semaglutide",
+   "result": "semaglutide",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.9090909090909091,
+   "via": {
+    "term": "semaglutide",
+    "window": "semaglotide"
+   }
+  },
+  {
+   "chunk": "semaglotide",
+   "decision": "accepted",
+   "heard": "semaglotide",
+   "offered": [
+    {
+     "term": "semaglutide",
+     "window": "semaglotide"
+    },
+    {
+     "term": "insulin aspart",
+     "window": "insulin But now"
+    }
+   ],
+   "repl": "semaglutide",
+   "result": "semaglutide",
+   "runs": [
+    "c-fx-both",
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "q9-fx-both",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 0.9090909090909091,
+   "via": {
+    "term": "semaglutide",
+    "window": "semaglotide"
+   }
+  },
+  {
+   "chunk": "semaglotide",
+   "decision": "no offered term in the replacement",
+   "heard": "semaglotide",
+   "offered": [],
+   "repl": "semaglutide",
+   "result": "semaglotide",
+   "runs": [
+    "c-fx-gloss",
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-gloss",
+    "q9-fx-gloss",
+    "q9-fx-none",
+    "t-fx-gloss"
+   ],
+   "sim": 0.9090909090909091,
+   "via": null
+  },
+  {
+   "chunk": "side effects",
+   "decision": "no offered term in the replacement",
+   "heard": "side effects",
+   "offered": [],
+   "repl": "side effect",
+   "result": "side effects",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": 0.9523809523809523,
+   "via": null
+  },
+  {
+   "chunk": "so could",
+   "decision": "similarity below 0.6",
+   "heard": "so could",
+   "offered": [
+    {
+     "term": "SGLT2",
+     "window": "so could"
+    },
+    {
+     "term": "chronic kidney disease",
+     "window": "chronic conditions"
+    }
+   ],
+   "repl": "SGLT2",
+   "result": "so could",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 0.3333333333333333,
+   "via": null
+  },
+  {
+   "chunk": "some nodes",
+   "decision": "no offered term in the replacement",
+   "heard": "some nodes",
+   "offered": [
+    {
+     "term": "terbutaline",
+     "window": "their baseline"
+    },
+    {
+     "term": "wheeze",
+     "window": "weight So"
+    },
+    {
+     "term": "inhaler",
+     "window": "in their"
+    },
+    {
+     "term": "angina",
+     "window": "are gonna"
+    }
+   ],
+   "repl": "some notes",
+   "result": "some nodes",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.8888888888888888,
+   "via": null
+  },
+  {
+   "chunk": "some nodes",
+   "decision": "no offered term in the replacement",
+   "heard": "some nodes",
+   "offered": [],
+   "repl": "some nurses",
+   "result": "some nodes",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": 0.7368421052631579,
+   "via": null
+  },
+  {
+   "chunk": "stalls",
+   "decision": "no offered term in the replacement",
+   "heard": "stalls",
+   "offered": [
+    {
+     "term": "clonidine",
+     "window": "clinician"
+    },
+    {
+     "term": "adrenaline",
+     "window": "it During an"
+    },
+    {
+     "term": "type 2 diabetes",
+     "window": "the patient's"
+    },
+    {
+     "term": "type 2 diabetes",
+     "window": "the patient's"
+    }
+   ],
+   "repl": "stalls",
+   "result": "stalls",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "stalls",
+   "decision": "no offered term in the replacement",
+   "heard": "stalls",
+   "offered": [
+    {
+     "term": "clonidine",
+     "window": "clinician"
+    }
+   ],
+   "repl": "stalls",
+   "result": "stalls",
+   "runs": [
+    "c-fx-both",
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "stalls",
+   "decision": "similarity below 0.6",
+   "heard": "stalls",
+   "offered": [
+    {
+     "term": "clonidine",
+     "window": "clinician"
+    }
+   ],
+   "repl": "stints",
+   "result": "stalls",
+   "runs": [
+    "q5-fx-lookup-nofacts"
+   ],
+   "sim": 0.5,
+   "via": null
+  },
+  {
+   "chunk": "step down",
+   "decision": "no offered term in the replacement",
+   "heard": "step down",
+   "offered": [],
+   "repl": "step-down",
+   "result": "step down",
+   "runs": [
+    "q4-fx-none"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "store the data",
+   "decision": "no offered term in the replacement",
+   "heard": "store the data",
+   "offered": [],
+   "repl": "store the drug",
+   "result": "store the data",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": 0.75,
+   "via": null
+  },
+  {
+   "chunk": "studying associated",
+   "decision": "no offered term in the replacement",
+   "heard": "studying associated",
+   "offered": [],
+   "repl": "statin associated",
+   "result": "studying associated",
+   "runs": [
+    "q9-fx-gloss",
+    "q9-fx-none"
+   ],
+   "sim": 0.8235294117647058,
+   "via": null
+  },
+  {
+   "chunk": "studying associated",
+   "decision": "no offered term in the replacement",
+   "heard": "studying associated",
+   "offered": [],
+   "repl": "studying associated",
+   "result": "studying associated",
+   "runs": [
+    "q4-fx-none"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "studying",
+   "decision": "similarity below 0.6",
+   "heard": "studying",
+   "offered": [],
+   "repl": "statutory",
+   "result": "studying",
+   "runs": [
+    "q4-fx-gloss",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 0.47058823529411764,
+   "via": null
+  },
+  {
+   "chunk": "studying",
+   "decision": "no offered term in the replacement",
+   "heard": "studying",
+   "offered": [
+    {
+     "term": "type 2 diabetes",
+     "window": "2 diabetes"
+    }
+   ],
+   "repl": "studying",
+   "result": "studying",
+   "runs": [
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "the pharmacy",
+   "decision": "similarity below 0.6",
+   "heard": "the pharmacy",
+   "offered": [
+    {
+     "term": "polypharmacy",
+     "window": "the pharmacy"
+    }
+   ],
+   "repl": "the clinical records",
+   "result": "the pharmacy",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.41379310344827586,
+   "via": null
+  },
+  {
+   "chunk": "the usual GP.",
+   "decision": "no offered term in the replacement",
+   "heard": "the usual GP.",
+   "offered": [],
+   "repl": "the usual GP.",
+   "result": "the usual GP.",
+   "runs": [
+    "q4-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "they didn't",
+   "decision": "similarity below 0.6",
+   "heard": "they didn't",
+   "offered": [
+    {
+     "term": "type 2 diabetes",
+     "window": "them had diabetes"
+    },
+    {
+     "term": "insulin detemir",
+     "window": "insulin they didn't"
+    }
+   ],
+   "repl": "insulin detemir",
+   "result": "they didn't",
+   "runs": [
+    "q9-fx-both"
+   ],
+   "sim": 0.2608695652173913,
+   "via": null
+  },
+  {
+   "chunk": "time to check",
+   "decision": "no offered term in the replacement",
+   "heard": "time to check",
+   "offered": [
+    {
+     "term": "MedsCheck",
+     "window": "time to check"
+    },
+    {
+     "term": "chronic kidney disease",
+     "window": "chronic condition"
+    }
+   ],
+   "repl": "time to check",
+   "result": "time to check",
+   "runs": [
+    "c-fx-both",
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "to check",
+   "decision": "accepted",
+   "heard": "to check",
+   "offered": [
+    {
+     "term": "polypharmacy",
+     "window": "the pharmacy"
+    },
+    {
+     "term": "MedsCheck",
+     "window": "to check"
+    }
+   ],
+   "repl": "MedsCheck",
+   "result": "MedsCheck",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 0.625,
+   "via": {
+    "term": "MedsCheck",
+    "window": "to check"
+   }
+  },
+  {
+   "chunk": "too badly",
+   "decision": "no offered term in the replacement",
+   "heard": "too badly",
+   "offered": [],
+   "repl": "too bad",
+   "result": "too badly",
+   "runs": [
+    "q9-fx-both",
+    "q9-fx-gloss",
+    "q9-fx-none"
+   ],
+   "sim": 0.8571428571428571,
+   "via": null
+  },
+  {
+   "chunk": "two I2 diagnosis",
+   "decision": "no offered term in the replacement",
+   "heard": "two I2 diagnosis",
+   "offered": [],
+   "repl": "two ICD diagnosis",
+   "result": "two I2 diagnosis",
+   "runs": [
+    "q9-fx-both",
+    "q9-fx-gloss",
+    "q9-fx-none"
+   ],
+   "sim": 0.896551724137931,
+   "via": null
+  },
+  {
+   "chunk": "two meters long",
+   "decision": "no offered term in the replacement",
+   "heard": "two meters long",
+   "offered": [],
+   "repl": "two meters tall",
+   "result": "two meters long",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": 0.7692307692307693,
+   "via": null
+  },
+  {
+   "chunk": "two meters long",
+   "decision": "no offered term in the replacement",
+   "heard": "two meters long",
+   "offered": [],
+   "repl": "two metres long",
+   "result": "two meters long",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-both",
+    "q5-fx-gloss",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-both",
+    "t-fx-gloss",
+    "t-fx-lookup"
+   ],
+   "sim": 0.9230769230769231,
+   "via": null
+  },
+  {
+   "chunk": "under control",
+   "decision": "no offered term in the replacement",
+   "heard": "under control",
+   "offered": [],
+   "repl": "uncontrolled",
+   "result": "under control",
+   "runs": [
+    "q9-fx-gloss"
+   ],
+   "sim": 0.75,
+   "via": null
+  },
+  {
+   "chunk": "under control",
+   "decision": "no offered term in the replacement",
+   "heard": "under control",
+   "offered": [
+    {
+     "term": "type 2 diabetes",
+     "window": "them had diabetes"
+    },
+    {
+     "term": "insulin detemir",
+     "window": "insulin they didn't"
+    }
+   ],
+   "repl": "under control",
+   "result": "under control",
+   "runs": [
+    "c-fx-both",
+    "q5-fx-both",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-both",
+    "t-fx-lookup"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "under control",
+   "decision": "no offered term in the replacement",
+   "heard": "under control",
+   "offered": [],
+   "repl": "under control",
+   "result": "under control",
+   "runs": [
+    "c-fx-gloss",
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-gloss",
+    "t-fx-gloss"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "use",
+   "decision": "no offered term in the replacement",
+   "heard": "use",
+   "offered": [],
+   "repl": "use",
+   "result": "use",
+   "runs": [
+    "q4-fx-none"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "usual ability",
+   "decision": "no offered term in the replacement",
+   "heard": "usual ability",
+   "offered": [
+    {
+     "term": "polypharmacy",
+     "window": "the pharmacy"
+    },
+    {
+     "term": "MedsCheck",
+     "window": "to check"
+    },
+    {
+     "term": "bioavailability",
+     "window": "usual ability"
+    }
+   ],
+   "repl": "usual ability",
+   "result": "usual ability",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "usual ability",
+   "decision": "no offered term in the replacement",
+   "heard": "usual ability",
+   "offered": [
+    {
+     "term": "bioavailability",
+     "window": "usual ability"
+    }
+   ],
+   "repl": "usual ability",
+   "result": "usual ability",
+   "runs": [
+    "q5-fx-lookup-nofacts"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "volume of",
+   "decision": "similarity below 0.6",
+   "heard": "volume of",
+   "offered": [],
+   "repl": "BMI of",
+   "result": "volume of",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": 0.46153846153846156,
+   "via": null
+  },
+  {
+   "chunk": "volume of",
+   "decision": "no offered term in the replacement",
+   "heard": "volume of",
+   "offered": [],
+   "repl": "volume of",
+   "result": "volume of",
+   "runs": [
+    "q9-fx-gloss"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "walk-intolerance",
+   "decision": "no offered term in the replacement",
+   "heard": "walk-intolerance",
+   "offered": [
+    {
+     "term": "angina",
+     "window": "anemia any"
+    }
+   ],
+   "repl": "walk intolerance",
+   "result": "walk-intolerance",
+   "runs": [
+    "q5-fx-both",
+    "q9-fx-both",
+    "t-fx-both"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "walk-intolerance",
+   "decision": "no offered term in the replacement",
+   "heard": "walk-intolerance",
+   "offered": [
+    {
+     "term": "pravastatin",
+     "window": "present in"
+    },
+    {
+     "term": "angina",
+     "window": "anemia any"
+    }
+   ],
+   "repl": "walk intolerance",
+   "result": "walk-intolerance",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "walk-intolerance",
+   "decision": "no offered term in the replacement",
+   "heard": "walk-intolerance",
+   "offered": [],
+   "repl": "walk intolerance",
+   "result": "walk-intolerance",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-gloss",
+    "q9-fx-gloss",
+    "q9-fx-none",
+    "t-fx-gloss"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "walking leaders",
+   "decision": "no offered term in the replacement",
+   "heard": "walking leaders",
+   "offered": [],
+   "repl": "walking aids",
+   "result": "walking leaders",
+   "runs": [
+    "q9-fx-none"
+   ],
+   "sim": 0.8,
+   "via": null
+  },
+  {
+   "chunk": "walking leaders",
+   "decision": "no offered term in the replacement",
+   "heard": "walking leaders",
+   "offered": [
+    {
+     "term": "MedsCheck",
+     "window": "need to check"
+    }
+   ],
+   "repl": "walking leaders",
+   "result": "walking leaders",
+   "runs": [
+    "c-fx-both",
+    "q5-fx-both",
+    "q9-fx-both",
+    "t-fx-both"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "walking leaders",
+   "decision": "no offered term in the replacement",
+   "heard": "walking leaders",
+   "offered": [],
+   "repl": "walking leaders",
+   "result": "walking leaders",
+   "runs": [
+    "q4-fx-none"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "walking leaders",
+   "decision": "no offered term in the replacement",
+   "heard": "walking leaders",
+   "offered": [],
+   "repl": "walking levels",
+   "result": "walking leaders",
+   "runs": [
+    "q9-fx-gloss"
+   ],
+   "sim": 0.8148148148148148,
+   "via": null
+  },
+  {
+   "chunk": "walks to",
+   "decision": "similarity below 0.6",
+   "heard": "walks to",
+   "offered": [
+    {
+     "term": "MedsCheck",
+     "window": "to check"
+    },
+    {
+     "term": "folic acid",
+     "window": "walks to"
+    }
+   ],
+   "repl": "takes",
+   "result": "walks to",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 0.5,
+   "via": null
+  },
+  {
+   "chunk": "walks to",
+   "decision": "no offered term in the replacement",
+   "heard": "walks to",
+   "offered": [
+    {
+     "term": "MedsCheck",
+     "window": "to check"
+    },
+    {
+     "term": "folic acid",
+     "window": "walks to"
+    }
+   ],
+   "repl": "walks to",
+   "result": "walks to",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "weight is",
+   "decision": "similarity below 0.6",
+   "heard": "weight is",
+   "offered": [
+    {
+     "term": "wheeze",
+     "window": "weight is"
+    }
+   ],
+   "repl": "wheeze is",
+   "result": "weight is",
+   "runs": [
+    "q4-fx-both",
+    "q4-fx-lookup"
+   ],
+   "sim": 0.5,
+   "via": null
+  },
+  {
+   "chunk": "weight the patient",
+   "decision": "no offered term in the replacement",
+   "heard": "weight the patient",
+   "offered": [
+    {
+     "term": "terbutaline",
+     "window": "their baseline"
+    },
+    {
+     "term": "wheeze",
+     "window": "weight So"
+    },
+    {
+     "term": "inhaler",
+     "window": "in their"
+    },
+    {
+     "term": "angina",
+     "window": "are gonna"
+    }
+   ],
+   "repl": "weigh the patient",
+   "result": "weight the patient",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": 0.967741935483871,
+   "via": null
+  },
+  {
+   "chunk": "weight the patient",
+   "decision": "no offered term in the replacement",
+   "heard": "weight the patient",
+   "offered": [],
+   "repl": "weigh the patient",
+   "result": "weight the patient",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-both",
+    "q5-fx-gloss",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "q9-fx-none",
+    "t-fx-both",
+    "t-fx-gloss",
+    "t-fx-lookup"
+   ],
+   "sim": 0.967741935483871,
+   "via": null
+  },
+  {
+   "chunk": "weight them",
+   "decision": "no offered term in the replacement",
+   "heard": "weight them",
+   "offered": [
+    {
+     "term": "terbutaline",
+     "window": "their baseline"
+    },
+    {
+     "term": "wheeze",
+     "window": "weight So"
+    },
+    {
+     "term": "inhaler",
+     "window": "in their"
+    },
+    {
+     "term": "angina",
+     "window": "are gonna"
+    }
+   ],
+   "repl": "weigh them",
+   "result": "weight them",
+   "runs": [
+    "q4-fx-both"
+   ],
+   "sim": 0.9473684210526315,
+   "via": null
+  },
+  {
+   "chunk": "weight them",
+   "decision": "no offered term in the replacement",
+   "heard": "weight them",
+   "offered": [],
+   "repl": "weigh them",
+   "result": "weight them",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-both",
+    "q5-fx-gloss",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "q9-fx-none",
+    "t-fx-both",
+    "t-fx-gloss",
+    "t-fx-lookup"
+   ],
+   "sim": 0.9473684210526315,
+   "via": null
+  },
+  {
+   "chunk": "weight them",
+   "decision": "no offered term in the replacement",
+   "heard": "weight them",
+   "offered": [
+    {
+     "term": "terbutaline",
+     "window": "their baseline"
+    },
+    {
+     "term": "wheeze",
+     "window": "weight So"
+    },
+    {
+     "term": "inhaler",
+     "window": "in their"
+    },
+    {
+     "term": "angina",
+     "window": "are gonna"
+    }
+   ],
+   "repl": "weight them",
+   "result": "weight them",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "which normally walks",
+   "decision": "no offered term in the replacement",
+   "heard": "which normally walks",
+   "offered": [],
+   "repl": "which normally walks",
+   "result": "which normally walks",
+   "runs": [
+    "c-fx-both",
+    "c-fx-gloss",
+    "q4-fx-gloss",
+    "q5-fx-both",
+    "q5-fx-gloss",
+    "t-fx-both",
+    "t-fx-gloss"
+   ],
+   "sim": 1.0,
+   "via": null
+  },
+  {
+   "chunk": "without that",
+   "decision": "no offered term in the replacement",
+   "heard": "without that",
+   "offered": [],
+   "repl": "without it",
+   "result": "without that",
+   "runs": [
+    "q4-fx-gloss",
+    "q4-fx-none",
+    "q5-fx-both",
+    "q5-fx-gloss",
+    "q5-fx-lookup",
+    "q5-fx-lookup-nofacts",
+    "t-fx-both",
+    "t-fx-gloss",
+    "t-fx-lookup"
+   ],
+   "sim": 0.8,
+   "via": null
+  },
+  {
+   "chunk": "you do",
+   "decision": "similarity below 0.6",
+   "heard": "you do",
+   "offered": [
+    {
+     "term": "NSAID",
+     "window": "NSAIDs"
+    },
+    {
+     "term": "heart failure",
+     "window": "Heart failure could"
+    },
+    {
+     "term": "breathlessness",
+     "window": "breadness"
+    },
+    {
+     "term": "reliever",
+     "window": "really severe"
+    },
+    {
+     "term": "fluoxetine",
+     "window": "will examine"
+    },
+    {
+     "term": "depression",
+     "window": "there is no"
+    }
+   ],
+   "repl": "do",
+   "result": "you do",
+   "runs": [
+    "q4-fx-lookup"
+   ],
+   "sim": 0.5714285714285714,
+   "via": null
+  }
+ ],
+ "span_limit": {
+  "max_chars": 32,
+  "max_words": 4
+ }
+}
