@@ -36,19 +36,27 @@ pub(crate) fn display_width(text: &str) -> usize {
 /// text from the engine can't move the cursor or reorder the screen.
 /// An empty `text` is no lines.
 pub(crate) fn wrap(text: &str, width: usize) -> Vec<String> {
+    wrap_hanging(text, width, width)
+}
+
+/// [`wrap`], with the first line `first` columns wide and the rest `rest`,
+/// as for a hanging indent.
+pub(crate) fn wrap_hanging(text: &str, first: usize, rest: usize) -> Vec<String> {
     let mut lines = Vec::new();
-    if width == 0 {
-        return lines;
-    }
     let mut line = String::new();
     let mut line_width = 0;
+    // The room of the line being filled: `first` until a line is done.
+    let room = |lines: &Vec<String>| if lines.is_empty() { first } else { rest };
+    if first == 0 || rest == 0 {
+        return lines;
+    }
     for word in text.split_whitespace() {
         let word: String = word.chars().filter(|&c| is_drawn(c)).collect();
         let word_width = display_width(&word);
         if word_width == 0 {
             continue;
         }
-        if line_width > 0 && line_width + 1 + word_width <= width {
+        if line_width > 0 && line_width + 1 + word_width <= room(&lines) {
             line.push(' ');
             line.push_str(&word);
             line_width += 1 + word_width;
@@ -60,7 +68,7 @@ pub(crate) fn wrap(text: &str, width: usize) -> Vec<String> {
         }
         // The word starts a line; break it if it's too wide for one.
         for (grapheme, grapheme_width) in graphemes(&word) {
-            if line_width + grapheme_width > width && line_width > 0 {
+            if line_width + grapheme_width > room(&lines) && line_width > 0 {
                 lines.push(std::mem::take(&mut line));
                 line_width = 0;
             }
@@ -105,6 +113,19 @@ mod tests {
         // Exactly full lines.
         assert_eq!(wrap("abcde fghij", 5), ["abcde", "fghij"]);
         assert_eq!(wrap("ab cd", 5), ["ab cd"]);
+    }
+
+    /// A hanging wrap fills its first line to `first` and the rest to
+    /// `rest`, and breaks a word too long for either between them without
+    /// adding anything.
+    #[test]
+    fn a_hanging_wrap_gives_its_first_line_its_own_width() {
+        assert_eq!(
+            wrap_hanging("the quick brown fox jumps", 15, 9),
+            ["the quick brown", "fox jumps"]
+        );
+        assert_eq!(wrap_hanging("abcdefghij", 6, 3), ["abcdef", "ghi", "j"]);
+        assert!(wrap_hanging("anything", 5, 0).is_empty());
     }
 
     #[test]

@@ -296,16 +296,7 @@ pub(crate) fn held_notes(held: &nota_recorder::segment::Published) -> Vec<String
     }
     notes.extend(cleanup_notes(held));
     notes.extend(finding_notes(held));
-    for (path, kind) in held.temps_kept() {
-        if held.blocked().contains(&(path.clone(), *kind)) {
-            continue;
-        }
-        notes.push(format!(
-            "{}: couldn't remove the temporary file ({})",
-            file_name(path),
-            file_cause(*kind)
-        ));
-    }
+    notes.extend(kept_temp_notes(held));
     for (journal, kind) in held.unread() {
         // What it holds isn't known, so it's neither published nor lost.
         notes.push(format!(
@@ -315,6 +306,22 @@ pub(crate) fn held_notes(held: &nota_recorder::segment::Published) -> Vec<String
         ));
     }
     notes
+}
+
+/// Names the segment temp files salvage couldn't remove that block no
+/// segment: [`held_notes`] names one that does with its segment's note.
+pub(crate) fn kept_temp_notes(held: &nota_recorder::segment::Published) -> Vec<String> {
+    held.temps_kept()
+        .iter()
+        .filter(|&kept| !held.blocked().contains(kept))
+        .map(|(path, kind)| {
+            format!(
+                "{}: couldn't remove the temporary file ({})",
+                file_name(path),
+                file_cause(*kind)
+            )
+        })
+        .collect()
 }
 
 /// Names rows that still hold a journal's audio back.
@@ -854,15 +861,18 @@ pub(super) mod tests {
     }
 
     /// The summary names each file the publisher holds once, with its
-    /// cause, however the failures combine. Only the system track's journal
-    /// is counted unpublished, and only while its audio is held back: the
-    /// mic's is saved, only not deleted.
+    /// cause, however the failures combine, even when every run stops on an
+    /// error. Only the system track's journal is counted unpublished, and
+    /// only while its audio is held back: the mic's is saved, only not
+    /// deleted.
     #[test]
     fn the_summary_names_each_held_file_once_across_combined_failures() {
-        use crate::library::held::{Beside, Held};
+        use crate::library::held::{Beside, Held, STOPPED};
         let mic = "journal-000000: couldn't delete it (permission denied); \
                    all its audio is published";
         let left = "1 journal wasn't published; the next start salvages it";
+        // A run that stops says why beside the count.
+        let left_stopped = format!("{left} (last error: {STOPPED})");
         for beside in Beside::ALL {
             let report = Held::new(beside).published();
             let mut outcome = Outcome::new(SessionId::new(1), PathBuf::new());
@@ -872,6 +882,9 @@ pub(super) mod tests {
             // publishing reports one in its way as a blocked name, and
             // never looks at one no segment uses.
             let expected: Vec<&str> = match beside {
+                // The publisher's last run stopped after it found the mic's
+                // journal published but not deleted.
+                Beside::Fails => vec![&left_stopped, mic],
                 Beside::Blocked => vec![
                     left,
                     "seg-t1-000000000000.flac: a directory is in the way; \
@@ -886,8 +899,9 @@ pub(super) mod tests {
                 ],
                 Beside::StrayTemp => vec![mic],
                 Beside::Unread | Beside::Unrepaired => {
-                    let [first, second] = beside.held_at_start();
-                    vec![left, first, second]
+                    let mut expected = vec![left];
+                    expected.extend(beside.held_at_start());
+                    expected
                 }
             };
             let held_back = beside != Beside::StrayTemp;

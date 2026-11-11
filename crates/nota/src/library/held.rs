@@ -6,7 +6,9 @@
 //!
 //! Each session records the mic and the system audio, one short journal
 //! each. The mic's journal is fully published but can't be deleted; the
-//! system track's audio is held back as [`Beside`] says.
+//! system track's audio is held back as [`Beside`] says, or, in
+//! [`Beside::Fails`], stops every run on an error once the mic's is
+//! published.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -32,6 +34,11 @@ const MIC: TrackId = TrackId::new(0);
 const SYSTEM: TrackId = TrackId::new(1);
 /// The error every refused operation gives.
 const REFUSED: io::ErrorKind = io::ErrorKind::PermissionDenied;
+/// The error that stops a run: not one name's, as a failing sector's `EIO`
+/// isn't (the fake disk can't give `EIO` itself).
+const STOPS: io::ErrorKind = io::ErrorKind::Other;
+/// What every report says stopped a [`Beside::Fails`] run.
+pub(crate) const STOPPED: &str = "publishing a segment failed: injected failure";
 
 /// What holds the system track's audio back, beside the mic's journal that
 /// can't be deleted.
@@ -50,52 +57,65 @@ pub(crate) enum Beside {
     /// The system track's segment was published, then changed, and the
     /// changed file can't be moved aside to repair it.
     Unrepaired,
+    /// The system track's segment temp can't be created, for an error that
+    /// isn't its name's, so every run stops there with [`STOPPED`], after
+    /// the mic's segment is published.
+    Fails,
 }
 
 impl Beside {
     /// What startup and Home must say of the files salvage holds: each
     /// named once, with its cause, and the mic's journal never called
-    /// unpublished.
-    pub(crate) fn held_at_start(self) -> [&'static str; 2] {
+    /// unpublished. A run that stops says why first ([`Self::stops`]).
+    pub(crate) fn held_at_start(self) -> Vec<&'static str> {
         let mic = "journal-000000: couldn't delete it (permission denied); \
                    all its audio is published";
         match self {
-            Self::Blocked => [
+            Self::Blocked => vec![
                 "seg-t1-000000000000.flac: a directory is in the way; \
                  its audio is still to publish",
                 mic,
             ],
-            Self::TempKept => [
+            Self::TempKept => vec![
                 "seg-t1-000000000000.flac.tmp: couldn't remove the temporary file \
                  (permission denied); its audio is still to publish",
                 mic,
             ],
-            Self::StrayTemp => [
+            Self::StrayTemp => vec![
                 mic,
                 "seg-t5-000000000000.flac.tmp: couldn't remove the temporary file \
                  (permission denied)",
             ],
-            Self::Unread => [
+            Self::Unread => vec![
                 mic,
                 "journal-000001: couldn't read it (permission denied); \
                  it's kept, and nota tries again when it starts",
             ],
-            Self::Unrepaired => [
+            Self::Unrepaired => vec![
                 mic,
                 "seg-t1-000000000000.flac: the segment file doesn't match its stored \
                  audio; couldn't repair it (permission denied); \
                  its journals are still to publish",
             ],
+            // The run stops on the system track: what holds it back is the
+            // error, said before this.
+            Self::Fails => vec![mic],
         }
     }
 
+    /// Whether every run over the session stops on an error.
+    pub(crate) fn stops(self) -> bool {
+        self == Self::Fails
+    }
+
     /// Every scenario, so a test covers them all.
-    pub(crate) const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 6] = [
         Self::Blocked,
         Self::TempKept,
         Self::StrayTemp,
         Self::Unread,
         Self::Unrepaired,
+        Self::Fails,
     ];
 }
 
@@ -127,7 +147,19 @@ impl Held {
             Beside::StrayTemp => held.plant_stuck_temp(&stray_temp()),
             Beside::Unread => held.fs.fail_on(&system, Fault::Read, REFUSED),
             Beside::Unrepaired => held.break_system_segment(),
+            Beside::Fails => held.fs.fail_on(&system_temp(), Fault::Create, STOPS),
         }
+        held
+    }
+
+    /// A session salvage publishes whole, except for a segment temp file
+    /// no planned segment uses, which it can't remove: the only file it
+    /// holds.
+    pub(crate) fn only_a_kept_temp() -> Self {
+        let fs = FakeFs::with_dirs([audio(), rows_dir()]);
+        let journals = record(&fs);
+        let held = Self { fs, journals };
+        held.plant_stuck_temp(&stray_temp());
         held
     }
 
