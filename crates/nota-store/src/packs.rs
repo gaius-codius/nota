@@ -26,21 +26,38 @@
 //! `application_id` says the file is a nota pack, so a library database
 //! or any other SQLite file is refused. Tables a reader doesn't know are
 //! ignored: one-line facts can come later as a table of their own without
-//! a new format version. A pack is built in memory and written whole by
+//! a new format version. The digest covers only the four tables below, so
+//! a later table that changes what a pack offers needs a new format and a
+//! new digest tag, not only a table. A pack is built in memory and written whole by
 //! SQLite's `VACUUM INTO`, which writes pages in order with no journal, so
 //! the same rows give the same bytes from the same SQLite. It's a build
 //! output, not a recording or the library database, so it doesn't go
 //! through the durable-write layer: a build that fails leaves a file to
 //! delete and run again, and nothing is lost.
+//!
+//! **Its digest.** Every pack has a [`PackDigest`]: the SHA-256 of its
+//! manifest and rows in one fixed encoding, so the same manifest and rows
+//! give the same digest in any order and from any SQLite. A session
+//! records the digest with the pack's name and version ([`PackRef`]), so
+//! a pack rebuilt with other rows, or as another kind, under the same
+//! version isn't taken for the one the session used. The file keeps the
+//! digest in its manifest, and [`Pack::open`] works it out again from the
+//! rows it read and refuses a file whose stored digest isn't that.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::Path;
 
 use rusqlite::{Connection, OpenFlags, params};
+use sha2::{Digest as _, Sha256};
 
-/// The pack format this code writes and reads.
-pub const FORMAT: i64 = 1;
+/// The pack format this code writes and reads. Format 1 had no digest; a
+/// pack in it is built again from its lists.
+pub const FORMAT: i64 = 2;
+
+/// What the digest's encoding starts with, so a change to the encoding
+/// gets a new tag and can't give an old digest by chance.
+const DIGEST_TAG: &[u8] = b"nota pack digest 1";
 
 /// A pack's `application_id`: "nota" in ASCII.
 const APPLICATION_ID: i32 = 0x6e6f_7461;
@@ -70,7 +87,8 @@ CREATE TABLE manifest (
     name TEXT NOT NULL,
     version TEXT NOT NULL,
     language TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('shipped', 'own'))
+    kind TEXT NOT NULL CHECK (kind IN ('shipped', 'own')),
+    digest BLOB NOT NULL CHECK (length(digest) = 32)
 ) STRICT;
 
 CREATE TABLE source (
@@ -182,8 +200,9 @@ pub struct Source {
 pub struct Manifest {
     /// The pack's name (`pharmacy`), which sessions record it by.
     pub name: String,
-    /// Its version (`2026.11`), which sessions record with the name. A pack
-    /// rebuilt with other rows needs a new one.
+    /// Its version (`2026.11`), which sessions record with the name and
+    /// the pack's digest. A pack rebuilt with other rows should get a new
+    /// one: under the same version it's another pack all the same.
     pub version: String,
     /// The language of its terms (`en`).
     pub language: String,
@@ -194,15 +213,6 @@ pub struct Manifest {
 }
 
 impl Manifest {
-    /// The pack as a session records it.
-    #[must_use]
-    pub fn pack_ref(&self) -> PackRef {
-        PackRef {
-            name: self.name.clone(),
-            version: self.version.clone(),
-        }
-    }
-
     /// The credits for the pack's sources: for each, in id order, its
     /// name, licence, address if it has one, and attribution text. This is
     /// the pack's part of a NOTICE file and of the screen that credits the
@@ -228,13 +238,66 @@ impl Manifest {
     }
 }
 
-/// A pack as a session records it: its name and version.
+/// A pack's digest: the SHA-256 of its manifest (name, version,
+/// language, kind and every field of every source) and its sorted rows,
+/// in a fixed encoding. Only a [`Pack`] works one out, from what it holds;
+/// the store reads back the ones it recorded.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PackDigest([u8; 32]);
+
+impl PackDigest {
+    /// The digest's bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// The digest stored as `bytes`, if they're 32 of them.
+    pub(crate) fn from_stored(bytes: &[u8]) -> Option<Self> {
+        <[u8; 32]>::try_from(bytes).ok().map(Self)
+    }
+}
+
+impl fmt::Display for PackDigest {
+    /// The digest in lower-case hex.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.iter().try_for_each(|b| write!(f, "{b:02x}"))
+    }
+}
+
+impl fmt::Debug for PackDigest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "PackDigest({self})")
+    }
+}
+
+/// A pack as a session records it: its name, version and digest. Only a
+/// [`Pack`] makes one ([`Pack::pack_ref`]), so the digest is always its.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PackRef {
+    name: String,
+    version: String,
+    digest: PackDigest,
+}
+
+impl PackRef {
     /// The manifest's name.
-    pub name: String,
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     /// The manifest's version.
-    pub version: String,
+    #[must_use]
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    /// The pack's digest.
+    #[must_use]
+    pub const fn digest(&self) -> PackDigest {
+        self.digest
+    }
 }
 
 /// A term from one source.
@@ -402,12 +465,13 @@ impl From<rusqlite::Error> for PackError {
 }
 
 /// A valid pack: its manifest and its rows, each list sorted and without
-/// repeats.
+/// repeats, and their digest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pack {
     manifest: Manifest,
     terms: Vec<TermRow>,
     aliases: Vec<AliasRow>,
+    digest: PackDigest,
 }
 
 impl Pack {
@@ -461,10 +525,14 @@ impl Pack {
             |r| (r.term.clone(), r.alias.clone(), r.source.clone()),
             |r| (r.term.clone(), r.source.clone()),
         )?;
+        // Worked out once everything is sorted and checked, so the order
+        // the rows were given in can't change it.
+        let digest = digest_of(&manifest, &terms, &aliases);
         Ok(Self {
             manifest,
             terms,
             aliases,
+            digest,
         })
     }
 
@@ -472,6 +540,22 @@ impl Pack {
     #[must_use]
     pub const fn manifest(&self) -> &Manifest {
         &self.manifest
+    }
+
+    /// The pack's digest: the same for the same manifest and rows.
+    #[must_use]
+    pub const fn digest(&self) -> PackDigest {
+        self.digest
+    }
+
+    /// The pack as a session records it: its name, version and digest.
+    #[must_use]
+    pub fn pack_ref(&self) -> PackRef {
+        PackRef {
+            name: self.manifest.name.clone(),
+            version: self.manifest.version.clone(),
+            digest: self.digest,
+        }
     }
 
     /// Its term rows, sorted by term and source.
@@ -499,7 +583,7 @@ impl Pack {
                 term: row.term.clone(),
                 aliases: Vec::new(),
                 language: self.manifest.language.clone(),
-                pack: self.manifest.pack_ref(),
+                pack: self.pack_ref(),
                 sources: Vec::new(),
                 reviewed: true,
             });
@@ -556,8 +640,14 @@ impl Pack {
     fn insert(&self, tx: &rusqlite::Transaction<'_>) -> Result<(), PackError> {
         let m = &self.manifest;
         tx.execute(
-            "INSERT INTO manifest VALUES (?1, ?2, ?3, ?4)",
-            params![m.name, m.version, m.language, m.kind.as_str()],
+            "INSERT INTO manifest VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                m.name,
+                m.version,
+                m.language,
+                m.kind.as_str(),
+                self.digest.as_bytes()
+            ],
         )?;
         for s in &m.sources {
             tx.execute(
@@ -583,16 +673,17 @@ impl Pack {
     }
 
     /// The pack in the file at `path`, read only, never through a symlink,
-    /// and checked as [`Pack::new`] checks a pack.
+    /// and checked as [`Pack::new`] checks a pack, its digest included.
     ///
     /// # Errors
     ///
     /// [`PackError::NotAPack`] for another kind of file,
-    /// [`PackError::UnknownFormat`] for a format this code doesn't read,
-    /// [`PackError::Corrupt`] for a manifest that isn't one row or a value
-    /// that isn't one, any of [`Pack::new`]'s errors for rows that break its
-    /// rules, and [`PackError::Sqlite`] if SQLite fails, including when
-    /// there's no file.
+    /// [`PackError::UnknownFormat`] for a format this code doesn't read
+    /// (format 1 among them), [`PackError::Corrupt`] for a manifest that
+    /// isn't one row, a value that isn't one, or a stored digest that isn't
+    /// the one its manifest and rows give, any of [`Pack::new`]'s errors for
+    /// rows that break its rules, and [`PackError::Sqlite`] if SQLite fails,
+    /// including when there's no file.
     pub fn open(path: &Path) -> Result<Self, PackError> {
         let conn = crate::connect(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e| match e {
             crate::StoreError::Sqlite(e) => PackError::Sqlite(e),
@@ -611,7 +702,7 @@ impl Pack {
             return Err(PackError::UnknownFormat(format));
         }
         check_schema(&conn)?;
-        let manifest = read_manifest(&conn)?;
+        let (manifest, stored) = read_manifest(&conn)?;
         let terms = read_rows(
             &conn,
             "SELECT term, source, licence, review FROM term",
@@ -651,7 +742,75 @@ impl Pack {
             })
         })
         .collect::<Result<Vec<_>, PackError>>()?;
-        Self::new(manifest, terms, aliases)
+        let pack = Self::new(manifest, terms, aliases)?;
+        // A file edited outside nota keeps its old digest unless the editor
+        // works the new one out too; either way the digest a session
+        // records is the one its rows give, never the stored one.
+        if pack.digest != stored {
+            return Err(PackError::Corrupt(
+                "its digest isn't the one its manifest and rows give".to_owned(),
+            ));
+        }
+        Ok(pack)
+    }
+}
+
+/// The digest of `manifest` and the rows, which [`Pack::new`] has sorted.
+/// Each text is given with its length, and each list with its count, so
+/// no two packs share an encoding.
+fn digest_of(manifest: &Manifest, terms: &[TermRow], aliases: &[AliasRow]) -> PackDigest {
+    let mut hash = Encoder(Sha256::new());
+    hash.text(DIGEST_TAG);
+    for field in [&manifest.name, &manifest.version, &manifest.language] {
+        hash.text(field.as_bytes());
+    }
+    hash.text(manifest.kind.as_str().as_bytes());
+    hash.count(manifest.sources.len());
+    for s in &manifest.sources {
+        for field in [&s.id, &s.name, &s.licence, &s.attribution] {
+            hash.text(field.as_bytes());
+        }
+        // A source with no address differs from one with an empty one.
+        match &s.url {
+            None => hash.count(0),
+            Some(url) => {
+                hash.count(1);
+                hash.text(url.as_bytes());
+            }
+        }
+    }
+    hash.count(terms.len());
+    for r in terms {
+        for field in [&r.term, &r.source, &r.licence] {
+            hash.text(field.as_bytes());
+        }
+        hash.text(r.review.as_str().as_bytes());
+    }
+    hash.count(aliases.len());
+    for r in aliases {
+        for field in [&r.term, &r.alias, &r.source, &r.licence] {
+            hash.text(field.as_bytes());
+        }
+        hash.text(r.review.as_str().as_bytes());
+    }
+    PackDigest(hash.0.finalize().into())
+}
+
+/// Feeds a digest's encoding to SHA-256.
+struct Encoder(Sha256);
+
+impl Encoder {
+    /// Adds a number, as eight little-endian bytes.
+    fn count(&mut self, n: usize) {
+        self.0
+            .update(u64::try_from(n).unwrap_or(u64::MAX).to_le_bytes());
+    }
+
+    /// Adds `bytes` after their length, so where one text ends and the next
+    /// starts is part of the encoding.
+    fn text(&mut self, bytes: &[u8]) {
+        self.count(bytes.len());
+        self.0.update(bytes);
     }
 }
 
@@ -774,17 +933,28 @@ fn dedupe<R: Ord + Clone, K: Ord>(
     Ok(rows)
 }
 
-/// The file's one manifest row and its sources.
-fn read_manifest(conn: &Connection) -> Result<Manifest, PackError> {
+/// The file's one manifest row and its sources, and the digest it stores.
+fn read_manifest(conn: &Connection) -> Result<(Manifest, PackDigest), PackError> {
     let rows = read_rows(
         conn,
-        "SELECT name, version, language, kind FROM manifest",
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, String>(3)?)),
+        "SELECT name, version, language, kind, digest FROM manifest",
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, Vec<u8>>(4)?,
+            ))
+        },
     )?;
-    let [(name, version, language, kind)] = <[_; 1]>::try_from(rows)
+    let [(name, version, language, kind, digest)] = <[_; 1]>::try_from(rows)
         .map_err(|rows| PackError::Corrupt(format!("{} manifest rows", rows.len())))?;
     let kind = PackKind::parse(&kind)
         .ok_or_else(|| PackError::Corrupt(format!("unknown pack kind {kind:?}")))?;
+    // The table's check holds it to 32 bytes; this is for the type.
+    let digest = PackDigest::from_stored(&digest)
+        .ok_or_else(|| PackError::Corrupt(format!("a digest of {} bytes", digest.len())))?;
     let sources = read_rows(
         conn,
         "SELECT id, name, licence, attribution, url FROM source",
@@ -798,13 +968,14 @@ fn read_manifest(conn: &Connection) -> Result<Manifest, PackError> {
             })
         },
     )?;
-    Ok(Manifest {
+    let manifest = Manifest {
         name,
         version,
         language,
         kind,
         sources,
-    })
+    };
+    Ok((manifest, digest))
 }
 
 /// The tables a pack's rows are read from.
