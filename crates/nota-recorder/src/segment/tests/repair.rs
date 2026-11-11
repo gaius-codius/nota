@@ -212,6 +212,50 @@ fn a_mismatched_file_that_cant_be_kept_aside_stays_and_is_reported() {
     assert!(kept_aside(&disk).is_empty());
 }
 
+/// Wherever an I/O error stops a salvage that repairs, each row it reports
+/// it couldn't repair is still among its findings: the rows it held back
+/// are named, though the run stopped.
+#[test]
+fn a_salvage_stopped_during_repairs_keeps_every_finding() {
+    let (disk, _, rows) = unsalvaged();
+    // Two committed rows with mismatched files: the first can't be kept
+    // aside, so it's never repaired; the second can be.
+    let (stuck, other) = (rows[0], rows[1]);
+    for row in [stuck, other] {
+        plant(&disk, &row);
+        plant_file(&disk, &durable_path(row.track(), row.range()), &junk());
+    }
+    let stuck_path = durable_path(stuck.track(), stuck.range());
+    disk.fail_on(&stuck_path, Fault::Rename, io::ErrorKind::PermissionDenied);
+    let probe = disk.copy_disk();
+    salvage(&mut session_store(&probe), length()).unwrap();
+    let ops = probe.attempted();
+
+    // An outcome per point: whether it stopped holding back a row it
+    // couldn't repair.
+    let mut sweep = Sweep::with_outcomes();
+    for at in 0..ops {
+        let run = disk.copy_disk();
+        run.fail_on(&stuck_path, Fault::Rename, io::ErrorKind::PermissionDenied);
+        run.fail_after(at, io::ErrorKind::Other);
+        let salvaged = salvage(&mut session_store(&run), length());
+        sweep.failure_point(&run);
+        let Err(stopped) = salvaged else {
+            continue;
+        };
+        let done = stopped.done();
+        for (row, _) in done.not_repaired() {
+            assert!(
+                done.findings().iter().any(|f| f.row() == row),
+                "after {at} ops: {row:?} isn't a finding: {done:?}"
+            );
+        }
+        sweep.saw(!done.not_repaired().is_empty());
+    }
+    // Not vacuous: some runs stopped after a row couldn't be repaired.
+    sweep.saw_each([true]); // check-bound
+}
+
 /// Salvage of `disk` crashed after every operation, under every standard
 /// outcome, then run again: no file is ever lost (`junk`, if given, is
 /// always somewhere in the session directory, and every sample promised
@@ -454,7 +498,7 @@ fn an_unparsable_row_stops_its_session_and_is_named() {
     let journals = journals_left(&fs);
     let mut bound = SessionStore::new(owned(&fs), store);
     let err = salvage(&mut bound, length()).unwrap_err();
-    assert!(matches!(err, PublishError::Store(_)), "{err}");
+    assert!(matches!(err.error(), PublishError::Store(_)), "{err}");
     let shown = err.to_string();
     assert!(
         shown.contains("session 1's segment row at track 0, sample 4800"),

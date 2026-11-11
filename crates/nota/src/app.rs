@@ -28,6 +28,7 @@
 //! ([`QuitSignals`]).
 
 use std::io;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -38,6 +39,7 @@ use jiff::civil::Date;
 use jiff::tz::TimeZone;
 use nota_core::recorder::{Command, Setup};
 use nota_core::{Clock, SessionId, SessionTime, SystemClock, WallTime, wall_now};
+use nota_recorder::segment::Published;
 use nota_store::{JobState, Wait};
 use nota_tui::{Action, Event, Home, InputThread, Recording, RunError, Session, Status, Theme};
 use ratatui::Terminal;
@@ -651,7 +653,7 @@ impl Listing<'_> {
                 Ok(jobs) => job_status(shown, jobs, |id| self.no_space(id)),
                 Err(error) => {
                     shown.status = Status::NeedsYou;
-                    shown.detail = Some(format!("processing status couldn't be read: {error}"));
+                    shown.detail = vec![format!("processing status couldn't be read: {error}")];
                 }
             }
         }
@@ -746,7 +748,8 @@ fn stopping_home(home: &mut Home) {
 
 /// Gives one ready session the status of its jobs. Jobs waiting for
 /// space need you to free some while there's none (`no_space` says what
-/// Home says of it then, see [`Listing::no_space`]).
+/// Home says of it then, see [`Listing::no_space`]). The status comes first
+/// in its detail, before what salvage said of it (a kept temp file, say).
 fn job_status(
     shown: &mut Session,
     jobs: &[nota_store::Job],
@@ -759,17 +762,19 @@ fn job_status(
         _ => None,
     }) {
         shown.status = Status::NeedsYou;
-        shown.detail = Some(format!("processing failed: {why}"));
+        shown.detail.insert(0, format!("processing failed: {why}"));
     } else if let Some(why) = own()
         .any(|job| job.state == JobState::Waiting(Some(Wait::Space)))
         .then(|| no_space(id))
         .flatten()
     {
         shown.status = Status::NeedsYou;
-        shown.detail = Some(why.to_owned());
+        shown.detail.insert(0, why.to_owned());
     } else if own().any(|job| job.state != JobState::Done) {
         shown.status = Status::Processing;
-        shown.detail = Some("final transcript queued or running".into());
+        shown
+            .detail
+            .insert(0, "final transcript queued or running".into());
     }
 }
 
@@ -828,36 +833,31 @@ fn session(listed: Listed, salvaged: &[Salvaged], dates: &Dates) -> Session {
     let salvage = salvaged.iter().find(|s| salvaged_id(s) == id);
     let (status, detail) = match (listed.needs, salvage) {
         // Salvage at start failed, and what it would have saved is still
-        // there: its error says why better than the listing can.
-        (Needs::Attention(_), Some(Salvaged::Failed(_, e))) => {
-            (Status::NeedsYou, Some(format!("salvage failed: {e}")))
+        // there: its error says why better than the listing can, and each
+        // file it held before it failed is named after it.
+        (Needs::Attention(_), Some(Salvaged::Failed(_, e, done))) => {
+            let mut detail = vec![format!("salvage failed: {e}")];
+            detail.extend(crate::record::held_notes(done));
+            (Status::NeedsYou, detail)
         }
         (Needs::Attention(why), Some(Salvaged::Left(_, _, held))) => {
             let notes = crate::record::held_notes(held);
-            let detail = if notes.is_empty() {
-                why
-            } else {
-                notes.join("; ")
-            };
-            (Status::NeedsYou, Some(detail))
+            let detail = if notes.is_empty() { vec![why] } else { notes };
+            (Status::NeedsYou, detail)
         }
-        (Needs::Attention(why), _) => (Status::NeedsYou, Some(why)),
-        (Needs::InUse, _) => (Status::Processing, Some("being recorded".to_owned())),
-        // Salvage at start failed, but a later one (each recording's start
-        // salvages too) left nothing to save.
-        (Needs::Nothing, Some(Salvaged::Failed(..) | Salvaged::InUse(_)) | None) => {
-            (Status::Ready, None)
+        (Needs::Attention(why), _) => (Status::NeedsYou, vec![why]),
+        (Needs::InUse, _) => (Status::Processing, vec!["being recorded".to_owned()]),
+        // Salvage at start failed, but nothing is left to save: a later
+        // salvage (each recording's start salvages too) finished, or the
+        // failure came once every journal was gone. Only the temp files it
+        // couldn't remove are still worth naming.
+        (Needs::Nothing, Some(Salvaged::Failed(_, _, done))) => {
+            (Status::Ready, crate::record::kept_temp_notes(done))
         }
-        // Journals salvage left, or set aside as damaged, show as attention
-        // above while they're there; once none are left, it's recovered.
-        // "Nothing lost" only if salvage set nothing aside.
-        (Needs::Nothing, Some(Salvaged::Done(_, aside) | Salvaged::Left(_, aside, _))) => {
-            let recovered = if aside.is_empty() {
-                "recovered after a crash · nothing lost"
-            } else {
-                "recovered after a crash"
-            };
-            (Status::Ready, Some(recovered.to_owned()))
+        (Needs::Nothing, Some(Salvaged::InUse(_)) | None) => (Status::Ready, Vec::new()),
+        (Needs::Nothing, Some(Salvaged::Done(_, aside))) => (Status::Ready, recovered(aside, None)),
+        (Needs::Nothing, Some(Salvaged::Left(_, aside, held))) => {
+            (Status::Ready, recovered(aside, Some(held)))
         }
     };
     Session {
@@ -872,12 +872,29 @@ fn session(listed: Listed, salvaged: &[Salvaged], dates: &Dates) -> Session {
     }
 }
 
+/// What Home says of a session salvage recovered, once nothing in it needs
+/// the user: journals it left, or set aside as damaged, show as attention
+/// while they're there. "Nothing lost" only if salvage set nothing aside
+/// (`aside`). The segment temp files `held` names as kept follow, each
+/// with its cause: the listing doesn't look for them, and a temp is never
+/// the only copy of anything, so it's still nothing lost.
+fn recovered(aside: &[PathBuf], held: Option<&Published>) -> Vec<String> {
+    let recovered = if aside.is_empty() {
+        "recovered after a crash · nothing lost"
+    } else {
+        "recovered after a crash"
+    };
+    let mut detail = vec![recovered.to_owned()];
+    detail.extend(held.map(crate::record::kept_temp_notes).unwrap_or_default());
+    detail
+}
+
 const fn salvaged_id(salvaged: &Salvaged) -> SessionId {
     match salvaged {
         Salvaged::Done(id, _)
         | Salvaged::Left(id, _, _)
         | Salvaged::InUse(id)
-        | Salvaged::Failed(id, _) => *id,
+        | Salvaged::Failed(id, _, _) => *id,
     }
 }
 

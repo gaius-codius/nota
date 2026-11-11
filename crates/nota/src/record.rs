@@ -142,7 +142,7 @@ pub(crate) use start::{last_setup, source_of};
 use summary::show;
 #[cfg(test)]
 pub(crate) use summary::tests::cleanup_report;
-pub(crate) use summary::{Outcome, held_notes};
+pub(crate) use summary::{Outcome, held_notes, kept_temp_notes};
 
 use crate::final_pass::Engine;
 use crate::inhibit::Logind;

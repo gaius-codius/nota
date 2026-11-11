@@ -26,7 +26,7 @@ fn session(id: u64, title: &str, status: Status, length: u64, date: &str) -> Ses
         status,
         duration: Some(minutes(length)),
         date: Some(date.to_owned()),
-        detail: None,
+        detail: Vec::new(),
     }
 }
 
@@ -40,7 +40,7 @@ fn mockup_home() -> Home {
         58,
         "2 Oct",
     );
-    stopped.detail = Some("stopped early: disk full · free space to finish".to_owned());
+    stopped.detail = vec!["stopped early: disk full · free space to finish".to_owned()];
     let sessions = vec![
         session(2, "Finishing · oils and waxes", Status::Ready, 65, "9 Sep"),
         stopped,
@@ -78,7 +78,7 @@ fn home() {
 #[test]
 fn home_ready() {
     let mut recovered = session(4, "Sharpening · chisels", Status::Ready, 41, "3 Oct");
-    recovered.detail = Some("recovered after a crash · nothing lost".to_owned());
+    recovered.detail = vec!["recovered after a crash · nothing lost".to_owned()];
     let mut home = Home::new(
         vec![
             session(
@@ -102,5 +102,41 @@ fn home_ready() {
 fn home_empty() {
     let mut home = Home::new(Vec::new(), "parakeet", Theme::default());
     let terminal = draw(&mut home, 62, 20);
+    insta::assert_snapshot!(terminal.backend());
+}
+
+/// A session salvage couldn't finish, at 80 columns: its detail names each
+/// file it held with the cause, every item from a row of its own, and one
+/// too long for a row wraps onto indented rows.
+#[test]
+fn home_held_files() {
+    let mut held = session(
+        7,
+        "Joinery · dovetails by hand",
+        Status::NeedsYou,
+        47,
+        "4 Oct",
+    );
+    held.detail = vec![
+        "salvage failed: publishing a segment failed: a disk error".to_owned(),
+        "journal-000000: couldn't delete it (permission denied); \
+         all its audio is published"
+            .to_owned(),
+        "seg-t1-000000000000.flac.tmp: couldn't remove the temporary file \
+         (permission denied); its audio is still to publish"
+            .to_owned(),
+    ];
+    let sessions = vec![
+        held,
+        session(
+            6,
+            "Woodwork workshop · hand planes",
+            Status::Ready,
+            162,
+            "today",
+        ),
+    ];
+    let mut home = Home::new(sessions, "parakeet", Theme::default());
+    let terminal = draw(&mut home, 80, 22);
     insta::assert_snapshot!(terminal.backend());
 }

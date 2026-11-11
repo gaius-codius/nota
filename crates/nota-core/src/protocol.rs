@@ -809,25 +809,122 @@ mod tests {
         assert!(reader.read_frame::<ToEngine>().unwrap().is_some());
     }
 
-    #[test]
-    fn a_failing_stream_is_an_error_but_an_interruption_is_retried() {
-        struct Broken(bool);
-        impl Read for Broken {
-            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
-                // Interrupted once, then broken for good.
-                let kind = if std::mem::replace(&mut self.0, false) {
-                    io::ErrorKind::Interrupted
-                } else {
-                    io::ErrorKind::BrokenPipe
-                };
-                Err(io::Error::from(kind))
+    /// A reader that plays a script of reads, then reports the end of the
+    /// stream. It counts every read, so a test can tell an error that was
+    /// read again from one that was returned at once; and since it ends
+    /// rather than failing for ever, retrying an error ends the read
+    /// instead of spinning.
+    struct Script {
+        /// The reads still to come: bytes to hand over, or an error.
+        steps: std::collections::VecDeque<Result<Vec<u8>, io::ErrorKind>>,
+        /// How many times the stream has been read.
+        reads: usize,
+    }
+
+    impl Script {
+        /// A stream that plays `steps` in order, not yet read.
+        fn new(steps: impl IntoIterator<Item = Result<Vec<u8>, io::ErrorKind>>) -> Self {
+            Self {
+                steps: steps.into_iter().collect(),
+                reads: 0,
             }
         }
-        let mut reader = FrameReader::new(Broken(true));
+    }
+
+    impl Read for Script {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.reads += 1;
+            match self.steps.pop_front() {
+                None => Ok(0),
+                Some(Err(kind)) => Err(io::Error::from(kind)),
+                Some(Ok(mut bytes)) => {
+                    let n = bytes.len().min(buf.len());
+                    buf[..n].copy_from_slice(&bytes[..n]);
+                    let rest = bytes.split_off(n);
+                    if !rest.is_empty() {
+                        self.steps.push_front(Ok(rest));
+                    }
+                    Ok(n)
+                }
+            }
+        }
+    }
+
+    /// An interruption is read past, and the failure after it ends the
+    /// frame as an error, from the second read.
+    #[test]
+    fn a_failing_stream_is_an_error_but_an_interruption_is_retried() {
+        let mut stream = Script::new([
+            Err(io::ErrorKind::Interrupted),
+            Err(io::ErrorKind::BrokenPipe),
+        ]);
+        let mut reader = FrameReader::new(&mut stream);
         match reader.read_frame::<FromEngine>() {
             Err(ReadError::Io(err)) => assert_eq!(err.kind(), io::ErrorKind::BrokenPipe),
             other => panic!("{other:?}"),
         }
+        assert_eq!(stream.reads, 2);
+    }
+
+    /// An error other than an interruption is handed back from the read
+    /// that failed, without reading again.
+    #[test]
+    fn read_full_returns_a_failure_without_reading_again() {
+        for kind in [
+            io::ErrorKind::BrokenPipe,
+            io::ErrorKind::UnexpectedEof,
+            io::ErrorKind::WouldBlock,
+            io::ErrorKind::Other,
+        ] {
+            let mut stream = Script::new([Err(kind), Ok(vec![1, 2, 3, 4])]);
+            let mut buf = [0_u8; 4];
+            match read_full(&mut stream, &mut buf) {
+                Err(ReadError::Io(err)) => assert_eq!(err.kind(), kind),
+                other => panic!("{kind:?}: {other:?}"),
+            }
+            assert_eq!(stream.reads, 1, "{kind:?}");
+            assert_eq!(buf, [0; 4], "{kind:?}");
+        }
+    }
+
+    /// A read cut short by an interruption is read again, and the bytes on
+    /// either side of it make up the whole buffer.
+    #[test]
+    fn read_full_reads_again_after_an_interruption() {
+        let mut stream = Script::new([
+            Err(io::ErrorKind::Interrupted),
+            Ok(vec![1]),
+            Err(io::ErrorKind::Interrupted),
+            Err(io::ErrorKind::Interrupted),
+            Ok(vec![2, 3, 4, 5]),
+        ]);
+        let mut buf = [0_u8; 4];
+        assert_eq!(read_full(&mut stream, &mut buf).unwrap(), 4);
+        assert_eq!(buf, [1, 2, 3, 4]);
+        // Full after the fifth read, so it doesn't read again for the byte
+        // left over.
+        assert_eq!(stream.reads, 5);
+    }
+
+    /// A frame whose prefix and body are both interrupted is read whole.
+    #[test]
+    fn an_interrupted_frame_is_read_whole() {
+        let frame = Frame::Message(FromEngine::Confirmed {
+            track: TrackId::new(2),
+            up_to: SampleIndex::new(48_000),
+        });
+        let bytes = encode(&frame).unwrap();
+        let mut stream = Script::new([
+            Err(io::ErrorKind::Interrupted),
+            Ok(bytes[..2].to_vec()),
+            Err(io::ErrorKind::Interrupted),
+            Ok(bytes[2..6].to_vec()),
+            Err(io::ErrorKind::Interrupted),
+            Ok(bytes[6..].to_vec()),
+        ]);
+        let mut reader = FrameReader::new(&mut stream);
+        assert_eq!(reader.read_frame::<FromEngine>().unwrap(), Some(frame));
+        assert!(reader.read_frame::<FromEngine>().unwrap().is_none());
     }
 
     #[test]
@@ -927,28 +1024,20 @@ mod tests {
     /// gives that frame.
     #[test]
     fn a_whole_frame_is_read_without_asking_the_stream_for_more() {
-        /// The bytes, then a broken pipe on any read after the last of them.
-        struct BreaksWhenDone<'a>(&'a [u8]);
-        impl Read for BreaksWhenDone<'_> {
-            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-                if self.0.is_empty() {
-                    return Err(io::Error::from(io::ErrorKind::BrokenPipe));
-                }
-                self.0.read(buf)
-            }
-        }
         let frame = Frame::Message(FromEngine::Confirmed {
             track: TrackId::new(1),
             up_to: SampleIndex::new(300),
         });
         let bytes = encode(&frame).unwrap();
-        let mut reader = FrameReader::new(BreaksWhenDone(&bytes));
+        // The bytes, then a broken pipe on the read after the last of them.
+        let stream = Script::new([Ok(bytes), Err(io::ErrorKind::BrokenPipe)]);
+        let mut reader = FrameReader::new(stream);
         assert_eq!(reader.read_frame::<FromEngine>().unwrap(), Some(frame));
         // The next read reaches the break.
-        assert!(matches!(
-            reader.read_frame::<FromEngine>(),
-            Err(ReadError::Io(_))
-        ));
+        match reader.read_frame::<FromEngine>() {
+            Err(ReadError::Io(err)) => assert_eq!(err.kind(), io::ErrorKind::BrokenPipe),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
