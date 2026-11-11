@@ -4252,6 +4252,11 @@ fn a_run_that_stops_reports_what_it_did_before_it_stopped() {
         matches!(stopped.error(), PublishError::Io(e) if e.kind() == io::ErrorKind::Other),
         "{stopped}"
     );
+    // It reads as its error, and its source is that error's own: the I/O
+    // error, so a chain says each message once.
+    assert_eq!(stopped.to_string(), stopped.error().to_string());
+    let source = Error::source(&stopped).and_then(|e| e.downcast_ref::<io::Error>());
+    assert_eq!(source.map(io::Error::kind), Some(io::ErrorKind::Other));
     assert_eq!(stopped.done().segments(), before);
     let deleted = stopped.done().deleted().to_vec();
     assert!(!deleted.is_empty(), "{stopped:?}");
