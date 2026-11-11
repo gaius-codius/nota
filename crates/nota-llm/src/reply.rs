@@ -1,4 +1,6 @@
-//! Reading llama-server's reply to a question into typed decisions.
+//! Reading a model's reply to a question into typed decisions: a chat
+//! completion from llama-server or another OpenAI-compatible server, or a
+//! bare answer from a CLI ([`parse_answer`]).
 //!
 //! The reply comes from outside nota, so nothing in it is trusted. It's
 //! read here, once, into one [`Decision`] per candidate, or refused:
@@ -113,8 +115,44 @@ pub fn parse(body: &[u8], candidates: usize) -> Result<Vec<Decision>, ReplyError
         .ok_or(ReplyError::NotACompletion("no message text"))?;
     let given = answers(text, candidates)?;
     let yes = probabilities(choice.get("logprobs"), &given);
+    in_order(given.into_iter().zip(yes), candidates)
+}
+
+/// The decisions in `text`, a bare answer to a question about
+/// `candidates` candidates (`{"decisions": [...]}`, as a CLI gives it),
+/// with no probabilities: the first for candidate 1, and so on.
+///
+/// # Errors
+///
+/// If `text` is over [`MAX_REPLY_LEN`], or isn't one yes or no for every
+/// candidate; see [`ReplyError`].
+pub fn parse_answer(text: &str, candidates: usize) -> Result<Vec<Decision>, ReplyError> {
+    if text.len() > MAX_REPLY_LEN {
+        return Err(ReplyError::TooLong(text.len()));
+    }
+    let Strict(value) = serde_json::from_str(text).map_err(ReplyError::NotJson)?;
+    answer_of(&value, candidates)
+}
+
+/// The decisions in `value`, an answer already read as JSON, with no
+/// probabilities.
+///
+/// # Errors
+///
+/// If it isn't one yes or no for every candidate; see [`ReplyError`].
+pub(crate) fn answer_of(value: &Value, candidates: usize) -> Result<Vec<Decision>, ReplyError> {
+    let given = answers_in(value, candidates)?;
+    in_order(given.into_iter().map(|g| (g, None)), candidates)
+}
+
+/// The decisions in `given`, each a candidate's index and answer with its
+/// probability, put in candidate order.
+fn in_order(
+    given: impl Iterator<Item = ((usize, Answer), Option<Probability>)>,
+    candidates: usize,
+) -> Result<Vec<Decision>, ReplyError> {
     let mut decisions = vec![None; candidates];
-    for (&(index, answer), yes) in given.iter().zip(yes) {
+    for ((index, answer), yes) in given {
         if let Some(slot) = decisions.get_mut(index) {
             *slot = Some(Decision { answer, yes });
         }
@@ -124,6 +162,17 @@ pub fn parse(body: &[u8], candidates: usize) -> Result<Vec<Decision>, ReplyError
         .enumerate()
         .map(|(index, d)| d.ok_or_else(|| ReplyError::Missing(number(index))))
         .collect()
+}
+
+/// JSON read from `bytes` so that no object in it gives a key twice.
+///
+/// # Errors
+///
+/// If it isn't JSON, or an object gives a key twice.
+// Only the CLI decider reads with it, and that is Unix only.
+#[cfg(unix)]
+pub(crate) fn strict_json(bytes: &[u8]) -> Result<Value, serde_json::Error> {
+    serde_json::from_slice(bytes).map(|Strict(value)| value)
 }
 
 /// Candidate `index`'s number (from 0, so one more).
@@ -136,7 +185,13 @@ fn number(index: usize) -> u32 {
 /// exactly one.
 fn answers(text: &str, candidates: usize) -> Result<Vec<(usize, Answer)>, ReplyError> {
     let Strict(value) = serde_json::from_str(text).map_err(ReplyError::NotJson)?;
-    let top = only_keys(&value, &["decisions"]).ok_or(ReplyError::NotDecisions(
+    answers_in(&value, candidates)
+}
+
+/// The answers in `value`, the message text read as JSON, as [`answers`]
+/// gives them.
+fn answers_in(value: &Value, candidates: usize) -> Result<Vec<(usize, Answer)>, ReplyError> {
+    let top = only_keys(value, &["decisions"]).ok_or(ReplyError::NotDecisions(
         "it isn't an object holding only \"decisions\"",
     ))?;
     let entries = top
@@ -254,7 +309,9 @@ impl<'de> Visitor<'de> for StrictVisitor {
         let mut object = Map::new();
         while let Some(key) = map.next_key::<String>()? {
             if object.contains_key(&key) {
-                return Err(de::Error::custom(format!("the key {key:?} is given twice")));
+                // Without the key: a cloud model's reply may hold the
+                // transcript's words, and none of them goes in a reason.
+                return Err(de::Error::custom("a key is given twice"));
             }
             let Strict(value) = map.next_value()?;
             object.insert(key, value);

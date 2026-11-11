@@ -90,7 +90,7 @@ fn a_connection_closed_early_is_an_error() {
 /// Heads that aren't HTTP/1.x as nota reads them are refused, saying why.
 #[test]
 fn a_bad_head_is_refused() {
-    let cases: [(&[u8], &str); 9] = [
+    let cases: [(&[u8], &str); 15] = [
         (b"HTTP/2 200 OK\r\n\r\n", "no status line"),
         (b"HTTP/1.1 20 OK\r\n\r\n", "no status line"),
         (b"HTTP/1.1 2000 OK\r\n\r\n", "no status line"),
@@ -109,8 +109,32 @@ fn a_bad_head_is_refused() {
             "it gives two lengths",
         ),
         (
-            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n",
-            "it's chunked",
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\n",
+            "its transfer encoding isn't chunked",
+        ),
+        (
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n",
+            "its transfer encoding isn't chunked",
+        ),
+        (
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nTransfer-Encoding: chunked\r\n\r\n",
+            "it gives a length and is chunked",
+        ),
+        (
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n",
+            "a chunk's size isn't a number",
+        ),
+        (
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nokay\r\n0\r\n\r\n",
+            "a chunk runs past its size",
+        ),
+        (
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\nok\r\n0\r\n\r\n",
+            "a chunk line doesn't end in CRLF",
+        ),
+        (
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\xff\r\n",
+            "a chunk line isn't text",
         ),
     ];
     for (bytes, why) in cases {
@@ -123,6 +147,50 @@ fn a_bad_head_is_refused() {
     assert!(matches!(
         read(b"HTTP/1.1 \xff\r\n\r\n"),
         Err(HttpError::BadHead("it isn't text"))
+    ));
+}
+
+/// A chunked body is joined from its chunks, whatever their sizes,
+/// extensions and trailers, however the bytes arrive.
+#[test]
+fn a_chunked_body_is_joined() {
+    let bytes = b"HTTP/1.1 200 OK\r\ntransfer-encoding: Chunked\r\n\r\n\
+                  4;name=x\r\n{\"a\"\r\nA\r\n:\"012345\"}\r\n0\r\nX-Trailer: y\r\n\r\n";
+    let response = read(bytes).unwrap();
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, br#"{"a":"012345"}"#);
+    let trickled = read_response(&mut Trickle(bytes.to_vec(), 0)).unwrap();
+    assert_eq!(trickled, response);
+}
+
+/// A chunked body cut short, or over the limit in its chunks, is refused.
+#[test]
+fn a_chunked_body_too_long_or_cut_short_is_refused() {
+    let head = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+    let cut = format!("{head}5\r\nab");
+    assert!(matches!(read(cut.as_bytes()), Err(HttpError::Io(_))));
+    let no_end = format!("{head}2\r\nok\r\n");
+    assert!(matches!(read(no_end.as_bytes()), Err(HttpError::Io(_))));
+    let over = format!("{head}{:x}\r\n", MAX_REPLY_LEN + 1);
+    assert!(matches!(
+        read(over.as_bytes()),
+        Err(HttpError::TooLong("body"))
+    ));
+    let half = MAX_REPLY_LEN / 2 + 1;
+    let two = format!("{head}{half:x}\r\n{}\r\n{half:x}\r\n", "a".repeat(half));
+    assert!(matches!(
+        read(two.as_bytes()),
+        Err(HttpError::TooLong("body"))
+    ));
+    let long_line = format!("{head}{}\r\n", "0".repeat(MAX_CHUNK_LINE + 1));
+    assert!(matches!(
+        read(long_line.as_bytes()),
+        Err(HttpError::TooLong("chunk line"))
+    ));
+    let trailers = format!("{head}0\r\n{}", "X: y\r\n".repeat(MAX_TRAILERS + 1));
+    assert!(matches!(
+        read(trailers.as_bytes()),
+        Err(HttpError::TooLong("trailers"))
     ));
 }
 
@@ -182,11 +250,11 @@ fn a_whole_head_over_its_limit_is_refused() {
 #[test]
 fn requests_are_written_as_http() {
     assert_eq!(
-        request("/health", None),
+        request("localhost", "/health", None),
         b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
     );
     assert_eq!(
-        request("/v1/chat/completions", Some(b"{}")),
+        request("localhost", "/v1/chat/completions", Some(b"{}")),
         b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
           Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{}"
     );
@@ -211,9 +279,9 @@ fn an_exchange_writes_then_reads() {
         }
     }
     let mut socket = Socket(Vec::new(), Cursor::new(HEALTH.to_vec()));
-    let response = exchange(&mut socket, &request("/health", None)).unwrap();
+    let response = exchange(&mut socket, &request("localhost", "/health", None)).unwrap();
     assert_eq!(response.status, 200);
-    assert_eq!(socket.0, request("/health", None));
+    assert_eq!(socket.0, request("localhost", "/health", None));
 }
 
 /// A body exactly as long as the limit is read whole.
