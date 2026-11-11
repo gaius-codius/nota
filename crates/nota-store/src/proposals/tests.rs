@@ -325,7 +325,9 @@ fn a_proposal_is_reviewed_once() {
     let (_dir, mut store, chunk) = store("proposals-review");
     store.add_proposals(S1, &every_decision(chunk)).unwrap();
     let id = store.proposals(S1).unwrap()[0].id;
+    assert!(!store.proposals(S1).unwrap()[0].reviewed());
     store.review_proposal(id, Reviewed::Rejected).unwrap();
+    assert!(store.proposals(S1).unwrap()[0].reviewed());
     assert_eq!(
         store.proposals(S1).unwrap()[0].review,
         Some(Reviewed::Rejected)
@@ -436,4 +438,46 @@ fn the_schema_ties_each_outcome_to_its_decision() {
         assert!(copy(outcome, change), "{outcome}{change}");
     }
     assert!(!copy("applied", ""), "an unchanged copy goes in");
+}
+
+/// Every refusal rule, and a decider in the cloud, read back as stored.
+#[test]
+fn every_refusal_and_place_reads_back() {
+    let (_dir, mut store, chunk) = store("proposals-refusals");
+    let rules = [
+        Refusal::EmptySpan,
+        Refusal::SpanNotFound,
+        Refusal::TooLong,
+        Refusal::Dissimilar,
+        Refusal::NotOffered,
+        Refusal::WindowElsewhere,
+        Refusal::AlreadyChanged,
+    ];
+    let added: Vec<NewProposal> = rules
+        .iter()
+        .map(|&rule| {
+            let mut p = proposal(
+                chunk,
+                "amlodipine",
+                Decided::Refused {
+                    yes: yes(0.7),
+                    rule,
+                    similarity: Some(0.4),
+                },
+            );
+            p.proposed.decided_by.place = Place::Cloud;
+            p
+        })
+        .collect();
+    store.add_proposals(S1, &added).unwrap();
+    let read: Vec<NewProposal> = store
+        .proposals(S1)
+        .unwrap()
+        .into_iter()
+        .map(|p| NewProposal {
+            proposed: p.proposed,
+            decided: p.decided,
+        })
+        .collect();
+    assert_eq!(read, added);
 }

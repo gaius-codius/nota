@@ -53,7 +53,15 @@ impl Installed {
 
 impl Sources for Installed {
     fn decider(&self) -> Setup {
-        local_decider(&self.clock)
+        #[cfg(unix)]
+        let decider = local_decider(&Environment::current(), &self.clock);
+        // The settings that describe a decider are read on unix only.
+        #[cfg(not(unix))]
+        let decider = {
+            let _unused = &self.clock;
+            Setup::NotSetUp
+        };
+        decider
     }
 
     fn packs(&self) -> Result<Vec<Pack>, String> {
@@ -62,10 +70,10 @@ impl Sources for Installed {
     }
 }
 
-/// The local decider the settings describe, timed by `clock`.
+/// The local decider the settings in `env` describe, timed by `clock`.
 #[cfg(unix)]
-fn local_decider(clock: &Arc<dyn Clock>) -> Setup {
-    match settings::local_decider(&Environment::current()) {
+fn local_decider(env: &Environment, clock: &Arc<dyn Clock>) -> Setup {
+    match settings::local_decider(env) {
         settings::LocalDecider::NotSetUp => Setup::NotSetUp,
         settings::LocalDecider::Unavailable(why) => {
             Setup::Unavailable(format!("the decider can't be used: {why}"))
@@ -81,12 +89,6 @@ fn local_decider(clock: &Arc<dyn Clock>) -> Setup {
             Setup::Ready(Box::new(decider), by)
         }
     }
-}
-
-/// No decider: the settings that describe one are read on unix only.
-#[cfg(not(unix))]
-fn local_decider(_clock: &Arc<dyn Clock>) -> Setup {
-    Setup::NotSetUp
 }
 
 /// A model's name, for the record: its file's name without the folder.
@@ -117,3 +119,7 @@ fn installed(dir: &Path) -> io::Result<Vec<Pack>> {
     paths.truncate(MAX_PACKS);
     Ok(paths.iter().filter_map(|p| Pack::open(p).ok()).collect())
 }
+
+#[cfg(test)]
+#[cfg(unix)]
+mod tests;

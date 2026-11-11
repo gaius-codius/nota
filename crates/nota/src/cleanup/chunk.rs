@@ -395,7 +395,8 @@ fn group(
     let mut start = 0;
     while start < placed.len() {
         let mut words = placed[start].1;
-        let mut end = start + 1;
+        // The first fix overlaps its own words, so the run starts with it.
+        let mut end = start;
         while let Some(next) = placed.get(end).filter(|p| p.1.overlaps(words)) {
             words = WordSpan::new(words.first(), words.last().max(next.1.last())).unwrap_or(words);
             end += 1;

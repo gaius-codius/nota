@@ -176,6 +176,27 @@ fn run_with(clean_up: &mut CleanUp, fixture: &Fixture, stop: &dyn Fn() -> bool) 
     clean_up.run(&fixture.db, SESSION, &running)
 }
 
+/// Runs `clean_up` on the fixture's session to its end, giving each time
+/// it told the runner the decider works, as the number of questions
+/// `fake` had been asked then.
+fn run_noting_answers(clean_up: &mut CleanUp, fixture: &Fixture, fake: &Fake) -> Vec<usize> {
+    let cleared = std::cell::RefCell::new(Vec::new());
+    let progress = |_| {};
+    let answered = || {};
+    let engine_down = |reason: Option<&str>| {
+        assert_eq!(reason, None);
+        cleared.borrow_mut().push(fake.questions());
+    };
+    let running = Running {
+        stop: &|| false,
+        progress: &progress,
+        answered: &answered,
+        engine_down: &engine_down,
+    };
+    assert_eq!(clean_up.run(&fixture.db, SESSION, &running), JobEnd::Done);
+    cleared.into_inner()
+}
+
 /// Runs `clean_up` on the fixture's session to its end.
 fn run(clean_up: &mut CleanUp, fixture: &Fixture) -> JobEnd {
     run_with(clean_up, fixture, &|| false)
@@ -806,3 +827,54 @@ fn a_decider_stopped_mid_question_stores_nothing_for_it() {
 
 #[path = "bench.rs"]
 mod bench;
+
+/// A decider's earlier failure is cleared once, after its first real
+/// answer: not after an answer that couldn't be read, and not again.
+#[test]
+fn an_earlier_failure_is_cleared_once_the_decider_answers() {
+    let chunks = [
+        AMLODIPINE,
+        "then amylo diping again",
+        "amylo diping once more",
+    ];
+    let fixture = Fixture::new("cleared-once", &chunks, &["amlodipine"]);
+    let fake = Fake::saying_yes([("amylo diping", "amlodipine")]).with_trouble(0, Trouble::Failed);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    assert_eq!(run_noting_answers(&mut clean_up, &fixture, &fake), [2]);
+}
+
+/// Each proposal records the thresholds it was decided under.
+#[test]
+fn proposals_record_their_thresholds() {
+    let fixture = Fixture::new("thresholds", &[AMLODIPINE], &["amlodipine"]);
+    let fake = Fake::saying_yes([("amylo diping", "amlodipine")]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake));
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(
+        fixture.proposals()[0].proposed.thresholds,
+        "similarity_min=0.6;keep=0.58;keep_rare=0.42;max_candidates=6;card_every_s=600"
+    );
+}
+
+/// A scored candidate keeps its scores, and whether it cleared the
+/// rare-word bar.
+#[test]
+fn a_scored_candidate_keeps_its_scores_and_bar() {
+    let score = |bar| nota_checks::Score {
+        total: 0.8,
+        sounds: 0.7,
+        trigrams: 0.6,
+        jaro_winkler: 0.9,
+        bar,
+    };
+    let stored = |rare| nota_store::Found::Scored {
+        score: 0.8,
+        sounds: 0.7,
+        trigrams: 0.6,
+        jaro_winkler: 0.9,
+        rare,
+    };
+    assert_eq!(found(Matched::Scored(score(Bar::Rare))), stored(true));
+    assert_eq!(found(Matched::Scored(score(Bar::Usual))), stored(false));
+    assert_eq!(found(Matched::Alias), nota_store::Found::Alias);
+}
