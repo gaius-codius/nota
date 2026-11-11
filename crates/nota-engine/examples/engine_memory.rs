@@ -12,14 +12,20 @@
 //!   case: a small glossary and a list the size of a term pack.
 //! - Each `*_VOCAB` is the `bpe.vocab` sherpa-onnx splits that list's
 //!   hotwords with (`piece<TAB>score` per line). A naive one is
-//!   `awk '{print $1"\t-"$2}' tokens.txt`; a tokenizer-matched one is
-//!   built by the research bench's `make_vocab.py`.
+//!   `awk '{print $1"\t-"$2}' tokens.txt`. It splits some words
+//!   differently from Parakeet's own tokenizer, so hotwords boost less,
+//!   but the graph is about the same size; for boosting that works, use a
+//!   vocab whose scores make sherpa-onnx split every hotword as the
+//!   tokenizer does.
 //!
 //! Every scenario runs in a fresh child process of this example, one after
 //! another, so one scenario's memory never counts towards another's. The
 //! greedy recogniser is loaded through [`SherpaModels::load`], as the
-//! engine child loads it; the beam recogniser takes the same model files,
-//! threads and provider. Each scenario prints `scenario key=value ...`
+//! engine child loads it, with a voice activity detector open for each of
+//! the two tracks; the beam recogniser takes the same model files, threads
+//! and provider. The example holds the chunks it decodes, which the engine
+//! child doesn't: each scenario's `start` reading, taken with the chunks
+//! loaded, is that baseline. Each scenario prints `scenario key=value ...`
 //! lines: memory in MiB from `/proc/self/status` (`VmRSS`, its peak
 //! `VmHWM`, and `VmSwap`), times in ms. No transcript text is printed,
 //! only counts.
@@ -31,9 +37,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use nota_core::{Clock, SystemClock};
+use nota_core::{Clock, SampleIndex, SystemClock};
 use nota_engine::child::{Models, Transcriber};
-use nota_engine::sherpa::{ModelPaths, SherpaModels};
+use nota_engine::sherpa::{ModelPaths, SherpaModels, SileroDetector};
 use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig, Wave};
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
@@ -55,6 +61,12 @@ const REPEATS: usize = 5;
 
 /// The bench's beam width (`--max-active-paths=4`).
 const BEAM_PATHS: i32 = 4;
+
+/// How the example tells a child process which scenario to run.
+const SCENARIO_FLAG: &str = "--scenario";
+
+/// The tracks the engine child opens a detector for: mic and system.
+const TRACKS: usize = 2;
 
 /// The command line, parsed: every scenario's inputs.
 #[derive(Debug, Clone)]
@@ -84,9 +96,12 @@ struct Hotwords {
 
 fn main() -> Result<()> {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    if let Some(scenario) = args.first().and_then(|a| a.to_str()?.strip_prefix("--")) {
-        let scenario = scenario.to_owned();
-        return run_scenario(&scenario, &inputs(&args[1..])?);
+    if args.first().is_some_and(|a| a == SCENARIO_FLAG) {
+        let scenario = args
+            .get(1)
+            .and_then(|s| s.to_str())
+            .ok_or("no scenario named")?;
+        return run_scenario(scenario, &inputs(&args[2..])?);
     }
     // Check the arguments before starting any child.
     inputs(&args)?;
@@ -97,10 +112,12 @@ fn main() -> Result<()> {
         "both-pack",
         "recreate-glossary",
         "recreate-pack",
-        "per-stream",
+        "per-stream-glossary",
+        "per-stream-pack",
     ] {
         let status = Command::new(&exe)
-            .arg(format!("--{scenario}"))
+            .arg(SCENARIO_FLAG)
+            .arg(scenario)
             .args(&args)
             .status()?;
         if !status.success() {
@@ -157,7 +174,8 @@ fn run_scenario(scenario: &str, inputs: &Inputs) -> Result<()> {
         "both-pack" => both(scenario, inputs, &inputs.pack, &audio),
         "recreate-glossary" => recreate(scenario, inputs, &inputs.glossary),
         "recreate-pack" => recreate(scenario, inputs, &inputs.pack),
-        "per-stream" => per_stream(inputs, &audio),
+        "per-stream-glossary" => per_stream(scenario, inputs, &inputs.glossary, &audio),
+        "per-stream-pack" => per_stream(scenario, inputs, &inputs.pack, &audio),
         other => Err(format!("no scenario {other}").into()),
     }
 }
@@ -166,7 +184,7 @@ fn run_scenario(scenario: &str, inputs: &Inputs) -> Result<()> {
 /// it today.
 fn greedy(inputs: &Inputs, audio: &[Vec<f32>]) -> Result<()> {
     report("greedy", "start", &memory()?)?;
-    let mut models = SherpaModels::load(&model_paths(inputs))?;
+    let (mut models, _detectors) = engine(inputs)?;
     report("greedy", "loaded", &memory()?)?;
     for chunk in audio {
         models.transcriber().transcribe(chunk);
@@ -174,11 +192,21 @@ fn greedy(inputs: &Inputs, audio: &[Vec<f32>]) -> Result<()> {
     report("greedy", "decoded", &memory()?)
 }
 
+/// What the engine child holds while it records: the greedy recogniser
+/// and a detector for each track.
+fn engine(inputs: &Inputs) -> Result<(SherpaModels, Vec<SileroDetector>)> {
+    let models = SherpaModels::load(&model_paths(inputs))?;
+    let detectors = (0..TRACKS)
+        .map(|_| models.detector(SampleIndex::ZERO))
+        .collect::<std::result::Result<_, _>>()?;
+    Ok((models, detectors))
+}
+
 /// Greedy and the boosted beam recogniser loaded together, each decoding
 /// every chunk.
 fn both(scenario: &str, inputs: &Inputs, hotwords: &Hotwords, audio: &[Vec<f32>]) -> Result<()> {
     report(scenario, "start", &memory()?)?;
-    let mut models = SherpaModels::load(&model_paths(inputs))?;
+    let (mut models, _detectors) = engine(inputs)?;
     report(scenario, "greedy-loaded", &memory()?)?;
     let beam = create(&beam_config(inputs, hotwords, true))?;
     report(scenario, "beam-loaded", &memory()?)?;
@@ -192,7 +220,7 @@ fn both(scenario: &str, inputs: &Inputs, hotwords: &Hotwords, audio: &[Vec<f32>]
 /// The time to build the boosted recogniser with a hotword list, and to
 /// build one stream with the list as per-stream hotwords.
 fn recreate(scenario: &str, inputs: &Inputs, hotwords: &Hotwords) -> Result<()> {
-    let clock = SystemClock::start().map_err(|e| format!("no clock: {e}"))?;
+    let clock = SystemClock::start()?;
     let mut builds = Vec::with_capacity(REPEATS);
     for _ in 0..REPEATS {
         let start = clock.now();
@@ -200,7 +228,7 @@ fn recreate(scenario: &str, inputs: &Inputs, hotwords: &Hotwords) -> Result<()> 
         builds.push(since(&clock, start));
         drop(recognizer);
     }
-    let terms = per_stream_list(&hotwords.list)?;
+    let (terms, count) = per_stream_list(&hotwords.list)?;
     let plain = create(&beam_config(inputs, hotwords, false))?;
     let mut streams = Vec::with_capacity(REPEATS);
     for _ in 0..REPEATS {
@@ -212,8 +240,7 @@ fn recreate(scenario: &str, inputs: &Inputs, hotwords: &Hotwords) -> Result<()> 
     let mut out = io::stdout().lock();
     writeln!(
         out,
-        "{scenario} terms={} recognizer_ms={} stream_ms={}",
-        terms.split('/').count(),
+        "{scenario} terms={count} recognizer_ms={} stream_ms={}",
         timings(&mut builds),
         timings(&mut streams)
     )?;
@@ -221,14 +248,18 @@ fn recreate(scenario: &str, inputs: &Inputs, hotwords: &Hotwords) -> Result<()> 
 }
 
 /// Whether per-stream hotwords boost like the recogniser's own: the same
-/// chunks through plain beam, beam with the glossary as its hotwords file,
-/// and plain beam with the glossary as per-stream hotwords (separated by
-/// `/`, then by newlines).
-fn per_stream(inputs: &Inputs, audio: &[Vec<f32>]) -> Result<()> {
-    let glossary = &inputs.glossary;
-    let plain = create(&beam_config(inputs, glossary, false))?;
-    let boosted = create(&beam_config(inputs, glossary, true))?;
-    let slashed = per_stream_list(&glossary.list)?;
+/// chunks through plain beam, beam with the list as its hotwords file, and
+/// plain beam with the list as per-stream hotwords (separated by `/`, then
+/// by newlines).
+fn per_stream(
+    scenario: &str,
+    inputs: &Inputs,
+    hotwords: &Hotwords,
+    audio: &[Vec<f32>],
+) -> Result<()> {
+    let plain = create(&beam_config(inputs, hotwords, false))?;
+    let boosted = create(&beam_config(inputs, hotwords, true))?;
+    let (slashed, _) = per_stream_list(&hotwords.list)?;
     let lined = slashed.replace('/', "\n");
     let mut counts = Agreement::default();
     for chunk in audio {
@@ -241,7 +272,7 @@ fn per_stream(inputs: &Inputs, audio: &[Vec<f32>]) -> Result<()> {
     let mut out = io::stdout().lock();
     writeln!(
         out,
-        "per-stream chunks={} file_differs_from_plain={} slash_matches_file={} \
+        "{scenario} chunks={} file_differs_from_plain={} slash_matches_file={} \
          slash_differs_from_plain={} newline_matches_file={} newline_differs_from_plain={}",
         audio.len(),
         counts.file_differs,
@@ -313,9 +344,16 @@ fn beam_config(inputs: &Inputs, hotwords: &Hotwords, with_file: bool) -> Offline
     config
 }
 
-/// Builds a recogniser, or says sherpa-onnx refused it.
+/// Builds a recogniser, or says sherpa-onnx refused it, naming the
+/// vocab and the hotwords file it was given.
 fn create(config: &OfflineRecognizerConfig) -> Result<OfflineRecognizer> {
-    OfflineRecognizer::create(config).ok_or_else(|| "sherpa-onnx refused the beam config".into())
+    OfflineRecognizer::create(config).ok_or_else(|| {
+        format!(
+            "sherpa-onnx refused the beam config (vocab {:?}, hotwords file {:?})",
+            config.model_config.bpe_vocab, config.hotwords_file
+        )
+        .into()
+    })
 }
 
 /// Decodes one chunk on `stream`; its text, trimmed.
@@ -332,19 +370,22 @@ fn decode(
         .unwrap_or_default()
 }
 
-/// A hotword list file as one per-stream string (see [`join_terms`]).
-fn per_stream_list(path: &Path) -> Result<String> {
-    join_terms(&std::fs::read_to_string(path)?)
+/// A hotword list file as one per-stream string and its term count (see
+/// [`join_terms`]).
+fn per_stream_list(path: &Path) -> Result<(String, usize)> {
+    let list = std::fs::read_to_string(path)
+        .map_err(|e| format!("can't read the hotword list {}: {e}", path.display()))?;
+    join_terms(&list)
 }
 
 /// A hotword list (one term per line) as one per-stream string, terms
-/// separated by `/`; blank lines are skipped.
+/// separated by `/`, and how many terms it holds; blank lines are skipped.
 ///
 /// # Errors
 ///
-/// If a term holds `/` or NUL: the first would split the term, the second
-/// panics inside sherpa-onnx's crate.
-fn join_terms(list: &str) -> Result<String> {
+/// If the list has no terms, or a term holds `/` or NUL: `/` would split
+/// the term, and NUL panics inside sherpa-onnx's crate.
+fn join_terms(list: &str) -> Result<(String, usize)> {
     let terms: Vec<&str> = list
         .lines()
         .map(str::trim)
@@ -353,12 +394,16 @@ fn join_terms(list: &str) -> Result<String> {
     if let Some(bad) = terms.iter().find(|t| t.contains(['/', '\0'])) {
         return Err(format!("hotword {bad:?} holds '/' or NUL").into());
     }
-    Ok(terms.join("/"))
+    if terms.is_empty() {
+        return Err("the hotword list has no terms".into());
+    }
+    Ok((terms.join("/"), terms.len()))
 }
 
 /// The first `count` 25 s chunks of a 16 kHz WAV file.
 fn chunks(path: &Path, count: usize) -> Result<Vec<Vec<f32>>> {
-    let wave = Wave::read(&path.to_string_lossy()).ok_or("can't read the WAV file")?;
+    let wave = Wave::read(&path.to_string_lossy())
+        .ok_or_else(|| format!("can't read the WAV file {}", path.display()))?;
     if wave.sample_rate() != RATE_HZ {
         return Err(format!("the WAV file is {} Hz, not 16 kHz", wave.sample_rate()).into());
     }
@@ -427,7 +472,8 @@ fn since(clock: &SystemClock, start: nota_core::SessionTime) -> Duration {
         .unwrap_or_default()
 }
 
-/// Timings as `first/median/max` in ms. Sorts them.
+/// Timings as `first/median/max` in ms (the upper median for an even
+/// count). Sorts them.
 fn timings(times: &mut [Duration]) -> String {
     let Some(&first) = times.first() else {
         return "none".to_owned();
@@ -474,20 +520,36 @@ mod tests {
         assert_eq!(timings(&mut times), "300/300/500");
     }
 
-    /// Terms are joined by `/`, without the blank lines.
+    /// Terms are joined by `/`, without the blank lines, and counted.
     #[test]
-    fn terms_are_joined_by_slashes() {
+    fn terms_are_joined_by_slashes_and_counted() {
         assert_eq!(
             join_terms("aspirin\n\n  ramipril \n").ok(),
-            Some("aspirin/ramipril".to_owned())
+            Some(("aspirin/ramipril".to_owned(), 2))
         );
     }
 
     /// A term with `/` would be split in two by the per-stream format, and
-    /// one with NUL would panic in sherpa-onnx's crate.
+    /// one with NUL would panic in sherpa-onnx's crate; the error names it.
     #[test]
-    fn a_term_holding_a_slash_or_nul_is_refused() {
-        assert!(join_terms("aspirin\nco-trimoxazole/x\n").is_err());
-        assert!(join_terms("aspirin\nram\0ipril\n").is_err());
+    fn a_term_holding_a_slash_or_nul_is_refused_by_name() {
+        let error = |list| join_terms(list).err().map(|e| e.to_string());
+        assert_eq!(
+            error("aspirin\nco-trimoxazole/x\n"),
+            Some(r#"hotword "co-trimoxazole/x" holds '/' or NUL"#.to_owned())
+        );
+        assert_eq!(
+            error("aspirin\nram\0ipril\n"),
+            Some(r#"hotword "ram\0ipril" holds '/' or NUL"#.to_owned())
+        );
+    }
+
+    /// An empty list would time an empty graph and report it as a term.
+    #[test]
+    fn an_empty_list_is_refused() {
+        assert_eq!(
+            join_terms("\n  \n").err().map(|e| e.to_string()),
+            Some("the hotword list has no terms".to_owned())
+        );
     }
 }
