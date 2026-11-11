@@ -638,7 +638,7 @@ fn due_after(
     clock: &nota_core::FakeClock,
     wait: Duration,
 ) -> Job {
-    clock.advance(wait - Duration::from_nanos(1));
+    clock.advance(wait.checked_sub(Duration::from_nanos(1)).unwrap());
     assert!(runner.next().unwrap().is_none(), "due before {wait:?}");
     clock.advance(Duration::from_nanos(1));
     runner.next().unwrap().unwrap()
