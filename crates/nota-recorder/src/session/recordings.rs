@@ -750,6 +750,25 @@ mod tests {
         assert!(recordings.running(&[]).unwrap());
     }
 
+    /// What isn't an entry (a file, a directory with something in it) is
+    /// left, and doesn't keep a start from removing the entries beside it.
+    #[test]
+    fn a_start_removes_left_entries_beside_what_isnt_one() {
+        let recordings = library();
+        let left = left_by_crashes(&recordings.fs);
+        // Named to sort first, so the clean-up meets them before the rest.
+        let note = lock_dir().join("0-note");
+        let full = lock_dir().join("0-full");
+        recordings.fs.create(&note).unwrap();
+        recordings.fs.create_dir(&full).unwrap();
+        recordings.fs.create(&full.join("inside")).unwrap();
+        let _recording = recordings.record().unwrap();
+        let after = entries(&recordings.fs);
+        assert_eq!(after.len(), 3, "{after:?}");
+        assert!(after.contains(&note) && after.contains(&full), "{after:?}");
+        assert!(left.iter().all(|entry| !after.contains(entry)), "{after:?}");
+    }
+
     /// A start leaves another recording's entry, which it holds.
     #[test]
     fn a_start_leaves_a_running_recordings_entry() {
@@ -817,11 +836,19 @@ mod tests {
         let dir = crate::test_dir::TestDir::new("recordings-checks");
         let recordings = Recordings::new(crate::fs::StdFs, &dir.0);
         let held = recordings.record().unwrap();
+        let held_entry = recordings.fs.list(recordings.dir()).unwrap();
         let left = recordings.dir().join("1-0-0");
         recordings.fs.create_dir(&left).unwrap();
         let starts = || {
             for _ in 0..300 {
-                drop(recordings.record().unwrap());
+                let recording = recordings.record().unwrap();
+                // Seen past the held one: an entry the other thread's
+                // clean-up removed under its lock would be held unseen.
+                assert!(
+                    recordings.running(&held_entry).unwrap(),
+                    "a start went unseen"
+                );
+                drop(recording);
             }
         };
         std::thread::scope(|scope| {
