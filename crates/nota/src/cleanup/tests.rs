@@ -388,6 +388,14 @@ fn the_job_waits_for_the_final_pass() {
         JobEnd::Failed("there's no final transcript to fix: it broke".to_owned())
     );
     assert_eq!(fake.questions(), 0);
+    // With no decider set up it fails all the same, rather than waiting
+    // for one.
+    let mut unset = fixture.clean_up(Gives::NotSetUp);
+    assert_eq!(unset.lacks(&fixture.db, SESSION), None);
+    assert_eq!(
+        run(&mut unset, &fixture),
+        JobEnd::Failed("there's no final transcript to fix: it broke".to_owned())
+    );
 }
 
 /// From #153: a recording that starts between two questions stops the
@@ -558,6 +566,107 @@ fn a_rerun_adds_nothing_to_reviewed_spans() {
         fixture.shown(),
         ["taking amlodipine DailyMed", "twice DailyMed"]
     );
+}
+
+/// Acceptance: a reviewed card holds its words as a fix does. Two
+/// chunks each have a yes the gate refuses; the one card is reviewed,
+/// the other went over the cap. A pair learned since offers a new term on
+/// both: only the words no review holds get a proposal.
+#[test]
+fn a_reviewed_card_holds_its_words() {
+    let chunks = [
+        "patients with chronic conditions here",
+        "more chronic conditions here",
+    ];
+    let fixture = Fixture::new("reviewed-card", &chunks, &["chronic kidney disease"]);
+    let fake = Fake::saying_yes([
+        ("chronic conditions", "chronic kidney disease"),
+        ("chronic conditions", "chronic condition"),
+    ]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake));
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    let first = fixture.proposals();
+    let outcomes: Vec<Outcome> = first.iter().map(|p| p.outcome).collect();
+    assert_eq!(outcomes, [Outcome::Card, Outcome::OverCap]);
+    fixture
+        .db
+        .with(|db| db.review_proposal(first[0].id, Reviewed::Rejected))
+        .unwrap();
+    let at = WallTime::from_unix_seconds(1_762_765_200).unwrap();
+    fixture
+        .db
+        .with(|db| {
+            db.learn(
+                SESSION,
+                "chronic conditions",
+                "chronic condition",
+                Verdict::Accepted,
+                at,
+            )
+        })
+        .unwrap();
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    let proposals = fixture.proposals();
+    let added: Vec<(u64, &str, Outcome)> = proposals[2..]
+        .iter()
+        .map(|p| {
+            (
+                p.proposed.chunk.start.get(),
+                p.proposed.term.as_str(),
+                p.outcome,
+            )
+        })
+        .collect();
+    let written = fixture.revisions()[1];
+    assert_eq!(
+        added,
+        [(CHUNK, "chronic condition", Outcome::Applied(Some(written)))]
+    );
+    assert_eq!(
+        fixture.shown(),
+        [
+            "patients with chronic conditions here",
+            "more chronic condition here"
+        ]
+    );
+}
+
+/// A run cut off before placing leaves its fixes applied but not yet
+/// written; they hold their words all the same, so a term learned since
+/// that overlaps one isn't asked, and the next run writes the fix.
+#[test]
+fn an_unwritten_fix_holds_its_words() {
+    let fixture = Fixture::new("unwritten", &["take amylo diping daily"], &["amlodipine"]);
+    let fake = Fake::saying_yes([
+        ("amylo diping", "amlodipine"),
+        ("diping daily", "dipping daily"),
+    ])
+    .flagging_after(1);
+    let log = Arc::clone(&fake.log);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    let stop = || log.flag.load(Ordering::SeqCst);
+    assert_eq!(
+        run_with(&mut clean_up, &fixture, &stop),
+        JobEnd::Waiting(None)
+    );
+    assert_eq!(fixture.proposals()[0].outcome, Outcome::Applied(None));
+    let at = WallTime::from_unix_seconds(1_762_765_200).unwrap();
+    fixture
+        .db
+        .with(|db| {
+            db.learn(
+                SESSION,
+                "diping daily",
+                "dipping daily",
+                Verdict::Accepted,
+                at,
+            )
+        })
+        .unwrap();
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(fake.questions(), 1);
+    assert_eq!(fixture.proposals().len(), 1);
+    assert_eq!(fixture.shown(), ["take amlodipine daily"]);
 }
 
 /// Acceptance: the card cap holds on a recording with many signals, and

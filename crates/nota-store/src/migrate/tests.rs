@@ -874,7 +874,8 @@ fn version_10_upgrades_to_11_with_old_words_unknown() {
 }
 
 /// Acceptance (#159): a version 11 library keeps its sessions, jobs and
-/// final text; its unused V8 `proposal` table gives way to clean-up's,
+/// final text; its V8 `proposal` table, kept closed with its rows as
+/// `proposal_v8`, gives way to clean-up's,
 /// which then takes proposals on the old final text; the session already
 /// stopped keeps only its final pass (sessions stopped before the upgrade
 /// get no clean-up job), and one stopped after it gets both jobs.
@@ -891,7 +892,10 @@ fn version_11_upgrades_to_12_with_clean_up_proposals() {
              INSERT INTO revision VALUES (1, 0, NULL);
              INSERT INTO final_word VALUES (1, 0, 0, 0, 'amylo', 0, 50, -0.5), \
                  (1, 0, 0, 1, 'diping', 50, 100, NULL);
-             INSERT INTO final_progress VALUES (1, 0, 100);",
+             INSERT INTO final_progress VALUES (1, 0, 100);
+             INSERT INTO proposal (session_id, revision, track, start_sample, first_word, last_word,
+                                   heard, replacement, source, pack_version, state)
+             VALUES (1, 0, 0, 0, 0, 1, 'amylo diping', 'amlodipine', 'pharmacy', '1', 'open');",
         )
         .unwrap();
     }
@@ -957,4 +961,16 @@ fn version_11_upgrades_to_12_with_clean_up_proposals() {
         .unwrap();
     assert_eq!(broken, 0);
     assert!(refused(&conn, "DELETE FROM proposal"));
+    // V8's row is kept, and its table is closed.
+    let kept: String = conn
+        .query_row("SELECT replacement FROM proposal_v8", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(kept, "amlodipine");
+    for sql in [
+        "INSERT INTO proposal_v8 SELECT * FROM proposal_v8",
+        "UPDATE proposal_v8 SET replacement = 'other'",
+        "DELETE FROM proposal_v8",
+    ] {
+        assert!(refused(&conn, sql), "{sql}");
+    }
 }

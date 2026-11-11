@@ -331,6 +331,8 @@ fn a_proposal_is_reviewed_once() {
         Some(Reviewed::Rejected)
     );
     assert!(store.review_proposal(id, Reviewed::Accepted).is_err());
+    // Not even with the same verdict.
+    assert!(store.review_proposal(id, Reviewed::Rejected).is_err());
     assert!(matches!(
         store.review_proposal(ProposalId(9_999), Reviewed::Accepted),
         Err(StoreError::NoProposal(9_999))
@@ -402,4 +404,36 @@ fn the_schema_keeps_proposals_as_recorded() {
         ))
         .is_err()
     );
+}
+
+/// A row's outcome agrees with its decision: one written by hand that
+/// doesn't is refused, so a read never meets it. Each is a stored row
+/// copied with one decision changed; the copy unchanged goes in.
+#[test]
+fn the_schema_ties_each_outcome_to_its_decision() {
+    let (dir, mut store, chunk) = store("proposals-outcomes");
+    store.add_proposals(S1, &every_decision(chunk)).unwrap();
+    drop(store);
+    let conn = raw(&dir.db());
+    let copy = |outcome: &str, change: &str| -> bool {
+        let sql = format!(
+            "CREATE TEMP TABLE copied AS SELECT * FROM proposal WHERE outcome = '{outcome}' LIMIT 1;
+             UPDATE copied SET id = id + 1000 {change};
+             INSERT INTO proposal SELECT * FROM copied;"
+        );
+        let refused = conn.execute_batch(&sql).is_err();
+        conn.execute_batch("DROP TABLE IF EXISTS temp.copied")
+            .unwrap();
+        refused
+    };
+    for (outcome, change) in [
+        ("applied", ", answer = 'no', gate = NULL"),
+        ("applied", ", gate = 'dissimilar'"),
+        ("to-rank", ", gate = 'applied'"),
+        ("to-rank", ", answer = 'no', gate = NULL"),
+        ("rejected", ", rule = 'no-answer'"),
+    ] {
+        assert!(copy(outcome, change), "{outcome}{change}");
+    }
+    assert!(!copy("applied", ""), "an unchanged copy goes in");
 }

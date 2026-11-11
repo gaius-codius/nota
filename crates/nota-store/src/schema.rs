@@ -763,6 +763,12 @@ CREATE TABLE proposal (
     CHECK ((answer = 'yes') = (gate IS NOT NULL)),
     CHECK ((outcome = 'rejected') = (rule IS NOT NULL)),
     CHECK (applied_in IS NULL OR outcome = 'applied'),
+    CHECK (CASE outcome
+        WHEN 'applied' THEN answer IS 'yes' AND gate IS 'applied'
+        WHEN 'rejected' THEN (rule IS 'no' AND answer IS 'no')
+            OR (rule IS 'no-answer' AND answer IS 'none')
+            OR (rule IN ('no-change', 'covered') AND gate IS 'applied')
+        ELSE answer IS 'yes' AND gate IS NOT 'applied' END),
     FOREIGN KEY (session_id, revision) REFERENCES revision(session_id, number),
     FOREIGN KEY (session_id, applied_in) REFERENCES revision(session_id, number),
     FOREIGN KEY (session_id, track, start_sample, first_word)
@@ -797,7 +803,7 @@ CREATE TRIGGER proposal_applied_once BEFORE UPDATE OF applied_in ON proposal
 WHEN NEW.applied_in IS NOT OLD.applied_in AND OLD.applied_in IS NOT NULL
 BEGIN SELECT RAISE(ABORT, 'the revision that applied a proposal is never changed'); END;
 CREATE TRIGGER proposal_reviewed_once BEFORE UPDATE OF review ON proposal
-WHEN NEW.review IS NOT OLD.review AND OLD.review IS NOT NULL
+WHEN OLD.review IS NOT NULL
 BEGIN SELECT RAISE(ABORT, 'a proposal is never reviewed twice'); END;
 ";
 

@@ -5,18 +5,24 @@
 //! The settings are read again at each run (and each look at the queue),
 //! so a decider set up while nota is open is used from the next run on.
 //! Until Setup picks a session's decider (#163), every session uses the
-//! local one.
+//! local one. The settings are read on unix only; elsewhere no decider is
+//! set up, and clean-up jobs wait for one.
 
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use nota_core::Clock;
+#[cfg(unix)]
 use nota_core::decide::Place;
+#[cfg(unix)]
 use nota_llm::local::LocalDecider;
-use nota_store::{DecidedBy, Pack};
+#[cfg(unix)]
+use nota_store::DecidedBy;
+use nota_store::Pack;
 
 use super::{Setup, Sources};
+#[cfg(unix)]
 use crate::settings::{self, Environment};
 
 /// The folder in the data directory that holds the installed packs.
@@ -47,22 +53,7 @@ impl Installed {
 
 impl Sources for Installed {
     fn decider(&self) -> Setup {
-        match settings::local_decider(&Environment::current()) {
-            settings::LocalDecider::NotSetUp => Setup::NotSetUp,
-            settings::LocalDecider::Unavailable(why) => {
-                Setup::Unavailable(format!("the decider can't be used: {why}"))
-            }
-            settings::LocalDecider::Ready(config) => {
-                let by = DecidedBy {
-                    name: "llama-server".to_owned(),
-                    model: model_name(&config.model),
-                    place: Place::Local,
-                };
-                let prompt = Box::new(nota_llm::prompt::English::new(None));
-                let decider = LocalDecider::new(*config, prompt, Arc::clone(&self.clock));
-                Setup::Ready(Box::new(decider), by)
-            }
-        }
+        local_decider(&self.clock)
     }
 
     fn packs(&self) -> Result<Vec<Pack>, String> {
@@ -71,7 +62,35 @@ impl Sources for Installed {
     }
 }
 
+/// The local decider the settings describe, timed by `clock`.
+#[cfg(unix)]
+fn local_decider(clock: &Arc<dyn Clock>) -> Setup {
+    match settings::local_decider(&Environment::current()) {
+        settings::LocalDecider::NotSetUp => Setup::NotSetUp,
+        settings::LocalDecider::Unavailable(why) => {
+            Setup::Unavailable(format!("the decider can't be used: {why}"))
+        }
+        settings::LocalDecider::Ready(config) => {
+            let by = DecidedBy {
+                name: "llama-server".to_owned(),
+                model: model_name(&config.model),
+                place: Place::Local,
+            };
+            let prompt = Box::new(nota_llm::prompt::English::new(None));
+            let decider = LocalDecider::new(*config, prompt, Arc::clone(clock));
+            Setup::Ready(Box::new(decider), by)
+        }
+    }
+}
+
+/// No decider: the settings that describe one are read on unix only.
+#[cfg(not(unix))]
+fn local_decider(_clock: &Arc<dyn Clock>) -> Setup {
+    Setup::NotSetUp
+}
+
 /// A model's name, for the record: its file's name without the folder.
+#[cfg(unix)]
 fn model_name(path: &Path) -> String {
     path.file_name()
         .unwrap_or(path.as_os_str())
@@ -93,8 +112,8 @@ fn installed(dir: &Path) -> io::Result<Vec<Pack>> {
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| path.extension().is_some_and(|ext| ext == "pack"))
-        .take(MAX_PACKS)
         .collect();
     paths.sort();
+    paths.truncate(MAX_PACKS);
     Ok(paths.iter().filter_map(|p| Pack::open(p).ok()).collect())
 }

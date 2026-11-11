@@ -48,7 +48,6 @@ pub(crate) mod cards;
 pub(crate) mod chunk;
 #[cfg(test)]
 pub(crate) mod fake;
-#[cfg(unix)]
 pub(crate) mod sources;
 
 use chunk::{Answers, Chunk, Context, Offer};
@@ -106,9 +105,11 @@ impl CleanUp {
     /// session's final pass, then a decider.
     pub(crate) fn lacks(&self, db: &Writer, session: SessionId) -> Option<Wait> {
         match final_pass(db, session) {
-            // A failed final pass is reported by the run, not waited on.
-            Ok(Some(JobState::Done | JobState::Failed(_)) | None) => {}
-            Ok(Some(_)) | Err(_) => return Some(Wait::FinalText),
+            Ok(Some(JobState::Done) | None) => {}
+            // A failed final pass, or one that can't be read, is reported
+            // by the run, without waiting for a decider first.
+            Ok(Some(JobState::Failed(_))) | Err(_) => return None,
+            Ok(Some(_)) => return Some(Wait::FinalText),
         }
         matches!(self.sources.decider(), Setup::NotSetUp).then_some(Wait::Decider)
     }
@@ -343,7 +344,11 @@ struct Pass<'a> {
 /// How a chunk's question went.
 enum Asked {
     /// Answered, or no answer to read: the chunk's proposals are stored.
-    Settled,
+    Settled {
+        /// Whether the decider answered, rather than giving an answer
+        /// that couldn't be read or not being asked.
+        answered: bool,
+    },
     /// The run must end here, as given.
     Ended(JobEnd),
 }
@@ -400,14 +405,14 @@ impl Pass<'_> {
                 blocked: held.blocked(chunk.key()),
             };
             match self.ask(&ask, &mut *decider) {
-                Asked::Settled => {}
+                Asked::Settled { answered: true } if !answered => {
+                    // The decider works: any reason shown for an earlier
+                    // failure goes.
+                    (self.running.engine_down)(None);
+                    answered = true;
+                }
+                Asked::Settled { .. } => {}
                 Asked::Ended(end) => return Some(end),
-            }
-            if !answered {
-                // The decider works: any reason shown for an earlier
-                // failure goes.
-                (self.running.engine_down)(None);
-                answered = true;
             }
         }
         (self.running.progress)(nota_store::Progress { done: total, total });
@@ -441,7 +446,9 @@ impl Pass<'_> {
             .db
             .with(|db| db.add_proposals(self.session, &proposals))
         {
-            Ok(()) => Asked::Settled,
+            Ok(()) => Asked::Settled {
+                answered: matches!(answers, Answers::Given(_)),
+            },
             Err(e) => Asked::Ended(stored(&e)),
         }
     }

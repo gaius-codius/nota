@@ -1,7 +1,10 @@
 //! Properties of settling a chunk, over random chunks, offers, decider
-//! answers and the gate's verdicts on them (the offers' windows and terms
-//! are drawn so the gate places some yeses and refuses others, for every
-//! rule):
+//! answers and the real gate's verdicts on them. The offers' windows are
+//! the chunk's own words and their terms near misses of them or not, so
+//! the gate places some yeses and refuses others as dissimilar, placed
+//! elsewhere or already changed; its other rules (an empty, missing or
+//! over-long span, a term not offered) can't arise from what clean-up
+//! offers, and the gate's own properties cover them:
 //!
 //! - every asked candidate ends in exactly one outcome, in order, naming
 //!   its heard span, term and offered words;
