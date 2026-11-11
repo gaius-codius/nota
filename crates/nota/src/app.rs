@@ -748,7 +748,8 @@ fn stopping_home(home: &mut Home) {
 
 /// Gives one ready session the status of its jobs. Jobs waiting for
 /// space need you to free some while there's none (`no_space` says what
-/// Home says of it then, see [`Listing::no_space`]).
+/// Home says of it then, see [`Listing::no_space`]). The status comes first
+/// in its detail, before what salvage said of it (a kept temp file, say).
 fn job_status(
     shown: &mut Session,
     jobs: &[nota_store::Job],
@@ -761,17 +762,19 @@ fn job_status(
         _ => None,
     }) {
         shown.status = Status::NeedsYou;
-        shown.detail = vec![format!("processing failed: {why}")];
+        shown.detail.insert(0, format!("processing failed: {why}"));
     } else if let Some(why) = own()
         .any(|job| job.state == JobState::Waiting(Some(Wait::Space)))
         .then(|| no_space(id))
         .flatten()
     {
         shown.status = Status::NeedsYou;
-        shown.detail = vec![why.to_owned()];
+        shown.detail.insert(0, why.to_owned());
     } else if own().any(|job| job.state != JobState::Done) {
         shown.status = Status::Processing;
-        shown.detail = vec!["final transcript queued or running".into()];
+        shown
+            .detail
+            .insert(0, "final transcript queued or running".into());
     }
 }
 
@@ -844,11 +847,14 @@ fn session(listed: Listed, salvaged: &[Salvaged], dates: &Dates) -> Session {
         }
         (Needs::Attention(why), _) => (Status::NeedsYou, vec![why]),
         (Needs::InUse, _) => (Status::Processing, vec!["being recorded".to_owned()]),
-        // Salvage at start failed, but a later one (each recording's start
-        // salvages too) left nothing to save.
-        (Needs::Nothing, Some(Salvaged::Failed(..) | Salvaged::InUse(_)) | None) => {
-            (Status::Ready, Vec::new())
+        // Salvage at start failed, but nothing is left to save: a later
+        // salvage (each recording's start salvages too) finished, or the
+        // failure came once every journal was gone. Only the temp files it
+        // couldn't remove are still worth naming.
+        (Needs::Nothing, Some(Salvaged::Failed(_, _, done))) => {
+            (Status::Ready, crate::record::kept_temp_notes(done))
         }
+        (Needs::Nothing, Some(Salvaged::InUse(_)) | None) => (Status::Ready, Vec::new()),
         (Needs::Nothing, Some(Salvaged::Done(_, aside))) => (Status::Ready, recovered(aside, None)),
         (Needs::Nothing, Some(Salvaged::Left(_, aside, held))) => {
             (Status::Ready, recovered(aside, Some(held)))

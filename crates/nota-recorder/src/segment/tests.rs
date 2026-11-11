@@ -15,7 +15,7 @@ use nota_core::{
 use nota_store::SegmentRow;
 use sha2::{Digest, Sha256};
 
-use super::publish::TempSegment;
+use super::publish::{Committed, TempSegment, delete_journals};
 use super::*;
 use crate::fs::crash::{CrashCase, CrashTest};
 use crate::fs::fake::{CrashOutcome, FakeFs, Fault, Op};
@@ -4281,6 +4281,35 @@ fn a_run_that_stops_reports_what_it_did_before_it_stopped() {
     );
     assert_eq!(stopped.done().deleted(), &deleted[1..]);
     assert_eq!(stopped.done().segments(), before);
+}
+
+/// A directory sync that fails after the deletes still returns the
+/// journals that couldn't be deleted, beside its error, so a run stopped by
+/// it can name them.
+#[test]
+fn a_failed_sync_after_deleting_still_names_the_journals_kept() {
+    let fs = FakeFs::with_dirs([session()]);
+    let (gone, stuck) = (JournalId::new(1), JournalId::new(2));
+    for id in [gone, stuck] {
+        plant_file(&fs, &session().join(id.file_name()), b"a journal");
+    }
+    fs.fail_on(
+        &session().join(stuck.file_name()),
+        Fault::Remove,
+        io::ErrorKind::PermissionDenied,
+    );
+    let committed = Committed::default();
+    let journals: Vec<_> = [gone, stuck]
+        .into_iter()
+        .filter_map(|id| committed.release(id, &session().join(id.file_name()), &BTreeSet::new()))
+        .collect();
+    // The two removes go ahead; the directory sync after them fails.
+    fs.fail_after(2, io::ErrorKind::Other);
+
+    let (kept, synced) = delete_journals(&fs, &session(), &journals);
+    assert_eq!(kept, [(stuck, io::ErrorKind::PermissionDenied)]);
+    assert_eq!(synced.unwrap_err().kind(), io::ErrorKind::Other);
+    assert!(!fs.paths().contains(&session().join(gone.file_name())));
 }
 
 /// Salvage that stops still names the segment temp files it couldn't

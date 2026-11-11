@@ -165,7 +165,8 @@ fn a_long_detail_item_wraps_onto_indented_rows() {
     ];
     let mut home = home_of(vec![held], Theme::default());
     let buf = draw(&mut home, 20);
-    // 62 columns leave 51 for each row of the item.
+    // 62 columns leave 53 for an item's first row and 51 for the rows it
+    // wraps onto.
     let rows: Vec<String> = (13..16).map(|y| row(&buf, y)).collect();
     assert_eq!(
         rows,
@@ -183,8 +184,23 @@ fn a_long_detail_item_wraps_onto_indented_rows() {
     );
 }
 
+/// An item's first row takes the whole room, and the rows it wraps onto
+/// two columns fewer, so neither runs into the frame's padding.
+#[test]
+fn a_wrapped_items_rows_have_their_own_widths() {
+    let mut held = session(1, Status::NeedsYou);
+    // 53 columns, then 52: the second fits the first row's room but not
+    // the indented rows'.
+    held.detail = vec![format!("{} {} end", "a".repeat(53), "b".repeat(52))];
+    let mut home = home_of(vec![held], Theme::default());
+    let buf = draw(&mut home, 20);
+    assert_eq!(row(&buf, 13), format!("│     {}  │", "a".repeat(53)));
+    assert_eq!(row(&buf, 14), format!("│       {}  │", "b".repeat(51)));
+    assert_eq!(row(&buf, 15), format!("│       b end{}│", " ".repeat(48)));
+}
+
 /// A detail taller than the list shows its first rows under the session's
-/// own row, which stays in view.
+/// own row, which stays in view, and says how many more it has.
 #[test]
 fn a_detail_taller_than_the_list_keeps_its_session_in_view() {
     let mut sessions: Vec<Session> = (1..=3).map(|id| session(id, Status::Ready)).collect();
@@ -194,10 +210,15 @@ fn a_detail_taller_than_the_list_keeps_its_session_in_view() {
     press(&mut home, KeyCode::Down);
     assert_eq!(home.selected(), Some(1));
     let buf = draw(&mut home, 20);
-    // 20 rows leave 7 for the list: the session, then six of its items.
+    // 20 rows leave 7 for the list: the session, five of its items, and
+    // a row counting the seven it can't show.
     assert!(row(&buf, 12).contains("▸ ✓ session 1"), "{}", row(&buf, 12));
     assert!(row(&buf, 13).contains("held file 1 "), "{}", row(&buf, 13));
-    assert!(row(&buf, 18).contains("held file 6 "), "{}", row(&buf, 18));
+    assert!(row(&buf, 17).contains("held file 5 "), "{}", row(&buf, 17));
+    assert_eq!(
+        row(&buf, 18),
+        format!("│     … 7 more rows{}│", " ".repeat(42))
+    );
 }
 
 #[test]

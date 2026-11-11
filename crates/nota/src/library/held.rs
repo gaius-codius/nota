@@ -163,6 +163,15 @@ impl Held {
         held
     }
 
+    /// [`Self::only_a_kept_temp`], but every run stops on the system
+    /// track's segment as in [`Beside::Fails`]: salvage fails, having kept
+    /// the temp file.
+    pub(crate) fn a_kept_temp_and_a_stop() -> Self {
+        let held = Self::only_a_kept_temp();
+        held.fs.fail_on(&system_temp(), Fault::Create, STOPS);
+        held
+    }
+
     /// Leaves a temp file at `temp`, as a crashed run would, that can't be
     /// removed.
     fn plant_stuck_temp(&self, temp: &Path) {

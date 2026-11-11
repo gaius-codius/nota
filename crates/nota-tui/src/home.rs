@@ -22,7 +22,8 @@
 //! or how it was recovered, such as each file a failed salvage held and
 //! why) shows below it: each item starts a row of its own, and one too
 //! long for a row wraps onto the rows after it, indented. The session's own
-//! row stays in view however tall its detail is.
+//! row stays in view however tall its detail is: a detail taller than the
+//! list ends in a row saying how many more rows it has.
 //!
 //! A problem (a recording that couldn't start, the sessions not listed)
 //! shows on the line above `recent` until a key is pressed once it has been
@@ -342,7 +343,7 @@ impl Home {
             );
             return;
         }
-        let lines = self.list_lines(usize::from(list.width));
+        let mut lines = self.list_lines(usize::from(list.width));
         // Keep the selected row and its detail in view.
         let rows = usize::from(list.height);
         let (top, bottom) = lines
@@ -358,14 +359,29 @@ impl Home {
             self.scroll = bottom + 1 - rows;
         }
         // A detail taller than the list shows its first rows: the
-        // session's own row stays at the top.
+        // session's own row stays at the top, and the last row says how
+        // many more there are.
         self.scroll = self.scroll.min(top);
+        let last_shown = self.scroll + rows - 1;
+        if bottom > last_shown && last_shown > top {
+            let more = bottom - last_shown + 1;
+            lines[last_shown].1 = self.more_line(more);
+        }
         for (y, (index, line)) in (list.y..list.bottom()).zip(lines.iter().skip(self.scroll)) {
             if *index == self.selected {
                 buf.set_style(Rect::new(list.x, y, list.width, 1), self.theme.highlight);
             }
             buf.set_line(list.x, y, line, list.width);
         }
+    }
+
+    /// The row that stands for the last `more` rows of a detail too tall for
+    /// the list.
+    fn more_line(&self, more: usize) -> Line<'static> {
+        Line::from(vec![
+            Span::raw(" ".repeat(ROW_LEAD)),
+            Span::styled(format!("… {more} more rows"), self.theme.text_hint),
+        ])
     }
 
     /// Every row of the list, each with the index of its session: a row per

@@ -306,8 +306,10 @@ impl fmt::Display for RunStopped {
 }
 
 impl Error for RunStopped {
+    // It reads as its error does, so its source is that error's: a chain
+    // printer doesn't say the same thing twice.
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(&self.error)
+        self.error.source()
     }
 }
 
@@ -907,15 +909,24 @@ fn repair_all<S: Fs>(
     published: &mut Published,
 ) -> Result<(), PublishError> {
     let mut still = Vec::new();
-    for finding in std::mem::take(&mut published.findings) {
-        match repair_row(fs, dir, &finding, summaries, published)? {
-            Some(done) => {
+    let mut found = std::mem::take(&mut published.findings).into_iter();
+    while let Some(finding) = found.next() {
+        match repair_row(fs, dir, &finding, summaries, published) {
+            Ok(Some(done)) => {
                 rows.push(*done.row());
                 published
                     .repaired
                     .push((*done.row(), done.kept().map(Path::to_path_buf)));
             }
-            None => still.push(finding),
+            Ok(None) => still.push(finding),
+            Err(error) => {
+                // A run that stops here still reports every row not
+                // repaired: this one, and those it didn't reach.
+                still.push(finding);
+                still.extend(found);
+                published.findings = still;
+                return Err(error);
+            }
         }
     }
     published.findings = still;
@@ -1044,7 +1055,9 @@ fn release<S: Fs>(
         .iter()
         .filter_map(|(&id, path)| committed.release(id, path, needs.get(&id).unwrap_or(&empty)))
         .collect();
-    let kept = delete_journals(fs, dir, &ready)?;
+    // What was unlinked and what wasn't is reported before a failed sync
+    // stops the run, so a stopped run still names the journals it kept.
+    let (kept, synced) = delete_journals(fs, dir, &ready);
     for journal in ready {
         // One that couldn't be deleted isn't tried again this run: it holds
         // nothing still to publish, and the next run finds it again.
@@ -1054,7 +1067,7 @@ fn release<S: Fs>(
             None => published.deleted.push(journal.id()),
         }
     }
-    Ok(())
+    synced
 }
 
 /// Of the `unreadable` journals, those to set aside: those nothing waits

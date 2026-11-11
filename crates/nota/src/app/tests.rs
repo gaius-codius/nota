@@ -315,6 +315,35 @@ fn home_names_a_kept_temp_when_it_is_all_salvage_held() {
     );
 }
 
+/// A salvage that failed after keeping a temp file names it once nothing
+/// is left to save, and the session is ready.
+#[test]
+fn home_names_a_failed_salvages_kept_temp_once_nothing_is_left() {
+    use crate::library::held::Held;
+    let salvaged = Held::a_kept_temp_and_a_stop().salvaged();
+    assert!(matches!(salvaged, Salvaged::Failed(..)), "{salvaged:?}");
+    // A later salvage published the rest: the listing finds nothing.
+    let listed = Listed {
+        id: SessionId::new(1),
+        title: None,
+        started_at: None,
+        recorded: None,
+        needs: Needs::Nothing,
+    };
+    let shown = session(listed, &[salvaged], &dates());
+    assert_eq!(
+        (shown.status, shown.detail),
+        (
+            Status::Ready,
+            vec![
+                "seg-t5-000000000000.flac.tmp: couldn't remove the temporary file \
+                 (permission denied)"
+                    .to_owned()
+            ]
+        )
+    );
+}
+
 #[test]
 fn each_session_shows_what_salvage_found() {
     let listed = |needs| Listed {
@@ -680,6 +709,27 @@ fn shown_job(library: &Library) -> Session {
         .into_iter()
         .find(|s| s.id == 3)
         .unwrap()
+}
+
+/// A session's processing status comes before what salvage said of it,
+/// which stays: a kept temp file is still named.
+#[test]
+fn a_processing_status_keeps_what_salvage_said() {
+    let tmp = TestDir::new("job-after-salvage");
+    let library = library_of_three(&tmp.0);
+    stopped_job(&library);
+    let jobs = library.db().with(|db| db.jobs()).unwrap();
+    let recovered = vec![
+        "recovered after a crash · nothing lost".to_owned(),
+        "seg-t5-000000000000.flac.tmp: couldn't remove the temporary file".to_owned(),
+    ];
+    let mut shown = shown_job(&library);
+    shown.detail.clone_from(&recovered);
+    shown.status = Status::Ready;
+    job_status(&mut shown, &jobs, |_| None);
+    let mut expected = vec!["final transcript queued or running".to_owned()];
+    expected.extend(recovered);
+    assert_eq!((shown.status, shown.detail), (Status::Processing, expected));
 }
 
 /// A queued final pass shows that the session is still being processed.
