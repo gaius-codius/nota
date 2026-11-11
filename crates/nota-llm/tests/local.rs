@@ -553,14 +553,17 @@ fn a_server_started_through_the_shim_dies_with_its_starter() {
 /// A stand-in whose parent is killed, as nextest kills a hung test, ends
 /// within a second, so a killed test leaves no server behind. The parent
 /// here is a shell standing in for the test process, killed with SIGKILL;
-/// the server isn't started through the shim, so only the stand-in's own
-/// watch on its parent can end it.
+/// the server is started by the shell, not through the shim, so only the
+/// stand-in's own watch on its parent can end it. The shell itself is
+/// started through the shim, so it dies with this test if this test is
+/// killed first.
 #[test]
 fn a_stand_in_ends_soon_after_its_parent_is_killed() {
     let fixture = Fixture::new("orphan", "answer");
     let socket = fixture.dir.join("o.sock");
-    let mut parent = Command::new("/bin/sh")
-        .args(["-c", r#""$@" & wait"#, "sh", FAKE, "--host"])
+    let mut parent = Command::new(FAKE)
+        .args(["exec-tied", "/bin/sh", "-c", r#""$@" & wait"#, "sh"])
+        .args([FAKE, "--host"])
         .arg(&socket)
         .arg("--model")
         .arg(&fixture.dir)
