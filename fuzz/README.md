@@ -80,12 +80,16 @@ frame it accepts:
 - a transcript covers some samples, and each of its words has text, lies
   inside the transcript's range, and starts no earlier than the word before
   ends
+- a word's log-probability, when it has one, is finite and at most zero,
+  and never a negative zero (the one zero is positive); with the first
+  point, each word's log-probability field is a value or the one unknown
+  encoding, never another NaN
 
 Seeds are any encoded frames. A handshake is enough to start from:
 
 ```sh
 mkdir -p in-protocol
-printf '\x07\x00\x00\x00\x00nota\x01\x00' > in-protocol/hello
+printf '\x07\x00\x00\x00\x00nota\x02\x00' > in-protocol/hello
 cargo afl build --release
 AFL_SKIP_CPUFREQ=1 AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 \
   cargo afl fuzz -i in-protocol -o out-protocol target/release/engine_protocol

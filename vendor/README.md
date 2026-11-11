@@ -23,8 +23,9 @@ the pinned native libraries (`scripts/sherpa-onnx.sh`). To check the copy
 against the release:
 
 ```sh
-cargo download sherpa-onnx==1.13.8   # or unpack ~/.cargo/registry's copy
-diff -r <release>/src vendor/sherpa-onnx/src
+mkdir -p ~/.cache/sherpa-onnx-crate && cd ~/.cache/sherpa-onnx-crate
+curl -sL https://static.crates.io/crates/sherpa-onnx/sherpa-onnx-1.13.8.crate | tar -xz
+cd - && diff -r ~/.cache/sherpa-onnx-crate/sherpa-onnx-1.13.8/src vendor/sherpa-onnx/src
 ```
 
 Remove this copy and the patch once a release of the crate has the field.

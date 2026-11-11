@@ -1,4 +1,4 @@
-use nota_core::{SessionId, SessionTime, TrackId, Utterance};
+use nota_core::{LogProb, SessionId, SessionTime, TrackId, Utterance};
 
 use super::*;
 use crate::test_dir::TestDir;
@@ -192,6 +192,8 @@ fn sqlite_refuses_to_change_or_delete_heard_text() {
              VALUES ({id}, 1, 0, 0, 1000000000, 'replaced', 'e', 'm')"
         ),
         format!("UPDATE word SET text = 'changed' WHERE utterance_id = {id}"),
+        // A log-probability goes in with its word and stays as it was.
+        format!("UPDATE word SET log_prob = -1.0 WHERE utterance_id = {id}"),
         format!("DELETE FROM word WHERE utterance_id = {id}"),
         format!(
             "INSERT OR REPLACE INTO word (utterance_id, position, text, start_ns, end_ns) \
@@ -230,6 +232,80 @@ fn sqlite_refuses_to_change_or_delete_heard_text() {
     let mut after = store.utterances(S1).unwrap();
     after.truncate(1);
     assert_eq!(before, after);
+}
+
+/// Acceptance (#157): the heard text's words read back with the
+/// log-probabilities they were heard with, and a word heard without one
+/// reads back unknown, not as zero.
+#[test]
+fn heard_words_read_back_with_their_log_probabilities() {
+    let (_dir, mut store) = store("log-probs");
+    let mut h = heard(MIC, 0, 3_000, "amylodian is certain");
+    let given = [LogProb::new(-1.954), None, Some(LogProb::CERTAIN)];
+    h.words = h
+        .words
+        .into_iter()
+        .zip(given)
+        .map(|(word, log_prob)| word.with_log_prob(log_prob))
+        .collect();
+    store.add_utterance(S1, &h).unwrap();
+    let read = store.utterances(S1).unwrap();
+    let scores: Vec<_> = read[0].heard.words.iter().map(Word::log_prob).collect();
+    assert_eq!(scores, given);
+    assert_eq!(read[0].heard, h);
+}
+
+/// The same words with another log-probability are another utterance,
+/// not a retry: the value is part of what was heard.
+#[test]
+fn the_same_words_with_another_log_probability_are_stored_again() {
+    let (_dir, mut store) = store("retry-log-prob");
+    let h = heard(MIC, 0, 1_000, "one");
+    let first = store.add_utterance(S1, &h).unwrap();
+    let mut other = h.clone();
+    other.words[0] = other.words[0].clone().with_log_prob(LogProb::new(-0.5));
+    assert_ne!(store.add_utterance(S1, &other).unwrap(), first);
+    assert_eq!(store.add_utterance(S1, &h).unwrap(), first);
+}
+
+/// A stored log-probability no [`LogProb`] could have written is a
+/// corrupt row, not unknown; SQLite refuses one above zero outright.
+#[test]
+fn a_stored_log_probability_that_isnt_one_is_corrupt() {
+    let (dir, mut store) = store("bad-log-prob");
+    let id = store
+        .add_utterance(S1, &heard(MIC, 0, 1_000, "one"))
+        .unwrap()
+        .get();
+    drop(store);
+    let conn = raw(&dir.db());
+    let above = conn.execute(
+        &format!(
+            "INSERT INTO word (utterance_id, position, text, start_ns, end_ns, log_prob) \
+             VALUES ({id}, 1, 'x', 0, 1, 0.5)"
+        ),
+        [],
+    );
+    assert!(
+        matches!(&above, Err(e) if e.to_string().contains("CHECK constraint failed")),
+        "{above:?}"
+    );
+    // Not an f32's value: 0.1 has no exact f32.
+    conn.execute(
+        &format!(
+            "INSERT INTO word (utterance_id, position, text, start_ns, end_ns, log_prob) \
+             VALUES ({id}, 1, 'x', 0, 1, -0.1)"
+        ),
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    let store = Store::open(&dir.db()).unwrap();
+    let err = store.utterances(S1).unwrap_err();
+    assert!(
+        matches!(&err, StoreError::Corrupt(why) if why == "log-probability -0.1 isn't one"),
+        "{err:?}"
+    );
 }
 
 /// The same utterance with other words is another utterance, not a retry.

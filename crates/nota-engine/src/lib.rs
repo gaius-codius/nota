@@ -149,7 +149,7 @@ mod tests {
         let version = EngineError::Version(ProtocolVersion::new(3));
         assert_eq!(
             version.to_string(),
-            "the recorder speaks protocol v3, this engine v1"
+            "the recorder speaks protocol v3, this engine v2"
         );
         assert_eq!(
             EngineError::Protocol("second hello").to_string(),

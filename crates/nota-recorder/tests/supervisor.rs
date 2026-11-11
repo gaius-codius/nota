@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
-use nota_core::messages::AudioChunk;
+use nota_core::messages::{AudioChunk, ProtocolVersion};
 use nota_core::{Clock, SampleCount, SampleIndex, SampleRate, SessionTime, SystemClock, TrackId};
 use nota_recorder::engine::{
     AudioRefused, EngineCommand, EngineConfig, EngineEvent, EngineStatus, EngineSupervisor,
@@ -145,6 +145,14 @@ impl Events {
                         t.text(),
                         format!("{}-{}", t.range().start().get(), t.range().end().get())
                     );
+                    // Its one word keeps the log-probability the fake
+                    // engine gave it (`ECHO_LOG_PROB`) across the protocol.
+                    let scores: Vec<_> = t
+                        .words()
+                        .iter()
+                        .map(|w| w.log_prob().map(nota_core::LogProb::get))
+                        .collect();
+                    assert_eq!(scores, [Some(-0.25)]);
                     Some((t.range().start().get(), t.range().end().get()))
                 }
                 _ => None,
@@ -596,9 +604,22 @@ fn a_wrong_version_is_refused() {
     let (_supervisor, mut events) = start(fake(&["wrong-version"]));
     let reason = events.offline(Duration::from_secs(10));
     assert!(
-        matches!(reason, OfflineReason::Version(v) if v.get() == 2),
+        matches!(reason, OfflineReason::Version(v) if v == ProtocolVersion::new(ProtocolVersion::CURRENT.get() + 1)),
         "{reason:?}"
     );
+}
+
+/// An engine from before words carried their log-probabilities is
+/// refused, not misread, and the reason names its version.
+#[test]
+fn an_engine_without_log_probabilities_is_refused() {
+    let (_supervisor, mut events) = start(fake(&["no-log-probs-version"]));
+    let reason = events.offline(Duration::from_secs(10));
+    assert!(
+        matches!(reason, OfflineReason::Version(v) if v == ProtocolVersion::WITHOUT_LOG_PROBS),
+        "{reason:?}"
+    );
+    assert_eq!(reason.to_string(), "speaks protocol v1");
 }
 
 /// An engine from before transcripts carried their words is refused, not

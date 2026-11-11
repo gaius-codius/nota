@@ -265,6 +265,7 @@ impl PassSink for Stored<'_> {
                     .map(|word| FinalWord {
                         text: word.text().to_owned(),
                         range: word.range(),
+                        log_prob: word.log_prob(),
                     })
                     .collect(),
                 heard_by: self.heard_by.clone(),
