@@ -49,10 +49,9 @@ proptest! {
         candidates in 1..=MAX_CANDIDATES,
     ) {
         let ran = ran(code, stdout);
-        for read in [claude_answer(&ran, candidates), codex_answer(&ran, candidates)] {
-            if let Ok(decisions) = read {
-                prop_assert_eq!(decisions.len(), candidates);
-            }
+        let reads = [claude_answer(&ran, candidates), codex_answer(&ran, candidates)];
+        for decisions in reads.into_iter().flatten() {
+            prop_assert_eq!(decisions.len(), candidates);
         }
     }
 
