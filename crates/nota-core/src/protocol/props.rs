@@ -228,8 +228,9 @@ proptest! {
     }
 }
 
-/// A reader that returns at most one byte per call, and an `Interrupted`
-/// error before each byte.
+/// A reader that returns at most one byte per call, with every other call
+/// an `Interrupted` error. The toggle is per thread and carries over from
+/// one case to the next, so a case may start on either.
 struct OneByte<'a>(&'a [u8]);
 
 impl Read for OneByte<'_> {
