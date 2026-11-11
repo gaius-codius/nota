@@ -169,6 +169,8 @@ fn in_order(
 /// # Errors
 ///
 /// If it isn't JSON, or an object gives a key twice.
+// Only the CLI decider reads with it, and that is Unix only.
+#[cfg(unix)]
 pub(crate) fn strict_json(bytes: &[u8]) -> Result<Value, serde_json::Error> {
     serde_json::from_slice(bytes).map(|Strict(value)| value)
 }
