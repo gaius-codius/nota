@@ -489,6 +489,22 @@ mod tests {
         assert!(asked.iter().all(|(dir, _)| *dir != lock_dir()), "{asked:?}");
     }
 
+    /// A lock refused because it's held is that refusal at once: only a
+    /// missing directory is made and the lock tried again, so a moment
+    /// asked to play while a recording runs asks for the lock once.
+    #[test]
+    fn a_held_lock_is_refused_without_a_second_try() {
+        let fs = Meddling::new();
+        let recordings = Recordings::new(fs.clone(), Path::new("/data"));
+        let _recording = recordings.record().unwrap();
+        fs.forget_locks();
+        assert_eq!(
+            recordings.quiet().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(fs.locks(), [(lock_dir(), false)]);
+    }
+
     /// Each recording holds an entry of its own, removed as it stops.
     #[test]
     fn each_recording_has_its_own_entry_until_it_stops() {
