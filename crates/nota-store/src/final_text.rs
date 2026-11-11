@@ -50,8 +50,7 @@ pub struct FinalWord {
     /// Where it was said.
     pub range: SampleRange,
     /// The lowest log-probability of its tokens, punctuation left out;
-    /// `None` if unknown, as for
-    /// every word stored before version 11.
+    /// `None` if unknown, as for every word stored before version 11.
     pub log_prob: Option<LogProb>,
 }
 

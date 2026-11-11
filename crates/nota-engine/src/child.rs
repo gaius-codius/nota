@@ -47,8 +47,7 @@ pub struct TimedWord {
     /// The sample after its last.
     pub to: SampleCount,
     /// The lowest log-probability of its tokens, punctuation left out;
-    /// `None` if the recogniser
-    /// didn't give one.
+    /// `None` if the recogniser didn't give one.
     pub log_prob: Option<LogProb>,
 }
 
