@@ -8,7 +8,11 @@ placed in the plan.
 
 Work is tracked in GitHub issues in this repo.
 
-- **The epic.** Every issue is a sub-issue of #144, `epic: nota v1`.
+- **Epics.** Each milestone has its own epic, a sub-issue of #144, `epic: nota v1`.
+  Every issue is a sub-issue of its milestone's epic: #285 for M3, #286 for
+  Next. GitHub allows at most 100 sub-issues per issue, so #144 holds the
+  epics. Issues in a milestone without an epic yet sit under #144 until its
+  epic is made. When an issue changes milestone, it moves to that epic.
 - **Milestones** follow the development plan: `M3: term clean-up` to
   `M7: v1 release`. `Next: not yet planned` holds work that's accepted but
   not scheduled, and `Holding` holds work waiting on a trigger, such as a
