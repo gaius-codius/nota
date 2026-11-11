@@ -302,21 +302,42 @@ fn a_body_stops_at_its_length() {
     assert_eq!(response.body, b"hello");
 }
 
+/// A reader whose first read fails with `.0`, if it's there, and whose
+/// reads after that give `.1`.
+struct FailsOnce(Option<io::ErrorKind>, Cursor<Vec<u8>>);
+
+impl Read for FailsOnce {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self.0.take() {
+            Some(kind) => Err(kind.into()),
+            None => self.1.read(buf),
+        }
+    }
+}
+
 /// A read that's interrupted is tried again.
 #[test]
 fn an_interrupted_read_is_tried_again() {
-    struct Once(bool, Cursor<Vec<u8>>);
-    impl Read for Once {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            if std::mem::replace(&mut self.0, false) {
-                Err(io::ErrorKind::Interrupted.into())
-            } else {
-                self.1.read(buf)
-            }
-        }
-    }
-    let response = read_response(&mut Once(true, Cursor::new(HEALTH.to_vec()))).unwrap();
+    let mut input = FailsOnce(
+        Some(io::ErrorKind::Interrupted),
+        Cursor::new(HEALTH.to_vec()),
+    );
+    let response = read_response(&mut input).unwrap();
     assert_eq!(response.body, br#"{"status":"ok"}"#);
+}
+
+/// A read that fails for any other reason fails the response, even when
+/// the connection would give a whole one if read again.
+#[test]
+fn a_failed_read_is_not_tried_again() {
+    let mut input = FailsOnce(
+        Some(io::ErrorKind::ConnectionReset),
+        Cursor::new(HEALTH.to_vec()),
+    );
+    let Err(HttpError::Io(e)) = read_response(&mut input) else {
+        panic!("a reset connection was read on");
+    };
+    assert_eq!(e.kind(), io::ErrorKind::ConnectionReset);
 }
 
 /// Errors say what went wrong, and a failed connection keeps its cause.

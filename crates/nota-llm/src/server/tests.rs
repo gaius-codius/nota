@@ -231,7 +231,14 @@ fn a_pause_ends_when_told_to_stop() {
         pause(&clock, Duration::ZERO, &|| true),
         Err(Interrupted::Stopped)
     ));
-    assert!(pause(&clock, Duration::ZERO, &|| false).is_ok());
+    // It looks once only: asked again, this stop would say to stop.
+    let asked = std::cell::Cell::new(0_u32);
+    let stop_when_asked_again = || {
+        asked.set(asked.get() + 1);
+        asked.get() > 1
+    };
+    assert!(pause(&clock, Duration::ZERO, &stop_when_asked_again).is_ok());
+    assert_eq!(asked.get(), 1);
 }
 
 /// A stop that comes during a pause's last wait is seen before it ends.
