@@ -182,11 +182,11 @@ fn a_whole_head_over_its_limit_is_refused() {
 #[test]
 fn requests_are_written_as_http() {
     assert_eq!(
-        request("/health", None),
+        request("localhost", "/health", None),
         b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
     );
     assert_eq!(
-        request("/v1/chat/completions", Some(b"{}")),
+        request("localhost", "/v1/chat/completions", Some(b"{}")),
         b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
           Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{}"
     );
@@ -211,9 +211,9 @@ fn an_exchange_writes_then_reads() {
         }
     }
     let mut socket = Socket(Vec::new(), Cursor::new(HEALTH.to_vec()));
-    let response = exchange(&mut socket, &request("/health", None)).unwrap();
+    let response = exchange(&mut socket, &request("localhost", "/health", None)).unwrap();
     assert_eq!(response.status, 200);
-    assert_eq!(socket.0, request("/health", None));
+    assert_eq!(socket.0, request("localhost", "/health", None));
 }
 
 /// A body exactly as long as the limit is read whole.

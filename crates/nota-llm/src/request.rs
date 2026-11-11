@@ -22,7 +22,7 @@ fn max_tokens(candidates: usize) -> usize {
 
 /// The schema the reply must follow: `{"decisions": [...]}` with exactly
 /// `candidates` entries, each a candidate's number and a yes or no.
-fn schema(candidates: usize) -> Value {
+pub(crate) fn schema(candidates: usize) -> Value {
     let ids: Vec<usize> = (1..=candidates).collect();
     json!({
         "type": "object",
@@ -47,10 +47,12 @@ fn schema(candidates: usize) -> Value {
     })
 }
 
-/// The request body that puts `question` to the model in `prompt`'s words.
+/// The request body that puts `question` to the model in `prompt`'s words,
+/// naming `model` if there is one (a server that runs several needs it;
+/// llama-server runs one and ignores it).
 #[must_use]
-pub fn body(prompt: &dyn Prompt, question: &Question) -> Vec<u8> {
-    let request = json!({
+pub fn body(prompt: &dyn Prompt, question: &Question, model: Option<&str>) -> Vec<u8> {
+    let mut request = json!({
         "temperature": 0,
         "max_tokens": max_tokens(question.len()),
         "logprobs": true,
@@ -65,7 +67,17 @@ pub fn body(prompt: &dyn Prompt, question: &Question) -> Vec<u8> {
             "json_schema": {"name": "decisions", "strict": true, "schema": schema(question.len())}
         }
     });
+    if let (Some(model), Some(fields)) = (model, request.as_object_mut()) {
+        fields.insert("model".to_owned(), Value::from(model));
+    }
     request.to_string().into_bytes()
+}
+
+/// The whole question as one message, for a CLI that takes a single
+/// prompt: `prompt`'s system message, a blank line, then its user message.
+#[must_use]
+pub fn one_message(prompt: &dyn Prompt, question: &Question) -> String {
+    format!("{}\n\n{}", prompt.system(), prompt.user(question))
 }
 
 #[cfg(test)]
@@ -87,7 +99,7 @@ mod tests {
     fn the_request_has_the_bench_settings_and_a_numbered_schema() {
         let prompt = English::new(None);
         let q = question(3);
-        let sent: Value = serde_json::from_slice(&body(&prompt, &q)).unwrap();
+        let sent: Value = serde_json::from_slice(&body(&prompt, &q, None)).unwrap();
         assert_eq!(sent["temperature"], 0);
         assert_eq!(sent["max_tokens"], 200);
         assert_eq!(sent["chat_template_kwargs"]["enable_thinking"], false);
@@ -109,7 +121,7 @@ mod tests {
     /// made to answer first answers differently.
     #[test]
     fn the_schema_names_the_candidate_before_its_answer() {
-        let sent = String::from_utf8(body(&English::new(None), &question(1))).unwrap();
+        let sent = String::from_utf8(body(&English::new(None), &question(1), None)).unwrap();
         let items = &sent[sent.find(r#""items""#).unwrap()..];
         let (id, apply) = (
             items.find(r#""id""#).unwrap(),

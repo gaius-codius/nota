@@ -67,18 +67,21 @@ impl From<io::Error> for HttpError {
     }
 }
 
-/// The request to send: `GET path`, or `POST path` with a JSON `body`.
+/// The request to send to `host` (its `Host` header: a name, with a port
+/// if it isn't the default): `GET path`, or `POST path` with a JSON `body`.
+/// The caller makes sure neither holds a space or a line break.
 #[must_use]
-pub fn request(path: &str, body: Option<&[u8]>) -> Vec<u8> {
+pub fn request(host: &str, path: &str, body: Option<&[u8]>) -> Vec<u8> {
     let mut out = match body {
         Some(body) => format!(
-            "POST {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+            "POST {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\
              Content-Type: application/json\r\nContent-Length: {}\r\n\r\n",
             body.len()
         )
         .into_bytes(),
-        None => format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-            .into_bytes(),
+        None => {
+            format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").into_bytes()
+        }
     };
     out.extend_from_slice(body.unwrap_or_default());
     out
