@@ -10,10 +10,11 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use nota_recorder::disk::Ballast;
 use nota_recorder::fs::{Fs, StdFs};
 
-use crate::library::startup_in_use;
+use crate::library::recording_elsewhere;
 
 /// How many of the ballast's megabytes pass between looks for another
-/// live recording: each look locks every session's audio directory.
+/// live recording: each look tries every recording's entry in the
+/// library's recording lock.
 const LOOK_EVERY: usize = 8;
 
 /// Where the ballast goes and how big it is.
@@ -47,14 +48,14 @@ impl BallastPlan {
     }
 
     /// [`BallastPlan::make`] on `fs`, given up when `asked` is set.
-    fn make_on<S: Fs>(&self, fs: &S, asked: &AtomicBool, full: bool) -> Option<String> {
+    fn make_on<S: Fs + Clone>(&self, fs: &S, asked: &AtomicBool, full: bool) -> Option<String> {
         let looks = AtomicUsize::new(0);
         let give_up = || {
             asked.load(Ordering::SeqCst)
                 || looks
                     .fetch_add(1, Ordering::SeqCst)
                     .is_multiple_of(LOOK_EVERY)
-                    && startup_in_use(fs, &self.data, &[]).unwrap_or(true)
+                    && recording_elsewhere(fs, &self.data, &[]).unwrap_or(true)
         };
         // Not even started on a full disk, or while another recording is
         // live.
@@ -105,6 +106,7 @@ mod tests {
     use std::io;
 
     use nota_recorder::fs::fake::FakeFs;
+    use nota_recorder::session::Recordings;
 
     use super::*;
 
@@ -138,17 +140,35 @@ mod tests {
         assert!(fs.paths().is_empty(), "{:?}", fs.paths());
     }
 
-    /// A recording live in another session (its audio directory locked)
-    /// keeps the stop from writing a ballast beside its journals.
+    /// A recording live in another session (counted in the library's
+    /// recording lock) keeps the stop from writing a ballast beside its
+    /// journals.
     #[test]
     fn a_live_recording_elsewhere_makes_none() {
         let fs = data();
-        fs.create_dir(Path::new("/data/sessions/2")).unwrap();
-        fs.create_dir(Path::new("/data/sessions/2/audio")).unwrap();
-        let _live = fs.lock_dir(Path::new("/data/sessions/2/audio")).unwrap();
+        let _live = Recordings::new(fs.clone(), Path::new("/data"))
+            .record()
+            .unwrap();
         let noted = plan().make_on(&fs, &AtomicBool::new(false), false);
         assert_eq!(noted, None);
         assert!(fs.paths().iter().all(|p| !p.starts_with("/data/ballast")));
+    }
+
+    /// A moment playing, which holds its session's lock and the library's
+    /// lock exclusively, is no recording: the ballast is made.
+    #[test]
+    fn a_moment_playing_doesnt_keep_the_ballast_from_being_made() {
+        let fs = data();
+        fs.create_dir(Path::new("/data/sessions/2")).unwrap();
+        fs.create_dir(Path::new("/data/sessions/2/audio")).unwrap();
+        // What `play_moment` holds while the moment plays.
+        let _quiet = Recordings::new(fs.clone(), Path::new("/data"))
+            .quiet()
+            .unwrap();
+        let _session = fs.lock_dir(Path::new("/data/sessions/2/audio")).unwrap();
+        let noted = plan().make_on(&fs, &AtomicBool::new(false), false);
+        assert_eq!(noted, None);
+        assert_eq!(fs.paths(), [PathBuf::from("/data/ballast-4096")]);
     }
 
     /// A ballast that can't be made says why, in the summary's words.
