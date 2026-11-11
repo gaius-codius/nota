@@ -6,6 +6,7 @@
 //! them. How these are put on the wire is [`crate::protocol`]'s business.
 
 use crate::ids::TrackId;
+use crate::log_prob::LogProb;
 use crate::time::{SampleCount, SampleIndex, SampleRange, SampleRate};
 
 /// A version of the engine protocol. Both sides check it before anything
@@ -15,7 +16,10 @@ pub struct ProtocolVersion(u16);
 
 impl ProtocolVersion {
     /// The version these messages are.
-    pub const CURRENT: Self = Self(1);
+    pub const CURRENT: Self = Self(2);
+
+    /// The version before words carried their log-probabilities.
+    pub const WITHOUT_LOG_PROBS: Self = Self(1);
 
     /// The version before transcripts carried their words' samples.
     pub const WITHOUT_WORDS: Self = Self(0);
@@ -118,20 +122,33 @@ impl AudioChunk {
     }
 }
 
-/// One word the engine heard, and the samples it was said in.
+/// One word the engine heard, the samples it was said in, and how sure
+/// the engine was of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeardWord {
     text: String,
     range: SampleRange,
+    log_prob: Option<LogProb>,
 }
 
 impl HeardWord {
-    /// `text`, said in `range`. `None` if `text` is empty: a word is
-    /// something heard. The range may be empty, for a word the model
-    /// placed at an instant.
+    /// `text`, said in `range`, with no log-probability. `None` if `text`
+    /// is empty: a word is something heard. The range may be empty, for a
+    /// word the model placed at an instant.
     #[must_use]
     pub fn new(text: String, range: SampleRange) -> Option<Self> {
-        (!text.is_empty()).then_some(Self { text, range })
+        (!text.is_empty()).then_some(Self {
+            text,
+            range,
+            log_prob: None,
+        })
+    }
+
+    /// The word with `log_prob` as its log-probability: its tokens'
+    /// lowest, or `None` if the engine didn't give one.
+    #[must_use]
+    pub fn with_log_prob(self, log_prob: Option<LogProb>) -> Self {
+        Self { log_prob, ..self }
     }
 
     /// The word.
@@ -144,6 +161,12 @@ impl HeardWord {
     #[must_use]
     pub const fn range(&self) -> SampleRange {
         self.range
+    }
+
+    /// The lowest log-probability of its tokens; `None` if unknown.
+    #[must_use]
+    pub const fn log_prob(&self) -> Option<LogProb> {
+        self.log_prob
     }
 }
 
@@ -284,6 +307,9 @@ mod tests {
         assert_eq!(HeardWord::new(String::new(), range(10, 12)), None);
         assert_eq!(word(3, 4).text(), "w");
         assert_eq!(word(3, 4).range(), range(3, 4));
+        assert_eq!(word(3, 4).log_prob(), None);
+        let sure = LogProb::new(-0.25);
+        assert_eq!(word(3, 4).with_log_prob(sure).log_prob(), sure);
         // Touching words, the first at the start, the last at the end, and
         // an instant between them.
         let words = vec![word(10, 12), word(12, 12), word(12, 20)];
@@ -305,9 +331,11 @@ mod tests {
 
     #[test]
     fn protocol_version() {
-        assert_eq!(ProtocolVersion::CURRENT.get(), 1);
+        assert_eq!(ProtocolVersion::CURRENT.get(), 2);
+        assert_eq!(ProtocolVersion::WITHOUT_LOG_PROBS.get(), 1);
         assert_eq!(ProtocolVersion::WITHOUT_WORDS.get(), 0);
         assert_eq!(ProtocolVersion::new(3).get(), 3);
         assert_ne!(ProtocolVersion::WITHOUT_WORDS, ProtocolVersion::CURRENT);
+        assert_ne!(ProtocolVersion::WITHOUT_LOG_PROBS, ProtocolVersion::CURRENT);
     }
 }

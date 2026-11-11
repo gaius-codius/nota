@@ -15,8 +15,10 @@
 //! | `0x82` | from engine | [`FromEngine::Confirmed`] | track `u32`, up to `u64` |
 //!
 //! Each word of a transcript is its first sample `u64`, its end `u64`, its
-//! text's length in bytes `u32`, then its UTF-8 text. Version 0 had no word
-//! count or words.
+//! log-probability (the `f32` bits of a [`LogProb`], or
+//! [`UNKNOWN_LOG_PROB`] if the engine gave none) `u32`, its text's length
+//! in bytes `u32`, then its UTF-8 text. Version 1 had no log-probabilities,
+//! and version 0 no word count or words.
 //!
 //! All integers are little-endian. Each side sends `Hello` first and refuses
 //! a peer whose version isn't [`ProtocolVersion::CURRENT`]; the magic bytes
@@ -27,7 +29,7 @@
 //! Bytes from the other process are untrusted: a native crash can leave half
 //! a frame, and a library can print to the wrong stream. The decoder checks
 //! every field and builds the typed messages ([`AudioChunk`],
-//! [`Transcript`], [`HeardWord`], [`SampleRange`]) through their checking constructors, so
+//! [`Transcript`], [`HeardWord`], [`SampleRange`], [`LogProb`]) through their checking constructors, so
 //! nothing past this module sees raw bytes. Every frame it accepts has exactly one encoding,
 //! and the property tests check that.
 
@@ -35,6 +37,7 @@ use std::fmt;
 use std::io::{self, Read, Write};
 
 use crate::ids::TrackId;
+use crate::log_prob::LogProb;
 use crate::messages::{AudioChunk, FromEngine, HeardWord, ProtocolVersion, ToEngine, Transcript};
 use crate::time::{SampleIndex, SampleRange, SampleRate};
 
@@ -61,8 +64,14 @@ const TAG_CONFIRMED: u8 = 0x82;
 const AUDIO_FIXED_LEN: usize = 1 + 4 + 8 + 4;
 /// Tag, track, start, end, word count; the words and the text follow.
 const TRANSCRIPT_FIXED_LEN: usize = 1 + 4 + 8 + 8 + 4;
-/// A word's start, end and text length; its text follows.
-pub const WORD_FIXED_LEN: usize = 8 + 8 + 4;
+/// A word's start, end, log-probability and text length; its text
+/// follows.
+pub const WORD_FIXED_LEN: usize = 8 + 8 + 4 + 4;
+
+/// The log-probability field of a word the engine gave none for: the
+/// quiet NaN, which no [`LogProb`] is. Any other NaN is refused, so the
+/// field has one encoding for unknown.
+pub const UNKNOWN_LOG_PROB: u32 = 0x7fc0_0000;
 
 /// One frame on the wire: the handshake, or a message of type `M`
 /// ([`ToEngine`] towards the engine, [`FromEngine`] back).
@@ -169,6 +178,8 @@ impl WireMessage for FromEngine {
                         u32::try_from(word.text().len()).map_err(|_| EncodeError::TooLarge)?;
                     out.extend_from_slice(&word.range().start().get().to_le_bytes());
                     out.extend_from_slice(&word.range().end().get().to_le_bytes());
+                    let log_prob = word.log_prob().map_or(UNKNOWN_LOG_PROB, LogProb::to_bits);
+                    out.extend_from_slice(&log_prob.to_le_bytes());
                     out.extend_from_slice(&text_len.to_le_bytes());
                     out.extend_from_slice(word.text().as_bytes());
                 }
@@ -197,10 +208,12 @@ impl WireMessage for FromEngine {
                 for _ in 0..count {
                     let start = SampleIndex::new(fields.u64()?);
                     let end = SampleIndex::new(fields.u64()?);
+                    let log_prob = log_prob(fields.u32()?)?;
                     let len = usize::try_from(fields.u32()?).map_err(|_| DecodeError::Short)?;
                     let text = utf8(fields.bytes(len)?)?;
                     let range = SampleRange::new(start, end).ok_or(DecodeError::BadWord)?;
-                    words.push(HeardWord::new(text, range).ok_or(DecodeError::BadWord)?);
+                    let word = HeardWord::new(text, range).ok_or(DecodeError::BadWord)?;
+                    words.push(word.with_log_prob(log_prob));
                 }
                 let text = utf8(fields.rest())?;
                 let transcript =
@@ -219,6 +232,17 @@ impl WireMessage for FromEngine {
             other => Err(DecodeError::UnknownTag(other)),
         }
     }
+}
+
+/// A word's log-probability field: `None` for [`UNKNOWN_LOG_PROB`], or the
+/// value whose bits it holds.
+fn log_prob(bits: u32) -> Result<Option<LogProb>, DecodeError> {
+    if bits == UNKNOWN_LOG_PROB {
+        return Ok(None);
+    }
+    LogProb::from_bits(bits)
+        .map(Some)
+        .ok_or(DecodeError::BadWord)
 }
 
 /// `bytes` as text.
@@ -455,8 +479,10 @@ pub enum DecodeError {
     EmptyRange,
     /// Transcript or word text that isn't UTF-8.
     NotUtf8,
-    /// A word with no text, a range that ends before it starts, or one
-    /// outside its transcript's or overlapping the word before.
+    /// A word with no text, a range that ends before it starts, one
+    /// outside its transcript's or overlapping the word before, or a
+    /// log-probability field that is neither a [`LogProb`] nor
+    /// [`UNKNOWN_LOG_PROB`].
     BadWord,
 }
 
@@ -538,7 +564,7 @@ mod tests {
     #[test]
     fn hello_layout() {
         let bytes = encode::<ToEngine>(&Frame::Hello(ProtocolVersion::CURRENT)).unwrap();
-        assert_eq!(bytes, [7, 0, 0, 0, 0x00, b'n', b'o', b't', b'a', 1, 0]);
+        assert_eq!(bytes, [7, 0, 0, 0, 0x00, b'n', b'o', b't', b'a', 2, 0]);
     }
 
     #[test]
@@ -560,9 +586,11 @@ mod tests {
     #[test]
     fn transcript_layout() {
         let word = |text: &str, a, b| HeardWord::new(text.to_owned(), range(a, b)).unwrap();
+        // One word with a log-probability, one without.
+        let unsure = word("hé", 10, 14).with_log_prob(LogProb::new(-0.5));
         let transcript = Transcript::new(TrackId::new(1), range(10, 30), "hé there".into())
             .unwrap()
-            .with_words(vec![word("hé", 10, 14), word("there", 15, 30)])
+            .with_words(vec![unsure, word("there", 15, 30)])
             .unwrap();
         let frame = Frame::Message(FromEngine::Transcript(transcript));
         let bytes = encode(&frame).unwrap();
@@ -572,10 +600,12 @@ mod tests {
         want.extend_from_slice(&2_u32.to_le_bytes());
         want.extend_from_slice(&10_u64.to_le_bytes());
         want.extend_from_slice(&14_u64.to_le_bytes());
+        want.extend_from_slice(&(-0.5_f32).to_bits().to_le_bytes());
         want.extend_from_slice(&3_u32.to_le_bytes());
         want.extend_from_slice("hé".as_bytes());
         want.extend_from_slice(&15_u64.to_le_bytes());
         want.extend_from_slice(&30_u64.to_le_bytes());
+        want.extend_from_slice(&[0x00, 0x00, 0xc0, 0x7f]);
         want.extend_from_slice(&5_u32.to_le_bytes());
         want.extend_from_slice(b"there");
         want.extend_from_slice("hé there".as_bytes());
@@ -587,16 +617,26 @@ mod tests {
         assert_eq!(decode_body::<FromEngine>(&bytes[4..]), Ok(frame));
     }
 
-    /// A transcript body over `0..20` with `words` (start, end, text bytes)
-    /// and the text "x".
+    /// A transcript body over `0..20` with `words` (start, end, text bytes),
+    /// each with no log-probability, and the text "x".
     fn transcript_body(count: u32, words: &[(u64, u64, &[u8])]) -> Vec<u8> {
+        let words: Vec<_> = words
+            .iter()
+            .map(|&(start, end, text)| (start, end, UNKNOWN_LOG_PROB, text))
+            .collect();
+        transcript_body_with(count, &words)
+    }
+
+    /// [`transcript_body`] with each word's log-probability field given.
+    fn transcript_body_with(count: u32, words: &[(u64, u64, u32, &[u8])]) -> Vec<u8> {
         let mut body = vec![0x81, 0, 0, 0, 0];
         body.extend_from_slice(&0_u64.to_le_bytes());
         body.extend_from_slice(&20_u64.to_le_bytes());
         body.extend_from_slice(&count.to_le_bytes());
-        for &(start, end, text) in words {
+        for &(start, end, log_prob, text) in words {
             body.extend_from_slice(&start.to_le_bytes());
             body.extend_from_slice(&end.to_le_bytes());
+            body.extend_from_slice(&log_prob.to_le_bytes());
             body.extend_from_slice(&u32::try_from(text.len()).unwrap().to_le_bytes());
             body.extend_from_slice(text);
         }
@@ -634,7 +674,7 @@ mod tests {
             Err(DecodeError::Short)
         );
         let mut long = transcript_body(1, &[(0, 5, b"a")]);
-        let at = 1 + 4 + 8 + 8 + 4 + 8 + 8;
+        let at = 1 + 4 + 8 + 8 + 4 + 8 + 8 + 4;
         long[at..at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
         assert_eq!(decode(long), Err(DecodeError::Short));
         // A version-0 transcript, with no word count, isn't misread as one.
@@ -643,6 +683,55 @@ mod tests {
         old.extend_from_slice(&20_u64.to_le_bytes());
         old.extend_from_slice(b"hi");
         assert_eq!(decode(old), Err(DecodeError::Short));
+    }
+
+    /// A word's log-probability field reads back as the value or as
+    /// unknown, and anything else in it is refused: so each word has one
+    /// encoding, and a garbage field isn't taken for a score.
+    #[test]
+    fn a_log_prob_field_is_a_value_or_unknown() {
+        let decode = |bits: u32| {
+            let body = transcript_body_with(1, &[(0, 5, bits, b"a")]);
+            match decode_body::<FromEngine>(&body) {
+                Ok(Frame::Message(FromEngine::Transcript(t))) => Ok(t.words()[0].log_prob()),
+                Ok(other) => panic!("{other:?}"),
+                Err(err) => Err(err),
+            }
+        };
+        assert_eq!(decode(UNKNOWN_LOG_PROB), Ok(None));
+        assert_eq!(decode((-0.75_f32).to_bits()), Ok(LogProb::new(-0.75)));
+        assert_eq!(decode(0), Ok(Some(LogProb::CERTAIN)));
+        // Above zero, a negative zero, infinities, and NaNs but the one.
+        for bad in [
+            0.5_f32.to_bits(),
+            (-0.0_f32).to_bits(),
+            f32::INFINITY.to_bits(),
+            f32::NEG_INFINITY.to_bits(),
+            0xffc0_0000,
+            0x7fc0_0001,
+            0x7f80_0001,
+        ] {
+            assert_eq!(decode(bad), Err(DecodeError::BadWord), "{bad:#010x}");
+        }
+    }
+
+    /// A version-1 word, with no log-probability field, isn't misread as
+    /// a version-2 one: its text length lands in the log-probability's
+    /// place and its text in the length's.
+    #[test]
+    fn a_version_one_word_is_not_misread() {
+        let mut old = vec![0x81, 0, 0, 0, 0];
+        old.extend_from_slice(&0_u64.to_le_bytes());
+        old.extend_from_slice(&20_u64.to_le_bytes());
+        old.extend_from_slice(&1_u32.to_le_bytes());
+        old.extend_from_slice(&0_u64.to_le_bytes());
+        old.extend_from_slice(&5_u64.to_le_bytes());
+        old.extend_from_slice(&4_u32.to_le_bytes());
+        old.extend_from_slice(b"word");
+        old.extend_from_slice(b"word");
+        // The length 4 reads as a log-probability's bits: a tiny positive
+        // number, so not one.
+        assert_eq!(decode_body::<FromEngine>(&old), Err(DecodeError::BadWord));
     }
 
     #[test]
@@ -787,7 +876,7 @@ mod tests {
     fn limits_fill_a_frame_exactly() {
         assert_eq!(MAX_AUDIO_SAMPLES, 524_279);
         assert_eq!(MAX_TEXT_LEN, MAX_BODY_LEN - 25);
-        assert_eq!(WORD_FIXED_LEN, 20);
+        assert_eq!(WORD_FIXED_LEN, 24);
         // The longest text fills the body to the byte; audio to within one
         // (an odd byte can't hold a sample).
         let text = Transcript::new(
