@@ -379,8 +379,9 @@ fn broken_model() -> OfflineReason {
 /// executable from a broken model.
 #[test]
 fn an_engine_that_cant_start_or_answer_waits_with_its_reason() {
-    let missing = pass_end(PassEnd::Stalled(Some(missing_executable().to_string())));
-    let broken = pass_end(PassEnd::Stalled(Some(broken_model().to_string())));
+    // Both end the run as soon as the pass gives up on starting them.
+    let missing = pass_end(PassEnd::CantStart(missing_executable().to_string()));
+    let broken = pass_end(PassEnd::CantStart(broken_model().to_string()));
     assert_eq!(
         missing,
         JobEnd::EngineDown(format!(
@@ -395,6 +396,11 @@ fn an_engine_that_cant_start_or_answer_waits_with_its_reason() {
              nota engine asr: the model at /m is not a model"
                 .into()
         )
+    );
+    // A stall reads the same as the early end when it knows why.
+    assert_eq!(
+        pass_end(PassEnd::Stalled(Some(broken_model().to_string()))),
+        broken
     );
     assert_eq!(
         pass_end(PassEnd::Stalled(None)),
@@ -428,7 +434,7 @@ fn a_missing_executable_and_a_broken_model_are_stored_apart() {
         })
         .unwrap();
         let job = db.with(|db| db.session_jobs(paths.id)).unwrap().remove(0);
-        let end = pass_end(PassEnd::Stalled(Some(reason.to_string())));
+        let end = pass_end(PassEnd::CantStart(reason.to_string()));
         db.with(|db| {
             db.start_job(job.id)?;
             db.end_job(job.id, &end)

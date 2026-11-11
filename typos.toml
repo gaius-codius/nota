@@ -8,9 +8,11 @@ extend-exclude = [
   # Fetched lists of names, spelled as their sources spell them.
   "packs/pharmacy/rxnorm.tsv",
   "packs/pharmacy/wikidata.tsv",
-  # Mis-heard terms from the research bench ("anormal", "ACI"), which C1 is
-  # tested on; the file is generated (the bench's fixtures/export.py).
+  # Mis-heard terms from the research bench ("anormal", "ACI"), which C1 and
+  # C2 are tested on; the files are generated (the bench's
+  # fixtures/export.py).
   "crates/nota-checks/tests/fixtures/c1_pairs.json",
+  "crates/nota-checks/tests/fixtures/c2_gate.json",
   # Words from wordfreq's list ("thar") and invented mis-hearings, which C4
   # is tested on; the file is generated (the bench's fixtures/c4_invented.py).
   "crates/nota-checks/tests/fixtures/c4_invented.json",
