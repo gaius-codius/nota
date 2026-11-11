@@ -1094,6 +1094,32 @@ fn a_recording_killed_outright_is_salvaged_at_the_next_start() {
     assert_everything_sent_saved(&next, &tmp.0, 2, &[0, 1], 1_450);
 }
 
+/// A recording killed outright leaves its entry in the library's recording
+/// lock, and the next start removes it: only the new recording's is left
+/// while it runs, and none once it stops.
+#[test]
+fn the_next_start_removes_the_entry_a_killed_recording_left() {
+    let tmp = TestDir::new("killed-entry");
+    let lock = tmp.0.join("recording.lock");
+    let mut killed = recording(&tmp.0);
+    killed.signal(Signal::KILL);
+    assert!(killed.exits().is_some());
+    let left = StdFs.list(&lock).unwrap();
+    assert_eq!(
+        left.len(),
+        1,
+        "the killed recording left no entry: {left:?}"
+    );
+
+    let mut next = recording(&tmp.0);
+    let during = StdFs.list(&lock).unwrap();
+    assert_eq!(during.len(), 1, "{during:?}");
+    assert_ne!(during, left);
+    next.signal(Signal::TERM);
+    assert!(next.exits().expect("nota didn't stop").success());
+    assert_eq!(StdFs.list(&lock).unwrap(), Vec::<PathBuf>::new());
+}
+
 /// Makes a mark, a note and another mark, a moment apart.
 fn annotate(nota: &mut Running) {
     nota.press("m");
