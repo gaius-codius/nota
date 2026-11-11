@@ -323,12 +323,17 @@ jobs:
           fi
 
   coverage:
-    name: Coverage (report only)
+    # A required check. GitHub counts a skipped required check as passing,
+    # so a pull request outside the scope paths isn't held up by it.
+    name: Coverage
     needs: coverage-scope
     # The scope job is skipped on push, so this states its own condition.
+    # It tests for 'false' rather than 'true' so that a scope job that fails
+    # or sets no output runs coverage, instead of skipping it, which would
+    # pass the required check unseen.
     if: >-
       !cancelled() &&
-      (github.event_name == 'push' || needs.coverage-scope.outputs.changed == 'true')
+      (github.event_name == 'push' || needs.coverage-scope.outputs.changed != 'false')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
