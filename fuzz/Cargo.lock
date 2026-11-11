@@ -871,6 +871,7 @@ name = "nota-llm"
 version = "0.0.0"
 dependencies = [
  "nota-core",
+ "rustix",
  "serde",
  "serde_json",
 ]

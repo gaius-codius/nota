@@ -524,7 +524,13 @@ impl Server {
         let waiting = Waiting::Ready(limit);
         loop {
             self.check(clock, until, stop, waiting)?;
-            match self.exchange(&http::request("/health", None), clock, until, stop, waiting) {
+            match self.exchange(
+                &http::request("localhost", "/health", None),
+                clock,
+                until,
+                stop,
+                waiting,
+            ) {
                 Ok(Response { status: 200, .. }) => return Ok(()),
                 Ok(Response { status, body }) if status != 503 => {
                     return Err(ServerError::Status(status, said(&body)).into());
@@ -556,7 +562,7 @@ impl Server {
         stop: &dyn Fn() -> bool,
     ) -> Result<Response, Interrupted> {
         let until = Deadline::after(clock, limit);
-        let request = http::request("/v1/chat/completions", Some(body));
+        let request = http::request("localhost", "/v1/chat/completions", Some(body));
         self.exchange(&request, clock, until, stop, Waiting::Answer(limit))
             .map_err(|e| self.explain(clock, e))
     }
@@ -696,7 +702,7 @@ fn socket_path(dir: &Path, pid: u32, generation: u64) -> Result<PathBuf, ServerE
 }
 
 /// Whether `program` is a file that can be run.
-fn runnable(program: &Path) -> io::Result<()> {
+pub(crate) fn runnable(program: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     let meta = std::fs::metadata(program)?;
@@ -716,7 +722,7 @@ fn runnable(program: &Path) -> io::Result<()> {
     clippy::disallowed_methods,
     reason = "the directory for llama-server's socket, not a recording or the database"
 )]
-fn private_dir(dir: &Path) -> Result<(), ServerError> {
+pub(crate) fn private_dir(dir: &Path) -> Result<(), ServerError> {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
     let failed = |e| ServerError::SocketDir(dir.to_owned(), e);
@@ -736,11 +742,11 @@ fn private_dir(dir: &Path) -> Result<(), ServerError> {
 /// A connection that, before each read or write (and so after each one
 /// that times out), asks `check` whether to go on waiting, and fails if
 /// not.
-struct Patient<'a, S> {
+pub(crate) struct Patient<'a, S> {
     /// The connection.
-    stream: &'a mut S,
+    pub(crate) stream: &'a mut S,
     /// Whether to keep waiting.
-    check: &'a mut dyn FnMut() -> io::Result<()>,
+    pub(crate) check: &'a mut dyn FnMut() -> io::Result<()>,
 }
 
 impl<S: Read> Read for Patient<'_, S> {

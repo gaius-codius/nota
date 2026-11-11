@@ -1,6 +1,6 @@
 [package]
 name = "nota-llm"
-description = "nota's model adapters: the decider on a supervised llama-server, and the prompts they send."
+description = "nota's model adapters: the decider on a supervised llama-server, a cloud CLI or an OpenAI-compatible server, and the prompts they send."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,12 +9,17 @@ publish.workspace = true
 
 [features]
 # `nota-fake-llama-server`, a stand-in for llama-server that the supervision
-# tests start, kill and hang. Turned on by the self dev-dependency below, so
-# it's built only with nota-llm's tests.
+# tests start, kill and hang, and `nota-fake-cli`, a stand-in for the cloud
+# CLIs. Turned on by the self dev-dependency below, so they're built only
+# with nota-llm's tests.
 fake-server = []
 
 [[bin]]
 name = "nota-fake-llama-server"
+required-features = ["fake-server"]
+
+[[bin]]
+name = "nota-fake-cli"
 required-features = ["fake-server"]
 
 [dependencies]
@@ -27,6 +32,10 @@ serde.workspace = true
 # a sorted schema makes the model answer before it names the candidate,
 # which changes its answers. Brings in indexmap, already in the tree.
 serde_json = { workspace = true, features = ["preserve_order"] }
+
+# Killing a CLI's whole process group on a stop or a timeout (see `cli`).
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["process"] }
 
 [dev-dependencies]
 nota-core = { path = "../nota-core", features = ["fake-clock"] }

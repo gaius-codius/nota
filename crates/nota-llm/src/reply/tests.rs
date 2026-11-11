@@ -314,3 +314,40 @@ fn weights_too_large_to_add_give_no_probability() {
         }
     );
 }
+
+/// A key given twice is refused without naming it: a cloud model's reply
+/// may hold the transcript's words, and none goes in a reason.
+#[test]
+fn a_key_given_twice_isnt_named() {
+    let twice = r#"{"decisions":[],"Start the drip.":1,"Start the drip.":2}"#;
+    let Err(ReplyError::NotJson(e)) = parse(&completion(twice), 1) else {
+        panic!("read a key given twice")
+    };
+    assert_eq!(e.to_string(), "a key is given twice at line 1 column 53");
+}
+
+/// A bare answer, as a CLI gives it, is read in candidate order with no
+/// probabilities.
+#[test]
+fn a_bare_answer_is_read_without_probabilities() {
+    let text = r#"{"decisions":[{"id":2,"apply":false},{"id":1,"apply":true}]}"#;
+    let decisions = parse_answer(text, 2).unwrap();
+    assert_eq!(
+        decisions,
+        [
+            Decision {
+                answer: Answer::Yes,
+                yes: None
+            },
+            Decision {
+                answer: Answer::No,
+                yes: None
+            },
+        ]
+    );
+    assert!(matches!(parse_answer(text, 3), Err(ReplyError::Missing(3))));
+    let long = " ".repeat(MAX_REPLY_LEN + 1);
+    assert!(
+        matches!(parse_answer(&long, 1), Err(ReplyError::TooLong(n)) if n == MAX_REPLY_LEN + 1)
+    );
+}
