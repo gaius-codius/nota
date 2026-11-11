@@ -18,7 +18,12 @@
 //!   stream;
 //! - why the engine is down reaches the sink as the supervisor reports it,
 //!   and its coming back up, so whoever shows the pass can say why it
-//!   stands still before it gives up.
+//!   stands still before it gives up;
+//! - an engine that can't be started, or that exits before saying hello
+//!   [`EXITS_BEFORE_HELLO`] times in a row, ends the pass at once: a retry
+//!   within the pass won't help, and the pass would hold the job runner
+//!   for its whole stall. One that hangs, or dies after saying hello, is
+//!   restarted until the stall.
 //!
 //! Audio is sent in frames that end on whole multiples of
 //! [`PassConfig::frame`] (or a segment's end), and never more than
@@ -38,7 +43,9 @@ use nota_core::messages::{AudioChunk, Transcript};
 use nota_core::{Clock, SampleCount, SampleIndex, SampleRange, SampleRate, TrackId};
 use nota_store::SegmentRow;
 
-use super::{EngineCommand, EngineConfig, EngineEvent, EngineStatus, EngineSupervisor};
+use super::{
+    EngineCommand, EngineConfig, EngineEvent, EngineStatus, EngineSupervisor, OfflineReason,
+};
 use crate::segment::ReadSegmentError;
 
 /// One track's published audio, and where the pass starts on it.
@@ -91,20 +98,22 @@ pub struct PassConfig {
     pub frame: SampleCount,
     /// The most audio sent ahead of what's confirmed.
     pub in_flight: SampleCount,
-    /// How long the pass waits with nothing confirmed (the engine down,
-    /// or failing to start) before it gives up.
+    /// How long the pass waits with nothing confirmed (the engine hung,
+    /// or dying after it says hello) before it gives up. An engine that
+    /// can't start ends the pass sooner ([`PassEnd::CantStart`]).
     pub stall: Duration,
 }
 
 impl PassConfig {
     /// The final pass with the engine `command` (which cuts at 25 s):
     /// frames of 1 s, up to 60 s ahead, and a pass given up after 10
-    /// minutes without progress. Each request may take 60 s; a track is
-    /// flushed only at the end of each of its runs, never for want of
-    /// audio; 25 s (one chunk) is skipped when engines keep failing on it;
-    /// and the engine is killed at once when the pass ends: a pass that's
-    /// done has nothing left to confirm, and one that's stopped (for a
-    /// recording) wouldn't use what it confirmed.
+    /// minutes without progress (sooner if the engine can't start).
+    /// Each request may take 60 s; a track is flushed only at the end of
+    /// each of its runs, never for want of audio; 25 s (one chunk) is
+    /// skipped when engines keep failing on it; and the engine is killed
+    /// at once when the pass ends: a pass that's done has nothing left to
+    /// confirm, and one that's stopped (for a recording) wouldn't use what
+    /// it confirmed.
     #[must_use]
     pub fn final_pass(command: EngineCommand) -> Self {
         let mut engine = EngineConfig::new(command);
@@ -131,6 +140,11 @@ pub enum PassEnd<E> {
     /// Nothing was confirmed for [`PassConfig::stall`]; why the engine was
     /// down, if it said and hasn't come back up since.
     Stalled(Option<String>),
+    /// The engine couldn't be spawned, or exited before saying hello
+    /// [`EXITS_BEFORE_HELLO`] times in a row, so restarting it within the
+    /// pass is no use; why it was down the last time. What the sink
+    /// committed stays.
+    CantStart(String),
     /// The sink failed.
     Sink(E),
     /// The supervisor couldn't be started.
@@ -142,7 +156,7 @@ impl<E: fmt::Display> fmt::Display for PassEnd<E> {
         match self {
             Self::Done => write!(f, "done"),
             Self::Stopped => write!(f, "stopped"),
-            Self::Stalled(Some(why)) => f.write_str(&stopped_working(why)),
+            Self::Stalled(Some(why)) | Self::CantStart(why) => f.write_str(&stopped_working(why)),
             Self::Stalled(None) => write!(f, "the transcriber stopped answering"),
             Self::Sink(e) => write!(f, "{e}"),
             Self::Engine(e) => write!(f, "the transcriber couldn't be started: {e}"),
@@ -159,6 +173,50 @@ fn stopped_working(why: &str) -> String {
 /// How often a pass that's waiting for the engine checks whether it's
 /// asked to stop.
 const POLL: Duration = Duration::from_millis(100);
+
+/// How many engines in a row may exit before saying hello before the pass
+/// ends: a model that doesn't load fails the same way each time, while one
+/// odd exit may not. Three, as decided on #237.
+pub const EXITS_BEFORE_HELLO: u32 = 3;
+
+/// How the pass's engines have started, judged from the supervisor's
+/// reports, so the pass can give up on an engine that can't start.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Starts {
+    /// The engine running now has said hello.
+    hello: bool,
+    /// The engines in a row that exited before saying hello: since the
+    /// last failure of any other kind.
+    exits: u32,
+}
+
+impl Starts {
+    /// Notes an engine that said hello: it started, so its failure,
+    /// whatever it is, breaks the run of exits before hello.
+    fn online(&mut self) {
+        self.hello = true;
+    }
+
+    /// Notes the engine going down for `why`, and whether that ends the
+    /// pass: it couldn't be spawned, or it's the last of
+    /// [`EXITS_BEFORE_HELLO`] exits in a row before hello. Any other
+    /// failure (a hang, a bad hello, an exit after hello) breaks the run
+    /// of exits and is left to the stall.
+    fn offline(&mut self, why: &OfflineReason) -> bool {
+        let before_hello = !std::mem::replace(&mut self.hello, false);
+        match why {
+            OfflineReason::SpawnFailed(_) => true,
+            OfflineReason::Exited { .. } if before_hello => {
+                self.exits = self.exits.saturating_add(1);
+                self.exits >= EXITS_BEFORE_HELLO
+            }
+            _ => {
+                self.exits = 0;
+                false
+            }
+        }
+    }
+}
 
 /// Runs a pass over `tracks`, one after the other, reading each segment's
 /// audio with `read` (16 kHz samples, one per sample of its row), until
@@ -185,6 +243,7 @@ pub fn transcribe<K: PassSink>(
         };
     let mut last_progress = clock.now();
     let mut offline: Option<String> = None;
+    let mut starts = Starts::default();
     let mut texts: Vec<Transcript> = Vec::new();
     work.reverse();
     while let Some(feed) = work.last_mut() {
@@ -224,9 +283,14 @@ pub fn transcribe<K: PassSink>(
                 texts.push(text);
                 continue;
             }
-            EngineEvent::Status(EngineStatus::Offline(why)) => {
-                let why = why.to_string();
+            EngineEvent::Status(EngineStatus::Offline(reason)) => {
+                let why = reason.to_string();
                 sink.engine_down(Some(&stopped_working(&why)));
+                // The sink has heard why first, as it does for every
+                // failure, so it shows the reason the run then ends with.
+                if starts.offline(&reason) {
+                    return PassEnd::CantStart(why);
+                }
                 offline = Some(why);
                 continue;
             }
@@ -234,6 +298,7 @@ pub fn transcribe<K: PassSink>(
             // later stall. An engine that wasn't down in this pass says
             // nothing: whatever the sink kept from before is its own.
             EngineEvent::Status(EngineStatus::Online { .. }) => {
+                starts.online();
                 if offline.take().is_some() {
                     sink.engine_down(None);
                 }
@@ -423,5 +488,119 @@ impl Feed {
         self.next = row.range().end();
         self.segments.pop_front();
         self.previous = Some(row);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn exited() -> OfflineReason {
+        OfflineReason::Exited {
+            status: None,
+            stderr: "no model".into(),
+        }
+    }
+
+    /// Whether each report, in order, ends the pass, an `Online` reading
+    /// `None`.
+    fn ends(reports: &[Option<OfflineReason>]) -> Vec<Option<bool>> {
+        let mut starts = Starts::default();
+        reports
+            .iter()
+            .map(|report| {
+                if let Some(why) = report {
+                    Some(starts.offline(why))
+                } else {
+                    starts.online();
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// An engine that can't be spawned ends the pass the first time.
+    #[test]
+    fn a_spawn_failure_ends_the_pass_at_once() {
+        assert_eq!(
+            ends(&[Some(OfflineReason::SpawnFailed("not found".into()))]),
+            [Some(true)]
+        );
+    }
+
+    /// The third engine in a row to exit before hello ends the pass; the
+    /// first two don't.
+    #[test]
+    fn the_third_exit_before_hello_ends_the_pass() {
+        assert_eq!(
+            ends(&[Some(exited()), Some(exited()), Some(exited())]),
+            [Some(false), Some(false), Some(true)]
+        );
+    }
+
+    /// An engine that dies after each hello is never counted: it started,
+    /// so the stall decides.
+    #[test]
+    fn exits_after_hello_never_end_the_pass() {
+        let reports: Vec<Option<OfflineReason>> =
+            (0..5).flat_map(|_| [None, Some(exited())]).collect();
+        assert!(
+            ends(&reports).iter().flatten().all(|ends| !ends),
+            "{:?}",
+            ends(&reports)
+        );
+    }
+
+    /// A hello between exits starts the count again.
+    #[test]
+    fn a_hello_starts_the_count_again() {
+        assert_eq!(
+            ends(&[
+                Some(exited()),
+                Some(exited()),
+                None,
+                Some(exited()),
+                Some(exited()),
+                Some(exited()),
+            ]),
+            // The exit after the hello is the started engine's own; two
+            // more before hello don't make three.
+            [
+                Some(false),
+                Some(false),
+                None,
+                Some(false),
+                Some(false),
+                Some(false)
+            ]
+        );
+    }
+
+    /// Another failure before hello (no hello in time, a bad hello)
+    /// breaks the run of exits, and isn't one itself.
+    #[test]
+    fn another_failure_breaks_the_run_of_exits() {
+        for other in [
+            OfflineReason::StartTimeout,
+            OfflineReason::Protocol("message before hello".into()),
+        ] {
+            assert_eq!(
+                ends(&[
+                    Some(exited()),
+                    Some(exited()),
+                    Some(other.clone()),
+                    Some(exited()),
+                    Some(exited()),
+                ]),
+                [
+                    Some(false),
+                    Some(false),
+                    Some(false),
+                    Some(false),
+                    Some(false)
+                ],
+                "{other:?}"
+            );
+        }
     }
 }
