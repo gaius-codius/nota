@@ -164,6 +164,28 @@ fn a_packs_digest_does_not_change_between_builds() {
     );
 }
 
+/// A digest shows in debug output as its hex, so an error or a failed
+/// assert names which build it was.
+#[test]
+fn a_digest_debugs_as_its_hex() {
+    assert_eq!(
+        format!("{:?}", sample(PackKind::Shipped).digest()),
+        format!("PackDigest({SAMPLE_DIGEST})")
+    );
+}
+
+/// A pack as a session records it holds the manifest's name and version
+/// and the pack's digest.
+#[test]
+fn a_pack_ref_holds_the_name_version_and_digest() {
+    let pack = sample(PackKind::Shipped);
+    let pack_ref = pack.pack_ref();
+    assert_eq!(
+        (pack_ref.name(), pack_ref.version(), pack_ref.digest()),
+        ("pharmacy", "2026.11", pack.digest())
+    );
+}
+
 /// What [`every_field_of_a_pack_changes_its_digest`] changes in a pack.
 type Edit = fn(&mut Manifest, &mut Vec<TermRow>, &mut Vec<AliasRow>);
 

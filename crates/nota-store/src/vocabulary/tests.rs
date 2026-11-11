@@ -245,6 +245,16 @@ fn assert_missing(store: &Store, installed: &[Pack], chosen: &PackRef) {
             if *session == ONE && *pack == RecordedPack::from(chosen)),
         "{err:?}"
     );
+    // A pack recorded with its digest is named as not installed as it was,
+    // not as one recorded before packs had digests.
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "session 1 used pack {} {}, which is not installed as it was then",
+            chosen.name(),
+            chosen.version()
+        )
+    );
 }
 
 /// Acceptance (#226): a pack rebuilt with other rows under the name and
