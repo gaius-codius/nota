@@ -56,6 +56,13 @@ use chunk::{Answers, Chunk, Context, Offer};
 mod tests;
 
 /// The decider a run would use, as the settings leave it now.
+#[cfg_attr(
+    all(not(unix), not(test)),
+    expect(
+        dead_code,
+        reason = "only unix reads a decider's settings, so elsewhere none is set up"
+    )
+)]
 pub(crate) enum Setup {
     /// None is set up: the job waits for one.
     NotSetUp,
