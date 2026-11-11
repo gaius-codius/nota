@@ -54,8 +54,8 @@ pub const RECORDING_LOCK: &str = "recording.lock";
 /// made, both rare.
 const ENTRY_TRIES: usize = 64;
 
-/// The number in the next entry this process makes, so its entries' names
-/// differ (see [`Recordings::enter`]).
+/// The count in the next entry this process makes, so its entries' names
+/// differ (see [`entry_name`]).
 static NEXT_ENTRY: AtomicU64 = AtomicU64::new(0);
 
 /// The recording lock of the library in one data folder. Making it does no
@@ -107,8 +107,11 @@ impl<S: Fs> Recordings<S> {
     }
 
     /// Whether a recording other than those holding the entries in `own`
-    /// runs in the library: one whose entry is locked. It locks nothing a
-    /// recording or a moment playing needs, and changes nothing on disk.
+    /// runs in the library: one whose entry is locked. It tries each entry
+    /// shared, so checks don't get in each other's way; it never takes the
+    /// library's lock, so it keeps out neither a recording nor a moment
+    /// playing (a recording whose new entry it's trying makes another), and
+    /// it changes nothing on disk.
     /// `own` is for a caller that counts its own recording: the paths it
     /// locked through a [`DiskWatch`](crate::disk::DiskWatch)'s filesystem,
     /// say. A library that has never recorded has no entries.
@@ -123,7 +126,9 @@ impl<S: Fs> Recordings<S> {
             listed => listed?,
         };
         for entry in entries.iter().filter(|entry| !own.contains(entry)) {
-            match self.fs.lock_dir(entry) {
+            // Shared: a recording holds its entry exclusively, so this is
+            // refused exactly while one does, and not by another check.
+            match self.fs.lock_dir_shared(entry) {
                 // Nobody holds it: its recording ended in a crash, or
                 // hasn't locked it yet and will make another.
                 Ok(_unheld) => {}
@@ -166,10 +171,11 @@ impl<S: Fs> Recordings<S> {
     }
 
     /// Makes this recording's entry in the lock's directory, making that
-    /// first if it isn't there, and locks it exclusively. A name already
-    /// there (a crash's, or another process's with the same id in another
-    /// namespace) and an entry a check holds at the moment it's locked are
-    /// passed over for the next name.
+    /// first if it isn't there, and locks it exclusively. Its name is the
+    /// process's id, a number drawn at random and a count, so a name a
+    /// crash left (where ids repeat, as in a PID namespace) is all but never
+    /// met again; one that is, and an entry a check holds at the moment
+    /// it's locked, are passed over for the next name.
     fn enter(&self) -> io::Result<Entry<S>>
     where
         S: Clone,
@@ -177,8 +183,7 @@ impl<S: Fs> Recordings<S> {
         self.make_dir()?;
         let mut passed = None;
         for _ in 0..ENTRY_TRIES {
-            let number = NEXT_ENTRY.fetch_add(1, Ordering::Relaxed);
-            let dir = self.dir.join(format!("{}-{number}", std::process::id()));
+            let dir = self.dir.join(entry_name());
             match self.make_entry(dir) {
                 Ok(entry) => return Ok(entry),
                 // A name already there, or a check trying the new entry:
@@ -194,7 +199,7 @@ impl<S: Fs> Recordings<S> {
                 Err(e) => return Err(e),
             }
         }
-        Err(passed.unwrap_or_else(|| io::Error::other("no entry was tried")))
+        Err(io::Error::other(NoEntry { last: passed }))
     }
 
     /// Makes the entry `dir` and locks it exclusively; an entry made but
@@ -226,6 +231,46 @@ impl<S: Fs> Recordings<S> {
             // the next taker, and holds nothing.
             made => made,
         }
+    }
+}
+
+/// A new entry's name: `<process id>-<random, in hex>-<count>`. The random
+/// part comes from the standard library's hasher keys, drawn afresh for
+/// each process, so it needs no clock and no crate.
+fn entry_name() -> String {
+    use std::hash::BuildHasher;
+    let number = NEXT_ENTRY.fetch_add(1, Ordering::Relaxed);
+    let random = std::collections::hash_map::RandomState::new().hash_one(number);
+    format!("{}-{random:016x}-{number}", std::process::id())
+}
+
+/// Every name a recording tried for its entry was already there or held by
+/// a check ([`Recordings::record`]): not a moment playing, so not
+/// [`io::ErrorKind::WouldBlock`].
+#[derive(Debug)]
+struct NoEntry {
+    /// Why the last name was passed over.
+    last: Option<io::Error>,
+}
+
+impl std::fmt::Display for NoEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "no entry of its own could be made in {ENTRY_TRIES} tries"
+        )?;
+        match &self.last {
+            Some(last) => write!(f, ": {last}"),
+            None => Ok(()),
+        }
+    }
+}
+
+impl std::error::Error for NoEntry {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.last
+            .as_ref()
+            .map(|last| last as &(dyn std::error::Error + 'static))
     }
 }
 
@@ -474,7 +519,7 @@ mod tests {
     fn what_a_crash_or_a_stray_file_leaves_is_not_running() {
         let recordings = library();
         recordings.fs.create_dir(&lock_dir()).unwrap();
-        recordings.fs.create_dir(&lock_dir().join("1-0")).unwrap();
+        recordings.fs.create_dir(&lock_dir().join("1-0-0")).unwrap();
         recordings.fs.create(&lock_dir().join("note")).unwrap();
         assert!(!recordings.running(&[]).unwrap());
     }
@@ -516,18 +561,61 @@ mod tests {
         assert!(recordings.running(&[]).unwrap());
     }
 
-    /// Past its tries, a recording gives up with the last reason, and
-    /// leaves none of its entries behind.
+    /// Past its tries, a recording gives up saying so, with the last
+    /// reason: not as a moment playing would refuse it. It leaves none of
+    /// its entries behind.
     #[test]
     fn a_recording_gives_up_after_its_tries() {
         let fs = Meddling::new();
         fs.with(|m| m.checked = ENTRY_TRIES);
         let recordings = Recordings::new(fs.clone(), Path::new("/data"));
+        let refused = recordings.record().unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::Other);
         assert_eq!(
-            recordings.record().unwrap_err().kind(),
-            io::ErrorKind::WouldBlock
+            refused.to_string(),
+            "no entry of its own could be made in 64 tries: the directory is locked"
         );
+        let last = std::error::Error::source(refused.get_ref().unwrap()).unwrap();
+        assert_eq!(last.to_string(), "the directory is locked");
         assert_eq!(entries(&fs), Vec::<PathBuf>::new());
+    }
+
+    /// Two checks at once don't take each other for a recording: an entry
+    /// a crash left, which another check is trying, is still no recording.
+    #[test]
+    fn checks_dont_take_each_other_for_a_recording() {
+        let recordings = library();
+        recordings.fs.create_dir(&lock_dir()).unwrap();
+        let left = lock_dir().join("1-0-0");
+        recordings.fs.create_dir(&left).unwrap();
+        // The other check's hold, as `running` takes it.
+        let _other_check = recordings.fs.lock_dir_shared(&left).unwrap();
+        assert!(!recordings.running(&[]).unwrap());
+    }
+
+    /// An entry removed between the listing and its try, as its recording
+    /// stopped, is no recording and no error.
+    #[test]
+    fn an_entry_removed_during_a_check_is_not_running() {
+        let fs = Meddling::new();
+        let recordings = Recordings::new(fs.clone(), Path::new("/data"));
+        drop(recordings.record().unwrap());
+        fs.inner.create_dir(&lock_dir().join("1-0-0")).unwrap();
+        fs.with(|m| m.vanish = true);
+        assert!(!recordings.running(&[]).unwrap());
+        assert_eq!(entries(&fs), Vec::<PathBuf>::new());
+    }
+
+    /// Entries' names differ within a process, and carry its id.
+    #[test]
+    fn entry_names_differ_and_carry_the_process_id() {
+        let (first, second) = (entry_name(), entry_name());
+        assert_ne!(first, second);
+        let pid = format!("{}-", std::process::id());
+        assert!(
+            first.starts_with(&pid) && second.starts_with(&pid),
+            "{first} {second}"
+        );
     }
 
     /// An entry that can't be locked for another reason is that error, and
@@ -598,6 +686,8 @@ mod tests {
         taken: usize,
         /// The error every entry's lock fails with, if any.
         refused: Option<io::ErrorKind>,
+        /// Whether an entry is removed just before a check tries it.
+        vanish: bool,
         /// Every lock asked for: its directory, and whether shared.
         locks: Vec<(PathBuf, bool)>,
     }
@@ -696,12 +786,19 @@ mod tests {
                 return Err(kind.into());
             }
             // A check holds the entry at this moment, as `running` would.
-            let _check = checked.then(|| self.inner.lock_dir(dir)).transpose()?;
+            let _check = checked
+                .then(|| self.inner.lock_dir_shared(dir))
+                .transpose()?;
             self.inner.lock_dir(dir)
         }
 
         fn lock_dir_shared(&self, dir: &Path) -> io::Result<FakeLock> {
-            self.with(|m| m.locks.push((dir.to_path_buf(), true)));
+            if self.with(|m| {
+                m.locks.push((dir.to_path_buf(), true));
+                m.vanish && is_entry(dir)
+            }) {
+                self.inner.remove_dir(dir)?;
+            }
             self.inner.lock_dir_shared(dir)
         }
     }

@@ -1911,7 +1911,7 @@ fn a_recording_doesnt_start_while_a_moment_plays() {
 /// goes) stops the start with that reason, not with "a moment is playing",
 /// and leaves no session behind.
 #[test]
-fn a_recording_lock_that_cant_be_taken_stops_the_start_with_its_reason() {
+fn a_recording_lock_that_cant_be_read_stops_the_start_with_its_reason() {
     let tmp = TestDir::new("record-lock-file");
     let _in_the_way = StdFs.create(&tmp.0.join("recording.lock")).unwrap();
     let mut nota = Running::start_with(&tmp.0, &[]);
@@ -1922,6 +1922,35 @@ fn a_recording_lock_that_cant_be_taken_stops_the_start_with_its_reason() {
     assert!(
         said.contains(&format!(
             "the library's recording lock {} can't be read: Not a directory",
+            lock.display()
+        )),
+        "{said}"
+    );
+    assert!(!said.contains("a moment of a session is playing"), "{said}");
+    assert!(StdFs.list(&tmp.0.join("sessions")).unwrap().is_empty());
+}
+
+/// A recording lock that can be read but not counted in (here its
+/// directory is read-only, so no entry can be made in it) stops the start
+/// with that reason, not with "a moment is playing", and leaves no session
+/// behind.
+#[test]
+#[expect(clippy::disallowed_methods, reason = "test scaffolding")]
+fn a_recording_lock_that_cant_be_taken_stops_the_start_with_its_reason() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TestDir::new("record-lock-read-only");
+    let lock = tmp.0.join("recording.lock");
+    StdFs.create_dir(&lock).unwrap();
+    std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let mut nota = Running::start_with(&tmp.0, &[]);
+    let status = nota.exits().expect("nota didn't give up");
+    // Writable again, so the test directory can be removed.
+    std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(!status.success(), "{status:?}");
+    let said = visible(&nota.output.lock().unwrap());
+    assert!(
+        said.contains(&format!(
+            "the library's recording lock {} can't be taken: Permission denied",
             lock.display()
         )),
         "{said}"
