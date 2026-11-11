@@ -26,7 +26,7 @@
 //! | `final_text`, `final_word`, `final_progress` | the final pass's text, by track and sample, beside the heard text and never in it, never changed (V8); how far it has got on each track (V5) | the final pass ([`crate::final_text`]) |
 //! | `event` | the timeline: warnings raised and cleared, device changes, the transcriber's state, gaps | `nota record`, as each is sent to the screen ([`crate::timeline`]) |
 //! | `finding` | an index of each session's findings file: rows whose file didn't prove them, and rows that don't parse (V6) | the app, from the findings files ([`Store::index_findings`](crate::Store::index_findings)) |
-//! | `session_pack`, `session_packs_chosen` | the term packs a session chose, by name and version, in order, and that it chose; never changed (V9) | Setup, when the session starts ([`Store::record_session_packs`](crate::Store::record_session_packs)) |
+//! | `session_pack`, `session_packs_chosen` | the term packs a session chose, by name, version and digest (V10; none before), in order, and that it chose; never changed (V9) | Setup, when the session starts ([`Store::record_session_packs`](crate::Store::record_session_packs)) |
 //! | `learned_pair` | each heard span → term the user accepted or rejected, with its session and when; never changed (V9) | the correction card ([`crate::learned`]) |
 //!
 //! Session times are nanoseconds from the session's start
@@ -577,7 +577,9 @@ BEGIN SELECT RAISE(ABORT, 'heard text is never replaced'); END;
 /// the span as heard; `heard_key` and `term_key` are the forms pairs are
 /// matched by ([`crate::learned::match_key`]), kept for the index: reading
 /// keys them again from `heard` and `term`, so a later change to the keys
-/// needs no migration. A pair is a record, never
+/// needs no migration. Rows stored before such a change keep their old
+/// keys (they're never updated), so nothing may look pairs up by these
+/// columns. A pair is a record, never
 /// changed: a later choice on the same span and term is a new row, and
 /// the newest says what holds ([`crate::learned`]).
 ///
@@ -636,6 +638,26 @@ BEGIN SELECT RAISE(ABORT, 'a learned pair is never deleted'); END;
 CREATE TRIGGER learned_pair_never_replaced BEFORE INSERT ON learned_pair
 WHEN EXISTS (SELECT 1 FROM learned_pair WHERE id = NEW.id)
 BEGIN SELECT RAISE(ABORT, 'a learned pair is never replaced'); END;
+";
+
+/// Version 10: each session pack's digest, `session_pack.digest`
+/// ([`crate::packs::PackDigest`]), so a pack rebuilt under the same name
+/// and version with other rows, or as another kind, isn't taken for the
+/// one the session used.
+///
+/// Rows recorded before this version have no digest, and can't be given
+/// one: they're never changed, and the pack they named may be gone. So
+/// nothing shows which build they used, and reading such a session's terms
+/// refuses each of its packs as missing
+/// ([`crate::vocabulary::RecordedPack::is`]). Every row recorded from this
+/// version on has a digest: a trigger refuses one without.
+pub(crate) const V10: &str = "
+ALTER TABLE session_pack ADD COLUMN digest BLOB
+    CHECK (digest IS NULL OR length(digest) = 32);
+
+CREATE TRIGGER session_pack_never_without_a_digest BEFORE INSERT ON session_pack
+WHEN NEW.digest IS NULL
+BEGIN SELECT RAISE(ABORT, 'a session''s pack is never recorded without its digest'); END;
 ";
 
 #[cfg(test)]

@@ -1,22 +1,62 @@
 //! A session's vocabulary: the packs it chose and the learned pairs, as the
 //! plain term list the lookup (C4) takes.
 //!
-//! A session records its packs once, when it starts, by each pack's name
-//! and version ([`PackRef`]), so a proposal made from its terms can say
-//! where each came from. Reading its vocabulary later takes the packs as
-//! they are installed and checks each recorded one is there at its
-//! recorded version: a pack upgraded since gives other terms, so it's
-//! refused, not quietly used. That rests on a pack rebuilt with other rows
-//! getting a new version: nothing here can tell two builds of one version
-//! apart.
+//! A session records its packs once, when it starts, by each pack's name,
+//! version and digest ([`PackRef`]), so a proposal made from its terms can
+//! say where each came from. Reading its vocabulary later takes the packs
+//! as they are installed and checks each recorded one is there with its
+//! recorded name, version and digest: a pack upgraded since, or rebuilt
+//! under the same version with other rows or as another kind, gives other
+//! terms, so it's refused as missing, not quietly used.
+//!
+//! A session recorded before digests were (library version 9) has none
+//! for its packs, and its rows are never changed. Nothing can show that an
+//! installed pack is the one it used, so every pack it recorded is refused
+//! as missing ([`RecordedPack::is`]): its terms can't be read, but no
+//! other build's terms stand in for them.
 
 use rusqlite::{TransactionBehavior, params};
 
 use nota_core::SessionId;
 
 use crate::learned::Learned;
-use crate::packs::{Offered, Pack, PackRef};
+use crate::packs::{Offered, Pack, PackDigest, PackRef};
 use crate::{Store, StoreError, session_key};
+
+/// A pack as a session's record holds it: what [`PackRef`] holds, but
+/// with no digest for a session recorded before digests were.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RecordedPack {
+    /// The pack's name.
+    pub name: String,
+    /// Its version.
+    pub version: String,
+    /// Its digest, or `None` for a session recorded before digests were
+    /// (library version 9).
+    pub digest: Option<PackDigest>,
+}
+
+impl RecordedPack {
+    /// Whether `pack` is the one recorded: the same name, version and
+    /// digest. Never for a record with no digest, which can't show which
+    /// build it was.
+    #[must_use]
+    pub fn is(&self, pack: &PackRef) -> bool {
+        self.name == pack.name()
+            && self.version == pack.version()
+            && self.digest == Some(pack.digest())
+    }
+}
+
+impl From<&PackRef> for RecordedPack {
+    fn from(pack: &PackRef) -> Self {
+        Self {
+            name: pack.name().to_owned(),
+            version: pack.version().to_owned(),
+            digest: Some(pack.digest()),
+        }
+    }
+}
 
 /// The terms a session's lookup may offer, and the user's learned pairs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,9 +117,15 @@ impl Store {
         )?;
         for (position, pack) in (0_i64..).zip(packs) {
             tx.execute(
-                "INSERT INTO session_pack (session_id, position, name, version)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![key, position, pack.name, pack.version],
+                "INSERT INTO session_pack (session_id, position, name, version, digest)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    key,
+                    position,
+                    pack.name(),
+                    pack.version(),
+                    pack.digest().as_bytes()
+                ],
             )?;
         }
         tx.commit()?;
@@ -91,21 +137,39 @@ impl Store {
     ///
     /// # Errors
     ///
+    /// [`StoreError::Corrupt`] if a stored digest isn't 32 bytes,
     /// [`StoreError::OutOfRange`] if the session's number doesn't fit
     /// SQLite's integer, and [`StoreError::Sqlite`] for any SQLite failure.
-    pub fn session_packs(&self, session: SessionId) -> Result<Vec<PackRef>, StoreError> {
+    pub fn session_packs(&self, session: SessionId) -> Result<Vec<RecordedPack>, StoreError> {
         let mut stmt = self.conn.prepare(
-            "SELECT name, version FROM session_pack WHERE session_id = ?1 ORDER BY position",
+            "SELECT name, version, digest FROM session_pack \
+             WHERE session_id = ?1 ORDER BY position",
         )?;
-        let packs = stmt
+        let raws = stmt
             .query_map([session_key(session)?], |r| {
-                Ok(PackRef {
-                    name: r.get(0)?,
-                    version: r.get(1)?,
-                })
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<Vec<u8>>>(2)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(packs)
+        raws.into_iter()
+            .map(|(name, version, digest)| {
+                let digest = digest
+                    .map(|bytes| {
+                        PackDigest::from_stored(&bytes).ok_or_else(|| {
+                            StoreError::Corrupt(format!("a pack digest of {} bytes", bytes.len()))
+                        })
+                    })
+                    .transpose()?;
+                Ok(RecordedPack {
+                    name,
+                    version,
+                    digest,
+                })
+            })
+            .collect()
     }
 
     /// `session`'s vocabulary: the terms its recorded packs offer, taken
@@ -115,8 +179,9 @@ impl Store {
     /// # Errors
     ///
     /// [`StoreError::PackMissing`] if a pack the session recorded isn't in
-    /// `installed` at its recorded version, and [`Store::session_packs`]'s
-    /// and [`Store::learned`]'s errors.
+    /// `installed` with its recorded name, version and digest
+    /// ([`RecordedPack::is`]), and [`Store::session_packs`]'s and
+    /// [`Store::learned`]'s errors.
     pub fn session_terms(
         &self,
         session: SessionId,
@@ -126,7 +191,7 @@ impl Store {
         for chosen in self.session_packs(session)? {
             let pack = installed
                 .iter()
-                .find(|p| p.manifest().pack_ref() == chosen)
+                .find(|p| chosen.is(&p.pack_ref()))
                 .ok_or_else(|| StoreError::PackMissing {
                     session,
                     pack: chosen.clone(),

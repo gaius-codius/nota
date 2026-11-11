@@ -58,12 +58,15 @@ fn library(dir: &TestDir) -> Store {
     store
 }
 
-/// `name` at `version`, as a session records it.
+/// A shipped pack `name` at `version` with one term, as a session
+/// records it.
 fn named(name: &str, version: &str) -> PackRef {
-    PackRef {
-        name: name.to_owned(),
-        version: version.to_owned(),
-    }
+    pack(name, version, PackKind::Shipped, &["amlodipine"]).pack_ref()
+}
+
+/// `packs` as the session's record reads them back.
+fn recorded(packs: &[PackRef]) -> Vec<RecordedPack> {
+    packs.iter().map(RecordedPack::from).collect()
 }
 
 /// Acceptance: a session's packs and their versions read back, in the
@@ -80,10 +83,10 @@ fn a_sessions_packs_and_versions_read_back() {
             .unwrap();
     }
     let store = Store::open(&dir.db()).unwrap();
-    assert_eq!(store.session_packs(ONE).unwrap(), chosen);
+    assert_eq!(store.session_packs(ONE).unwrap(), recorded(&chosen));
     assert_eq!(
         store.session_packs(TWO).unwrap(),
-        [named("pharmacy", "2026.10")]
+        recorded(&[named("pharmacy", "2026.10")])
     );
     assert!(store.session_packs(SessionId::new(3)).unwrap().is_empty());
 }
@@ -101,7 +104,10 @@ fn a_sessions_packs_are_recorded_once() {
         store.record_session_packs(ONE, &[named("other", "1")]),
         Err(StoreError::PacksRecorded(id)) if id == ONE
     ));
-    assert_eq!(store.session_packs(ONE).unwrap(), [named("pharmacy", "1")]);
+    assert_eq!(
+        store.session_packs(ONE).unwrap(),
+        recorded(&[named("pharmacy", "1")])
+    );
     let three = SessionId::new(3);
     assert!(matches!(
         store.record_session_packs(three, &[named("pharmacy", "1")]),
@@ -142,12 +148,15 @@ fn a_sessions_packs_are_never_changed() {
     let conn = raw(&dir.db());
     for sql in [
         "UPDATE session_pack SET version = '2'",
+        "UPDATE session_pack SET digest = zeroblob(32)",
         "DELETE FROM session_pack",
-        "INSERT OR REPLACE INTO session_pack VALUES (1, 0, 'pharmacy', '2')",
-        "INSERT INTO session_pack VALUES (1, 0, 'other', '1')",
+        "INSERT OR REPLACE INTO session_pack VALUES (1, 0, 'pharmacy', '2', zeroblob(32))",
+        "INSERT INTO session_pack VALUES (1, 0, 'other', '1', zeroblob(32))",
         // A replace by rowid would take session 1's row for session 2.
-        "INSERT OR REPLACE INTO session_pack (rowid, session_id, position, name, version) \
-         VALUES (1, 2, 0, 'x', '1')",
+        "INSERT OR REPLACE INTO session_pack (rowid, session_id, position, name, version, digest) \
+         VALUES (1, 2, 0, 'x', '1', zeroblob(32))",
+        // From version 10 on, a pack is never recorded without its digest.
+        "INSERT INTO session_pack (session_id, position, name, version) VALUES (2, 0, 'x', '1')",
         "UPDATE session_packs_chosen SET session_id = 2",
         "DELETE FROM session_packs_chosen",
         "INSERT OR REPLACE INTO session_packs_chosen VALUES (1)",
@@ -167,7 +176,7 @@ fn a_session_gets_the_terms_of_the_packs_it_chose() {
     let glossary = pack("glossary", "1", PackKind::Own, &["Naranjo"]);
     let other = pack("law", "1", PackKind::Shipped, &["estoppel"]);
     store
-        .record_session_packs(ONE, &[named("glossary", "1"), named("pharmacy", "2")])
+        .record_session_packs(ONE, &[glossary.pack_ref(), pharmacy.pack_ref()])
         .unwrap();
     store
         .learn(
@@ -223,11 +232,64 @@ fn a_chosen_pack_missing_or_at_another_version_is_refused() {
         vec![],
         vec![pack("pharmacy", "3", PackKind::Shipped, &["amlodipine"])],
     ] {
-        let err = store.session_terms(ONE, &installed).unwrap_err();
-        assert!(
-            matches!(&err, StoreError::PackMissing { session, pack }
-                if *session == ONE && *pack == named("pharmacy", "2")),
-            "{err:?}"
-        );
+        assert_missing(&store, &installed, &named("pharmacy", "2"));
     }
+}
+
+/// Asserts that session 1's terms are refused, with `installed`, because
+/// its pack `chosen` is missing.
+fn assert_missing(store: &Store, installed: &[Pack], chosen: &PackRef) {
+    let err = store.session_terms(ONE, installed).unwrap_err();
+    assert!(
+        matches!(&err, StoreError::PackMissing { session, pack }
+            if *session == ONE && *pack == RecordedPack::from(chosen)),
+        "{err:?}"
+    );
+    // A pack recorded with its digest is named as not installed as it was,
+    // not as one recorded before packs had digests.
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "session 1 used pack {} {}, which is not installed as it was then",
+            chosen.name(),
+            chosen.version()
+        )
+    );
+}
+
+/// Acceptance (#226): a pack rebuilt with other rows under the name and
+/// version the session recorded is refused as missing, not used: its
+/// terms aren't the ones the session's proposals came from.
+#[test]
+fn a_pack_rebuilt_with_other_rows_under_the_same_version_is_refused() {
+    let dir = TestDir::new("session-terms-rebuilt");
+    let mut store = library(&dir);
+    let chosen = pack("glossary", "1", PackKind::Own, &["Naranjo"]);
+    store
+        .record_session_packs(ONE, &[chosen.pack_ref()])
+        .unwrap();
+    // The glossary's default version again, with a term more.
+    let rebuilt = pack("glossary", "1", PackKind::Own, &["Naranjo", "Beers"]);
+    assert_missing(&store, std::slice::from_ref(&rebuilt), &chosen.pack_ref());
+    // The pack it recorded is still found, beside the rebuilt one.
+    let terms = store
+        .session_terms(ONE, &[rebuilt, chosen.clone()])
+        .unwrap();
+    assert_eq!(terms.terms, chosen.offered());
+}
+
+/// Acceptance (#226): a pack of the recorded name and version but
+/// another kind (a user's own built with a shipped pack's name and
+/// version) is refused as missing: its draft rows would all be offered.
+#[test]
+fn a_pack_of_another_kind_under_the_same_version_is_refused() {
+    let dir = TestDir::new("session-terms-kind");
+    let mut store = library(&dir);
+    let shipped = pack("pharmacy", "2026.11", PackKind::Shipped, &["amlodipine"]);
+    store
+        .record_session_packs(ONE, &[shipped.pack_ref()])
+        .unwrap();
+    // The same rows: only the kind differs.
+    let own = pack("pharmacy", "2026.11", PackKind::Own, &["amlodipine"]);
+    assert_missing(&store, &[own], &shipped.pack_ref());
 }

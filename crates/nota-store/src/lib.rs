@@ -63,13 +63,13 @@ pub use findings::{IndexedFinding, Problem, ReadFailure, Status};
 pub use jobs::{Job, JobEnd, JobId, JobKind, JobState, Progress, Wait};
 pub use learned::{Learned, LearnedPair, Verdict};
 pub use migrate::Adopted;
-pub use packs::{Pack, PackError, PackRef};
+pub use packs::{Pack, PackDigest, PackError, PackRef};
 pub use revisions::{Applied, Change, ChunkKey, FinalLine, RevisionNumber, Timed, WordSpan};
 pub use segments::{AudioDigest, Inserted, RowKey, SegmentRow, Sha256Digest};
 pub use sessions::{NewSession, Session, SessionState, Track, TrackKind};
 pub use timeline::{Happened, TimelineEvent};
 pub use transcript::{Heard, HeardRevision, Line, StoredUtterance, UtteranceId, Word};
-pub use vocabulary::SessionTerms;
+pub use vocabulary::{RecordedPack, SessionTerms};
 pub use writer::Writer;
 
 /// How long a write waits for another process's write to finish.
@@ -131,12 +131,16 @@ pub enum StoreError {
     NoJob(i64),
     /// The session's packs are recorded already: they're recorded once.
     PacksRecorded(SessionId),
-    /// A pack the session recorded isn't installed at its recorded version.
+    /// A pack the session recorded isn't installed with its recorded name,
+    /// version and digest: it's missing, at another version, or rebuilt
+    /// with other contents; or the session recorded it with no digest
+    /// (before library version 10), so no installed build can be shown to
+    /// be the one it used.
     PackMissing {
         /// The session.
         session: SessionId,
         /// The pack it recorded.
-        pack: PackRef,
+        pack: RecordedPack,
     },
     /// A learned pair's span or term has no letters or digits. Nothing was
     /// stored.
@@ -222,9 +226,16 @@ impl fmt::Display for StoreError {
             Self::PacksRecorded(id) => {
                 write!(f, "session {}'s packs are recorded already", id.get())
             }
+            Self::PackMissing { session, pack } if pack.digest.is_none() => write!(
+                f,
+                "session {} used pack {} {}, recorded before packs had digests, so the build it used can't be confirmed",
+                session.get(),
+                pack.name,
+                pack.version
+            ),
             Self::PackMissing { session, pack } => write!(
                 f,
-                "session {} used pack {} {}, which is not installed",
+                "session {} used pack {} {}, which is not installed as it was then",
                 session.get(),
                 pack.name,
                 pack.version

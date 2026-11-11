@@ -105,7 +105,7 @@ fn a_glossary_builds_into_a_pack_a_session_is_offered() {
     let session = SessionId::new(1);
     store.create_session(&NewSession::bare(session)).unwrap();
     store
-        .record_session_packs(session, &[m.pack_ref()])
+        .record_session_packs(session, &[pack.pack_ref()])
         .unwrap();
     let offered = store.session_terms(session, &[pack]).unwrap().terms;
     let summary: Vec<_> = offered
