@@ -140,8 +140,9 @@ jobs:
         working-directory: fuzz
 
   mutants-shard:
-    # Every mutant of the lines this PR changes in the core, recorder, checks
-    # and LLM crates must be caught by a test. A missed or timed-out mutant fails.
+    # Every mutant of the lines this PR changes in the core, recorder, checks,
+    # LLM, store and engine crates must be caught by a test. A missed or
+    # timed-out mutant fails.
     # The mutants are dealt out round-robin to five shards that run side by
     # side; the job below gathers the results. Round-robin, not cargo-mutants'
     # default consecutive slices: a file's mutants tend to share slow tests,
@@ -186,6 +187,12 @@ jobs:
           else
             echo changed=true >>"$GITHUB_OUTPUT"
           fi
+          # Only the engine's mutants need its libraries and the test models.
+          if git diff --quiet "$PR_BASE...HEAD" -- 'crates/nota-engine/*.rs'; then
+            echo engine=false >>"$GITHUB_OUTPUT"
+          else
+            echo engine=true >>"$GITHUB_OUTPUT"
+          fi
       - if: steps.rust.outputs.changed == 'true'
         run: rustup toolchain install
       - if: steps.rust.outputs.changed == 'true'
@@ -206,22 +213,50 @@ jobs:
           PR_BASE: ${{ github.event.pull_request.base.sha }}
         run: git diff --src-prefix=a/ --dst-prefix=b/ "$PR_BASE...HEAD" > "$RUNNER_TEMP/pr.diff"
       # A shard dealt no mutants (a small diff, or none in these crates) passes.
-      - if: steps.rust.outputs.changed == 'true'
+      - name: Mutate the crates other than the engine
+        if: steps.rust.outputs.changed == 'true'
         env:
           SHARD: ${{ strategy.job-index }}
           SHARDS: ${{ strategy.job-total }}
           # Caps each test process's memory, as in mutants.yml.
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: prlimit --as=1073741824 --
-        run: >-
-          cargo mutants --in-diff "$RUNNER_TEMP/pr.diff"
-          -p nota-core -p nota-recorder -p nota-checks -p nota-llm
-          --shard "$SHARD/$SHARDS" --sharding round-robin
-          --test-tool nextest --jobs 2 --output "$RUNNER_TEMP"
+        run: |
+          mkdir -p "$RUNNER_TEMP/crates"
+          cargo mutants --in-diff "$RUNNER_TEMP/pr.diff" \
+            -p nota-core -p nota-recorder -p nota-checks -p nota-llm -p nota-store \
+            --shard "$SHARD/$SHARDS" --sharding round-robin \
+            --test-tool nextest --jobs 2 --output "$RUNNER_TEMP/crates"
+      # The engine's setup and run, as in mutants.yml. They run even when the
+      # step above found a missed mutant, so a run reports every one at once.
+      - name: Fetch the pinned sherpa-onnx libraries
+        if: ${{ !cancelled() && steps.rust.outputs.engine == 'true' }}
+        # An absolute path: cargo-mutants copies the tree without target/,
+        # where .cargo/config.toml's relative one points.
+        run: |
+          lib=$(scripts/sherpa-onnx.sh)
+          echo "SHERPA_ONNX_LIB_DIR=$lib" >>"$GITHUB_ENV"
+      - if: ${{ !cancelled() && steps.rust.outputs.engine == 'true' }}
+        # zizmor's self-repository form ($/) fails actionlint 1.7.12, CI's.
+        uses: ./.github/actions/pre-test # zizmor: ignore[self-repository]
+      - name: Mutate the engine
+        if: ${{ !cancelled() && steps.rust.outputs.engine == 'true' }}
+        env:
+          SHARD: ${{ strategy.job-index }}
+          SHARDS: ${{ strategy.job-total }}
+          # A larger cap and fewer tests at a time, as in mutants.yml.
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: prlimit --as=3221225472 --
+          NEXTEST_TEST_THREADS: "2"
+        run: |
+          mkdir -p "$RUNNER_TEMP/engine"
+          cargo mutants --in-diff "$RUNNER_TEMP/pr.diff" \
+            -p nota-engine \
+            --shard "$SHARD/$SHARDS" --sharding round-robin \
+            --test-tool nextest --jobs 2 --output "$RUNNER_TEMP/engine"
       - if: failure() && steps.rust.outputs.changed == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mutants-shard-${{ strategy.job-index }}
-          path: ${{ runner.temp }}/mutants.out
+          path: ${{ runner.temp }}/*/mutants.out
 
   mutants:
     # The required check. It passes only if every shard passed: a failed,
