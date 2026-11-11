@@ -14,7 +14,7 @@ fn session(id: u64, status: Status) -> Session {
         status,
         duration: Some(Duration::from_secs(id * 60)),
         date: Some("today".into()),
-        detail: Some(format!("detail {id}")),
+        detail: vec![format!("detail {id}")],
     }
 }
 
@@ -133,6 +133,92 @@ fn only_the_selected_session_shows_its_detail() {
     assert!(row(&buf, 14).contains("  ✓ session 1"), "{}", row(&buf, 14));
     let all: String = (0..20).map(|y| row(&buf, y)).collect();
     assert!(!all.contains("detail 1"));
+}
+
+/// Each item of the detail starts a row of its own, so two held files
+/// never share one.
+#[test]
+fn each_detail_item_starts_its_own_row() {
+    let mut held = session(1, Status::NeedsYou);
+    held.detail = vec!["first file: held".into(), "second file: held".into()];
+    let mut home = home_of(vec![held], Theme::default());
+    let buf = draw(&mut home, 20);
+    assert_eq!(
+        row(&buf, 13),
+        format!("│     first file: held{}│", " ".repeat(39))
+    );
+    assert_eq!(
+        row(&buf, 14),
+        format!("│     second file: held{}│", " ".repeat(38))
+    );
+}
+
+/// An item too long for its row wraps between words onto indented rows,
+/// so none of it is cut off.
+#[test]
+fn a_long_detail_item_wraps_onto_indented_rows() {
+    let mut held = session(1, Status::NeedsYou);
+    held.detail = vec![
+        "journal-000000: couldn't delete it (permission denied); \
+         all its audio is published"
+            .into(),
+    ];
+    let mut home = home_of(vec![held], Theme::default());
+    let buf = draw(&mut home, 20);
+    // 62 columns leave 53 for an item's first row and 51 for the rows it
+    // wraps onto.
+    let rows: Vec<String> = (13..16).map(|y| row(&buf, y)).collect();
+    assert_eq!(
+        rows,
+        [
+            format!(
+                "│     journal-000000: couldn't delete it (permission{}│",
+                " ".repeat(9)
+            ),
+            format!(
+                "│       denied); all its audio is published{}│",
+                " ".repeat(18)
+            ),
+            format!("│{}│", " ".repeat(60)),
+        ]
+    );
+}
+
+/// An item's first row takes the whole room, and the rows it wraps onto
+/// two columns fewer, so neither runs into the frame's padding.
+#[test]
+fn a_wrapped_items_rows_have_their_own_widths() {
+    let mut held = session(1, Status::NeedsYou);
+    // 53 columns, then 52: the second fits the first row's room but not
+    // the indented rows'.
+    held.detail = vec![format!("{} {} end", "a".repeat(53), "b".repeat(52))];
+    let mut home = home_of(vec![held], Theme::default());
+    let buf = draw(&mut home, 20);
+    assert_eq!(row(&buf, 13), format!("│     {}  │", "a".repeat(53)));
+    assert_eq!(row(&buf, 14), format!("│       {}  │", "b".repeat(51)));
+    assert_eq!(row(&buf, 15), format!("│       b end{}│", " ".repeat(48)));
+}
+
+/// A detail taller than the list shows its first rows under the session's
+/// own row, which stays in view, and says how many more it has.
+#[test]
+fn a_detail_taller_than_the_list_keeps_its_session_in_view() {
+    let mut sessions: Vec<Session> = (1..=3).map(|id| session(id, Status::Ready)).collect();
+    sessions[0].detail = (1..=12).map(|n| format!("held file {n}")).collect();
+    let mut home = home_of(sessions, Theme::default());
+    press(&mut home, KeyCode::Down);
+    press(&mut home, KeyCode::Down);
+    assert_eq!(home.selected(), Some(1));
+    let buf = draw(&mut home, 20);
+    // 20 rows leave 7 for the list: the session, five of its items, and
+    // a row counting the seven it can't show.
+    assert!(row(&buf, 12).contains("▸ ✓ session 1"), "{}", row(&buf, 12));
+    assert!(row(&buf, 13).contains("held file 1 "), "{}", row(&buf, 13));
+    assert!(row(&buf, 17).contains("held file 5 "), "{}", row(&buf, 17));
+    assert_eq!(
+        row(&buf, 18),
+        format!("│     … 7 more rows{}│", " ".repeat(42))
+    );
 }
 
 #[test]
@@ -307,7 +393,7 @@ fn a_new_list_keeps_the_selection_on_its_session() {
     // Session 1 no longer needs you, so it moves below 2; session 2's
     // detail changes, and the selected row shows the new one.
     let mut two = session(2, Status::Ready);
-    two.detail = Some("recovered".into());
+    two.detail = vec!["recovered".into()];
     home.set_sessions(vec![
         session(1, Status::Ready),
         two,

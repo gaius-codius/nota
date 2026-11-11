@@ -656,7 +656,7 @@ mod tests {
             status: crate::home::Status::Ready,
             duration: None,
             date: None,
-            detail: None,
+            detail: Vec::new(),
         };
         Home::new(vec![session], "parakeet", Theme::no_color())
     }
@@ -687,7 +687,7 @@ mod tests {
                 status: crate::home::Status::Ready,
                 duration: None,
                 date: None,
-                detail: None,
+                detail: Vec::new(),
             };
             home.set_sessions(vec![session]);
             let next = if refreshes == 1 { 'j' } else { 'q' };

@@ -272,15 +272,13 @@ impl DeletableJournal {
 /// gone is fine. One that can't be unlinked (an immutable file's `EPERM`,
 /// `EIO`) is left as it is, holding only audio already in committed rows,
 /// and returned with the error's kind; the rest are deleted all the same.
-///
-/// # Errors
-///
-/// Any I/O error syncing the directory.
+/// The journals left are returned even if the sync fails, so the caller
+/// can still name them; that sync's result comes beside them.
 pub(super) fn delete_journals<S: Fs>(
     fs: &S,
     dir: &Path,
     journals: &[DeletableJournal],
-) -> io::Result<Vec<(JournalId, io::ErrorKind)>> {
+) -> (Vec<(JournalId, io::ErrorKind)>, io::Result<()>) {
     let mut kept = Vec::new();
     for journal in journals {
         match fs.remove(&journal.path) {
@@ -289,10 +287,12 @@ pub(super) fn delete_journals<S: Fs>(
             Err(e) => kept.push((journal.id, e.kind())),
         }
     }
-    if kept.len() < journals.len() {
-        fs.sync_dir(dir)?;
-    }
-    Ok(kept)
+    let synced = if kept.len() < journals.len() {
+        fs.sync_dir(dir)
+    } else {
+        Ok(())
+    };
+    (kept, synced)
 }
 
 /// Why a segment's write or rename failed.
