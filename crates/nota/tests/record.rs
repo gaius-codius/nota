@@ -1907,9 +1907,9 @@ fn a_recording_doesnt_start_while_a_moment_plays() {
     stop_with_keys(&mut nota);
 }
 
-/// A recording lock that can't be taken for another reason (here a file
-/// where its directory goes) stops the start with that reason, not with
-/// "a moment is playing", and leaves no session behind.
+/// A recording lock that can't be read (here a file where its directory
+/// goes) stops the start with that reason, not with "a moment is playing",
+/// and leaves no session behind.
 #[test]
 fn a_recording_lock_that_cant_be_taken_stops_the_start_with_its_reason() {
     let tmp = TestDir::new("record-lock-file");
@@ -1921,7 +1921,7 @@ fn a_recording_lock_that_cant_be_taken_stops_the_start_with_its_reason() {
     let lock = tmp.0.join("recording.lock");
     assert!(
         said.contains(&format!(
-            "the library's recording lock {} can't be taken: lock_dir needs a directory",
+            "the library's recording lock {} can't be read: Not a directory",
             lock.display()
         )),
         "{said}"

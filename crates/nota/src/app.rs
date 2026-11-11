@@ -353,8 +353,8 @@ fn start_jobs(
 }
 
 /// Whether a recording is going: this nota's, known at once, or another
-/// nota's, found by its locked session ([`Library::recording`]) at most
-/// every [`ELSEWHERE`].
+/// nota's, found in the library's recording lock ([`Library::recording`])
+/// at most every [`ELSEWHERE`].
 struct Recordings {
     /// The library checked for another recording.
     library: Library,

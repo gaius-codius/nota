@@ -1295,17 +1295,22 @@ fn listing_without_kept_metadata_still_has_unknown_title_and_start() {
     }
 }
 
+/// Another nota's recording counted in the library on `fs`, as a start
+/// counts its own before it makes its session.
+fn counted<S: Fs + Clone>(fs: &S, root: &Path) -> nota_recorder::session::RecordingLock<S> {
+    Recordings::new(fs.clone(), root).record().unwrap()
+}
+
 /// A second start mustn't spend the ballast of a live recording, even
-/// before that recording has made its first journal.
+/// before that recording has made its session.
 #[test]
 fn startup_keeps_a_live_recordings_ballast() {
     use nota_recorder::disk::{Ballast, Freed};
     use nota_recorder::fs::fake::FakeFs;
     let root = PathBuf::from("/data");
-    let audio = root.join("sessions/1/audio");
-    let fs = FakeFs::with_dirs([audio.clone()]);
+    let fs = FakeFs::with_dirs([root.join("sessions")]);
     Ballast::keep(&fs, &root, 1_024, || false).unwrap();
-    let _recording = fs.lock_dir(&audio).unwrap();
+    let _recording = counted(&fs, &root);
     // Home recovery takes no reserve from a session still being started.
     let watch = startup_watch(&fs, &root, 1_024).unwrap();
     fs.set_capacity(Some(1_024));
@@ -1318,18 +1323,17 @@ fn startup_keeps_a_live_recordings_ballast() {
     assert!(Ballast::find(&fs, &root, 1_024).unwrap().is_some());
 }
 
-/// Once another recording releases its lock, recovery can use the ballast.
+/// Once another recording stops, recovery can use the ballast.
 #[test]
 fn startup_can_use_ballast_after_the_live_recording_stops() {
     use nota_recorder::disk::Ballast;
     use nota_recorder::fs::fake::FakeFs;
     let root = PathBuf::from("/data");
-    let audio = root.join("sessions/1/audio");
-    let fs = FakeFs::with_dirs([audio.clone()]);
+    let fs = FakeFs::with_dirs([root.join("sessions")]);
     Ballast::keep(&fs, &root, 1_024, || false).unwrap();
-    let recording = fs.lock_dir(&audio).unwrap();
+    let recording = counted(&fs, &root);
     assert!(!startup_watch(&fs, &root, 1_024).unwrap().holds_ballast());
-    // Releasing the session gives recovery its finishing room back.
+    // Its stop gives recovery its finishing room back.
     drop(recording);
     assert!(startup_watch(&fs, &root, 1_024).unwrap().holds_ballast());
 }
@@ -1341,13 +1345,12 @@ fn a_recording_started_during_recovery_keeps_its_ballast() {
     use nota_recorder::disk::{Ballast, Freed};
     use nota_recorder::fs::fake::FakeFs;
     let root = PathBuf::from("/data");
-    let audio = root.join("sessions/2/audio");
-    let fs = FakeFs::with_dirs([root.join("sessions/1/audio"), audio.clone()]);
+    let fs = FakeFs::with_dirs([root.join("sessions/1/audio")]);
     Ballast::keep(&fs, &root, 1_024, || false).unwrap();
     let watch = startup_watch(&fs, &root, 1_024).unwrap();
     assert!(watch.holds_ballast());
     // Another nota starts recording while this one salvages.
-    let _recording = fs.lock_dir(&audio).unwrap();
+    let _recording = counted(&fs, &root);
     fs.set_capacity(Some(1_024));
     let mut output = watch.fs().create(&root.join("old-segment.tmp")).unwrap();
     assert_eq!(
@@ -1405,41 +1408,136 @@ fn startup_frees_the_ballast_while_salvage_holds_its_session() {
     assert!(Ballast::find(&fs, &root, 1_024).unwrap().is_none());
 }
 
-/// Once salvage lets a session go, a recording that locks it next claims
-/// the ballast: the watch counts only the locks it still holds as its own.
+/// The start's own recording, counted through its watch before it starts
+/// recording, doesn't keep the ballast from it on a full disk: the watch
+/// passes over the entry it holds itself.
 #[test]
-fn a_session_salvage_let_go_is_claimed_by_the_recording_that_takes_it() {
+fn the_starts_own_count_doesnt_keep_the_ballast_from_it() {
     use nota_recorder::disk::{Ballast, Freed};
     use nota_recorder::fs::fake::FakeFs;
     let root = PathBuf::from("/data");
-    let audio = root.join("sessions/1/audio");
-    let fs = FakeFs::with_dirs([audio.clone()]);
+    let fs = FakeFs::with_dirs([root.join("sessions")]);
     Ballast::keep(&fs, &root, 1_024, || false).unwrap();
     let watch = startup_watch(&fs, &root, 1_024).unwrap();
-    drop(watch.fs().lock_dir(&audio).unwrap());
-    // Another nota resumes recording the session salvage just finished.
-    let _resumed = fs.lock_dir(&audio).unwrap();
+    // As `count_recording` does, before the session is made.
+    let _own = counted(&watch.fs(), &root);
+    watch.note_full(None);
+    assert_eq!(watch.full().map(|f| f.ballast), Some(Freed::Freed));
+}
+
+/// With the start's own recording counted, another nota's still claims
+/// the ballast.
+#[test]
+fn another_recording_beside_the_starts_own_keeps_the_ballast() {
+    use nota_recorder::disk::{Ballast, Freed};
+    use nota_recorder::fs::fake::FakeFs;
+    let root = PathBuf::from("/data");
+    let fs = FakeFs::with_dirs([root.join("sessions")]);
+    Ballast::keep(&fs, &root, 1_024, || false).unwrap();
+    let watch = startup_watch(&fs, &root, 1_024).unwrap();
+    let _own = counted(&watch.fs(), &root);
+    // Another nota starts recording while this one is still starting.
+    let _other = counted(&fs, &root);
     watch.note_full(None);
     assert_eq!(watch.full().map(|f| f.ballast), Some(Freed::None));
     assert!(Ballast::find(&fs, &root, 1_024).unwrap().is_some());
 }
 
-/// If the sessions can't be listed when the disk fills, one of them may
-/// be recording: the ballast is kept.
+/// Once the start lets its own count go (the start was given up), a
+/// recording another nota counts next claims the ballast: the watch counts
+/// only the entries it still holds as its own.
 #[test]
-fn startup_keeps_the_ballast_when_it_cant_list_the_sessions() {
+fn a_count_let_go_is_no_longer_the_watchs_own() {
     use nota_recorder::disk::{Ballast, Freed};
     use nota_recorder::fs::fake::FakeFs;
     let root = PathBuf::from("/data");
-    let sessions = root.join("sessions");
-    let fs = FakeFs::with_dirs([sessions.clone()]);
+    let fs = FakeFs::with_dirs([root.join("sessions")]);
     Ballast::keep(&fs, &root, 1_024, || false).unwrap();
     let watch = startup_watch(&fs, &root, 1_024).unwrap();
-    // Gone by the time the disk fills: listing it fails.
-    fs.remove_dir(&sessions).unwrap();
+    drop(counted(&watch.fs(), &root));
+    let _resumed = counted(&fs, &root);
     watch.note_full(None);
     assert_eq!(watch.full().map(|f| f.ballast), Some(Freed::None));
     assert!(Ballast::find(&fs, &root, 1_024).unwrap().is_some());
+}
+
+/// If the recording lock can't be read when the disk fills, it may hide a
+/// recording: the ballast is kept.
+#[test]
+fn startup_keeps_the_ballast_when_it_cant_read_the_recording_lock() {
+    use nota_recorder::disk::{Ballast, Freed};
+    use nota_recorder::fs::fake::FakeFs;
+    let root = PathBuf::from("/data");
+    let fs = FakeFs::with_dirs([root.join("sessions")]);
+    Ballast::keep(&fs, &root, 1_024, || false).unwrap();
+    let watch = startup_watch(&fs, &root, 1_024).unwrap();
+    // A file where the lock's directory goes: listing it fails.
+    let _in_the_way = fs.create(&root.join("recording.lock")).unwrap();
+    watch.note_full(None);
+    assert_eq!(watch.full().map(|f| f.ballast), Some(Freed::None));
+    assert!(Ballast::find(&fs, &root, 1_024).unwrap().is_some());
+}
+
+/// A start that can't read the recording lock stops with the lock's
+/// directory and the cause.
+#[test]
+fn startup_stops_when_it_cant_read_the_recording_lock() {
+    use nota_recorder::fs::fake::FakeFs;
+    let root = PathBuf::from("/data");
+    let fs = FakeFs::with_dirs([root.join("sessions")]);
+    let _in_the_way = fs.create(&root.join("recording.lock")).unwrap();
+    let error = startup_watch(&fs, &root, 1_024).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::NotADirectory);
+    assert_eq!(
+        error.to_string(),
+        "the library's recording lock /data/recording.lock can't be read: not a directory"
+    );
+}
+
+/// A moment playing holds its session's lock and the library's lock
+/// exclusively, but it's no recording: startup holds the ballast.
+#[test]
+fn startup_holds_the_ballast_while_a_moment_plays() {
+    use nota_recorder::disk::Ballast;
+    use nota_recorder::fs::fake::FakeFs;
+    let root = PathBuf::from("/data");
+    let audio = root.join("sessions/1/audio");
+    let fs = FakeFs::with_dirs([audio.clone()]);
+    Ballast::keep(&fs, &root, 1_024, || false).unwrap();
+    // What `play_moment` holds while the moment plays.
+    let _quiet = Recordings::new(fs.clone(), &root).quiet().unwrap();
+    let _session = fs.lock_dir(&audio).unwrap();
+    assert!(startup_watch(&fs, &root, 1_024).unwrap().holds_ballast());
+}
+
+/// A recording counted in the library is seen from the moment it's
+/// counted, before it has made its session or any journal.
+#[test]
+fn a_recording_is_seen_before_its_first_journal() {
+    let tmp = TestDir::new("recording-counted");
+    let library = Library::open(&tmp.0).unwrap();
+    let recording = counted(&StdFs, &tmp.0);
+    assert!(library.recording());
+    drop(recording);
+    assert!(!library.recording());
+}
+
+/// A moment playing is no recording, even of a session that still has
+/// journals and isn't marked stopped, whose lock playback holds.
+#[test]
+fn a_moment_playing_is_not_a_recording() {
+    let tmp = TestDir::new("recording-playing");
+    let library = Library::open(&tmp.0).unwrap();
+    let session = library.create().unwrap();
+    StdFs
+        .create(&session.audio().join(JournalId::new(0).file_name()))
+        .unwrap();
+    // What `play_moment` holds while the moment plays.
+    let _quiet = library.recordings_on(StdFs).quiet().unwrap();
+    let _session = SessionDir::new(session.id, StdFs, &session.audio())
+        .lock()
+        .unwrap();
+    assert!(!library.recording());
 }
 
 /// Each combined failure leaves the session for the next start, with the

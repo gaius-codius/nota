@@ -179,36 +179,42 @@ impl<S: Fs> Recordings<S> {
         for _ in 0..ENTRY_TRIES {
             let number = NEXT_ENTRY.fetch_add(1, Ordering::Relaxed);
             let dir = self.dir.join(format!("{}-{number}", std::process::id()));
-            match self.fs.create_dir(&dir) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            match self.make_entry(dir) {
+                Ok(entry) => return Ok(entry),
+                // A name already there, or a check trying the new entry:
+                // it's let go at once, but this recording mustn't wait.
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::AlreadyExists | io::ErrorKind::WouldBlock
+                    ) =>
+                {
                     passed = Some(e);
-                    continue;
                 }
                 Err(e) => return Err(e),
             }
-            match self.fs.lock_dir(&dir) {
-                Ok(lock) => {
-                    return Ok(Entry {
-                        _lock: lock,
-                        fs: self.fs.clone(),
-                        dir,
-                    });
-                }
-                // A check is trying it: it's let go at once, but this
-                // recording mustn't wait, so the entry is left for one it
-                // makes next.
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    let _left = self.fs.remove_dir(&dir);
-                    passed = Some(e);
-                }
-                Err(e) => {
-                    let _left = self.fs.remove_dir(&dir);
-                    return Err(e);
-                }
-            }
         }
         Err(passed.unwrap_or_else(|| io::Error::other("no entry was tried")))
+    }
+
+    /// Makes the entry `dir` and locks it exclusively; an entry made but
+    /// not locked is removed.
+    fn make_entry(&self, dir: PathBuf) -> io::Result<Entry<S>>
+    where
+        S: Clone,
+    {
+        self.fs.create_dir(&dir)?;
+        match self.fs.lock_dir(&dir) {
+            Ok(lock) => Ok(Entry {
+                _lock: lock,
+                fs: self.fs.clone(),
+                dir,
+            }),
+            Err(e) => {
+                let _left = self.fs.remove_dir(&dir);
+                Err(e)
+            }
+        }
     }
 
     /// Makes the lock's directory if it isn't there yet.
