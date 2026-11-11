@@ -113,9 +113,11 @@ pub struct Launcher {
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     /// The `llama-server` program: a path, or a bare name looked for on
-    /// `PATH`. Until nota downloads its own (M7), from the user's settings.
+    /// `PATH`. Until nota downloads its own (M7), from the user's settings
+    /// (`program` in `settings.toml`'s `[local_decider]`, read by the `nota`
+    /// app's `settings` module, which sets nota's launcher too).
     pub program: PathBuf,
-    /// The model file (GGUF). Likewise from the settings for now.
+    /// The model file (GGUF). Likewise from the settings (`model`) for now.
     pub model: PathBuf,
     /// Where the model runs.
     pub device: Device,

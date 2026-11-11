@@ -68,6 +68,10 @@ thread-priority = { version = "3.1", default-features = false }
 # The Omarchy theme's colours (`colors.toml`), read by the screens. Already in
 # the tree as a build dependency of PipeWire's bindings.
 toml = { version = "1.1", default-features = false, features = ["std", "serde", "parse"] }
+# Unicode normalisation (NFC), so a learned pair's span and term match
+# however their accents were composed. From the unicode-rs project, as
+# unicode-segmentation is; brings in tinyvec.
+unicode-normalization = { version = "0.1.24", default-features = false, features = ["std"] }
 # Grapheme clusters, for wrapping and cutting text on the screen (their
 # widths come from ratatui, measured the way it draws them).
 unicode-segmentation = "1.12"

@@ -6,9 +6,11 @@ use nota_core::{
 use rusqlite::params;
 
 use super::*;
+use crate::packs::{Manifest, PackKind, Review, Source, TermRow};
 use crate::test_dir::TestDir;
 use crate::tests::{new_session, raw, refused, row};
-use crate::{SegmentRow, SessionState};
+use crate::vocabulary::RecordedPack;
+use crate::{Pack, SegmentRow, SessionState};
 
 /// A per-session store at `path`, as M1 made one, holding `rows`.
 fn per_session_store(path: &Path, rows: &[SegmentRow]) {
@@ -39,7 +41,7 @@ fn a_new_file_gets_the_current_schema() {
     let dir = TestDir::new("fresh");
     let store = Store::open(&dir.db()).unwrap();
     assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
-    assert_eq!(STEPS.len(), 8);
+    assert_eq!(STEPS.len(), 9);
     assert_eq!(STEPS.len(), usize::try_from(VERSION - FIRST + 1).unwrap());
     // Opening again changes nothing.
     drop(store);
@@ -637,10 +639,7 @@ fn version_8_upgrades_to_9_with_no_packs_or_pairs() {
     assert!(store.learned().unwrap().history().is_empty());
 
     // The upgraded library takes new rows of both.
-    let pharmacy = crate::PackRef {
-        name: "pharmacy".to_owned(),
-        version: "2026.11".to_owned(),
-    };
+    let pharmacy = pharmacy_pack("2026.11").pack_ref();
     store
         .record_session_packs(one, std::slice::from_ref(&pharmacy))
         .unwrap();
@@ -656,7 +655,10 @@ fn version_8_upgrades_to_9_with_no_packs_or_pairs() {
         .unwrap();
     drop(store);
     let store = Store::open(&dir.db()).unwrap();
-    assert_eq!(store.session_packs(one).unwrap(), [pharmacy]);
+    assert_eq!(
+        store.session_packs(one).unwrap(),
+        [RecordedPack::from(&pharmacy)]
+    );
     assert_eq!(
         store.learned().unwrap().accepted_for("hyper profen"),
         ["ibuprofen"]
@@ -672,6 +674,111 @@ fn version_8_upgrades_to_9_with_no_packs_or_pairs() {
         })
         .unwrap();
     assert_eq!(proposal, ("ibuprofen".to_owned(), "2026.11".to_owned()));
+    let broken: i64 = conn
+        .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(broken, 0);
+}
+
+/// A shipped pack `pharmacy` at `version`, with one reviewed term.
+fn pharmacy_pack(version: &str) -> Pack {
+    let manifest = Manifest {
+        name: "pharmacy".to_owned(),
+        version: version.to_owned(),
+        language: "en".to_owned(),
+        kind: PackKind::Shipped,
+        sources: vec![Source {
+            id: "rxnorm".to_owned(),
+            name: "RxNorm".to_owned(),
+            licence: "public domain".to_owned(),
+            attribution: "From RxNorm.".to_owned(),
+            url: None,
+        }],
+    };
+    let term = TermRow {
+        term: "amlodipine".to_owned(),
+        source: "rxnorm".to_owned(),
+        licence: "public domain".to_owned(),
+        review: Review::Reviewed,
+    };
+    Pack::new(manifest, vec![term], vec![]).unwrap()
+}
+
+/// Acceptance (#226): a version 9 library keeps the packs its sessions
+/// recorded, with no digest, and refuses each as missing when they're
+/// read, since no installed build can be shown to be the one used; a pack
+/// recorded after the upgrade has its digest, and one without is refused.
+#[test]
+fn version_9_upgrades_to_10_refusing_packs_recorded_without_a_digest() {
+    let dir = TestDir::new("v9");
+    {
+        let conn = crate::tests::library_at(&dir.db(), 9);
+        conn.execute_batch(
+            "INSERT INTO session (id, state, language) VALUES (1, 'stopped', 'en'), (2, 'stopped', 'en');
+             INSERT INTO session_packs_chosen VALUES (1);
+             INSERT INTO session_pack VALUES (1, 0, 'pharmacy', '2026.11');",
+        )
+        .unwrap();
+    }
+    let mut store = Store::open(&dir.db()).unwrap();
+    assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
+    let (one, two) = (SessionId::new(1), SessionId::new(2));
+    let old = RecordedPack {
+        name: "pharmacy".to_owned(),
+        version: "2026.11".to_owned(),
+        digest: None,
+    };
+    assert_eq!(
+        store.session_packs(one).unwrap(),
+        std::slice::from_ref(&old)
+    );
+    // With no digest recorded, nothing shows which build the session used:
+    // even a pack of the recorded name and version is refused as missing,
+    // alone or beside another build.
+    let installed = pharmacy_pack("2026.11");
+    for packs in [
+        vec![installed.clone()],
+        vec![pharmacy_pack("2026.12"), installed.clone()],
+        vec![],
+    ] {
+        let err = store.session_terms(one, &packs).unwrap_err();
+        assert!(
+            matches!(&err, StoreError::PackMissing { pack, .. } if *pack == old),
+            "{err:?}"
+        );
+        // The message says why: not that the pack is gone.
+        assert!(
+            err.to_string().contains("before packs had digests"),
+            "{err}"
+        );
+    }
+
+    // A session recorded now keeps its pack's digest.
+    store
+        .record_session_packs(two, &[installed.pack_ref()])
+        .unwrap();
+    drop(store);
+    let store = Store::open(&dir.db()).unwrap();
+    assert_eq!(
+        store.session_packs(two).unwrap(),
+        [RecordedPack::from(&installed.pack_ref())]
+    );
+    // And its pack is found again in the upgraded library.
+    assert_eq!(
+        store
+            .session_terms(two, std::slice::from_ref(&installed))
+            .unwrap()
+            .terms,
+        installed.offered()
+    );
+    drop(store);
+    let conn = raw(&dir.db());
+    assert!(refused(
+        &conn,
+        "INSERT INTO session_pack (session_id, position, name, version) VALUES (2, 1, 'law', '1')"
+    ));
     let broken: i64 = conn
         .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
             r.get(0)
