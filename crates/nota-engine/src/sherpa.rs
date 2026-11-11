@@ -596,6 +596,34 @@ mod tests {
         }
     }
 
+    /// With the real model, every word comes with a log-probability: the
+    /// linked library's result gives one per token, and the patched crate
+    /// reads them, one for one with the tokens.
+    #[test]
+    fn parakeet_gives_every_word_a_log_probability() {
+        let Some((mut models, audio)) = models_and_fixture() else {
+            return;
+        };
+        // The first 15 s is enough speech, and keeps the test quick.
+        let heard = models
+            .transcriber()
+            .transcribe(&audio[..audio.len().min(15 * 16_000)]);
+        assert!(!heard.words.is_empty(), "{heard:?}");
+        let unknown: Vec<_> = heard
+            .words
+            .iter()
+            .filter(|w| w.log_prob.is_none())
+            .collect();
+        assert!(unknown.is_empty(), "{unknown:?}");
+        // Not every word certain: the values are the model's, not a default.
+        let unsure = heard
+            .words
+            .iter()
+            .filter(|w| w.log_prob < Some(LogProb::CERTAIN))
+            .count();
+        assert!(unsure > 0, "{:?}", heard.words);
+    }
+
     #[test]
     fn a_reset_in_a_pause_changes_nothing() {
         let Some((models, audio)) = models_and_fixture() else {
