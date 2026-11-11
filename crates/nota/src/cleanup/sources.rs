@@ -36,7 +36,9 @@ const MAX_PACKS: usize = 256;
 pub(crate) struct Installed {
     /// The installed packs' folder.
     packs: PathBuf,
-    /// The clock the decider times its server by.
+    /// The clock the decider times its server by (on unix, the only
+    /// place a decider is set up).
+    #[cfg(unix)]
     clock: Arc<dyn Clock>,
 }
 
@@ -44,8 +46,12 @@ impl Installed {
     /// The decider from the user's settings, timed by `clock`, and the
     /// packs installed under the data directory `data`.
     pub(crate) fn new(data: &Path, clock: Arc<dyn Clock>) -> Self {
+        // Elsewhere no decider is set up, so nothing is timed.
+        #[cfg(not(unix))]
+        drop(clock);
         Self {
             packs: data.join(PACKS),
+            #[cfg(unix)]
             clock,
         }
     }
@@ -57,10 +63,7 @@ impl Sources for Installed {
         let decider = local_decider(&Environment::current(), &self.clock);
         // The settings that describe a decider are read on unix only.
         #[cfg(not(unix))]
-        let decider = {
-            let _unused = &self.clock;
-            Setup::NotSetUp
-        };
+        let decider = Setup::NotSetUp;
         decider
     }
 
