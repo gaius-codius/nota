@@ -440,4 +440,6 @@ impl Drop for SchemaFile {
 }
 
 #[cfg(test)]
+mod props;
+#[cfg(test)]
 mod tests;
