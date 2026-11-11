@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use nota_core::{LogProb, SampleCount, SampleIndex, SampleRange, SampleRate};
 use sherpa_onnx::{
-    OfflineRecognizer, OfflineRecognizerConfig, SileroVadModelConfig, VadModelConfig,
-    VoiceActivityDetector,
+    OfflineRecognizer, OfflineRecognizerConfig, OfflineRecognizerResult, SileroVadModelConfig,
+    VadModelConfig, VoiceActivityDetector,
 };
 
 use crate::EngineError;
@@ -172,26 +172,30 @@ impl Transcriber for Parakeet {
         let stream = self.recognizer.create_stream();
         stream.accept_waveform(RATE_HZ, audio);
         self.recognizer.decode(&stream);
-        let Some(result) = stream.get_result() else {
-            return Heard::default();
-        };
-        let len = SampleCount::new(audio.len() as u64);
-        let words = match (&result.timestamps, &result.durations) {
-            (Some(starts), durations) => {
-                let tokens = Tokens {
-                    text: &result.tokens,
-                    starts,
-                    durations: durations.as_deref(),
-                    log_probs: result.ys_log_probs.as_deref(),
-                };
-                words_of(&tokens, len)
-            }
-            (None, _) => Vec::new(),
-        };
-        Heard {
-            text: result.text.trim().to_owned(),
-            words,
+        stream.get_result().map_or_else(Heard::default, |result| {
+            heard_in(&result, SampleCount::new(audio.len() as u64))
+        })
+    }
+}
+
+/// What the recogniser's `result` heard in `len` samples of audio: its
+/// text, and its words if it gave the tokens' times.
+fn heard_in(result: &OfflineRecognizerResult, len: SampleCount) -> Heard {
+    let words = match (&result.timestamps, &result.durations) {
+        (Some(starts), durations) => {
+            let tokens = Tokens {
+                text: &result.tokens,
+                starts,
+                durations: durations.as_deref(),
+                log_probs: result.ys_log_probs.as_deref(),
+            };
+            words_of(&tokens, len)
         }
+        (None, _) => Vec::new(),
+    };
+    Heard {
+        text: result.text.trim().to_owned(),
+        words,
     }
 }
 
@@ -297,10 +301,13 @@ fn words_of(tokens: &Tokens<'_>, len: SampleCount) -> Vec<TimedWord> {
 /// isn't one (NaN, infinite, or above zero by more than rounding), and
 /// zero if it is above zero by no more than [`ROUNDING_ABOVE_ZERO`].
 fn token_log_prob(value: f32) -> Option<LogProb> {
-    if value > 0.0 && value <= ROUNDING_ABOVE_ZERO {
-        return Some(LogProb::CERTAIN);
+    // NaN fails the comparison; `min` takes a value just above zero to zero
+    // and leaves every other one.
+    if value <= ROUNDING_ABOVE_ZERO {
+        LogProb::new(value.min(0.0))
+    } else {
+        None
     }
-    LogProb::new(value)
 }
 
 /// A word's score, built a token at a time: the lowest log-probability of
@@ -761,6 +768,45 @@ mod tests {
         let past = f32::from_bits(ROUNDING_ABOVE_ZERO.to_bits() + 1);
         assert_eq!(token_log_prob(ROUNDING_ABOVE_ZERO), Some(LogProb::CERTAIN));
         assert_eq!(token_log_prob(past), None);
+    }
+
+    /// Values either side of zero: the smallest above it counts as zero,
+    /// both zeros are the one zero, and the largest below it is kept.
+    #[test]
+    fn token_log_probs_either_side_of_zero() {
+        let tiny = f32::from_bits(1);
+        assert_eq!(token_log_prob(tiny), Some(LogProb::CERTAIN));
+        assert_eq!(token_log_prob(0.0).map(LogProb::to_bits), Some(0));
+        assert_eq!(token_log_prob(-0.0).map(LogProb::to_bits), Some(0));
+        assert_eq!(token_log_prob(-tiny).map(LogProb::get), Some(-tiny));
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1.0] {
+            assert_eq!(token_log_prob(bad), None, "{bad}");
+        }
+    }
+
+    /// A recogniser's result gives its trimmed text and its words, each
+    /// with its score; without the tokens' times, the text alone.
+    #[test]
+    fn a_result_gives_its_text_and_words() {
+        let mut result = OfflineRecognizerResult {
+            text: " hi amylo ".to_owned(),
+            tokens: tokens(&[" hi", " amy", "lo"]),
+            timestamps: Some(vec![0.0, 0.25, 0.5]),
+            durations: Some(vec![0.25, 0.25, 0.25]),
+            ys_log_probs: Some(vec![-0.1, -0.2, -1.954]),
+        };
+        let heard = heard_in(&result, SampleCount::new(16_000));
+        assert_eq!(heard.text, "hi amylo");
+        let words: Vec<_> = heard.words.iter().map(|w| w.text.as_str()).collect();
+        assert_eq!(words, ["hi", "amylo"]);
+        assert_eq!(heard.words[1].from, SampleCount::new(4_000));
+        assert_eq!(heard.words[1].to, SampleCount::new(12_000));
+        assert_eq!(scores(&heard.words), [Some(-0.1), Some(-1.954)]);
+
+        result.timestamps = None;
+        let heard = heard_in(&result, SampleCount::new(16_000));
+        assert_eq!(heard.text, "hi amylo");
+        assert!(heard.words.is_empty(), "{heard:?}");
     }
 
     /// Punctuation without a value doesn't take its word's score away,
