@@ -35,6 +35,12 @@ const PROMPTLY: Duration = Duration::from_secs(5); // check-bound
 /// How soon after `stop` says to stop the server is gone.
 const STOPPED_WITHIN: Duration = Duration::from_secs(1); // check-bound
 
+/// The longest any one wait in these tests lasts before it fails with its
+/// own message. Two in a row stay inside the ten seconds nextest gives each
+/// of nota-llm's tests (`.config/nextest.toml`), so a wait that runs out
+/// says what never happened rather than being cut off.
+const WAIT: Duration = Duration::from_secs(4); // check-bound
+
 /// A test's folder (the stand-in's `--model`, holding its plan and log) and
 /// the socket folder under it, removed when dropped.
 struct Fixture {
@@ -67,8 +73,8 @@ impl Fixture {
     fn config(&self) -> ServerConfig {
         let gpu = Device::Gpu(GpuName::new("Vulkan0").unwrap());
         let mut config = ServerConfig::new(FAKE.into(), self.dir.clone(), gpu, self.sockets());
-        config.start_timeout = Duration::from_secs(10);
-        config.request_timeout = Duration::from_secs(10);
+        config.start_timeout = WAIT;
+        config.request_timeout = WAIT;
         config.initial_backoff = Duration::from_millis(10);
         config.max_backoff = Duration::from_millis(40);
         config.restarts = 2;
@@ -166,15 +172,12 @@ fn kill(pid: u32) {
     kill_process(pid, Signal::KILL).unwrap();
 }
 
-/// Waits up to 10 s for `done` to hold, looking every 10 ms.
+/// Waits up to [`WAIT`] for `done` to hold, looking every 10 ms.
 fn until(what: &str, done: impl Fn() -> bool) {
     let clock = clock();
     let (_keep, ticks) = mpsc::channel::<()>();
     while !done() {
-        assert!(
-            clock.now().elapsed() < Duration::from_secs(10),
-            "never: {what}"
-        );
+        assert!(clock.now().elapsed() < WAIT, "never: {what}");
         let _ = ticks.recv_timeout(Duration::from_millis(10));
     }
 }
@@ -526,7 +529,7 @@ fn a_server_started_through_the_shim_dies_with_its_starter() {
     until("the server starts", || !fixture.starts().is_empty());
     end.send(()).unwrap();
     starter.join().unwrap();
-    let status: ExitStatus = wait_within(&mut child, Duration::from_secs(10));
+    let status: ExitStatus = wait_within(&mut child, WAIT);
     assert_eq!(
         std::os::unix::process::ExitStatusExt::signal(&status),
         Some(9)

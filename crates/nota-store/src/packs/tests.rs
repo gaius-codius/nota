@@ -124,11 +124,138 @@ fn the_same_rows_in_any_order_give_the_same_bytes() {
     m.sources.reverse();
     let shuffled = Pack::new(m, terms, aliases).unwrap();
     assert_eq!(shuffled, pack);
+    // Acceptance (#226): the same rows give the same digest.
+    assert_eq!(shuffled.digest(), pack.digest());
 
     let (a, b) = (pack_path(&dir, "a"), pack_path(&dir, "b"));
     pack.write(&a).unwrap();
     shuffled.write(&b).unwrap();
     assert_eq!(bytes(&a), bytes(&b));
+}
+
+/// Acceptance (#226): a pack's digest is kept in its file and read back
+/// on open, the same as the pack it was written from.
+#[test]
+fn a_packs_digest_is_read_back_from_its_file() {
+    let dir = TestDir::new("pack-digest-file");
+    let pack = sample(PackKind::Shipped);
+    let path = pack_path(&dir, "pharmacy");
+    pack.write(&path).unwrap();
+    let stored: Vec<u8> = raw(&path)
+        .query_row("SELECT digest FROM manifest", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(stored, pack.digest().as_bytes());
+    assert_eq!(Pack::open(&path).unwrap().digest(), pack.digest());
+}
+
+/// The digest of [`sample`]'s shipped pack, as this encoding gives it. A
+/// change to the encoding changes every pack's digest, so sessions
+/// recorded before it would find none of their packs: it needs a new
+/// [`DIGEST_TAG`] and a plan for those sessions, not a new value here.
+const SAMPLE_DIGEST: &str = "d7ce59153a5ac14b41b36be5db419cc2ca76b83cb64b3fff26c4e1c48478c666";
+
+/// The digest is a fixed function of the pack: a later build of nota
+/// works out the one an earlier build recorded.
+#[test]
+fn a_packs_digest_does_not_change_between_builds() {
+    assert_eq!(
+        sample(PackKind::Shipped).digest().to_string(),
+        SAMPLE_DIGEST
+    );
+}
+
+/// A digest shows in debug output as its hex, so an error or a failed
+/// assert names which build it was.
+#[test]
+fn a_digest_debugs_as_its_hex() {
+    assert_eq!(
+        format!("{:?}", sample(PackKind::Shipped).digest()),
+        format!("PackDigest({SAMPLE_DIGEST})")
+    );
+}
+
+/// A pack as a session records it holds the manifest's name and version
+/// and the pack's digest.
+#[test]
+fn a_pack_ref_holds_the_name_version_and_digest() {
+    let pack = sample(PackKind::Shipped);
+    let pack_ref = pack.pack_ref();
+    assert_eq!(
+        (pack_ref.name(), pack_ref.version(), pack_ref.digest()),
+        ("pharmacy", "2026.11", pack.digest())
+    );
+}
+
+/// What [`every_field_of_a_pack_changes_its_digest`] changes in a pack.
+type Edit = fn(&mut Manifest, &mut Vec<TermRow>, &mut Vec<AliasRow>);
+
+/// Acceptance (#226): every part of the manifest and every part of a row
+/// is in the digest, so a pack differing in any one has another digest.
+#[test]
+fn every_field_of_a_pack_changes_its_digest() {
+    let base = || {
+        (
+            manifest(PackKind::Shipped),
+            vec![term("GLP-1", "open", Review::Reviewed)],
+            vec![alias("GLP-1", "gee el pee one", "open", Review::Reviewed)],
+        )
+    };
+    let edits: [(&str, Edit); 17] = [
+        ("nothing", |_, _, _| {}),
+        ("name", |m, _, _| m.name = "law".to_owned()),
+        ("version", |m, _, _| m.version = "1".to_owned()),
+        ("language", |m, _, _| m.language = "fr".to_owned()),
+        ("kind", |m, _, _| m.kind = PackKind::Own),
+        ("source id", |m, _, _| m.sources[0].id = "other".to_owned()),
+        ("source name", |m, _, _| m.sources[0].name = "A".to_owned()),
+        ("source licence", |m, _, _| {
+            m.sources[0].licence = "PD".to_owned();
+        }),
+        ("attribution", |m, _, _| {
+            m.sources[0].attribution = "Other.".to_owned();
+        }),
+        ("no address", |m, _, _| m.sources[0].url = None),
+        ("address", |m, _, _| {
+            m.sources[0].url = Some("https://example.org".to_owned());
+        }),
+        ("term", |_, t, a| {
+            t[0].term = "GLP-2".to_owned();
+            a.clear();
+        }),
+        ("term source", |_, t, _| {
+            t.push(term("GLP-1", "public", Review::Reviewed));
+            t.remove(0);
+        }),
+        ("term review", |_, t, _| t[0].review = Review::Draft),
+        ("alias", |_, _, a| a[0].alias = "glp one".to_owned()),
+        ("alias source", |_, t, a| {
+            t.push(term("GLP-1", "public", Review::Reviewed));
+            a[0] = alias("GLP-1", "gee el pee one", "public", Review::Reviewed);
+        }),
+        ("alias review", |_, _, a| a[0].review = Review::Draft),
+    ];
+    let mut seen = BTreeMap::new();
+    for (what, edit) in edits {
+        let (mut m, mut t, mut a) = base();
+        edit(&mut m, &mut t, &mut a);
+        let digest = Pack::new(m, t, a).unwrap().digest();
+        if let Some(other) = seen.insert(digest, what) {
+            panic!("{what} and {other} have one digest");
+        }
+    }
+}
+
+/// Where one text ends and the next starts is part of the digest: a name
+/// and version that run together alike still differ.
+#[test]
+fn texts_that_run_together_alike_have_other_digests() {
+    let with = |name: &str, version: &str| {
+        let mut m = manifest(PackKind::Shipped);
+        m.name = name.to_owned();
+        m.version = version.to_owned();
+        Pack::new(m, vec![], vec![]).unwrap().digest()
+    };
+    assert_ne!(with("ab", "c"), with("a", "bc"));
 }
 
 /// Acceptance: a row with no source, or no licence, fails the build, and
@@ -352,10 +479,12 @@ fn the_sources_are_there_and_distinct() {
 /// offered, and neither is a draft alias of a reviewed term.
 #[test]
 fn a_draft_row_is_not_offered_from_a_shipped_pack() {
-    let offered = sample(PackKind::Shipped).offered();
+    let sample = sample(PackKind::Shipped);
+    let offered = sample.offered();
     let pack = PackRef {
         name: "pharmacy".to_owned(),
         version: "2026.11".to_owned(),
+        digest: sample.digest(),
     };
     assert_eq!(
         offered,
@@ -453,17 +582,23 @@ fn a_file_that_is_not_a_pack_is_refused() {
     assert!(matches!(Pack::open(&dir.db()), Err(PackError::NotAPack)));
 }
 
-/// A pack in a format this code doesn't know is refused, not misread.
+/// A pack in a format this code doesn't know is refused, not misread:
+/// a later one, or format 1, which had no digest.
 #[test]
 fn an_unknown_format_is_refused() {
     let dir = TestDir::new("pack-format");
-    let path = pack_path(&dir, "future");
-    sample(PackKind::Shipped).write(&path).unwrap();
-    raw(&path).pragma_update(None, "user_version", 2).unwrap();
-    assert!(matches!(
-        Pack::open(&path),
-        Err(PackError::UnknownFormat(2))
-    ));
+    for format in [FORMAT + 1, 1] {
+        let path = pack_path(&dir, &format!("format-{format}"));
+        sample(PackKind::Shipped).write(&path).unwrap();
+        raw(&path)
+            .pragma_update(None, "user_version", format)
+            .unwrap();
+        let err = Pack::open(&path).unwrap_err();
+        assert!(
+            matches!(err, PackError::UnknownFormat(f) if f == format),
+            "{err:?}"
+        );
+    }
 }
 
 /// What a refusal of one edit to a pack file must be.
@@ -471,19 +606,28 @@ type Expected = fn(&PackError) -> bool;
 
 /// A file edited outside nota is checked as a built pack is: a row whose
 /// licence was changed, a second manifest row, or an unknown status is
-/// refused.
+/// refused; so is a valid edit that leaves the stored digest behind, or a
+/// stored digest changed alone.
 #[test]
 fn a_pack_edited_outside_nota_is_refused() {
     let dir = TestDir::new("pack-edited");
     let licence: Expected = |e| matches!(e, PackError::LicenceMismatch { .. });
     let corrupt: Expected = |e| matches!(e, PackError::Corrupt(_));
+    let digest: Expected = |e| matches!(e, PackError::Corrupt(why) if why.contains("digest"));
     let edits = [
+        // A pack Pack::new would accept, but not the one the digest is of.
+        (
+            "UPDATE term SET review = 'draft' WHERE term = 'GLP-1'",
+            digest,
+        ),
+        ("UPDATE manifest SET kind = 'own'", digest),
+        ("UPDATE manifest SET digest = zeroblob(32)", digest),
         (
             "UPDATE term SET licence = 'proprietary' WHERE term = 'GLP-1'",
             licence,
         ),
         (
-            "INSERT INTO manifest VALUES ('other', '1', 'en', 'own')",
+            "INSERT INTO manifest VALUES ('other', '1', 'en', 'own', zeroblob(32))",
             corrupt,
         ),
         (

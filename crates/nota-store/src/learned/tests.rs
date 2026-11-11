@@ -85,6 +85,55 @@ fn a_span_matches_whatever_its_case_and_punctuation() {
     assert_eq!(learned.accepted_for("a dlp one"), ["GLP-1"]);
 }
 
+/// Acceptance (#227): "naïve" with a combining diaeresis and with the
+/// single letter "ï" have one key, so a rejection made on one spelling
+/// holds for the other.
+#[test]
+fn a_span_matches_whichever_way_its_accents_are_composed() {
+    let (composed, decomposed) = ("na\u{ef}ve", "nai\u{308}ve");
+    assert_eq!(match_key(decomposed), match_key(composed));
+    assert_eq!(match_key(decomposed), "na\u{ef}ve");
+    let dir = TestDir::new("learned-nfc");
+    let mut store = library(&dir);
+    store
+        .learn(ONE, decomposed, "Naive", Verdict::Rejected, at(0))
+        .unwrap();
+    store
+        .learn(ONE, "cafe", "Caf\u{e9}", Verdict::Accepted, at(1))
+        .unwrap();
+    let learned = store.learned().unwrap();
+    // Asked in the other form, the rejection and the acceptance hold.
+    assert!(!learned.allows(composed, "naive"));
+    assert!(!learned.allows("NA\u{cf}VE", "naive"));
+    assert!(learned.allows(composed, "n\u{e4}ive"));
+    store
+        .learn(TWO, "caf\u{e9}", "Cafe\u{301}s", Verdict::Rejected, at(2))
+        .unwrap();
+    let learned = store.learned().unwrap();
+    assert!(!learned.allows("cafe\u{301}", "caf\u{e9}s"));
+}
+
+/// Acceptance (#227): a pair stored under the key an older nota worked
+/// out (accents as written) is still read under today's: keys are worked
+/// out again from the stored span and term, never read from the row.
+#[test]
+fn a_pair_stored_under_an_older_key_reads_under_the_new_one() {
+    let dir = TestDir::new("learned-old-key");
+    drop(library(&dir));
+    // The row as nota wrote it before keys were composed: the combining
+    // diaeresis split the word, so the stored keys are "nai ve".
+    raw(&dir.db())
+        .execute(
+            "INSERT INTO learned_pair (session_id, heard, heard_key, term, term_key, verdict, at)
+             VALUES (1, 'nai\u{308}ve', 'nai ve', 'Nai\u{308}ve', 'nai ve', 'rejected', 0)",
+            [],
+        )
+        .unwrap();
+    let learned = Store::open(&dir.db()).unwrap().learned().unwrap();
+    assert!(!learned.allows("na\u{ef}ve", "na\u{ef}ve"));
+    assert!(!learned.allows("nai\u{308}ve", "Na\u{ef}ve"));
+}
+
 /// The newest choice on a span and term decides: a term typed in by hand
 /// after it was rejected is accepted, and one rejected after it was
 /// accepted is offered no more. Both rows stay in the history.
@@ -200,5 +249,19 @@ proptest! {
             match_key(&text.to_ascii_uppercase()),
             match_key(&text.to_ascii_lowercase())
         );
+    }
+
+    /// Acceptance (#227): text in Unicode's composed (NFC) and decomposed
+    /// (NFD) forms has one key. Half the cases are Latin letters, some
+    /// accented, each with a combining mark or none, so most have accents
+    /// to compose or reorder.
+    #[test]
+    fn a_match_key_is_the_same_composed_or_decomposed(
+        text in prop_oneof!["\\PC{0,30}", "([a-zA-Z\\u{c0}-\\u{17f}][\\u{300}-\\u{36f}]?){0,15}"]
+    ) {
+        use unicode_normalization::UnicodeNormalization as _;
+        let (nfc, nfd): (String, String) = (text.nfc().collect(), text.nfd().collect());
+        prop_assert_eq!(match_key(&nfc), match_key(&nfd));
+        prop_assert_eq!(match_key(&text), match_key(&nfd));
     }
 }
