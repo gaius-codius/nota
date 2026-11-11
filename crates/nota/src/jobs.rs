@@ -27,9 +27,11 @@
 //! couldn't start or stopped working is tried again [`IDLE`] after its run
 //! ended, then twice as long after each further failure, up to
 //! [`RETRY_CAP`]. Once any job's engine confirms audio, every waiting job
-//! goes back to the shortest spacing. Jobs never tried go first, in queue
-//! order; then the one whose last run ended longest ago, so each waiting
-//! session is tried before any is tried again, however long the runs take.
+//! goes back to the shortest spacing. Jobs not waiting on an engine retry
+//! go first, in queue order; then the retries take turns, the one whose
+//! last run ended longest ago first, and none runs before an older one that
+//! isn't due yet. So each waiting session is tried before any is tried
+//! again, however long the runs take and however far each has backed off.
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -105,6 +107,15 @@ impl Retry {
     fn reset(&mut self) {
         self.again = 0;
     }
+}
+
+/// Whether engine retries may still run in this look at the queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Turn {
+    /// No retry met so far is waiting out its spacing.
+    Open,
+    /// One is: the retries after it wait their turn.
+    Closed,
 }
 
 /// How a run went, as the runner needs to know it.
@@ -349,8 +360,9 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
 
     /// The first job that can run now: those not waiting on an engine
     /// retry in queue order, then the retries, the one that last ran
-    /// longest ago first. A waiting job that lacks what it needs is marked
-    /// as waiting for it, so the Processing screen can say why.
+    /// longest ago first, as long as no older one is still waiting out its
+    /// spacing. A waiting job that lacks what it needs is marked as waiting
+    /// for it, so the Processing screen can say why.
     fn next(&self) -> Result<Option<Job>, StoreError> {
         let mut jobs = self.db.with(|db| db.jobs())?;
         // A stable sort: jobs with no retry (`None`) keep queue order
@@ -358,17 +370,14 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
         // Taking the oldest retry first means a session tried a while ago
         // isn't passed over by one whose runs keep ending sooner.
         jobs.sort_by_key(|job| self.retries.get(&job.id).map(|retry| retry.ended));
+        let mut turn = Turn::Open;
         for job in jobs {
             let waits = match &job.state {
                 JobState::Waiting(waits) => *waits,
                 JobState::EngineDown(_) => Some(Wait::Engine),
                 _ => continue,
             };
-            if self
-                .retries
-                .get(&job.id)
-                .is_some_and(|retry| !retry.due(self.clock.now()))
-            {
+            if !self.has_turn(job.id, &mut turn) {
                 continue;
             }
             // A job waiting for space keeps waiting for it until there's
@@ -389,6 +398,22 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
             return Ok(Some(job));
         }
         Ok(None)
+    }
+
+    /// Whether job `id` may run now as far as engine retries go, given the
+    /// retries before it in turn order; a retry not due yet closes `turn`
+    /// to every retry after it.
+    fn has_turn(&self, id: JobId, turn: &mut Turn) -> bool {
+        let Some(retry) = self.retries.get(&id) else {
+            return true;
+        };
+        // Without this, a session that backed off less (queued later, say)
+        // would be retried again and again while an older one waits.
+        if *turn == Turn::Closed || !retry.due(self.clock.now()) {
+            *turn = Turn::Closed;
+            return false;
+        }
+        true
     }
 
     fn run_one(&mut self, job: &Job) {
@@ -418,12 +443,15 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
         if answered {
             self.retries.values_mut().for_each(Retry::reset);
         }
-        if !matches!(
-            end,
-            JobEnd::EngineDown(_) | JobEnd::Waiting(Some(Wait::Engine))
-        ) {
-            self.retries.remove(&id);
-            return;
+        match end {
+            JobEnd::EngineDown(_) | JobEnd::Waiting(Some(Wait::Engine)) => {}
+            // Stopped by a recording or by nota closing: a retry keeps its
+            // place and its spacing, since nothing said the engine works.
+            JobEnd::Waiting(None) => return,
+            _ => {
+                self.retries.remove(&id);
+                return;
+            }
         }
         let now = self.clock.now();
         let retry = match self.retries.get(&id) {

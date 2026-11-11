@@ -52,17 +52,7 @@ fn library(name: &str, sessions: &[(SessionId, Option<Wait>)]) -> (TestDir, Writ
     let dir = TestDir::new(name);
     let db = Writer::new(&dir.0.join("library.db"));
     for &(id, waits) in sessions {
-        db.with(|db| {
-            db.create_session(&NewSession {
-                id,
-                title: None,
-                language: None,
-                started_at: None,
-                tracks: Vec::new(),
-            })?;
-            db.finish_recording(id, waits)
-        })
-        .unwrap();
+        queue(&db, id, waits);
     }
     (dir, db)
 }
@@ -759,6 +749,90 @@ fn an_engine_that_answers_for_one_session_resets_the_others() {
     runner.run_one(&job);
     assert_eq!(states(&db), [(S1, JobState::Done), (S2, JobState::Done)]);
     assert_eq!(worker.ran(), [S1, S2, S1, S2, S1]);
+}
+
+/// Acceptance (#247): a session queued while another has backed off
+/// waits for that one's turn before it's retried, rather than being
+/// retried on its shorter spacing meanwhile.
+#[test]
+fn a_session_queued_later_waits_its_turn_behind_one_that_backed_off() {
+    let (_dir, db) = library("engine-turns", &[(S1, None)]);
+    let worker = Fake::default();
+    let down = Then::EngineDown("exited: no model");
+    worker.script(S1, &[down.clone(), down.clone(), Then::Done]);
+    worker.script(S2, &[down, Then::Done]);
+    let clock = Arc::new(nota_core::FakeClock::new(SessionTime::ZERO));
+    let mut runner = loop_with_clock(&db, &worker, &clock);
+    let job = runner.next().unwrap().unwrap();
+    runner.run_one(&job);
+    let job = due_after(&runner, &clock, Duration::from_secs(5));
+    runner.run_one(&job);
+    // S1 now waits 10 s, to 15 s. S2, stopped at 6 s, fails at once.
+    clock.advance(Duration::from_secs(1));
+    queue(&db, S2, None);
+    let job = runner.next().unwrap().unwrap();
+    assert_eq!(job.session, S2);
+    runner.run_one(&job);
+    // At 11 s S2's own 5 s are up, but S1 ended first and isn't due.
+    let job = due_after(&runner, &clock, Duration::from_secs(9));
+    assert_eq!(job.session, S1);
+    runner.run_one(&job);
+    let job = runner.next().unwrap().unwrap();
+    runner.run_one(&job);
+    assert_eq!(states(&db), [(S1, JobState::Done), (S2, JobState::Done)]);
+    assert_eq!(worker.ran(), [S1, S1, S2, S1, S2]);
+}
+
+/// A retry stopped by a recording runs again once it has stopped, and
+/// keeps the spacing it had grown to.
+#[test]
+fn a_retry_stopped_by_a_recording_keeps_its_spacing() {
+    let (_dir, db) = library("engine-paused", &[(S1, None)]);
+    let worker = Fake::default();
+    let down = Then::EngineDown("exited: no model");
+    worker.script(
+        S1,
+        &[
+            down.clone(),
+            down.clone(),
+            Then::UntilStopped,
+            down,
+            Then::Done,
+        ],
+    );
+    let clock = Arc::new(nota_core::FakeClock::new(SessionTime::ZERO));
+    let mut runner = loop_with_clock(&db, &worker, &clock);
+    let job = runner.next().unwrap().unwrap();
+    runner.run_one(&job);
+    let job = due_after(&runner, &clock, Duration::from_secs(5));
+    runner.run_one(&job);
+    // A recording stops the third run as soon as it starts.
+    let job = due_after(&runner, &clock, Duration::from_secs(10));
+    runner.capture.set(true);
+    runner.run_one(&job);
+    runner.capture.set(false);
+    let job = runner.next().unwrap().unwrap();
+    runner.run_one(&job);
+    // The failure after the pause doubles from 10 s, not from 5 s.
+    let job = due_after(&runner, &clock, Duration::from_secs(20));
+    runner.run_one(&job);
+    assert_eq!(states(&db), [(S1, JobState::Done)]);
+    assert_eq!(worker.ran(), [S1; 5]);
+}
+
+/// Queues `session`'s jobs as a stop would, waiting for what `waits` says.
+fn queue(db: &Writer, session: SessionId, waits: Option<Wait>) {
+    db.with(|db| {
+        db.create_session(&NewSession {
+            id: session,
+            title: None,
+            language: None,
+            started_at: None,
+            tracks: Vec::new(),
+        })?;
+        db.finish_recording(session, waits)
+    })
+    .unwrap();
 }
 
 /// A runner loop using time the test can advance.
