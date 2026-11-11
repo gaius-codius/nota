@@ -86,6 +86,10 @@ enum Then {
     /// Its engine goes down while it runs, for this reason, comes back,
     /// and the run finishes.
     DownAndBack(&'static str),
+    /// Its engine confirms audio, and the run finishes.
+    Answered,
+    /// Its engine confirms audio, then stops working, for this reason.
+    AnsweredThenDown(&'static str),
 }
 
 /// A worker that does as told per session, and notes each run.
@@ -101,6 +105,10 @@ struct Fake {
     db: Option<Writer>,
     /// The states noted while running, in order.
     seen: Arc<Mutex<Vec<JobState>>>,
+    /// Moved on by `takes` in every run, so runs take time.
+    clock: Option<Arc<nota_core::FakeClock>>,
+    /// How long each run takes on `clock`.
+    takes: Duration,
 }
 
 impl Fake {
@@ -128,6 +136,9 @@ impl Fake {
 impl Worker for Fake {
     fn run(&mut self, job: &Job, running: &Running<'_>) -> JobEnd {
         self.ran.lock().unwrap().push(job.session);
+        if let Some(clock) = &self.clock {
+            clock.advance(self.takes);
+        }
         let then = {
             let mut script = self.script.lock().unwrap();
             let steps = script.entry(job.session).or_default();
@@ -154,6 +165,14 @@ impl Worker for Fake {
                 (running.engine_down)(None);
                 self.note(job);
                 JobEnd::Done
+            }
+            Then::Answered => {
+                (running.answered)();
+                JobEnd::Done
+            }
+            Then::AnsweredThenDown(why) => {
+                (running.answered)();
+                JobEnd::EngineDown(why.into())
             }
             Then::NoSpace => JobEnd::Waiting(Some(Wait::Space)),
             Then::UntilStopped => {
@@ -594,6 +613,154 @@ fn an_engine_back_up_clears_the_reason_while_the_run_goes_on() {
     assert_eq!(states(&db), [(S1, JobState::Done)]);
 }
 
+/// Runs the jobs as they come due, moving `clock` on a second at a time
+/// while none is, until every job is done.
+fn run_until_done(runner: &mut Loop<Fake, Switch, Switch>, clock: &nota_core::FakeClock) {
+    for _ in 0..10_000 {
+        match runner.next().unwrap() {
+            Some(job) => runner.run_one(&job),
+            None if states(&runner.db)
+                .iter()
+                .all(|(_, state)| *state == JobState::Done) =>
+            {
+                return;
+            }
+            None => clock.advance(Duration::from_secs(1)),
+        }
+    }
+    panic!("never done: {:?}", states(&runner.db));
+}
+
+/// The job that comes due exactly `wait` from now: nothing is due a
+/// nanosecond sooner. Leaves `clock` at `wait` from now.
+fn due_after(
+    runner: &Loop<Fake, Switch, Switch>,
+    clock: &nota_core::FakeClock,
+    wait: Duration,
+) -> Job {
+    clock.advance(wait - Duration::from_nanos(1));
+    assert!(runner.next().unwrap().is_none(), "due before {wait:?}");
+    clock.advance(Duration::from_nanos(1));
+    runner.next().unwrap().unwrap()
+}
+
+/// Fails `S1`'s engine once per wait in `waits`, checking each retry
+/// comes due after exactly that wait, then lets it finish.
+fn check_retry_waits(name: &str, waits: &[u64]) {
+    let (_dir, db) = library(name, &[(S1, None)]);
+    let worker = Fake::default();
+    let mut script = vec![Then::EngineDown("exited: no model"); waits.len()];
+    script.push(Then::Done);
+    worker.script(S1, &script);
+    let clock = Arc::new(nota_core::FakeClock::new(SessionTime::ZERO));
+    let mut runner = loop_with_clock(&db, &worker, &clock);
+    let job = runner.next().unwrap().unwrap();
+    runner.run_one(&job);
+    for &wait in waits {
+        let job = due_after(&runner, &clock, Duration::from_secs(wait));
+        runner.run_one(&job);
+    }
+    assert_eq!(states(&db), [(S1, JobState::Done)]);
+    assert_eq!(worker.ran().len(), waits.len() + 1);
+}
+
+/// Acceptance (#247): sessions whose engine keeps failing are each tried
+/// before any is tried again, even when every run outlasts the idle
+/// interval.
+#[test]
+fn engine_down_sessions_each_get_a_turn_however_long_the_runs_take() {
+    let (_dir, db) = library("engine-rotate", &[(S1, None), (S2, None), (S3, None)]);
+    let clock = Arc::new(nota_core::FakeClock::new(SessionTime::ZERO));
+    // Six seconds a run: longer than the idle interval, so the first
+    // sessions come due again before the third has had a turn.
+    let worker = Fake {
+        clock: Some(Arc::clone(&clock)),
+        takes: Duration::from_secs(6),
+        ..Fake::default()
+    };
+    let down = Then::EngineDown("exited: no model");
+    for session in [S1, S2, S3] {
+        worker.script(session, &[down.clone(), down.clone(), Then::Done]);
+    }
+    let mut runner = loop_with_clock(&db, &worker, &clock);
+    run_until_done(&mut runner, &clock);
+    assert_eq!(worker.ran(), [S1, S2, S3, S1, S2, S3, S1, S2, S3]);
+}
+
+/// Acceptance (#247): each further engine failure doubles the wait before
+/// the job is tried again.
+#[test]
+fn a_job_whose_engine_keeps_failing_waits_twice_as_long_each_time() {
+    check_retry_waits("engine-backoff", &[5, 10, 20, 40]);
+}
+
+/// Acceptance (#247): the wait between retries stops growing at five
+/// minutes.
+#[test]
+fn engine_retries_wait_at_most_five_minutes() {
+    // 5 s doubled six times is 320 s, past the cap.
+    check_retry_waits("engine-cap", &[5, 10, 20, 40, 80, 160, 300, 300]);
+}
+
+/// Acceptance (#247): a run whose engine confirms audio and then fails
+/// is retried after the shortest wait again, and its next failure doubles
+/// from there.
+#[test]
+fn an_engine_that_answers_starts_its_retry_spacing_again() {
+    let (_dir, db) = library("engine-reset", &[(S1, None)]);
+    let worker = Fake::default();
+    let down = Then::EngineDown("exited: no model");
+    worker.script(
+        S1,
+        &[
+            down.clone(),
+            down.clone(),
+            Then::AnsweredThenDown("the transcriber stopped working"),
+            down,
+            Then::Done,
+        ],
+    );
+    let clock = Arc::new(nota_core::FakeClock::new(SessionTime::ZERO));
+    let mut runner = loop_with_clock(&db, &worker, &clock);
+    let job = runner.next().unwrap().unwrap();
+    runner.run_one(&job);
+    // Two failures: the spacing has grown to 10 s when the engine answers.
+    for wait in [5, 10, 5, 10] {
+        let job = due_after(&runner, &clock, Duration::from_secs(wait));
+        runner.run_one(&job);
+    }
+    assert_eq!(states(&db), [(S1, JobState::Done)]);
+    assert_eq!(worker.ran(), [S1; 5]);
+}
+
+/// Acceptance (#247): an engine confirming audio for one session puts the
+/// other sessions' retries back to the shortest wait too.
+#[test]
+fn an_engine_that_answers_for_one_session_resets_the_others() {
+    let (_dir, db) = library("engine-reset-all", &[(S1, None), (S2, None)]);
+    let worker = Fake::default();
+    let down = Then::EngineDown("exited: no model");
+    worker.script(S1, &[down.clone(), down.clone(), Then::Done]);
+    worker.script(S2, &[down, Then::Answered]);
+    let clock = Arc::new(nota_core::FakeClock::new(SessionTime::ZERO));
+    let mut runner = loop_with_clock(&db, &worker, &clock);
+    for _ in 0..2 {
+        let job = runner.next().unwrap().unwrap();
+        runner.run_one(&job);
+    }
+    // At 5 s both come due: S1 fails again (its spacing now 10 s), then
+    // S2's engine answers.
+    let job = due_after(&runner, &clock, Duration::from_secs(5));
+    runner.run_one(&job);
+    let job = runner.next().unwrap().unwrap();
+    assert_eq!(job.session, S2);
+    runner.run_one(&job);
+    let job = due_after(&runner, &clock, Duration::from_secs(5));
+    runner.run_one(&job);
+    assert_eq!(states(&db), [(S1, JobState::Done), (S2, JobState::Done)]);
+    assert_eq!(worker.ran(), [S1, S2, S1, S2, S1]);
+}
+
 /// A runner loop using time the test can advance.
 fn loop_with_clock(
     db: &Writer,
@@ -607,7 +774,7 @@ fn loop_with_clock(
         room: Switch::on(),
         shared: Arc::new(Shared::default()),
         clock: Arc::clone(clock) as Arc<dyn Clock>,
-        retry_after: BTreeMap::new(),
+        retries: BTreeMap::new(),
     }
 }
 
