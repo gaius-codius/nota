@@ -594,3 +594,77 @@ fn the_current_environment_reads_nota_s_settings_file() {
         assert_eq!(env.runtime_dir, Some(run.join("nota")));
     }
 }
+
+/// The user guide to the settings file, `docs/settings.md`.
+const GUIDE: &str = include_str!("../../../../docs/settings.md");
+
+/// The TOML in the guide's section `heading`: the first block after it.
+fn guide_example(heading: &str) -> &'static str {
+    let (_, section) = GUIDE.split_once(heading).unwrap();
+    let (_, block) = section.split_once("```toml\n").unwrap();
+    block.split_once("```").unwrap().0
+}
+
+/// The guide's example, with its program and model where it says, makes a
+/// ready decider with the program, model and device it names.
+#[test]
+fn the_guide_s_example_makes_a_ready_decider() {
+    let dir = TestDir::new("guide-example");
+    dir.folder("llama.cpp");
+    dir.folder("llama.cpp/build");
+    dir.folder("llama.cpp/build/bin");
+    let program = dir.program("llama.cpp/build/bin/llama-server");
+    dir.folder("models");
+    let model = dir.file("models/decider.gguf", "");
+    dir.settings(guide_example("## A complete example"));
+
+    let config = ready_config(local_decider(&dir.env()));
+
+    assert_eq!(config.program, program);
+    assert_eq!(config.model, model);
+    assert_eq!(config.device, Device::Gpu(GpuName::new("Vulkan0").unwrap()));
+    assert_eq!(config.socket_dir, dir.0.join("run"));
+}
+
+/// The guide describes, under "The keys", every key the table may hold and
+/// no other.
+#[test]
+fn the_guide_names_every_key_and_no_other() {
+    let (_, keys) = GUIDE.split_once("## The keys\n").unwrap();
+    let keys = keys.split("\n## ").next().unwrap();
+    let mut named: Vec<&str> = keys
+        .lines()
+        .filter_map(|line| line.strip_prefix("### `")?.strip_suffix('`'))
+        .collect();
+    named.sort_unstable();
+    let mut accepted = KEYS.to_vec();
+    accepted.sort_unstable();
+
+    assert_eq!(named, accepted);
+}
+
+/// Each reason the decider can be unavailable has its message in the
+/// guide, with `<…>` for what it names.
+#[test]
+fn the_guide_has_every_unavailable_message() {
+    let file = PathBuf::from("<file>");
+    let reason = || io::Error::other("<reason>");
+    let every = [
+        Unavailable::NoSettingsFile,
+        Unavailable::Unreadable(file.clone(), reason()),
+        Unavailable::TooLarge(file.clone()),
+        Unavailable::Invalid(file, "<reason>".to_owned()),
+        Unavailable::ProgramMissing(PathBuf::from("<path>")),
+        Unavailable::ProgramNotOnPath(OsString::from("<name>")),
+        Unavailable::ModelMissing(PathBuf::from("<path>")),
+        Unavailable::NoSocketDir,
+        Unavailable::NoLauncher(Arc::new(reason())),
+    ];
+    // The guide puts what a message names in code spans.
+    let guide = GUIDE.replace('`', "");
+
+    for why in every {
+        let message = format!("| {why} |");
+        assert!(guide.contains(&message), "not in the guide: {message}");
+    }
+}

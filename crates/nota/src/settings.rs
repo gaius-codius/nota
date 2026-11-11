@@ -3,7 +3,9 @@
 //! own server and model (M7), nothing else says where they are.
 //!
 //! They're in `settings.toml` in nota's config directory
-//! (`~/.config/nota/settings.toml` on Linux):
+//! (`~/.config/nota/settings.toml` on Linux). The user's guide to it is
+//! `docs/settings.md`, which the tests hold to this module: its example
+//! must make a ready decider, and it must name every key and message.
 //!
 //! ```toml
 //! [local_decider]
@@ -50,6 +52,9 @@ const MAX_LEN: u64 = 64 * 1024;
 
 /// The table that holds the local decider's settings.
 const TABLE: &str = "local_decider";
+
+/// The keys the local decider's table may hold.
+const KEYS: [&str; 4] = ["program", "model", "device", "socket_dir"];
 
 /// What nota is given to find the local decider: the settings file and the
 /// parts of its environment that the settings lean on. Passed in, so tests
@@ -227,10 +232,7 @@ fn parse(text: &str, home: Option<&Path>) -> Result<Written, String> {
         Some(toml::Value::Table(t)) => t,
         Some(_) => return Err(format!("{TABLE} isn't a table")),
     };
-    if let Some(key) = table
-        .keys()
-        .find(|k| !matches!(k.as_str(), "program" | "model" | "device" | "socket_dir"))
-    {
+    if let Some(key) = table.keys().find(|k| !KEYS.contains(&k.as_str())) {
         return Err(format!("nota has no setting {TABLE}.{key}"));
     }
     Ok(Written {

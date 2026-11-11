@@ -2,6 +2,20 @@
 # Tests that hang (an engine child that never answers) fail instead of blocking.
 slow-timeout = { period = "30s", terminate-after = 4 }
 
+# Each of nota-llm's tests ends in about a second at most, and none waits
+# longer than four seconds at a time (`WAIT` in its tests/local.rs), so one
+# still running after ten seconds has hung: a supervisor that never gives
+# up, or a read that loops. nextest stops it then, rather than at two
+# minutes, so that the mutation gate counts a mutant that hangs the tests as
+# caught. cargo-mutants stops a test run at 20 seconds at the least and
+# counts that as timed out, which fails the gate. This holds because the
+# default profile stops at the first failure: cargo-mutants runs it without
+# --no-fail-fast, so no hung test starts after the first one fails, and
+# every test that hangs has started within the run's first second.
+[[profile.default.overrides]]
+filter = "package(nota-llm)"
+slow-timeout = { period = "10s", terminate-after = 1 }
+
 [profile.ci]
 fail-fast = false
 failure-output = "immediate-final"
