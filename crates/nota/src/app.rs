@@ -40,11 +40,13 @@ use jiff::tz::TimeZone;
 use nota_core::recorder::{Command, Setup};
 use nota_core::{Clock, SessionId, SessionTime, SystemClock, WallTime, wall_now};
 use nota_recorder::segment::Published;
-use nota_store::{JobState, Wait};
+use nota_store::{JobKind, JobState, Wait};
 use nota_tui::{Action, Event, Home, InputThread, Recording, RunError, Session, Status, Theme};
 use ratatui::Terminal;
 use ratatui::backend::Backend;
 
+use crate::cleanup::CleanUp;
+use crate::cleanup::sources::Installed;
 use crate::final_pass::Jobs;
 use crate::jobs::{Capture, FreeSpace, Room as _, Runner};
 use crate::library::{Library, Listed, Needs, Salvaged};
@@ -344,7 +346,15 @@ fn start_jobs(
     match Runner::spawn(
         &args.data,
         library.db().clone(),
-        Jobs::new(library.clone(), engine, Arc::clone(clock)),
+        Jobs::new(
+            library.clone(),
+            engine,
+            Arc::clone(clock),
+            CleanUp::new(
+                Box::new(Installed::new(&args.data, Arc::clone(clock))),
+                RATE,
+            ),
+        ),
         capture,
         FreeSpace(args.data.clone()),
         Arc::clone(clock),
@@ -746,7 +756,8 @@ fn stopping_home(home: &mut Home) {
     home.set_busy(Some(STOPPING.to_owned()));
 }
 
-/// Gives one ready session the status of its jobs. Jobs waiting for
+/// Gives one ready session the status of its jobs. Clean-up waiting for a
+/// decider leaves it ready, saying so. Jobs waiting for
 /// space need you to free some while there's none (`no_space` says what
 /// Home says of it then, see [`Listing::no_space`]). The status comes first
 /// in its detail, before what salvage said of it (a kept temp file, say).
@@ -770,12 +781,27 @@ fn job_status(
     {
         shown.status = Status::NeedsYou;
         shown.detail.insert(0, why.to_owned());
-    } else if own().any(|job| job.state != JobState::Done) {
+    } else if let Some(job) = own().find(|job| !settled(job)) {
         shown.status = Status::Processing;
+        let doing = match job.kind {
+            JobKind::FinalPass => "final transcript queued or running",
+            JobKind::CleanUp => "term fixes queued or running",
+        };
+        shown.detail.insert(0, doing.into());
+    } else if own().any(|job| job.state == JobState::Waiting(Some(Wait::Decider))) {
         shown
             .detail
-            .insert(0, "final transcript queued or running".into());
+            .insert(0, "term fixes wait for a decider".into());
     }
+}
+
+/// Whether `job` leaves its session ready: it's done, or it waits for a
+/// decider, which nothing else needs.
+fn settled(job: &nota_store::Job) -> bool {
+    matches!(
+        job.state,
+        JobState::Done | JobState::Waiting(Some(Wait::Decider))
+    )
 }
 
 /// How Home words a session's date: `today`, `2 Oct` this year, `Oct 2025`

@@ -15,17 +15,33 @@ fn store(name: &str) -> (TestDir, Store) {
     (dir, store)
 }
 
+/// The final passes' numbers, in queue order.
+fn final_passes(store: &Store) -> Vec<JobId> {
+    store
+        .jobs()
+        .unwrap()
+        .iter()
+        .filter(|job| job.kind == JobKind::FinalPass)
+        .map(|job| job.id)
+        .collect()
+}
+
+/// Each final pass's session and state, in queue order. Every session
+/// also has a clean-up job, queued with it; the tests that are about the
+/// queue's states follow the final pass's.
 fn states(store: &Store) -> Vec<(SessionId, JobState)> {
     store
         .jobs()
         .unwrap()
         .into_iter()
+        .filter(|job| job.kind == JobKind::FinalPass)
         .map(|job| (job.session, job.state))
         .collect()
 }
 
-/// Stopping a recording marks it stopped and queues its final pass, in
-/// order of the stops; stopping again queues nothing more.
+/// Stopping a recording marks it stopped and queues its final pass and
+/// its clean-up, in order of the stops; stopping again queues nothing
+/// more.
 #[test]
 fn a_stop_queues_the_sessions_jobs_once() {
     let (_dir, mut store) = store("queue");
@@ -47,22 +63,36 @@ fn a_stop_queues_the_sessions_jobs_once() {
                 Progress::default()
             ),
             (
+                S2,
+                JobKind::CleanUp,
+                JobState::Waiting(None),
+                0,
+                Progress::default()
+            ),
+            (
                 S1,
                 JobKind::FinalPass,
                 JobState::Waiting(Some(Wait::Space)),
                 0,
                 Progress::default()
             ),
+            (
+                S1,
+                JobKind::CleanUp,
+                JobState::Waiting(Some(Wait::Space)),
+                0,
+                Progress::default()
+            ),
         ]
     );
-    assert!(jobs[0].id < jobs[1].id);
+    assert!(jobs.windows(2).all(|w| w[0].id < w[1].id));
     for session in [S1, S2] {
         assert_eq!(
             store.session(session).unwrap().unwrap().state,
             SessionState::Stopped
         );
     }
-    assert_eq!(store.session_jobs(S1).unwrap(), [jobs[1].clone()]);
+    assert_eq!(store.session_jobs(S1).unwrap(), jobs[2..]);
     assert!(matches!(
         store.finish_recording(SessionId::new(9), None),
         Err(StoreError::NoSession(_))
@@ -196,7 +226,7 @@ fn jobs_left_running_are_taken_back_until_they_have_died_too_often() {
     let (_dir, mut store) = store("recover");
     store.finish_recording(S1, None).unwrap();
     store.finish_recording(S2, None).unwrap();
-    let ids: Vec<JobId> = store.jobs().unwrap().iter().map(|j| j.id).collect();
+    let ids = final_passes(&store);
     assert_eq!(store.recover_jobs(3).unwrap(), 0);
     for attempt in 1..=3 {
         assert!(store.start_job(ids[0]).unwrap());
@@ -317,7 +347,7 @@ fn an_engine_down_note_only_touches_a_running_job() {
     let (_dir, mut store) = store("engine-down-late");
     store.finish_recording(S1, None).unwrap();
     store.finish_recording(S2, None).unwrap();
-    let ids: Vec<JobId> = store.jobs().unwrap().iter().map(|j| j.id).collect();
+    let ids = final_passes(&store);
     store.engine_down(ids[0], "too early").unwrap();
     assert!(store.start_job(ids[1]).unwrap());
     store.end_job(ids[1], &JobEnd::Done).unwrap();
@@ -354,7 +384,7 @@ fn a_retry_left_running_is_taken_back_with_its_reason() {
     let (_dir, mut store) = store("engine-down-recover");
     store.finish_recording(S1, None).unwrap();
     store.finish_recording(S2, None).unwrap();
-    let ids: Vec<JobId> = store.jobs().unwrap().iter().map(|j| j.id).collect();
+    let ids = final_passes(&store);
     assert!(store.start_job(ids[0]).unwrap());
     store
         .end_job(ids[0], &JobEnd::EngineDown("exited: no model".into()))
@@ -416,9 +446,10 @@ fn an_adopted_session_gets_its_jobs() {
         crate::Adopted::Added
     );
     assert_eq!(states(&store), [(found, JobState::Waiting(None))]);
-    // Adopting it again changes nothing.
+    // Adopting it again changes nothing: it keeps its final pass and its
+    // clean-up.
     store
         .adopt_session(&crate::NewSession::bare(found), None)
         .unwrap();
-    assert_eq!(store.jobs().unwrap().len(), 1);
+    assert_eq!(store.jobs().unwrap().len(), 2);
 }

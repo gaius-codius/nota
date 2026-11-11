@@ -163,7 +163,12 @@ impl Data<'_> {
                 title: session
                     .title
                     .unwrap_or_else(|| format!("session {}", self.id.get())),
-                jobs: self.steps(session.state, db.session_jobs(self.id)?, &final_text),
+                jobs: self.steps(
+                    session.state,
+                    db.session_jobs(self.id)?,
+                    &final_text,
+                    &decider(db.proposals(self.id)),
+                ),
                 transcript: transcript(heard, &final_text, &db.tracks(self.id)?),
             })
         })
@@ -190,6 +195,7 @@ impl Data<'_> {
         state: SessionState,
         jobs: Vec<Job>,
         final_text: &[FinalLine],
+        decider: &str,
     ) -> Vec<ProcessingJob> {
         let mut steps = vec![ProcessingJob {
             name: "Recording saved".into(),
@@ -201,9 +207,28 @@ impl Data<'_> {
             .map(|line| &line.heard.heard_by)
             .map(|by| format!("{} · {}", by.engine, by.model));
         let engine = engine.as_deref().unwrap_or_else(|| self.engines.label());
-        steps.extend(jobs.into_iter().map(|job| step(job, engine)));
+        steps.extend(jobs.into_iter().map(|job| {
+            let by = match job.kind {
+                JobKind::FinalPass => engine,
+                JobKind::CleanUp => decider,
+            };
+            step(job, by)
+        }));
         steps
     }
+}
+
+/// The decider named on the clean-up step: the one the session's
+/// `proposals` were decided by, or just "decider" before there are any
+/// (or if they can't be read).
+fn decider(proposals: Result<Vec<nota_store::Proposal>, StoreError>) -> String {
+    proposals
+        .ok()
+        .and_then(|proposals| {
+            let by = &proposals.first()?.proposed.decided_by;
+            Some(format!("{} · {}", by.name, by.model))
+        })
+        .unwrap_or_else(|| "decider".to_owned())
 }
 
 /// A step that cannot run yet, with no progress to show.
@@ -263,6 +288,8 @@ fn step(job: Job, engine: &str) -> ProcessingJob {
                 Some(Wait::Engine) => ProcessingWait::Engine,
                 Some(Wait::Audio) => ProcessingWait::Audio,
                 Some(Wait::Space) => ProcessingWait::Space,
+                Some(Wait::Decider) => ProcessingWait::Decider,
+                Some(Wait::FinalText) => ProcessingWait::FinalText,
                 None => ProcessingWait::Queued,
             },
             progress,
@@ -282,6 +309,7 @@ fn step(job: Job, engine: &str) -> ProcessingJob {
     ProcessingJob {
         name: match job.kind {
             JobKind::FinalPass => "Final transcript",
+            JobKind::CleanUp => "Fixing terms",
         }
         .into(),
         engine: engine.into(),
@@ -511,6 +539,56 @@ mod tests {
             fixture.read().jobs[1].engine,
             "stored-engine · stored-model"
         );
+    }
+
+    /// The clean-up step names its decider, not the speech engine: the
+    /// one its proposals name, or just "decider" before there are any.
+    #[test]
+    fn the_clean_up_step_names_its_decider() {
+        let fixture = Fixture::new("the_clean_up_step_names_its_decider");
+        fixture.finish();
+        let range = |a, b| SampleRange::new(SampleIndex::new(a), SampleIndex::new(b)).unwrap();
+        let mut line = text(TrackId::new(0), SampleIndex::ZERO, "dose");
+        line.words = vec![nota_store::FinalWord {
+            text: "dose".into(),
+            range: range(0, 100),
+            log_prob: None,
+        }];
+        let db = fixture.library.db();
+        db.with(|db| {
+            db.add_final_text(fixture.id, TrackId::new(0), SampleIndex::new(100), &[line])
+        })
+        .unwrap();
+        let clean_up = |fixture: &Fixture| fixture.read().jobs[2].clone();
+        assert_eq!(clean_up(&fixture).name, "Fixing terms");
+        assert_eq!(clean_up(&fixture).engine, "decider");
+        let words = nota_store::WordSpan::new(0, 0).unwrap();
+        let proposal = nota_store::NewProposal {
+            proposed: nota_store::Proposed {
+                chunk: nota_store::ChunkKey {
+                    track: TrackId::new(0),
+                    start: SampleIndex::ZERO,
+                },
+                words,
+                offered: words,
+                heard: "dose".into(),
+                term: "doses".into(),
+                replacement: "doses".into(),
+                origin: nota_store::Origin::Learned,
+                found: nota_store::Found::Alias,
+                decided_by: nota_store::DecidedBy {
+                    name: "llama-server".into(),
+                    model: "qwen.gguf".into(),
+                    place: nota_core::decide::Place::Local,
+                },
+                log_prob: None,
+                thresholds: String::new(),
+            },
+            decided: nota_store::Decided::No { yes: None },
+        };
+        db.with(|db| db.add_proposals(fixture.id, &[proposal]))
+            .unwrap();
+        assert_eq!(clean_up(&fixture).engine, "llama-server · qwen.gguf");
     }
 
     /// Final rows do not replace the chronological heard text.

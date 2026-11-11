@@ -31,7 +31,7 @@ use nota_recorder::fs::{Fs, StdFs};
 use nota_recorder::playback::{Output, OutputError, OutputStream, PlaybackError, play_moment};
 use nota_recorder::segment::needs_salvage;
 use nota_recorder::session::{Recordings, SessionDir};
-use nota_store::{Annotation, JobState, SessionState, Store, TrackKind};
+use nota_store::{Annotation, JobKind, JobState, SessionState, Store, TrackKind};
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::fs::{Mode, OFlags};
 use rustix::process::{Pid, Signal, kill_process, kill_process_group};
@@ -1709,13 +1709,14 @@ fn stop_with_keys(nota: &mut Running) {
     assert!(status.success(), "{status:?}: {}", nota.output());
 }
 
-/// Each session's jobs and their states, in queue order.
+/// Each session's final passes and their states, in queue order.
 fn jobs(data: &Path) -> Vec<(u64, JobState)> {
     Store::open(&data.join("library.db"))
         .unwrap()
         .jobs()
         .unwrap()
         .into_iter()
+        .filter(|job| job.kind == JobKind::FinalPass)
         .map(|job| (job.session.get(), job.state))
         .collect()
 }

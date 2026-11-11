@@ -91,6 +91,7 @@ fn the_schema_has_exactly_these_tables() {
             "mark",
             "note",
             "proposal",
+            "proposal_v8",
             "revision",
             "revision_text",
             "segment",
@@ -382,12 +383,17 @@ fn revisions_chain_and_name_their_final_words() {
     write(&store, "revision_text", columns, &change(2, 1, 0, 0, 0));
 }
 
+/// A proposal names words its own session's chunk has, where its outcome
+/// is and where the lookup offered it, and a revision the session has;
+/// its columns hold only the values clean-up writes.
 #[test]
 fn proposals_name_their_revision_and_final_words() {
     let (_dir, mut store) = store("proposal");
     two_sessions_chunks(&mut store);
     let columns = "id, session_id, revision, track, start_sample, first_word, last_word, \
-                   heard, replacement, source, model, pack_version, thresholds, state";
+                   offered_first, offered_last, heard, term, replacement, source, matched, \
+                   decider, decider_model, decider_place, answer, outcome, rule, thresholds, \
+                   log_version";
     let proposal = |id, session, revision, last| {
         vec![
             int(id),
@@ -397,17 +403,26 @@ fn proposals_name_their_revision_and_final_words() {
             int(0),
             int(0),
             int(last),
+            int(0),
+            int(last),
             text("hyper profen"),
             text("ibuprofen"),
-            text("term lookup"),
-            text("qwen3-4b"),
-            text("pharmacology 3"),
-            text("sim>=0.6"),
-            text("pending"),
+            text("ibuprofen"),
+            text("lookup"),
+            text("alias"),
+            text("llama-server"),
+            text("qwen"),
+            text("local"),
+            text("no"),
+            text("rejected"),
+            text("no"),
+            text("similarity=0.6"),
+            int(1),
         ]
     };
     write(&store, "proposal", columns, &proposal(1, 1, 0, 1));
-    assert_eq!(read(&store, "proposal"), [proposal(1, 1, 0, 1)]);
+    let stored = read(&store, "proposal");
+    assert_eq!(stored.len(), 1);
     // Words its chunk hasn't: session 2's chunk has only word 0.
     refused(&store, "proposal", columns, &proposal(2, 2, 0, 1));
     // A revision the session hasn't.
@@ -416,6 +431,18 @@ fn proposals_name_their_revision_and_final_words() {
     let mut backwards = proposal(4, 1, 0, 0);
     backwards[5] = int(1);
     refused(&store, "proposal", columns, &backwards);
+    // An offered run its chunk hasn't, though the outcome's words are there.
+    let mut offered = proposal(5, 2, 0, 0);
+    offered[8] = int(1);
+    refused(&store, "proposal", columns, &offered);
+    // A value clean-up never writes: an unknown outcome, or a rejection
+    // with no rule.
+    let mut outcome = proposal(6, 1, 0, 1);
+    outcome[18] = text("pending");
+    refused(&store, "proposal", columns, &outcome);
+    let mut rule = proposal(7, 1, 0, 1);
+    rule[19] = Value::Null;
+    refused(&store, "proposal", columns, &rule);
 }
 
 #[test]

@@ -19,7 +19,8 @@
 //!
 //! **Nothing holds the queue up.** A job runs only once what it waits for
 //! is there ([`Wait`]): space, after a full disk; a speech engine; its
-//! session's audio, all published. The queue moves on past one that's
+//! session's audio, all published; for clean-up, its session's final
+//! text and a decider set up. The queue moves on past one that's
 //! waiting, and past one that fails (it keeps its reason), to the next
 //! session's.
 //!
@@ -152,7 +153,8 @@ pub(crate) trait Worker: Send + 'static {
 
     /// What `job` would wait for if it were run now, if anything: the
     /// final pass waits for a speech engine, and for its session's
-    /// journals to be published.
+    /// journals to be published; clean-up waits for its session's final
+    /// pass, and for a decider to be set up.
     fn lacks(&self, job: &Job) -> Option<Wait>;
 }
 

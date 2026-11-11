@@ -769,18 +769,49 @@ fn home_shows_failed_job_reason() {
     assert_eq!(shown.detail, ["processing failed: broken"]);
 }
 
-/// A finished final pass makes the session ready.
+/// A finished final pass leaves the clean-up to run; once that's done,
+/// or waits for a decider nothing else needs, the session is ready.
 #[test]
 fn home_shows_done_job() {
     let tmp = TestDir::new("job-done");
     let library = library_of_three(&tmp.0);
     let job = stopped_job(&library);
-    // Ending the queued pass clears the processing status.
-    library
+    let end = |id, end: nota_store::JobEnd| {
+        library.db().with(|db| db.end_job(id, &end)).unwrap();
+    };
+    end(job.id, nota_store::JobEnd::Done);
+    let shown = shown_job(&library);
+    assert_eq!(
+        (shown.status, shown.detail),
+        (
+            Status::Processing,
+            vec!["term fixes queued or running".to_owned()]
+        )
+    );
+    let clean_up = library
         .db()
-        .with(|db| db.end_job(job.id, &nota_store::JobEnd::Done))
-        .unwrap();
-    assert_eq!(shown_job(&library).status, Status::Ready);
+        .with(|db| db.session_jobs(SessionId::new(3)))
+        .unwrap()
+        .remove(1);
+    assert_eq!(clean_up.kind, JobKind::CleanUp);
+    end(
+        clean_up.id,
+        nota_store::JobEnd::Waiting(Some(Wait::Decider)),
+    );
+    let shown = shown_job(&library);
+    assert_eq!(
+        (shown.status, shown.detail),
+        (
+            Status::Ready,
+            vec!["term fixes wait for a decider".to_owned()]
+        )
+    );
+    end(clean_up.id, nota_store::JobEnd::Done);
+    let shown = shown_job(&library);
+    assert_eq!(
+        (shown.status, shown.detail),
+        (Status::Ready, Vec::<String>::new())
+    );
 }
 
 /// Entering Home reads a changed session before the usual interval passes.
