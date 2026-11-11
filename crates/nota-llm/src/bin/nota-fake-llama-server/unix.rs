@@ -5,6 +5,9 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -137,11 +140,11 @@ fn trickle(mut stream: &UnixStream, body: &[u8]) -> io::Result<()> {
         body.len()
     );
     // Nothing is ever sent: the channel only gives a wait.
-    let (_keep, ticks) = std::sync::mpsc::channel::<()>();
+    let (_keep, ticks) = mpsc::channel::<()>();
     for byte in head.as_bytes().iter().chain(body) {
         stream.write_all(&[*byte])?;
         stream.flush()?;
-        let _ = ticks.recv_timeout(std::time::Duration::from_millis(20));
+        let _ = ticks.recv_timeout(Duration::from_millis(20));
     }
     Ok(())
 }
@@ -211,7 +214,7 @@ fn handle(stream: &UnixStream, dir: &Path, plan: Plan, healthy: &mut u32) -> io:
         }
         Plan::Hang => loop {
             // Holds the question, unanswered, until killed.
-            std::thread::park();
+            thread::park();
         },
         Plan::Exit => {
             let _ = writeln!(io::stderr(), "fake: exiting on a question");
@@ -243,6 +246,43 @@ fn value(args: &[OsString], flag: &str) -> Option<PathBuf> {
     args.get(at + 1).map(PathBuf::from)
 }
 
+/// How often the stand-in looks for its parent: well inside the second in
+/// which it must end once its parent has gone.
+const PARENT_LOOK: Duration = Duration::from_millis(100);
+
+/// Ends this process soon after the process that started it has gone.
+///
+/// The decider starts its server in a process group of its own, so when
+/// nextest stops a hung test, or a developer kills one, the signal misses
+/// the stand-in, and the test dies before the decider's Drop can stop it.
+/// A process whose parent dies is given another (init, or a subreaper), so
+/// a change of parent is the sign. The kernel's tie (the launch shim's)
+/// can't do this for every test: it fires when the *thread* that started
+/// the process ends, and a test may start a server from a thread that ends
+/// before the decider does.
+fn end_with_parent() {
+    let parent = std::os::unix::process::parent_id();
+    let _ = thread::Builder::new()
+        .name("parent-watch".into())
+        .spawn(move || {
+            let (_keep, ticks) = mpsc::channel::<()>();
+            while std::os::unix::process::parent_id() == parent {
+                let _ = ticks.recv_timeout(PARENT_LOOK);
+            }
+            leave();
+        });
+}
+
+/// Exits at once, from the parent watch's thread.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a test stand-in with nothing to finish: its parent has gone, and \
+              its main thread may be blocked in accept or a hang forever"
+)]
+fn leave() {
+    std::process::exit(0);
+}
+
 /// The program, on Unix.
 pub(crate) fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -251,6 +291,7 @@ pub(crate) fn main() -> ExitCode {
         let _ = writeln!(io::stderr(), "fake: {err}");
         return ExitCode::from(2);
     }
+    end_with_parent();
     let (Some(dir), Some(socket)) = (value(&args, "--model"), value(&args, "--host")) else {
         let _ = writeln!(io::stderr(), "fake: no --model or --host");
         return ExitCode::from(2);

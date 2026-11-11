@@ -35,6 +35,9 @@ const PROMPTLY: Duration = Duration::from_secs(5); // check-bound
 /// How soon after `stop` says to stop the server is gone.
 const STOPPED_WITHIN: Duration = Duration::from_secs(1); // check-bound
 
+/// How soon a stand-in whose parent has died is gone.
+const ORPHAN_ENDS_WITHIN: Duration = Duration::from_secs(1); // check-bound
+
 /// The longest any one wait in these tests lasts before it fails with its
 /// own message. Two in a row stay inside the ten seconds nextest gives each
 /// of nota-llm's tests (`.config/nextest.toml`), so a wait that runs out
@@ -545,6 +548,50 @@ fn a_server_started_through_the_shim_dies_with_its_starter() {
         child.id(),
         "the server isn't the process started"
     );
+}
+
+/// A stand-in whose parent is killed, as nextest kills a hung test, ends
+/// within a second, so a killed test leaves no server behind. The parent
+/// here is a shell standing in for the test process, killed with SIGKILL;
+/// the server isn't started through the shim, so only the stand-in's own
+/// watch on its parent can end it.
+#[test]
+fn a_stand_in_ends_soon_after_its_parent_is_killed() {
+    let fixture = Fixture::new("orphan", "answer");
+    let socket = fixture.dir.join("o.sock");
+    let mut parent = Command::new("/bin/sh")
+        .args(["-c", r#""$@" & wait"#, "sh", FAKE, "--host"])
+        .arg(&socket)
+        .arg("--model")
+        .arg(&fixture.dir)
+        .spawn()
+        .unwrap();
+    until("the server starts", || !fixture.starts().is_empty());
+    let [(pid, _)] = fixture.starts()[..] else {
+        panic!("{:?}", fixture.starts())
+    };
+    parent.kill().unwrap();
+    parent.wait().unwrap();
+    let clock = clock();
+    let (_keep, ticks) = mpsc::channel::<()>();
+    while running(pid) {
+        if clock.now().elapsed() >= ORPHAN_ENDS_WITHIN {
+            kill(pid);
+            panic!("server {pid} outlived its parent");
+        }
+        let _ = ticks.recv_timeout(Duration::from_millis(10));
+    }
+}
+
+/// Whether process `pid` still runs: it exists and isn't a zombie waiting
+/// for its new parent to reap it.
+fn running(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    // The state follows the command's name, which is in parentheses.
+    let state = stat.rsplit_once(')').map(|(_, rest)| rest.trim_start());
+    !state.is_some_and(|rest| rest.starts_with('Z'))
 }
 
 /// Waits for `child` to exit, for up to `limit`.
