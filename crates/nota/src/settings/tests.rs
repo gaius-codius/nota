@@ -284,16 +284,23 @@ fn a_bare_name_not_on_path_is_reported_with_its_name() {
 /// folder, so it isn't searched.
 #[test]
 fn a_relative_path_entry_isnt_searched() {
-    // Tests run in the package's folder, where this holds a program that
-    // a search of relative entries would find.
-    let relative = Path::new("../../scripts");
-    assert!(is_program(&relative.join("check-files.sh")));
-    let path = std::env::join_paths([Path::new(""), relative]).unwrap();
+    let dir = TestDir::new("relative-entry");
+    dir.program("llama-server");
+    // The folder as reached from the working folder: up to the root, then
+    // down. Built from wherever the test runs, so a search of relative
+    // entries would find the program, in the repository or in a copy of
+    // the crate outside it, without changing the process's working folder.
+    let cwd = std::env::current_dir().unwrap();
+    let mut relative: PathBuf = cwd.components().skip(1).map(|_| "..").collect();
+    relative.push(dir.0.strip_prefix("/").unwrap());
+    assert!(relative.is_relative(), "{}", relative.display());
+    assert!(is_program(&relative.join("llama-server")));
+    let path = std::env::join_paths([Path::new(""), &relative]).unwrap();
 
-    let found = find_program(Path::new("check-files.sh"), Some(&path));
+    let found = find_program(Path::new("llama-server"), Some(&path));
 
     assert!(
-        matches!(found, Err(Unavailable::ProgramNotOnPath(ref n)) if n == "check-files.sh"),
+        matches!(found, Err(Unavailable::ProgramNotOnPath(ref n)) if n == "llama-server"),
         "{found:?}"
     );
 }
