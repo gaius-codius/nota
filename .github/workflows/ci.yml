@@ -335,6 +335,9 @@ jobs:
       !cancelled() &&
       (github.event_name == 'push' || needs.coverage-scope.outputs.changed != 'false')
     runs-on: ubuntu-latest
+    # A warm run takes about five minutes. A hung test would otherwise hold
+    # the required check for the six-hour default.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
