@@ -252,19 +252,81 @@ fn store_error<E: Error + Send + Sync + 'static>(e: E) -> PublishError {
     PublishError::Store(Box::new(e))
 }
 
+/// Why a publish or salvage run stopped, with what it did before it
+/// stopped: the rows it committed, the journals it deleted, and the files
+/// it held and why, each as [`Published`] reports them. What it did is
+/// consistent (see [`PublishError`]), so a report can count a journal
+/// whose audio was all committed, though deleting it failed, as published.
+/// A run refused before it did anything ([`PublishError::InUse`],
+/// [`PublishError::OtherSession`]) did nothing, so its [`Self::done`] is
+/// empty.
+#[derive(Debug)]
+pub struct RunStopped {
+    error: PublishError,
+    done: Box<Published>,
+}
+
+impl RunStopped {
+    /// `error`, after a run that did `done`.
+    fn new(error: PublishError, done: Published) -> Self {
+        Self {
+            error,
+            done: Box::new(done),
+        }
+    }
+
+    /// `error`, before the run did anything.
+    fn before_anything(error: PublishError) -> Self {
+        Self::new(error, Published::default())
+    }
+
+    /// Why the run stopped.
+    #[must_use]
+    pub const fn error(&self) -> &PublishError {
+        &self.error
+    }
+
+    /// What the run did before it stopped.
+    #[must_use]
+    pub fn done(&self) -> &Published {
+        &self.done
+    }
+
+    /// Why the run stopped, and what it did before it.
+    #[must_use]
+    pub fn into_parts(self) -> (PublishError, Published) {
+        (self.error, *self.done)
+    }
+}
+
+impl fmt::Display for RunStopped {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl Error for RunStopped {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
 /// Salvages at startup through the disk watch. If a full disk freed the
 /// ballast, retry once: the first attempt may have left part of a segment.
 ///
 /// # Errors
 ///
-/// As [`salvage`], after the retry if one was needed.
+/// As [`salvage`], after the retry if one was needed: the retry's error,
+/// with what the retry did.
 pub fn salvage_start<S: Fs + Clone + 'static, T: SegmentStore>(
     session: &mut SessionStore<crate::disk::WatchedFs<S>, T>,
     length: SegmentLength,
     watch: &crate::disk::DiskWatch<S>,
-) -> Result<Published, PublishError> {
+) -> Result<Published, RunStopped> {
     let first = salvage(session, length);
-    if first.as_ref().is_err_and(startup_space_error::<T>)
+    if first
+        .as_ref()
+        .is_err_and(|stopped| startup_space_error::<T>(stopped.error()))
         && watch
             .full()
             .is_some_and(|f| f.ballast == crate::disk::Freed::Freed)
@@ -305,22 +367,37 @@ fn startup_space_error<T: SegmentStore>(error: &PublishError) -> bool {
 ///
 /// # Errors
 ///
-/// [`PublishError::InUse`], before anything is done, if the owner is
-/// recording, publishing or already salvaging the session. Otherwise as
-/// [`publish_journals`].
+/// [`RunStopped`]: with [`PublishError::InUse`], before anything is done,
+/// if the owner is recording, publishing or already salvaging the session;
+/// with [`PublishError::Io`] and nothing done if the directory can't be
+/// listed; otherwise as [`publish_journals`], with the segment temp files
+/// it couldn't remove in what it did too.
 ///
 /// [`SessionLock`]: crate::session::SessionLock
 pub fn salvage<S: Fs, T: SegmentStore>(
     session: &mut SessionStore<S, T>,
     length: SegmentLength,
-) -> Result<Published, PublishError> {
+) -> Result<Published, RunStopped> {
     let _salvaging = session
         .lock()
         .begin(Use::Salvaging)
-        .map_err(PublishError::InUse)?;
+        .map_err(|u| RunStopped::before_anything(PublishError::InUse(u)))?;
+    let mut published = Published::default();
+    match salvage_into(session, length, &mut published) {
+        Ok(()) => Ok(published),
+        Err(error) => Err(RunStopped::new(error, published)),
+    }
+}
+
+/// [`salvage`]'s run, once it has the session to itself: what it does goes
+/// into `published` as it's done, so a run that stops still reports it.
+fn salvage_into<S: Fs, T: SegmentStore>(
+    session: &mut SessionStore<S, T>,
+    length: SegmentLength,
+    published: &mut Published,
+) -> Result<(), PublishError> {
     let (fs, dir) = (session.session().fs(), session.session().dir());
     let mut journals = Vec::new();
-    let mut temps_kept = Vec::new();
     for path in fs.list(dir)? {
         if findings::is_temp(&path) || crate::session::is_marks_temp(&path) {
             // Best effort: the next findings write removes it anyway, and
@@ -332,16 +409,14 @@ pub fn salvage<S: Fs, T: SegmentStore>(
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                 // Left as it is: the segment it's named for reports its own
                 // name blocked if it's planned, and nothing else needs it.
-                Err(e) => temps_kept.push((path, e.kind())),
+                Err(e) => published.temps_kept.push((path, e.kind())),
             }
         } else if let Some(id) = path.file_name().and_then(JournalId::from_file_name) {
             // At startup nothing is writing: every journal is finished.
             journals.push(FinishedJournal::new(session.session().id(), id));
         }
     }
-    let mut published = publish(session, length, &journals)?;
-    published.temps_kept = temps_kept;
-    Ok(published)
+    publish_into(session, length, &journals, published)
 }
 
 /// Whether the session's directory holds journals, so [`salvage`] may have
@@ -566,33 +641,44 @@ fn journal_summaries<S: Fs>(fs: &S, paths: &[PathBuf]) -> Vec<JournalSummary> {
 ///
 /// # Errors
 ///
-/// [`PublishError::InUse`], before anything is done, if the owner is
-/// already publishing or salvaging the session.
-/// [`PublishError::OtherSession`], before anything is done, if a journal is
-/// another session's. Otherwise [`PublishError`]: what was done before the
-/// error is consistent, rows only for durable files, journals deleted only
-/// after their rows. A journal that read in the first pass but can't be
-/// read again when its segment is encoded (something changed it, or a
-/// transient error) stops the run with [`PublishError::Changed`] or
-/// [`PublishError::Io`]; the next run reads it again from the start.
+/// [`RunStopped`], with why the run stopped and what it did before:
+/// - [`PublishError::InUse`], before anything is done, if the owner is
+///   already publishing or salvaging the session.
+/// - [`PublishError::OtherSession`], before anything is done, if a journal
+///   is another session's.
+/// - Otherwise any [`PublishError`]. What was done before the error is
+///   consistent, rows only for durable files, journals deleted only after
+///   their rows, and [`RunStopped::done`] reports it as a [`Published`]
+///   would: the rows committed, the journals deleted, and the files held
+///   and why, up to the error. A journal that read in the first pass but
+///   can't be read again when its segment is encoded (something changed it,
+///   or a transient error) stops the run with [`PublishError::Changed`] or
+///   [`PublishError::Io`]; the next run reads it again from the start.
 pub fn publish_journals<S: Fs, T: SegmentStore>(
     session: &mut SessionStore<S, T>,
     length: SegmentLength,
     journals: &[FinishedJournal],
-) -> Result<Published, PublishError> {
+) -> Result<Published, RunStopped> {
     let _publishing = session
         .lock()
         .begin(Use::Publishing)
-        .map_err(PublishError::InUse)?;
-    publish(session, length, journals)
+        .map_err(|u| RunStopped::before_anything(PublishError::InUse(u)))?;
+    let mut published = Published::default();
+    match publish_into(session, length, journals, &mut published) {
+        Ok(()) => Ok(published),
+        Err(error) => Err(RunStopped::new(error, published)),
+    }
 }
 
 /// [`publish_journals`], for a caller already using the session to itself.
-fn publish<S: Fs, T: SegmentStore>(
+/// What it does goes into `published` as it's done, so that a run that
+/// stops still reports it.
+fn publish_into<S: Fs, T: SegmentStore>(
     session: &mut SessionStore<S, T>,
     length: SegmentLength,
     journals: &[FinishedJournal],
-) -> Result<Published, PublishError> {
+    published: &mut Published,
+) -> Result<(), PublishError> {
     let (session, mut store) = session.parts();
     if let Some(foreign) = journals.iter().find(|j| j.session() != session.id()) {
         return Err(PublishError::OtherSession(FinishedJournal::new(
@@ -606,7 +692,6 @@ fn publish<S: Fs, T: SegmentStore>(
     // Pass 1: what each journal holds, without keeping its samples.
     let mut summaries = Vec::new();
     let mut unreadable = Vec::new();
-    let mut unread = Vec::new();
     // Journals to delete once their segments are committed.
     let mut waiting: BTreeMap<JournalId, PathBuf> = BTreeMap::new();
     for &id in &ids {
@@ -617,7 +702,9 @@ fn publish<S: Fs, T: SegmentStore>(
             Err(e) => {
                 // Left as it is: the failure may pass, and renaming it aside
                 // may fail too. Not in the plan, so it's never deleted.
-                unread.push((FinishedJournal::new(session.id(), id), e.kind()));
+                published
+                    .unread
+                    .push((FinishedJournal::new(session.id(), id), e.kind()));
                 continue;
             }
         };
@@ -653,26 +740,15 @@ fn publish<S: Fs, T: SegmentStore>(
         }
     }
     let rows = read_rows(fs, dir, &mut store)?;
-    let mut published = Published {
-        unread,
-        ..Published::default()
-    };
-    let mut rows = check(fs, dir, rows, &summaries, &mut published);
+    let mut rows = check(fs, dir, rows, &summaries, published);
 
     // Repairs, each only with proof, before anything is planned around them.
-    repair_all(fs, dir, &summaries, &mut rows, &mut published)?;
+    repair_all(fs, dir, &summaries, &mut rows, published)?;
     let plan = plan::plan(&rows, &summaries, length);
 
     let mut committed = Committed::default();
     // Journals with no samples, or all of them in rows already, go first.
-    release(
-        fs,
-        dir,
-        &plan.needs,
-        &committed,
-        &mut waiting,
-        &mut published,
-    )?;
+    release(fs, dir, &plan.needs, &committed, &mut waiting, published)?;
 
     // Pass 2: one segment at a time.
     for segment in &plan.segments {
@@ -693,19 +769,12 @@ fn publish<S: Fs, T: SegmentStore>(
         let done = durable.commit(&mut store).map_err(store_error)?;
         committed.add(&done);
         published.segments.push(*done.row());
-        release(
-            fs,
-            dir,
-            &plan.needs,
-            &committed,
-            &mut waiting,
-            &mut published,
-        )?;
+        release(fs, dir, &plan.needs, &committed, &mut waiting, published)?;
     }
 
     let unreadable = settled(unreadable, &plan.needs, &committed);
-    quarantine(fs, dir, &unreadable, &mut published);
-    Ok(published)
+    quarantine(fs, dir, &unreadable, published);
+    Ok(())
 }
 
 /// Encodes `segment` and makes its file durable under its name: steps 1 to

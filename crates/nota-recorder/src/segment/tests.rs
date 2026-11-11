@@ -1649,7 +1649,7 @@ fn a_failing_store_keeps_the_journals_for_the_next_try() {
     let mut missing = SessionStore::new(owned(&fs), FakeStore::new(&fs, Path::new("/missing")));
     let err = salvage(&mut missing, length()).unwrap_err();
     drop(missing);
-    assert!(matches!(err, PublishError::Store(_)), "{err}");
+    assert!(matches!(err.error(), PublishError::Store(_)), "{err}");
     assert!(needs_salvage(&session_dir(&fs)).unwrap());
     let mut store = session_store(&fs);
     salvage(&mut store, length()).unwrap();
@@ -2507,7 +2507,7 @@ fn recording_with_the_store_down_loses_nothing_once_it_is_back() {
         writer.sync_if_due().unwrap();
         pending.extend(writer.take_finished());
         let err = publish_journals(&mut store, length(), &pending).unwrap_err();
-        assert!(matches!(err, PublishError::Store(_)), "{err}");
+        assert!(matches!(err.error(), PublishError::Store(_)), "{err}");
         failures += 1;
     }
     for track in [MIC, SYSTEM] {
@@ -2554,14 +2554,17 @@ fn another_sessions_journals_are_refused_before_anything_is_done() {
     let ops = fs.ops().len();
     let err = publish_journals(&mut store_on(&lock), length(), &[theirs()]).unwrap_err();
     assert!(
-        matches!(&err, PublishError::OtherSession(j) if *j == theirs()),
+        matches!(err.error(), PublishError::OtherSession(j) if *j == theirs()),
         "{err}"
     );
     // Mixed with this session's own, still refused.
     let ours = finished(&[0]);
     let mixed = [finished(&[0]).remove(0), theirs()];
     let err = publish_journals(&mut store_on(&lock), length(), &mixed).unwrap_err();
-    assert!(matches!(err, PublishError::OtherSession(_)), "{err}");
+    assert!(
+        matches!(err.error(), PublishError::OtherSession(_)),
+        "{err}"
+    );
     assert_eq!(fs.ops().len(), ops);
     assert_eq!(observe(&fs), before);
     // The journal goes on recording, and is published once it's finished.
@@ -2726,7 +2729,7 @@ fn an_unreadable_store_is_recorded_and_clears_no_finding() {
     let mut file = fs.create(&bad_row).unwrap();
     file.write_all(b"torn").unwrap();
     let err = salvage(&mut session_store(&fs), length()).unwrap_err();
-    assert!(matches!(err, PublishError::Store(_)), "{err}");
+    assert!(matches!(err.error(), PublishError::Store(_)), "{err}");
     let findings = read_findings(&session_dir(&fs)).unwrap();
     assert_eq!(findings.verification(), Verification::Unavailable);
     assert_eq!(as_found(findings.found()), expected);
@@ -2756,7 +2759,7 @@ fn recording_starts_and_rotates_with_the_store_down_and_the_findings_unwritable(
     fs.create_dir(&session().join("salvage-findings.tmp"))
         .unwrap();
     let err = salvage(&mut session_store(&fs), length()).unwrap_err();
-    assert!(matches!(err, PublishError::Store(_)), "{err}");
+    assert!(matches!(err.error(), PublishError::Store(_)), "{err}");
 
     let (clock, dyn_clock) = fake_clock();
     let lock = owned(&fs);
@@ -2776,7 +2779,7 @@ fn recording_starts_and_rotates_with_the_store_down_and_the_findings_unwritable(
         writer.sync_if_due().unwrap();
         pending.extend(writer.take_finished());
         let err = publish_journals(&mut store, length(), &pending).unwrap_err();
-        assert!(matches!(err, PublishError::Store(_)), "{err}");
+        assert!(matches!(err.error(), PublishError::Store(_)), "{err}");
     }
     pending.extend(writer.finish().unwrap());
     // 5,000 samples in windows of 1,500: four journals.
@@ -3408,7 +3411,12 @@ fn salvage_while_a_writer_records_is_refused_and_loses_nothing() {
 
     // The owner itself, through a store bound under the writer's lock.
     let err = salvage(&mut store_on(&lock), length()).unwrap_err();
-    assert!(matches!(err, PublishError::InUse(Use::Recording)), "{err}");
+    assert!(
+        matches!(err.error(), PublishError::InUse(Use::Recording)),
+        "{err}"
+    );
+    // Refused before it did anything, so it reports nothing done.
+    assert_eq!(*err.done(), Published::default());
     // Another owner, as a second process would be.
     assert_eq!(
         session_dir(&fs).lock().unwrap_err().kind(),
@@ -3468,7 +3476,10 @@ fn publishing_runs_one_at_a_time_and_never_during_salvage() {
         let _busy = held(busy);
         let before = fs.attempted();
         assert!(
-            matches!(publish(&lock), Err(PublishError::InUse(u)) if u == refused),
+            matches!(
+                publish(&lock).map_err(RunStopped::into_parts),
+                Err((PublishError::InUse(u), done)) if u == refused && done == Published::default()
+            ),
             "{busy:?}"
         );
         assert_eq!(fs.attempted(), before, "{busy:?}");
@@ -3476,8 +3487,8 @@ fn publishing_runs_one_at_a_time_and_never_during_salvage() {
     {
         let _publishing = held(Use::Publishing);
         assert!(matches!(
-            salvage(&mut store_on(&lock), length()),
-            Err(PublishError::InUse(Use::Publishing))
+            salvage(&mut store_on(&lock), length()).map_err(RunStopped::into_parts),
+            Err((PublishError::InUse(Use::Publishing), done)) if done == Published::default()
         ));
     }
     // A writer reads the directory as it opens, so not while publishing.
@@ -4209,9 +4220,120 @@ fn a_segment_whose_temp_cant_be_created_blocks_only_itself_live() {
     full.fail_on(&temp, Fault::Create, io::ErrorKind::StorageFull);
     let stopped = publish_journals(&mut session_store(&full), length(), &ids).unwrap_err();
     assert!(
-        matches!(&stopped, PublishError::Io(e) if e.kind() == io::ErrorKind::StorageFull),
+        matches!(stopped.error(), PublishError::Io(e) if e.kind() == io::ErrorKind::StorageFull),
         "{stopped}"
     );
+}
+
+/// A run stopped by an I/O error, which isn't one name's, reports what it
+/// did before it stopped: the rows it committed, the journals it deleted,
+/// and the one it couldn't delete though its audio is all published.
+#[test]
+fn a_run_that_stops_reports_what_it_did_before_it_stopped() {
+    let (disk, _, rows) = unsalvaged();
+    let (last, before) = rows.split_last().unwrap();
+    let temp = temp_path(&session(), last.track(), last.range());
+    let ids: Vec<FinishedJournal> = disk
+        .paths()
+        .iter()
+        .filter(|p| is_journal(p))
+        .map(|p| FinishedJournal::new(SESSION, journal_id(p)))
+        .collect();
+    let stopping = || {
+        let fs = disk.copy_disk();
+        // Every segment before the last is published first.
+        fs.fail_on(&temp, Fault::Create, io::ErrorKind::Other);
+        fs
+    };
+
+    let fs = stopping();
+    let stopped = publish_journals(&mut session_store(&fs), length(), &ids).unwrap_err();
+    assert!(
+        matches!(stopped.error(), PublishError::Io(e) if e.kind() == io::ErrorKind::Other),
+        "{stopped}"
+    );
+    assert_eq!(stopped.done().segments(), before);
+    let deleted = stopped.done().deleted().to_vec();
+    assert!(!deleted.is_empty(), "{stopped:?}");
+    let on_disk: Vec<JournalId> = fs
+        .paths()
+        .iter()
+        .filter(|p| is_journal(p))
+        .map(|p| journal_id(p))
+        .collect();
+    assert!(
+        deleted.iter().all(|id| !on_disk.contains(id)),
+        "{on_disk:?}"
+    );
+
+    // One of those journals can't be deleted: the stopped run names it.
+    let fs = stopping();
+    let stuck = deleted[0];
+    fs.fail_on(
+        &session().join(stuck.file_name()),
+        Fault::Remove,
+        io::ErrorKind::PermissionDenied,
+    );
+    let stopped = publish_journals(&mut session_store(&fs), length(), &ids).unwrap_err();
+    assert_eq!(
+        stopped.done().not_deleted(),
+        [(stuck, io::ErrorKind::PermissionDenied)]
+    );
+    assert_eq!(stopped.done().deleted(), &deleted[1..]);
+    assert_eq!(stopped.done().segments(), before);
+}
+
+/// Salvage that stops still names the segment temp files it couldn't
+/// remove before it published anything.
+#[test]
+fn a_salvage_that_stops_reports_the_temps_it_kept() {
+    let (disk, _, rows) = unsalvaged();
+    let fs = disk.copy_disk();
+    let last = rows[rows.len() - 1];
+    fs.fail_on(
+        &temp_path(&session(), last.track(), last.range()),
+        Fault::Create,
+        io::ErrorKind::Other,
+    );
+    let stray = session().join("seg-t5-000000000000.flac.tmp");
+    plant_file(&fs, &stray, b"a crashed run's temp");
+    fs.fail_on(&stray, Fault::Remove, io::ErrorKind::PermissionDenied);
+
+    let stopped = salvage(&mut session_store(&fs), length()).unwrap_err();
+    assert!(matches!(stopped.error(), PublishError::Io(_)), "{stopped}");
+    assert_eq!(
+        stopped.done().temps_kept(),
+        [(stray, io::ErrorKind::PermissionDenied)]
+    );
+    assert_eq!(stopped.done().segments(), &rows[..rows.len() - 1]);
+}
+
+/// A run whose rows can't be read still names the journals it couldn't
+/// read before it tried them.
+#[test]
+fn a_run_that_cant_read_its_rows_reports_the_journals_it_couldnt_read() {
+    let (disk, _, _) = unsalvaged();
+    let fs = disk.copy_disk();
+    let journal = fs.paths().into_iter().find(|p| is_journal(p)).unwrap();
+    fs.fail_on(&journal, Fault::Read, io::ErrorKind::PermissionDenied);
+    let mut missing = SessionStore::new(owned(&fs), FakeStore::new(&fs, Path::new("/missing")));
+
+    let stopped = salvage(&mut missing, length()).unwrap_err();
+    assert!(
+        matches!(stopped.error(), PublishError::Store(_)),
+        "{stopped}"
+    );
+    let unread: Vec<_> = stopped
+        .done()
+        .unread()
+        .iter()
+        .map(|(j, kind)| (j.id(), *kind))
+        .collect();
+    assert_eq!(
+        unread,
+        [(journal_id(&journal), io::ErrorKind::PermissionDenied)]
+    );
+    assert!(stopped.done().segments().is_empty(), "{stopped:?}");
 }
 
 /// A journal set aside whose directory sync then fails is still reported as

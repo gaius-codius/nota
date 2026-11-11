@@ -454,7 +454,7 @@ fn an_unparsable_row_stops_its_session_and_is_named() {
     let journals = journals_left(&fs);
     let mut bound = SessionStore::new(owned(&fs), store);
     let err = salvage(&mut bound, length()).unwrap_err();
-    assert!(matches!(err, PublishError::Store(_)), "{err}");
+    assert!(matches!(err.error(), PublishError::Store(_)), "{err}");
     let shown = err.to_string();
     assert!(
         shown.contains("session 1's segment row at track 0, sample 4800"),
