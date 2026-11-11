@@ -253,6 +253,9 @@ impl Fs for BadLocks {
     fn lock_dir(&self, _dir: &Path) -> io::Result<Self::Lock> {
         Err(io::Error::new(io::ErrorKind::PermissionDenied, "no"))
     }
+    fn lock_dir_shared(&self, _dir: &Path) -> io::Result<Self::Lock> {
+        Err(io::Error::new(io::ErrorKind::PermissionDenied, "no"))
+    }
 }
 
 #[test]
