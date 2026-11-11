@@ -32,6 +32,14 @@
 //! then makes another. An entry is removed as its recording ends; one left
 //! by a crash is an empty directory nobody holds, read as no recording.
 //!
+//! Each start removes those: once it holds its own entry and the shared
+//! lock, it takes every other entry exclusively and removes the ones it
+//! gets, while it holds them. One a recording or a check holds refuses it
+//! and stays. A start's clean-up may also take a recording's new entry
+//! before its recorder locks it, or remove it between the recorder's open
+//! and its lock, so the recorder makes sure its entry is still there once
+//! it holds it, and makes another if not. A check stays read-only.
+//!
 //! It covers one library. A recording into another data folder isn't seen,
 //! although it hears the same speakers, and neither is a [`SessionWriter`]
 //! opened without the lock (the recorder's own examples) or a nota from
@@ -50,8 +58,8 @@ use crate::fs::Fs;
 pub const RECORDING_LOCK: &str = "recording.lock";
 
 /// How many entries a recording makes before giving up: each try after the
-/// first follows a name already there or a check holding the entry it just
-/// made, both rare.
+/// first follows a name already there, or a check or another start holding
+/// or removing the entry it just made, all rare.
 const ENTRY_TRIES: usize = 64;
 
 /// The count in the next entry this process makes, so its entries' names
@@ -100,6 +108,10 @@ impl<S: Fs> Recordings<S> {
         // it holds the shared lock. Refused, the entry goes with it.
         let entry = self.enter()?;
         let shared = self.take(S::lock_dir_shared)?;
+        // Last, so a start refused here removes nothing: while the clean-up
+        // holds an entry a check reads it as a recording, which by now is
+        // true.
+        self.clear_left();
         Ok(RecordingLock {
             _shared: shared,
             _entry: entry,
@@ -170,12 +182,32 @@ impl<S: Fs> Recordings<S> {
         }
     }
 
+    /// Removes every entry in the lock's directory that nobody holds: those
+    /// crashed recordings left. Each is taken exclusively and removed while
+    /// held, so one a recording or a check holds refuses it and stays, this
+    /// recording's own included. Nothing it meets is an error: a clean-up
+    /// that fails leaves only what a check already reads as no recording,
+    /// and must never end a start.
+    fn clear_left(&self) {
+        let Ok(entries) = self.fs.list(&self.dir) else {
+            return;
+        };
+        for entry in entries {
+            if let Ok(held) = self.fs.lock_dir(&entry) {
+                let _left = self.fs.remove_dir(&entry);
+                // Let go only once it's gone.
+                drop(held);
+            }
+        }
+    }
+
     /// Makes this recording's entry in the lock's directory, making that
     /// first if it isn't there, and locks it exclusively. Its name is the
     /// process's id, a number drawn at random and a count, so a name a
     /// crash left (where ids repeat, as in a PID namespace) is all but never
-    /// met again; one that is, and an entry a check holds at the moment
-    /// it's locked, are passed over for the next name.
+    /// met again. One that is, and an entry a check or another start's
+    /// clean-up meets at the moment it's locked, are passed over for the
+    /// next name ([`Self::make_entry`]).
     fn enter(&self) -> io::Result<Entry<S>>
     where
         S: Clone,
@@ -183,42 +215,51 @@ impl<S: Fs> Recordings<S> {
         self.make_dir()?;
         let mut passed = None;
         for _ in 0..ENTRY_TRIES {
-            let dir = self.dir.join(entry_name());
-            match self.make_entry(dir) {
-                Ok(entry) => return Ok(entry),
-                // A name already there, or a check trying the new entry:
-                // it's let go at once, but this recording mustn't wait.
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        io::ErrorKind::AlreadyExists | io::ErrorKind::WouldBlock
-                    ) =>
-                {
-                    passed = Some(e);
-                }
-                Err(e) => return Err(e),
+            match self.make_entry(self.dir.join(entry_name()))? {
+                Tried::Held(entry) => return Ok(entry),
+                // It's let go or gone at once, but this recording mustn't
+                // wait for it.
+                Tried::Passed(why) => passed = Some(why),
             }
         }
         Err(io::Error::other(NoEntry { last: passed }))
     }
 
     /// Makes the entry `dir` and locks it exclusively; an entry made but
-    /// not locked is removed.
-    fn make_entry(&self, dir: PathBuf) -> io::Result<Entry<S>>
+    /// not held is removed. A name already there, a lock refused while a
+    /// check or a clean-up holds it, and an entry a clean-up removed are
+    /// passed over; any other error is the start's.
+    fn make_entry(&self, dir: PathBuf) -> io::Result<Tried<S>>
     where
         S: Clone,
     {
-        self.fs.create_dir(&dir)?;
-        match self.fs.lock_dir(&dir) {
-            Ok(lock) => Ok(Entry {
-                _lock: lock,
-                fs: self.fs.clone(),
-                dir,
-            }),
+        match self.fs.create_dir(&dir) {
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(Tried::Passed(e)),
+            made => made?,
+        }
+        let lock = match self.fs.lock_dir(&dir) {
+            Ok(lock) => lock,
             Err(e) => {
                 let _left = self.fs.remove_dir(&dir);
-                Err(e)
+                return match e.kind() {
+                    io::ErrorKind::WouldBlock | io::ErrorKind::NotFound => Ok(Tried::Passed(e)),
+                    _ => Err(e),
+                };
             }
+        };
+        let entry = Entry {
+            _lock: lock,
+            fs: self.fs.clone(),
+            dir,
+        };
+        // A clean-up may have locked and removed the entry between the
+        // lock's open and its `flock`, which then holds a directory no
+        // longer there, where no check sees it. Names aren't met again, so
+        // one still there is this one.
+        match self.fs.list(&entry.dir) {
+            Ok(_) => Ok(Tried::Held(entry)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Tried::Passed(e)),
+            Err(e) => Err(e),
         }
     }
 
@@ -244,9 +285,17 @@ fn entry_name() -> String {
     format!("{}-{random:016x}-{number}", std::process::id())
 }
 
-/// Every name a recording tried for its entry was already there or held by
-/// a check ([`Recordings::record`]): not a moment playing, so not
-/// [`io::ErrorKind::WouldBlock`].
+/// One try at a recording's entry ([`Recordings::make_entry`]).
+enum Tried<S: Fs> {
+    /// The entry, made and held.
+    Held(Entry<S>),
+    /// The name was passed over, for this reason; another is tried.
+    Passed(io::Error),
+}
+
+/// Every name a recording tried for its entry was already there, or held or
+/// removed by a check or another start ([`Recordings::record`]): not a
+/// moment playing, so not [`io::ErrorKind::WouldBlock`].
 #[derive(Debug)]
 struct NoEntry {
     /// Why the last name was passed over.
@@ -300,7 +349,8 @@ struct Entry<S: Fs> {
 impl<S: Fs> Drop for Entry<S> {
     fn drop(&mut self) {
         // Removed while still locked, so no check finds it unheld while
-        // the recording runs. Left behind, it reads as no recording.
+        // the recording runs. Left behind, it reads as no recording until
+        // the next start removes it.
         let _left = self.fs.remove_dir(&self.dir);
     }
 }
@@ -674,23 +724,121 @@ mod tests {
         assert_eq!(entries(&recordings.fs), Vec::<PathBuf>::new());
     }
 
-    /// Recordings and checks on the real filesystem, from two threads at
-    /// once: every recording starts, and each check while one is held
-    /// finds it.
+    /// Entries a crash left in [`library`]'s lock directory: two, which
+    /// nobody holds.
+    fn left_by_crashes(fs: &impl Fs) -> [PathBuf; 2] {
+        fs.create_dir(&lock_dir()).unwrap();
+        let left = [lock_dir().join("1-0-0"), lock_dir().join("2-0-0")];
+        for entry in &left {
+            fs.create_dir(entry).unwrap();
+        }
+        left
+    }
+
+    /// A start removes every entry nobody holds, leaving only its own.
+    #[test]
+    fn a_start_removes_the_entries_nobody_holds() {
+        let recordings = library();
+        let left = left_by_crashes(&recordings.fs);
+        let _recording = recordings.record().unwrap();
+        let after = entries(&recordings.fs);
+        let [own] = &after[..] else {
+            panic!("{after:?}")
+        };
+        assert!(!left.contains(own), "{after:?}");
+        // The one left is the recording's, held.
+        assert!(recordings.running(&[]).unwrap());
+    }
+
+    /// A start leaves another recording's entry, which it holds.
+    #[test]
+    fn a_start_leaves_a_running_recordings_entry() {
+        let recordings = library();
+        let _first = recordings.record().unwrap();
+        let first = entries(&recordings.fs);
+        let _second = recordings.record().unwrap();
+        let after = entries(&recordings.fs);
+        assert_eq!(after.len(), 2, "{after:?}");
+        assert!(after.contains(&first[0]), "{after:?}");
+        // Without its entry, the first recording would be no longer seen.
+        let second: Vec<_> = after.into_iter().filter(|e| *e != first[0]).collect();
+        assert!(recordings.running(&second).unwrap());
+    }
+
+    /// A start leaves an entry a check holds at that moment, although no
+    /// recording does: it can't tell which, so it doesn't remove it.
+    #[test]
+    fn a_start_leaves_an_entry_a_check_holds() {
+        let recordings = library();
+        let [checked, unheld] = left_by_crashes(&recordings.fs);
+        // The check's hold, as `running` takes it.
+        let _check = recordings.fs.lock_dir_shared(&checked).unwrap();
+        let _recording = recordings.record().unwrap();
+        let after = entries(&recordings.fs);
+        assert_eq!(after.len(), 2, "{after:?}");
+        assert!(
+            after.contains(&checked) && !after.contains(&unheld),
+            "{after:?}"
+        );
+    }
+
+    /// A recording whose new entry another start's clean-up removes before
+    /// it locks it makes another and starts, and is seen.
+    #[test]
+    fn a_recording_whose_entry_is_removed_before_its_lock_makes_another() {
+        let fs = Meddling::new();
+        fs.with(|m| m.removed = 1);
+        let recordings = Recordings::new(fs.clone(), Path::new("/data"));
+        let _recording = recordings.record().unwrap();
+        assert_eq!(fs.with(|m| m.removed), 0, "no entry was removed");
+        assert_eq!(entries(&fs).len(), 1);
+        assert!(recordings.running(&[]).unwrap());
+    }
+
+    /// A recording whose new entry another start's clean-up removes between
+    /// the lock's open and its `flock` holds a lock on a directory no longer
+    /// there: it makes another and starts, and is seen.
+    #[test]
+    fn a_recording_whose_entry_is_removed_under_its_lock_makes_another() {
+        let fs = Meddling::new();
+        fs.with(|m| m.unlinked = 1);
+        let recordings = Recordings::new(fs.clone(), Path::new("/data"));
+        let _recording = recordings.record().unwrap();
+        assert_eq!(fs.with(|m| m.unlinked), 0, "no entry was removed");
+        assert_eq!(entries(&fs).len(), 1);
+        assert!(recordings.running(&[]).unwrap());
+    }
+
+    /// Recordings, their clean-ups and checks on the real filesystem, from
+    /// three threads at once: every recording starts, each check while one
+    /// is held finds it, and an entry a crash left is gone by the end.
     #[test]
     fn recordings_and_checks_on_the_real_filesystem_dont_get_in_each_others_way() {
         let dir = crate::test_dir::TestDir::new("recordings-checks");
         let recordings = Recordings::new(crate::fs::StdFs, &dir.0);
         let held = recordings.record().unwrap();
-        std::thread::scope(|scope| {
-            let checks = scope.spawn(|| (0..500).all(|_| recordings.running(&[]).unwrap()));
-            for _ in 0..500 {
+        let left = recordings.dir().join("1-0-0");
+        recordings.fs.create_dir(&left).unwrap();
+        let starts = || {
+            for _ in 0..300 {
                 drop(recordings.record().unwrap());
             }
+        };
+        std::thread::scope(|scope| {
+            let checks = scope.spawn(|| (0..500).all(|_| recordings.running(&[]).unwrap()));
+            // Two threads, so one's clean-up meets the other's new entries.
+            let other = scope.spawn(starts);
+            starts();
+            other.join().unwrap();
             assert!(checks.join().unwrap(), "a check missed the held recording");
         });
+        assert_eq!(recordings.fs.list(recordings.dir()).unwrap().len(), 1);
         drop(held);
         assert!(!recordings.running(&[]).unwrap());
+        assert_eq!(
+            recordings.fs.list(recordings.dir()).unwrap(),
+            Vec::<PathBuf>::new()
+        );
     }
 
     /// What [`Meddling`] does next, and the locks it was asked for.
@@ -704,6 +852,13 @@ mod tests {
         refused: Option<io::ErrorKind>,
         /// Whether an entry is removed just before a check tries it.
         vanish: bool,
+        /// How many of the next entries another start's clean-up removes
+        /// just before they're locked exclusively.
+        removed: usize,
+        /// How many of the next entries another start's clean-up removes
+        /// between the lock's open and its `flock`: the lock is taken, on a
+        /// directory no longer there.
+        unlinked: usize,
         /// Every lock asked for: its directory, and whether shared.
         locks: Vec<(PathBuf, bool)>,
     }
@@ -737,6 +892,13 @@ mod tests {
         fn forget_locks(&self) {
             self.with(|m| m.locks.clear());
         }
+    }
+
+    /// Whether `count` was above zero, counting one off it.
+    fn take_one(count: &mut usize) -> bool {
+        let some = *count > 0;
+        *count = count.saturating_sub(1);
+        some
     }
 
     /// Whether `path` is an entry in [`lock_dir`].
@@ -790,22 +952,33 @@ mod tests {
         }
 
         fn lock_dir(&self, dir: &Path) -> io::Result<FakeLock> {
-            let (checked, refused) = self.with(|m| {
+            let (checked, refused, removed, unlinked) = self.with(|m| {
                 m.locks.push((dir.to_path_buf(), false));
-                let checked = is_entry(dir) && m.checked > 0;
-                if checked {
-                    m.checked -= 1;
-                }
-                (checked, m.refused.filter(|_| is_entry(dir)))
+                let entry = is_entry(dir);
+                (
+                    entry && take_one(&mut m.checked),
+                    m.refused.filter(|_| entry),
+                    entry && take_one(&mut m.removed),
+                    entry && take_one(&mut m.unlinked),
+                )
             });
             if let Some(kind) = refused {
                 return Err(kind.into());
+            }
+            if removed {
+                self.inner.remove_dir(dir)?;
             }
             // A check holds the entry at this moment, as `running` would.
             let _check = checked
                 .then(|| self.inner.lock_dir_shared(dir))
                 .transpose()?;
-            self.inner.lock_dir(dir)
+            let lock = self.inner.lock_dir(dir)?;
+            if unlinked {
+                // The fake's locks don't keep a directory from being
+                // removed, as an `flock` on a real one doesn't.
+                self.inner.remove_dir(dir)?;
+            }
+            Ok(lock)
         }
 
         fn lock_dir_shared(&self, dir: &Path) -> io::Result<FakeLock> {
