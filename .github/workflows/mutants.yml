@@ -126,8 +126,9 @@ jobs:
             --description "A weekly mutation testing run failed"
           body="[Mutation testing run]($RUN_URL) on \`$REF\` failed. Each shard's
           missed and timed-out mutants are in its mutants-shard-N artifact
-          (missed.txt, timeout.txt, under crates/ and engine/); a shard that
-          stopped without one lists them in its log."
+          (missed.txt and timeout.txt, in crates/mutants.out/ and
+          engine/mutants.out/); a shard that stopped without one lists them in
+          its log."
           open=$(gh issue list --label mutants-weekly --state open --limit 1 \
             --json number --jq '.[0].number // empty')
           if [ -n "$open" ]; then
