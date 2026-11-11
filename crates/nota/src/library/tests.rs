@@ -1494,6 +1494,23 @@ fn startup_stops_when_it_cant_read_the_recording_lock() {
     );
 }
 
+/// The error a start stops with keeps its cause: the filesystem's own
+/// error is its source, kind and words both.
+#[test]
+fn an_unreadable_recording_lock_keeps_its_cause() {
+    use nota_recorder::fs::fake::FakeFs;
+    let root = PathBuf::from("/data");
+    let fs = FakeFs::with_dirs([root.join("sessions")]);
+    let _in_the_way = fs.create(&root.join("recording.lock")).unwrap();
+    let error = startup_watch(&fs, &root, 1_024).unwrap_err();
+    let unreadable = error.get_ref().unwrap();
+    let cause = std::error::Error::source(unreadable)
+        .and_then(|cause| cause.downcast_ref::<io::Error>())
+        .unwrap();
+    assert_eq!(cause.kind(), io::ErrorKind::NotADirectory);
+    assert_eq!(cause.to_string(), "not a directory");
+}
+
 /// A moment playing holds its session's lock and the library's lock
 /// exclusively, but it's no recording: startup holds the ballast.
 #[test]
