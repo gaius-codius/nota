@@ -362,8 +362,10 @@ impl Home {
         // session's own row stays at the top, and the last row says how
         // many more there are.
         self.scroll = self.scroll.min(top);
+        // The list is at least 7 rows (`draw` refuses a frame under
+        // `MIN_HEIGHT`), so the last row shown is always below the session's.
         let last_shown = self.scroll + rows - 1;
-        if bottom > last_shown && last_shown > top {
+        if bottom > last_shown {
             let more = bottom - last_shown + 1;
             lines[last_shown].1 = self.more_line(more);
         }

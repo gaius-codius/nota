@@ -128,6 +128,14 @@ mod tests {
         assert!(wrap_hanging("anything", 5, 0).is_empty());
     }
 
+    /// A grapheme wider than the whole line still starts the line it's on:
+    /// no empty line goes before it.
+    #[test]
+    fn a_grapheme_wider_than_the_line_gets_a_line_of_its_own() {
+        assert_eq!(wrap("界", 1), ["界"]);
+        assert_eq!(wrap_hanging("a 界", 1, 1), ["a", "界"]);
+    }
+
     #[test]
     fn collapses_whitespace_and_drops_control_characters() {
         assert_eq!(wrap("  a \n\t b  ", 10), ["a b"]);
