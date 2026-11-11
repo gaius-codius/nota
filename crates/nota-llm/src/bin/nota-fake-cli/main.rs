@@ -19,13 +19,29 @@
 //!
 //! Every way it fails puts the question's words where a careless reason
 //! would pick them up, so the tests can show none does.
+//!
+//! On Unix it ends within a second of its parent's death, so a test that's
+//! killed (nextest stopping a hang) leaves no CLI running.
 
 use std::io::{Read, Write};
 use std::process::ExitCode;
 
 use serde_json::{Value, json};
 
+#[cfg(unix)]
+// The stand-in server's watch, shared rather than copied.
+#[path = "../nota-fake-llama-server/parent_watch.rs"]
+mod parent_watch;
+
 fn main() -> ExitCode {
+    #[cfg(unix)]
+    if let Err(e) = parent_watch::end_with_parent() {
+        let _ = writeln!(
+            std::io::stderr(),
+            "nota-fake-cli: couldn't watch its parent: {e}"
+        );
+        return ExitCode::from(2);
+    }
     match run() {
         Ok(code) => code,
         Err(e) => {
