@@ -20,18 +20,25 @@ use std::time::Duration;
 
 use nota_core::decide::{Answer, Candidate, DecideError, Decider, Decisions, Place, Question};
 use nota_core::{Clock, SystemClock};
-use nota_llm::cli::{CLAUDE_SYSTEM, Cli, CliConfig, CliDecider, CliError};
+use nota_llm::cli::{CLAUDE_SYSTEM, CODEX_TOOLS_OFF, Cli, CliConfig, CliDecider, CliError};
 use nota_llm::endpoint::{Endpoint, EndpointConfig, EndpointDecider, EndpointError};
 use nota_llm::prompt::English;
 use nota_llm::reply::ReplyError;
+use nota_llm::server::Launcher;
 use rustix::process::{Pid, test_kill_process};
 
 /// The stand-in CLI.
 const FAKE: &str = env!("CARGO_BIN_EXE_nota-fake-cli");
 
+/// The stand-in llama-server, whose `exec-tied` is nota's launch shim.
+const SHIM: &str = env!("CARGO_BIN_EXE_nota-fake-llama-server");
+
 /// How soon a timed-out or stopped decider comes back: far less than a
 /// hang.
 const PROMPTLY: Duration = Duration::from_secs(5); // check-bound
+
+/// How long a hang test waits for an answer that never comes.
+const HANG_LIMIT: Duration = Duration::from_secs(1);
 
 /// The words of the question that must never be in a reason or the CLI's
 /// arguments: both chunks, the heard words and the terms. Made up, and
@@ -136,17 +143,41 @@ impl Fixture {
         fixture
     }
 
+    /// Lets every user open the work folder.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test scaffolding, not a recording"
+    )]
+    fn open_to_all(&self) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(self.work(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
     /// The CLI's work folder, where the stand-in reads its plan.
     fn work(&self) -> PathBuf {
         self.dir.join("work")
     }
 
-    /// A decider on the stand-in as `cli`, with a short time limit.
-    fn decider(&self, cli: Cli) -> CliDecider {
+    /// A config for the stand-in as `cli`, with a time limit no answer
+    /// comes near on a busy machine.
+    fn config(&self, cli: Cli) -> CliConfig {
         let mut config = CliConfig::new(cli, self.work());
         config.program = FAKE.into();
         config.model = Some("a-model".to_owned());
-        config.timeout = Duration::from_secs(1);
+        config.timeout = Duration::from_secs(30);
+        config
+    }
+
+    /// A decider on the stand-in as `cli`.
+    fn decider(&self, cli: Cli) -> CliDecider {
+        CliDecider::new(self.config(cli), Box::new(English::new(None)), clock())
+    }
+
+    /// A decider on the stand-in as `cli` that gives up after a second.
+    fn impatient(&self, cli: Cli) -> CliDecider {
+        let mut config = self.config(cli);
+        config.timeout = HANG_LIMIT;
         CliDecider::new(config, Box::new(English::new(None)), clock())
     }
 
@@ -240,44 +271,44 @@ fn claude_runs_without_tools_or_settings() {
     );
 }
 
-/// Codex ignores the user's config, keeps no session, may only read, and
-/// is held to a schema file that's removed once it has answered.
+/// Codex ignores the user's config, keeps no session, may only read, has
+/// no tools, and is held to a schema file that's removed once it has
+/// answered.
 #[test]
-fn codex_runs_read_only_without_the_users_config() {
+fn codex_runs_read_only_without_tools_or_the_users_config() {
     let fixture = Fixture::new("codex-args", "answer");
     fixture
         .decider(Cli::Codex)
         .decide(&question(), &go_on)
         .unwrap();
     let args = fixture.read("args");
-    let args: Vec<&str> = args.split('\n').collect();
-    let schema = args.get(11).copied().unwrap_or_default();
+    let mut args: Vec<&str> = args.split('\n').collect();
+    let at = args.iter().position(|a| *a == "--output-schema").unwrap() + 1;
+    let schema = args.remove(at);
     assert!(
         Path::new(schema).starts_with(fixture.work()),
         "{schema} {args:?}"
     );
     assert!(!Path::new(schema).exists(), "{schema} was left");
-    let mut without_schema = args.clone();
-    without_schema.remove(11);
-    assert_eq!(
-        without_schema,
-        [
-            "exec",
-            "--ignore-user-config",
-            "--ephemeral",
-            "--skip-git-repo-check",
-            "--sandbox",
-            "read-only",
-            "--color",
-            "never",
-            "-c",
-            "model_reasoning_effort=\"low\"",
-            "--output-schema",
-            "--model",
-            "a-model",
-            "-",
-        ]
-    );
+    let mut expected = vec![
+        "exec",
+        "--ignore-user-config",
+        "--ephemeral",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "read-only",
+        "--color",
+        "never",
+        "-c",
+        "model_reasoning_effort=\"low\"",
+        "-c",
+        "web_search=\"disabled\"",
+    ];
+    for tool in CODEX_TOOLS_OFF {
+        expected.extend(["--disable", tool]);
+    }
+    expected.extend(["--output-schema", "--model", "a-model", "-"]);
+    assert_eq!(args, expected);
 }
 
 /// A malformed answer is a failed decision, with no word of the question
@@ -317,12 +348,12 @@ fn a_huge_cli_answer_is_a_failed_decision() {
 fn a_cli_that_hangs_is_killed_at_its_time_limit() {
     for cli in CLIS {
         let fixture = Fixture::new(&format!("hang-{cli}"), "hang");
-        let mut decider = fixture.decider(cli);
+        let mut decider = fixture.impatient(cli);
         let (result, took) = timed(|| decider.decide(&question(), &go_on));
         let e = result.unwrap_err();
         assert!(took < PROMPTLY, "took {took:?}");
         assert!(
-            matches!(reason(&e), CliError::NoAnswer(c, limit) if *c == cli && *limit == Duration::from_secs(1)),
+            matches!(reason(&e), CliError::NoAnswer(c, limit) if *c == cli && *limit == HANG_LIMIT),
             "{e:?}"
         );
         assert!(matches!(e, DecideError::Unavailable(_)), "{e:?}");
@@ -502,12 +533,18 @@ fn completion(content: &str) -> String {
     .to_string()
 }
 
-/// A decider on `endpoint`, with a short time limit.
-fn endpoint_decider(endpoint: Endpoint) -> EndpointDecider {
+/// A decider on `endpoint`, giving up after `limit`.
+fn endpoint_within(endpoint: Endpoint, limit: Duration) -> EndpointDecider {
     let mut config = EndpointConfig::new(endpoint);
     config.model = Some("qwen3".to_owned());
-    config.timeout = Duration::from_millis(500);
+    config.timeout = limit;
     EndpointDecider::new(config, Box::new(English::new(None)), clock())
+}
+
+/// A decider on `endpoint`, with a time limit no answer comes near on a
+/// busy machine.
+fn endpoint_decider(endpoint: Endpoint) -> EndpointDecider {
+    endpoint_within(endpoint, Duration::from_secs(30))
 }
 
 /// A server's answer is read as a yes and a no, from a request posted to
@@ -571,7 +608,7 @@ fn a_server_error_gives_its_status_alone() {
 #[test]
 fn a_server_that_hangs_times_out() {
     let (endpoint, _request) = serve(Serve::Hang);
-    let mut decider = endpoint_decider(endpoint);
+    let mut decider = endpoint_within(endpoint, Duration::from_millis(500));
     let (result, took) = timed(|| decider.decide(&question(), &go_on));
     let e = result.unwrap_err();
     assert!(took < PROMPTLY, "took {took:?}");
@@ -646,4 +683,110 @@ fn a_server_elsewhere_runs_in_the_cloud() {
         let decider = endpoint_decider(Endpoint::parse(url).unwrap());
         assert_eq!(decider.place(), Place::Local, "{url}");
     }
+}
+
+/// A server that sends its whole answer in chunks, as Go's servers do once
+/// it's over a couple of KiB, is read like one that gives its length.
+#[test]
+fn a_server_answer_in_chunks_is_read() {
+    let answer = r#"{"decisions":[{"id":1,"apply":true},{"id":2,"apply":false}]}"#;
+    let body = completion(answer);
+    let (first, second) = body.split_at(body.len() / 2);
+    let chunked = format!(
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
+         {:x}\r\n{first}\r\n{:x}\r\n{second}\r\n0\r\n\r\n",
+        first.len(),
+        second.len()
+    );
+    let (endpoint, _request) = serve(Serve::With(chunked));
+    let decisions = endpoint_decider(endpoint)
+        .decide(&question(), &go_on)
+        .unwrap();
+    assert_eq!(answers(&decisions), [Answer::Yes, Answer::No]);
+}
+
+/// A refusal the server would give every question (it wants a key, or
+/// has no such path or model) makes the decider unavailable, so no more
+/// of the transcript goes to it.
+#[test]
+fn a_server_that_refuses_every_question_stops_the_job() {
+    for status in [401, 403, 404, 405, 429] {
+        let (endpoint, _request) = serve(Serve::With(response(status, SECRETS[1])));
+        let e = endpoint_decider(endpoint)
+            .decide(&question(), &go_on)
+            .unwrap_err();
+        assert!(matches!(e, DecideError::Unavailable(_)), "{status}: {e:?}");
+        assert!(
+            matches!(reason(&e), EndpointError::RefusesAll(s) if *s == status),
+            "{e:?}"
+        );
+        assert_no_secrets(&everything_said(&e));
+    }
+}
+
+/// An endpoint decider's debug form holds nothing of a question it
+/// asked.
+#[test]
+fn an_endpoint_deciders_debug_form_holds_no_question() {
+    let answer = r#"{"decisions":[{"id":1,"apply":true},{"id":2,"apply":false}]}"#;
+    let (endpoint, _request) = serve(Serve::With(response(200, &completion(answer))));
+    let mut decider = endpoint_decider(endpoint);
+    decider.decide(&question(), &go_on).unwrap();
+    assert_no_secrets(&format!("{decider:?}"));
+}
+
+/// Through a launcher, the CLI is started as its last argument but one
+/// (the shim, then the CLI and its own arguments), and still answers.
+#[test]
+fn a_cli_can_be_started_through_a_launcher() {
+    let fixture = Fixture::new("launcher", "answer");
+    let mut config = fixture.config(Cli::Codex);
+    config.launcher = Some(Launcher {
+        program: SHIM.into(),
+        args: vec!["exec-tied".into()],
+    });
+    let mut decider = CliDecider::new(config, Box::new(English::new(None)), clock());
+    let decisions = decider.decide(&question(), &go_on).unwrap();
+    assert_eq!(answers(&decisions), [Answer::Yes, Answer::No]);
+    // The stand-in saw its own arguments, so the shim ran it by exec.
+    assert!(
+        fixture.read("args").starts_with("exec\n"),
+        "{}",
+        fixture.read("args")
+    );
+}
+
+/// Through a launcher, a CLI named by a path that isn't there is named
+/// as missing, rather than read as a CLI that fails.
+#[test]
+fn a_missing_cli_behind_a_launcher_is_named() {
+    let fixture = Fixture::new("launcher-missing", "answer");
+    let mut config = fixture.config(Cli::Claude);
+    config.program = fixture.dir.join("no-such-claude");
+    config.launcher = Some(Launcher {
+        program: SHIM.into(),
+        args: vec!["exec-tied".into()],
+    });
+    let mut decider = CliDecider::new(config, Box::new(English::new(None)), clock());
+    let e = decider.decide(&question(), &go_on).unwrap_err();
+    assert!(
+        matches!(reason(&e), CliError::Missing(Cli::Claude, p) if p.ends_with("no-such-claude")),
+        "{e:?}"
+    );
+}
+
+/// A work folder other users can open is refused, naming it.
+#[test]
+fn an_open_work_folder_is_refused() {
+    let fixture = Fixture::new("open-work", "answer");
+    fixture.open_to_all();
+    let e = fixture
+        .decider(Cli::Claude)
+        .decide(&question(), &go_on)
+        .unwrap_err();
+    assert!(matches!(e, DecideError::Unavailable(_)), "{e:?}");
+    assert!(
+        matches!(reason(&e), CliError::WorkDirOpen(dir) if *dir == fixture.work()),
+        "{e:?}"
+    );
 }

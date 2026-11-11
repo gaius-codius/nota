@@ -1,11 +1,14 @@
-//! Just enough HTTP/1.1 to talk to llama-server over its UNIX socket.
+//! Just enough HTTP/1.1 to talk to llama-server over its UNIX socket, and
+//! to an OpenAI-compatible server over TCP.
 //!
 //! nota sends one request per connection, with `Connection: close`, and
 //! reads one response. llama-server frames a response with
 //! `Content-Length`; with no length, the body runs to the end of the
-//! connection. Chunked responses (sent only when streaming, which nota
-//! never asks for) are refused. Everything read is bounded: the head to
-//! [`MAX_HEAD_LEN`], the body to [`MAX_REPLY_LEN`].
+//! connection. Other servers may send a whole answer in chunks (Go's,
+//! Ollama's among them, do once it's over a couple of KiB), which are
+//! joined; any other transfer encoding is refused. Everything read is
+//! bounded: the head to [`MAX_HEAD_LEN`], the body to [`MAX_REPLY_LEN`],
+//! and each chunk's size line to [`MAX_CHUNK_LINE`].
 //!
 //! A UNIX socket rather than a TCP port, because the socket lives in a
 //! directory only this user can open, so no other user on the machine can
@@ -17,6 +20,21 @@ use std::fmt;
 use std::io::{self, Read, Write};
 
 use crate::reply::MAX_REPLY_LEN;
+
+/// The longest chunk size line read, in bytes: a size in hex, with room for
+/// an extension after it.
+pub const MAX_CHUNK_LINE: usize = 256;
+
+/// How a response's body is framed, from its head.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Framing {
+    /// `Content-Length` gives its length.
+    Length(usize),
+    /// It comes in chunks.
+    Chunked,
+    /// It runs to the end of the connection.
+    ToEnd,
+}
 
 /// The longest response head (status line and headers) read, in bytes.
 /// llama-server's are about 200.
@@ -103,16 +121,78 @@ pub fn exchange(stream: &mut (impl Read + Write), request: &[u8]) -> Result<Resp
 ///
 /// # Errors
 ///
-/// If reading fails or ends early, the head isn't HTTP/1.x, the response
-/// is chunked, or the head or body is over its limit.
+/// If reading fails or ends early, the head isn't HTTP/1.x, the body's
+/// encoding isn't plain or chunked, its chunks are malformed, or the head
+/// or body is over its limit.
 pub fn read_response(input: &mut impl Read) -> Result<Response, HttpError> {
     let (head, rest) = read_head(input)?;
-    let (status, length) = parse_head(&head)?;
-    let body = match length {
-        Some(length) => body_of(input, rest, length)?,
-        None => body_to_end(input, rest)?,
+    let (status, framing) = parse_head(&head)?;
+    let body = match framing {
+        Framing::Length(length) => body_of(input, rest, length)?,
+        Framing::Chunked => body_in_chunks(&mut io::Cursor::new(rest).chain(input))?,
+        Framing::ToEnd => body_to_end(input, rest)?,
     };
     Ok(Response { status, body })
+}
+
+/// A chunked body read from `input`: each chunk's size line, its bytes and
+/// their line end, until the chunk of size 0 and the trailers after it.
+fn body_in_chunks(input: &mut impl Read) -> Result<Vec<u8>, HttpError> {
+    let mut body = Vec::new();
+    loop {
+        let line = line_of(input)?;
+        let size = line.split(';').next().unwrap_or_default().trim();
+        let size = usize::from_str_radix(size, 16)
+            .map_err(|_| HttpError::BadHead("a chunk's size isn't a number"))?;
+        if size == 0 {
+            break;
+        }
+        if size > MAX_REPLY_LEN.saturating_sub(body.len()) {
+            return Err(HttpError::TooLong("body"));
+        }
+        let start = body.len();
+        input.take(size as u64).read_to_end(&mut body)?;
+        if body.len() - start < size {
+            return Err(HttpError::Io(io::ErrorKind::UnexpectedEof.into()));
+        }
+        if !line_of(input)?.is_empty() {
+            return Err(HttpError::BadHead("a chunk runs past its size"));
+        }
+    }
+    // Trailers, which nota has no use for, up to the blank line that ends
+    // them; bounded, since each is a line.
+    for _ in 0..MAX_TRAILERS {
+        if line_of(input)?.is_empty() {
+            return Ok(body);
+        }
+    }
+    Err(HttpError::TooLong("trailers"))
+}
+
+/// The most trailer lines read after a chunked body.
+const MAX_TRAILERS: usize = 64;
+
+/// One line from `input`, without its `\r\n`, read a byte at a time so
+/// nothing past it is taken; at most [`MAX_CHUNK_LINE`] bytes.
+fn line_of(input: &mut impl Read) -> Result<String, HttpError> {
+    let mut line = Vec::new();
+    let mut byte = [0_u8; 1];
+    loop {
+        if input.read(&mut byte)? == 0 {
+            return Err(HttpError::Io(io::ErrorKind::UnexpectedEof.into()));
+        }
+        if byte == *b"\n" {
+            if line.pop() != Some(b'\r') {
+                return Err(HttpError::BadHead("a chunk line doesn't end in CRLF"));
+            }
+            return String::from_utf8(line)
+                .map_err(|_| HttpError::BadHead("a chunk line isn't text"));
+        }
+        if line.len() >= MAX_CHUNK_LINE {
+            return Err(HttpError::TooLong("chunk line"));
+        }
+        line.push(byte[0]);
+    }
 }
 
 /// The body that `Content-Length` says is `length` bytes: `read`, what came
@@ -176,15 +256,15 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-/// The status code and `Content-Length`, if any, from a response `head`.
-fn parse_head(head: &[u8]) -> Result<(u16, Option<usize>), HttpError> {
+/// The status code and the body's framing, from a response `head`.
+fn parse_head(head: &[u8]) -> Result<(u16, Framing), HttpError> {
     let head = std::str::from_utf8(head).map_err(|_| HttpError::BadHead("it isn't text"))?;
     let mut lines = head.split("\r\n");
     let status = lines
         .next()
         .and_then(status_of)
         .ok_or(HttpError::BadHead("no status line"))?;
-    let mut length = None;
+    let (mut length, mut chunked) = (None, false);
     for line in lines {
         let (name, value) = line
             .split_once(':')
@@ -199,10 +279,19 @@ fn parse_head(head: &[u8]) -> Result<(u16, Option<usize>), HttpError> {
             }
             length = Some(parsed);
         } else if name.eq_ignore_ascii_case("transfer-encoding") {
-            return Err(HttpError::BadHead("it's chunked"));
+            if !value.eq_ignore_ascii_case("chunked") || chunked {
+                return Err(HttpError::BadHead("its transfer encoding isn't chunked"));
+            }
+            chunked = true;
         }
     }
-    Ok((status, length))
+    match (length, chunked) {
+        // Which to believe is a guess, and a wrong guess cuts the body in the wrong place.
+        (Some(_), true) => Err(HttpError::BadHead("it gives a length and is chunked")),
+        (Some(length), false) => Ok((status, Framing::Length(length))),
+        (None, true) => Ok((status, Framing::Chunked)),
+        (None, false) => Ok((status, Framing::ToEnd)),
+    }
 }
 
 /// The status code in a status line such as `HTTP/1.1 200 OK`.

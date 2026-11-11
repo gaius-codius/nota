@@ -1,5 +1,7 @@
 use std::os::unix::process::ExitStatusExt;
 
+use serde_json::json;
+
 use super::*;
 
 /// What a CLI that exited with `code` left on its stdout.
@@ -51,7 +53,6 @@ fn a_claude_error_keeps_only_its_status() {
             r#"{"type":"result","is_error":true,"api_error_status":70000}"#,
             None,
         ),
-        (r#"{"type":"result","structured_output":{}}"#, None),
     ];
     for (stdout, status) in cases {
         let Err(CliError::Refused(Cli::Claude, got)) = claude_answer(&ran(1, stdout), 1) else {
@@ -120,5 +121,45 @@ fn only_an_unusable_answer_is_a_failed_decision() {
     ];
     for e in unavailable {
         assert!(matches!(e.into_decide(), DecideError::Unavailable(_)));
+    }
+}
+
+/// A schema file is named by its whole path, though its folder was given
+/// relative: Codex runs in that folder and would look for it under itself.
+#[test]
+fn a_schema_file_is_named_by_its_whole_path() {
+    // The workspace's build folder, from the crate's, where tests run.
+    let file = SchemaFile::write(Path::new("../../target"), &json!({})).unwrap();
+    assert!(file.0.is_absolute(), "{}", file.0.display());
+    assert!(file.0.exists(), "{}", file.0.display());
+    let path = file.0.clone();
+    drop(file);
+    assert!(!path.exists(), "{} was left", path.display());
+}
+
+/// Claude's result that doesn't say whether it failed, or that gave up on
+/// the answer's shape, is an answer that can't be used: a failed decision,
+/// not a CLI that can't run.
+#[test]
+fn a_claude_result_unsure_or_out_of_shape_cant_be_used() {
+    let cases = [
+        (
+            r#"{"type":"result","structured_output":{}}"#,
+            ReplyError::NotACompletion("it doesn't say whether it failed"),
+        ),
+        (
+            r#"{"type":"result","is_error":"false","structured_output":{}}"#,
+            ReplyError::NotACompletion("it doesn't say whether it failed"),
+        ),
+        (
+            r#"{"type":"result","is_error":true,"subtype":"error_max_structured_output_retries"}"#,
+            ReplyError::NotDecisions("it gave up on the answer's shape"),
+        ),
+    ];
+    for (stdout, expected) in cases {
+        let Err(CliError::Unreadable(Cli::Claude, got)) = claude_answer(&ran(0, stdout), 1) else {
+            panic!("{stdout}")
+        };
+        assert_eq!(got.to_string(), expected.to_string(), "{stdout}");
     }
 }

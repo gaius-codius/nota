@@ -1,5 +1,6 @@
 //! The chat request a question becomes, in llama-server's
-//! OpenAI-compatible form.
+//! OpenAI-compatible form, which other such servers take too; and the
+//! single message a CLI is given ([`one_message`]).
 //!
 //! The settings are the bench's (`pick.py`): temperature 0, thinking off,
 //! and a JSON schema that llama-server turns into a grammar, so the reply

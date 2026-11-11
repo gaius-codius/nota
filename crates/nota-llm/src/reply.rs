@@ -1,4 +1,6 @@
-//! Reading llama-server's reply to a question into typed decisions.
+//! Reading a model's reply to a question into typed decisions: a chat
+//! completion from llama-server or another OpenAI-compatible server, or a
+//! bare answer from a CLI ([`parse_answer`]).
 //!
 //! The reply comes from outside nota, so nothing in it is trusted. It's
 //! read here, once, into one [`Decision`] per candidate, or refused:

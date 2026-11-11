@@ -700,7 +700,7 @@ fn socket_path(dir: &Path, pid: u32, generation: u64) -> Result<PathBuf, ServerE
 }
 
 /// Whether `program` is a file that can be run.
-fn runnable(program: &Path) -> io::Result<()> {
+pub(crate) fn runnable(program: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     let meta = std::fs::metadata(program)?;

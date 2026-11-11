@@ -10,6 +10,7 @@
 //! unreaped: its id can't have been given to another process then.
 
 use std::io::{self, Read, Write};
+use std::os::unix::process::CommandExt as _;
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
@@ -68,7 +69,11 @@ impl Drop for Running {
         if let Some(mut child) = self.0.take() {
             // Still unreaped, so its id is still its group's. Fails only if
             // the group has gone already.
-            let _ = kill_process_group(Pid::from_child(&child), Signal::KILL);
+            // A CLI that left its group (by `setsid`, say) is killed
+            // alone, so the wait below can't block for good.
+            if kill_process_group(Pid::from_child(&child), Signal::KILL).is_err() {
+                let _ = child.kill();
+            }
             let _ = child.wait();
         }
     }
@@ -97,7 +102,7 @@ pub(crate) fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     // A group of its own, so a stop kills whatever it started too.
-    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    command.process_group(0);
     let mut child = command.spawn().map_err(RunFailure::Spawn)?;
     let pipes = (child.stdin.take(), child.stdout.take());
     let mut running = Running(Some(child));

@@ -43,7 +43,9 @@ fn main() -> ExitCode {
 fn run() -> std::io::Result<ExitCode> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     std::fs::write("args", args.join("\n"))?;
-    std::fs::write("pid", std::process::id().to_string())?;
+    // Whole or not at all, for a test that waits for it to appear.
+    std::fs::write("pid.tmp", std::process::id().to_string())?;
+    std::fs::rename("pid.tmp", "pid")?;
     let mut question = String::new();
     std::io::stdin().read_to_string(&mut question)?;
     std::fs::write("stdin", &question)?;

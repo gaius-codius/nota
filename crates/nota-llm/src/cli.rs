@@ -5,10 +5,15 @@
 //!
 //! The question goes in on the CLI's stdin, never in its arguments, which
 //! anyone on the machine can read. The arguments hold only the answer's
-//! schema, a fixed instruction and the model's name. Each CLI is told to
-//! use no tools, keep no session, and load none of the user's MCP servers,
-//! hooks or project files, and runs in an empty folder of nota's own: the
-//! question is all it sees.
+//! schema, a fixed instruction and the model's name. Each CLI runs in an
+//! empty folder of nota's own, keeps no session, and is told to use no
+//! tools and load none of the user's MCP servers or hooks: Claude with
+//! `--tools ""` and no setting sources, Codex without the user's config
+//! and with its shell, web, app and browser tools turned off.
+//!
+//! Given a [`CliConfig::launcher`] (nota's own `engine` shim, as for
+//! llama-server; see [`crate::lifeline`]), the CLI is started through it
+//! and is killed when nota dies, however it dies.
 //! - `claude -p --output-format json --json-schema …` answers with a
 //!   result object whose `structured_output` is the answer.
 //! - `codex exec --output-schema <file> -` prints the answer alone on its
@@ -33,6 +38,7 @@
 //! with the shape of the answer.
 
 use std::error::Error;
+use std::ffi::OsString;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -43,12 +49,13 @@ use std::time::Duration;
 
 use nota_core::Clock;
 use nota_core::decide::{DecideError, Decider, Decision, Decisions, Place, Question};
+use nota_core::lifeline::RECORDER_PID_VAR;
 use serde_json::Value;
 
 use crate::prompt::Prompt;
 use crate::reply::{self, ReplyError};
 use crate::request;
-use crate::server::{ServerError, private_dir};
+use crate::server::{Launcher, ServerError, private_dir, runnable};
 
 mod run;
 
@@ -63,6 +70,18 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(180);
 /// go in on stdin with the question.
 pub const CLAUDE_SYSTEM: &str = "Answer the user's message exactly as it asks, in the JSON \
     shape it gives. Use no tools.";
+
+/// The Codex features turned off for a question, so it has no tool to
+/// run: its shells, its apps and plugins, and its browsers.
+pub const CODEX_TOOLS_OFF: [&str; 7] = [
+    "shell_tool",
+    "unified_exec",
+    "apps",
+    "plugins",
+    "browser_use",
+    "computer_use",
+    "in_app_browser",
+];
 
 /// Which CLI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +123,9 @@ pub struct CliConfig {
     pub work_dir: PathBuf,
     /// How long it has to answer a question.
     pub timeout: Duration,
+    /// What to start the CLI through, if anything: normally nota's own
+    /// shim, which ties the CLI to nota. It must run the CLI by exec.
+    pub launcher: Option<Launcher>,
 }
 
 impl CliConfig {
@@ -117,6 +139,7 @@ impl CliConfig {
             model: None,
             work_dir,
             timeout: DEFAULT_TIMEOUT,
+            launcher: None,
         }
     }
 }
@@ -130,7 +153,9 @@ pub enum CliError {
     /// The program was found but couldn't be started.
     Spawn(Cli, io::Error),
     /// The folder it runs in couldn't be made or used.
-    WorkDir(ServerError),
+    WorkDir(PathBuf, io::Error),
+    /// The folder it runs in can be opened by other users.
+    WorkDirOpen(PathBuf),
     /// Its schema file couldn't be written.
     Schema(Cli, io::Error),
     /// It hadn't answered within this long, and was killed.
@@ -158,7 +183,16 @@ impl fmt::Display for CliError {
                 program.display()
             ),
             Self::Spawn(cli, e) => write!(f, "{cli} couldn't be started: {e}"),
-            Self::WorkDir(e) => write!(f, "the folder the CLI runs in can't be used: {e}"),
+            Self::WorkDir(dir, e) => write!(
+                f,
+                "the folder the CLI runs in, {}, can't be used: {e}",
+                dir.display()
+            ),
+            Self::WorkDirOpen(dir) => write!(
+                f,
+                "the folder the CLI runs in, {}, can be opened by other users",
+                dir.display()
+            ),
             Self::Schema(cli, e) => write!(f, "{cli}'s answer schema couldn't be written: {e}"),
             Self::NoAnswer(cli, limit) => {
                 write!(f, "{cli} gave no answer within {limit:?}")
@@ -182,8 +216,9 @@ impl fmt::Display for CliError {
 impl Error for CliError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Spawn(_, e) | Self::Schema(_, e) | Self::Io(_, e) => Some(e),
-            Self::WorkDir(e) => Some(e),
+            Self::Spawn(_, e) | Self::Schema(_, e) | Self::Io(_, e) | Self::WorkDir(_, e) => {
+                Some(e)
+            }
             Self::Unreadable(_, e) => Some(e),
             _ => None,
         }
@@ -227,7 +262,8 @@ impl CliDecider {
     /// Runs the CLI on `question` and reads its decisions.
     fn ask(&self, question: &Question, stop: &dyn Fn() -> bool) -> Result<Decisions, Asked> {
         let cli = self.config.cli;
-        private_dir(&self.config.work_dir).map_err(|e| Asked::Error(CliError::WorkDir(e)))?;
+        private_dir(&self.config.work_dir).map_err(work_dir_error)?;
+        self.check_program()?;
         let schema = request::schema(question.len());
         let schema_file = match cli {
             Cli::Claude => None,
@@ -253,55 +289,48 @@ impl CliDecider {
     }
 
     /// The command that asks the question, with the answer held to
-    /// `schema` (for Codex, in `schema_file`).
+    /// `schema` (for Codex, in `schema_file`), started through the
+    /// launcher if there is one.
     fn command(&self, schema: &Value, schema_file: Option<&SchemaFile>) -> Command {
-        let mut command = Command::new(&self.config.program);
-        command.current_dir(&self.config.work_dir);
+        let mut command = match &self.config.launcher {
+            Some(launcher) => {
+                let mut c = Command::new(&launcher.program);
+                c.args(&launcher.args).arg(&self.config.program);
+                c
+            }
+            None => Command::new(&self.config.program),
+        };
+        command
+            .current_dir(&self.config.work_dir)
+            // Whom the launcher ties the CLI to.
+            .env(RECORDER_PID_VAR, std::process::id().to_string());
         match self.config.cli {
-            Cli::Claude => {
-                command.args(["-p", "--output-format", "json", "--json-schema"]);
-                command.arg(schema.to_string());
-                command.args([
-                    "--tools",
-                    "",
-                    "--no-session-persistence",
-                    "--setting-sources",
-                    "",
-                    "--strict-mcp-config",
-                    "--disable-slash-commands",
-                    "--system-prompt",
-                    CLAUDE_SYSTEM,
-                ]);
-                if let Some(model) = &self.config.model {
-                    command.args(["--model", model]);
-                }
-            }
-            Cli::Codex => {
-                command.args([
-                    "exec",
-                    "--ignore-user-config",
-                    "--ephemeral",
-                    "--skip-git-repo-check",
-                    "--sandbox",
-                    "read-only",
-                    "--color",
-                    "never",
-                    // Its default with no config of the user's is no
-                    // reasoning, which was seen to hang.
-                    "-c",
-                    "model_reasoning_effort=\"low\"",
-                ]);
-                if let Some(file) = schema_file {
-                    command.arg("--output-schema").arg(&file.0);
-                }
-                if let Some(model) = &self.config.model {
-                    command.args(["--model", model]);
-                }
-                // The prompt from stdin.
-                command.arg("-");
-            }
+            Cli::Claude => command.args(claude_args(schema)),
+            Cli::Codex => command.args(codex_args(schema_file)),
+        };
+        if let Some(model) = &self.config.model {
+            command.args([OsString::from("--model"), OsString::from(model)]);
+        }
+        if self.config.cli == Cli::Codex {
+            // The prompt from stdin.
+            command.arg("-");
         }
         command
+    }
+
+    /// Whether a CLI named by its path can be run, when it's started
+    /// through a launcher: the launcher would start, then fail to run it,
+    /// which would read as a CLI that fails. A bare name is looked for on
+    /// `PATH` by the launcher's exec, so it's left to that.
+    fn check_program(&self) -> Result<(), CliError> {
+        let program = &self.config.program;
+        if self.config.launcher.is_none() || program.components().count() < 2 {
+            return Ok(());
+        }
+        runnable(program).map_err(|e| match e.kind() {
+            io::ErrorKind::NotFound => CliError::Missing(self.config.cli, program.clone()),
+            _ => CliError::Spawn(self.config.cli, e),
+        })
     }
 
     /// The error for a run that didn't reach its end.
@@ -357,6 +386,75 @@ impl Decider for CliDecider {
     }
 }
 
+/// `claude -p`'s arguments, before the model's: JSON out, held to
+/// `schema`, with no tools, session, settings, MCP servers or commands,
+/// and nota's own system prompt.
+fn claude_args(schema: &Value) -> Vec<OsString> {
+    let mut args: Vec<OsString> = ["-p", "--output-format", "json", "--json-schema"]
+        .map(OsString::from)
+        .into();
+    args.push(schema.to_string().into());
+    args.extend(
+        [
+            "--tools",
+            "",
+            "--no-session-persistence",
+            "--setting-sources",
+            "",
+            "--strict-mcp-config",
+            "--disable-slash-commands",
+            "--system-prompt",
+            CLAUDE_SYSTEM,
+        ]
+        .map(OsString::from),
+    );
+    args
+}
+
+/// `codex exec`'s arguments, before the model's: without the user's
+/// config or a session, read-only, with no tools, and held to the schema
+/// in `schema_file`.
+fn codex_args(schema_file: Option<&SchemaFile>) -> Vec<OsString> {
+    let mut args: Vec<OsString> = [
+        "exec",
+        "--ignore-user-config",
+        "--ephemeral",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "read-only",
+        "--color",
+        "never",
+        // Its default with no config of the user's is no reasoning, which
+        // was seen to hang.
+        "-c",
+        "model_reasoning_effort=\"low\"",
+        "-c",
+        "web_search=\"disabled\"",
+    ]
+    .map(OsString::from)
+    .into();
+    // No tools: a read-only sandbox still lets its shell read any file,
+    // and the transcript could ask it to.
+    for tool in CODEX_TOOLS_OFF {
+        args.extend(["--disable", tool].map(OsString::from));
+    }
+    if let Some(file) = schema_file {
+        args.push("--output-schema".into());
+        args.push(file.0.clone().into());
+    }
+    args
+}
+
+/// The error for a work folder [`private_dir`] refused.
+fn work_dir_error(e: ServerError) -> CliError {
+    match e {
+        ServerError::SocketDir(dir, e) => CliError::WorkDir(dir, e),
+        ServerError::SocketDirOpen(dir) => CliError::WorkDirOpen(dir),
+        // `private_dir` gives no other; kept whole if it ever does.
+        other => CliError::WorkDir(PathBuf::new(), io::Error::other(other.to_string())),
+    }
+}
+
 /// The decisions in what `claude -p --output-format json` wrote: a result
 /// object, whose `structured_output` is the answer unless `is_error` says
 /// it failed.
@@ -376,17 +474,41 @@ fn claude_answer(ran: &Ran, candidates: usize) -> Result<Vec<Decision>, CliError
             CliError::Exited(cli, ran.status)
         });
     }
-    if result.get("is_error").and_then(Value::as_bool) != Some(false) {
-        let status = result
-            .get("api_error_status")
-            .and_then(Value::as_u64)
-            .and_then(|s| u16::try_from(s).ok());
-        return Err(CliError::Refused(cli, status));
+    match result.get("is_error").and_then(Value::as_bool) {
+        Some(false) => {}
+        // Claude kept answering in the wrong shape and gave up: the same
+        // as a malformed answer, not a CLI that can't run.
+        Some(true) if gave_up_on_the_shape(&result) => {
+            return Err(unreadable(ReplyError::NotDecisions(
+                "it gave up on the answer's shape",
+            )));
+        }
+        Some(true) => {
+            let status = result
+                .get("api_error_status")
+                .and_then(Value::as_u64)
+                .and_then(|s| u16::try_from(s).ok());
+            return Err(CliError::Refused(cli, status));
+        }
+        None => {
+            return Err(unreadable(ReplyError::NotACompletion(
+                "it doesn't say whether it failed",
+            )));
+        }
     }
     let answer = result
         .get("structured_output")
         .ok_or_else(|| unreadable(ReplyError::NotACompletion("there's no structured answer")))?;
     reply::answer_of(answer, candidates).map_err(unreadable)
+}
+
+/// Whether Claude's error `result` is its giving up on the schema, after
+/// answering in the wrong shape too many times.
+fn gave_up_on_the_shape(result: &Value) -> bool {
+    result
+        .get("subtype")
+        .and_then(Value::as_str)
+        .is_some_and(|subtype| subtype.starts_with("error_max_structured_output"))
 }
 
 /// The decisions in what `codex exec` wrote: its last message, the answer
@@ -411,7 +533,7 @@ static SCHEMA_FILES: AtomicU64 = AtomicU64::new(0);
 struct SchemaFile(PathBuf);
 
 impl SchemaFile {
-    /// Writes `schema` to a new file in `dir`.
+    /// Writes `schema` to a new file in `dir`, named by its whole path.
     ///
     /// # Errors
     ///
@@ -422,6 +544,9 @@ impl SchemaFile {
     )]
     fn write(dir: &Path, schema: &Value) -> Result<Self, CliError> {
         let n = SCHEMA_FILES.fetch_add(1, Ordering::Relaxed);
+        // Whole, since Codex runs in `dir` and would read a relative path
+        // from there.
+        let dir = std::path::absolute(dir).map_err(|e| CliError::Schema(Cli::Codex, e))?;
         let path = dir.join(format!("schema-{}-{n}.json", std::process::id()));
         std::fs::write(&path, schema.to_string()).map_err(|e| CliError::Schema(Cli::Codex, e))?;
         Ok(Self(path))

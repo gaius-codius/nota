@@ -16,12 +16,16 @@
 //! - **`stop` says to stop:** the connection is dropped, and the question
 //!   comes back [`DecideError::Stopped`].
 //! - **The server can't be reached, doesn't answer within
-//!   [`EndpointConfig::timeout`], or fails** (a 5xx status, a connection
-//!   that breaks): [`DecideError::Unavailable`]. It isn't asked again;
-//!   nota doesn't run this server, so it can't restart it.
-//! - **The answer can't be read** (a malformed reply, a refusal such as an
-//!   unknown model, a reply cut short): a failed decision,
-//!   [`DecideError::Failed`].
+//!   [`EndpointConfig::timeout`], fails** (a 5xx status, a connection
+//!   that breaks), **or refuses every question alike** (it wants a key,
+//!   has no such path or model, or is over its rate limit: 401, 403, 404,
+//!   405, 429): [`DecideError::Unavailable`], so the job stops rather than
+//!   send the rest of the transcript to a server that won't answer it. It
+//!   isn't asked again; nota doesn't run this server, so it can't restart
+//!   it.
+//! - **The answer can't be read** (a malformed reply, a refusal of this
+//!   question alone such as one too long, a reply cut short): a failed
+//!   decision, [`DecideError::Failed`].
 //!
 //! No reason holds what the server said, only its status: a refusal may
 //! quote the question back.
@@ -253,9 +257,13 @@ pub enum EndpointError {
     Connection(HttpError),
     /// It failed with this server error status (5xx).
     Failed(u16),
-    /// It refused the question with this status (a 4xx: an unknown model,
-    /// a question too long).
+    /// It refused this question with this status (a 4xx such as 400 or
+    /// 413: a question too long, say).
     Refused(u16),
+    /// It refused with a status that it would give every question (401,
+    /// 403, 404, 405, 429): a key it wants, a wrong path or model, a rate
+    /// limit.
+    RefusesAll(u16),
     /// Its response wasn't HTTP as expected, or was too long.
     Unreadable(HttpError),
     /// Its reply wasn't one yes or no per candidate.
@@ -273,6 +281,11 @@ impl fmt::Display for EndpointError {
             Self::Connection(e) => write!(f, "the connection to the server failed: {e}"),
             Self::Failed(status) => write!(f, "the server failed (status {status})"),
             Self::Refused(status) => write!(f, "the server refused the question (status {status})"),
+            Self::RefusesAll(status) => write!(
+                f,
+                "the server refuses questions (status {status}): check its address, \
+                 model and whether it needs a key"
+            ),
             Self::Unreadable(e) => write!(f, "the server's response couldn't be read: {e}"),
             Self::Reply(e) => write!(f, "the server's answer couldn't be used: {e}"),
         }
@@ -415,8 +428,8 @@ impl EndpointDecider {
 
 /// Starts connecting to `endpoint` on a thread, which sends the connection
 /// when it's made. Looking up a name can't be timed or stopped, so it's
-/// done there too; the thread ends by itself, within `limit` of the
-/// lookup, if nobody waits for it.
+/// done there too; if nobody waits for it, the thread ends by itself once
+/// the lookup and each address's try (up to `limit` apiece) are done.
 fn connect(endpoint: &Endpoint, limit: Duration) -> Result<Receiver<io::Result<TcpStream>>, Asked> {
     let (host, port) = (endpoint.bare_host().to_owned(), endpoint.port);
     let (tx, rx) = mpsc::sync_channel(1);
@@ -448,6 +461,7 @@ fn read(question: &Question, response: &Response) -> Result<Decisions, EndpointE
     match response.status {
         200 => {}
         status @ 500.. => return Err(EndpointError::Failed(status)),
+        status @ (401 | 403 | 404 | 405 | 429) => return Err(EndpointError::RefusesAll(status)),
         status => return Err(EndpointError::Refused(status)),
     }
     let decisions = reply::parse(&response.body, question.len()).map_err(EndpointError::Reply)?;
