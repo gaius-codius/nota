@@ -17,13 +17,13 @@
 //! | `track` | each track's kind and source | `nota record`, and adopting a session found on disk with its row kept |
 //! | `segment` | each published segment: its track, epoch, samples, SHA-256, decoded-audio digest (V6) | the recorder's publish step and salvage |
 //! | `epoch` | each epoch's first sample, rate, session-time anchor and drift (V7) ([`Store::insert_epoch`](crate::Store::insert_epoch)) | the recorder's publish step, before each segment row |
-//! | `utterance`, `word` | the heard text, as the engine confirmed it, with word times; never changed (V4's triggers) | `nota record`'s live text ([`crate::transcript`]) |
+//! | `utterance`, `word` | the heard text, as the engine confirmed it, with word times and log-probabilities (V11; unknown before); never changed (V4's triggers) | `nota record`'s live text ([`crate::transcript`]) |
 //! | `revision`, `revision_text` | the displayed text: revision 0 is the final pass's text, each later one a new row holding only what it changes, as runs of a chunk's words; never changed (V8) | revision 0 with the first final-text row, later ones by term clean-up ([`crate::revisions`]) |
 //! | `proposal` | a proposed fix to a run of a chunk's words, with the revision, model, pack and thresholds it came from (V8) | term clean-up |
 //! | `heard_revision`, `heard_revision_text`, `heard_proposal` | the heard text's revisions and proposals from before V8, kept as they were and never added to | nothing since V8 |
 //! | `mark`, `note` | marks and notes made while recording, in session time | `nota record`, as each is made ([`crate::annotations`]) |
 //! | `job` | work queued after a stop: its kind, state, progress and what it waits for (V5) | the job queue ([`crate::jobs`]) |
-//! | `final_text`, `final_word`, `final_progress` | the final pass's text, by track and sample, beside the heard text and never in it, never changed (V8); how far it has got on each track (V5) | the final pass ([`crate::final_text`]) |
+//! | `final_text`, `final_word`, `final_progress` | the final pass's text, by track and sample, with its words' log-probabilities (V11; unknown before), beside the heard text and never in it, never changed (V8); how far it has got on each track (V5) | the final pass ([`crate::final_text`]) |
 //! | `event` | the timeline: warnings raised and cleared, device changes, the transcriber's state, gaps | `nota record`, as each is sent to the screen ([`crate::timeline`]) |
 //! | `finding` | an index of each session's findings file: rows whose file didn't prove them, and rows that don't parse (V6) | the app, from the findings files ([`Store::index_findings`](crate::Store::index_findings)) |
 //! | `session_pack`, `session_packs_chosen` | the term packs a session chose, by name, version and digest (V10; none before), in order, and that it chose; never changed (V9) | Setup, when the session starts ([`Store::record_session_packs`](crate::Store::record_session_packs)) |
@@ -658,6 +658,22 @@ ALTER TABLE session_pack ADD COLUMN digest BLOB
 CREATE TRIGGER session_pack_never_without_a_digest BEFORE INSERT ON session_pack
 WHEN NEW.digest IS NULL
 BEGIN SELECT RAISE(ABORT, 'a session''s pack is never recorded without its digest'); END;
+";
+
+/// Version 11: each word's log-probability, `word.log_prob` and
+/// `final_word.log_prob`: the lowest of its tokens' log-probabilities
+/// (punctuation left out), as the engine gave it ([`nota_core::LogProb`]),
+/// never above zero.
+///
+/// Null is unknown: every word stored before this version, and a word the
+/// engine gave no value for. It never reads as zero, which is a word the
+/// model was certain of. So unlike V10's digest, nothing refuses a word
+/// without one. The value goes in with its word and, like the rest of the
+/// row, is never changed: V4's and V8's triggers refuse any UPDATE of
+/// either table, this column included.
+pub(crate) const V11: &str = "
+ALTER TABLE word ADD COLUMN log_prob REAL CHECK (log_prob IS NULL OR log_prob <= 0);
+ALTER TABLE final_word ADD COLUMN log_prob REAL CHECK (log_prob IS NULL OR log_prob <= 0);
 ";
 
 #[cfg(test)]

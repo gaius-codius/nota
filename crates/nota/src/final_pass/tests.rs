@@ -141,7 +141,10 @@ fn confirmed_text_is_stored_with_its_progress() {
     };
     let text = Transcript::new(MIC, range(0, 80), "hello there".into())
         .unwrap()
-        .with_words(vec![word("hello", 0, 40), word("there", 40, 80)])
+        .with_words(vec![
+            word("hello", 0, 40).with_log_prob(nota_core::LogProb::new(-0.75)),
+            word("there", 40, 80),
+        ])
         .unwrap();
     sink.confirmed(MIC, s(100), vec![text], vec![]).unwrap();
     sink.confirmed(MIC, s(250), vec![], vec![range(200, 250)])
@@ -159,14 +162,19 @@ fn confirmed_text_is_stored_with_its_progress() {
         ]
     );
     assert_eq!(stored[0].heard_by, heard_by());
-    // The words, by sample, as the engine gave them.
-    let word = |text: &str, a, b| FinalWord {
+    // The words, by sample, as the engine gave them, each with its
+    // log-probability or none.
+    let word = |text: &str, a, b, log_prob| FinalWord {
         text: text.to_owned(),
         range: range(a, b),
+        log_prob,
     };
     assert_eq!(
         stored[0].words,
-        [word("hello", 0, 40), word("there", 40, 80)]
+        [
+            word("hello", 0, 40, nota_core::LogProb::new(-0.75)),
+            word("there", 40, 80, None)
+        ]
     );
     assert!(stored[1].words.is_empty());
     assert_eq!(

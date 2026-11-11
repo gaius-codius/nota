@@ -235,11 +235,26 @@ fn utterances_and_their_words_keep_their_track() {
         ],
     );
 
-    let columns = "utterance_id, position, text, start_ns, end_ns";
-    // The newest utterance's: its words go in with it (V4).
+    let columns = "utterance_id, position, text, start_ns, end_ns, log_prob";
+    // The newest utterance's: its words go in with it (V4), one with a
+    // log-probability and one unknown (V11).
     let words = [
-        vec![int(2), int(0), text("hello"), int(150), int(400)],
-        vec![int(2), int(1), text("there"), int(450), int(700)],
+        vec![
+            int(2),
+            int(0),
+            text("hello"),
+            int(150),
+            int(400),
+            Value::Real(-0.5),
+        ],
+        vec![
+            int(2),
+            int(1),
+            text("there"),
+            int(450),
+            int(700),
+            Value::Null,
+        ],
     ];
     for word in &words {
         write(&store, "word", columns, word);
@@ -249,7 +264,21 @@ fn utterances_and_their_words_keep_their_track() {
         &store,
         "word",
         columns,
-        &[int(9), int(0), text("x"), int(0), int(1)],
+        &[int(9), int(0), text("x"), int(0), int(1), Value::Null],
+    );
+    // A log-probability is never above zero (V11).
+    refused(
+        &store,
+        "word",
+        columns,
+        &[
+            int(2),
+            int(2),
+            text("x"),
+            int(700),
+            int(800),
+            Value::Real(0.5),
+        ],
     );
 }
 
@@ -484,6 +513,22 @@ fn final_text_keeps_its_track_and_samples() {
     for bad in [row(0, 0, 20), row(0, 5, 5), row(0, -1, 2), row(-1, 0, 1)] {
         refused(&store, "final_text", columns, &bad);
     }
+    // A log-probability is never above zero (V11).
+    refused(
+        &store,
+        "final_word",
+        &format!("{words}, log_prob"),
+        &[
+            int(1),
+            int(0),
+            int(0),
+            int(1),
+            text("w"),
+            int(4),
+            int(6),
+            Value::Real(0.5),
+        ],
+    );
     for bad in [
         // No such text.
         [int(1), int(0), int(3), int(0), text("w"), int(2), int(4)],

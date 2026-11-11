@@ -13,7 +13,7 @@
 //!
 //! | Mode | Behaviour |
 //! |---|---|
-//! | `echo` | A good engine: every `N` audio frames per track (`--every`, default 1) it answers the buffered audio with a transcript of its range, text `"start-end"` as one word over the whole range, then a confirmation. `Flush` answers what is buffered and ends the track's stream. Exits 3 if a track's audio isn't contiguous. |
+//! | `echo` | A good engine: every `N` audio frames per track (`--every`, default 1) it answers the buffered audio with a transcript of its range, text `"start-end"` as one word over the whole range with the log-probability [`ECHO_LOG_PROB`], then a confirmation. `Flush` answers what is buffered and ends the track's stream. Exits 3 if a track's audio isn't contiguous. |
 //! | `text-only` | `echo`, but never confirms: it sends only the transcripts. |
 //! | `hang` | Sends `Hello`, then never writes again. |
 //! | `hang-after` | `echo` for `K` audio frames, then goes silent. |
@@ -25,6 +25,7 @@
 //! | `no-hello` | Never sends `Hello`. |
 //! | `wrong-version` | Sends a `Hello` with a protocol version after the current one. |
 //! | `old-version` | Sends a `Hello` with version 0, from before transcripts carried words. |
+//! | `no-log-probs-version` | Sends a `Hello` with version 1, from before words carried log-probabilities. |
 //!
 //! Every mode first requires the recorder's `Hello` (else exit 2) and exits 0
 //! when stdin ends. Bad arguments exit 2. Like the real engine, every mode
@@ -40,7 +41,7 @@ use std::process::ExitCode;
 use nota_core::lifeline::{Tie, tie_to_recorder};
 use nota_core::messages::{FromEngine, HeardWord, ProtocolVersion, ToEngine, Transcript};
 use nota_core::protocol::{Frame, FrameReader, write_frame};
-use nota_core::{SampleCount, SampleIndex, SampleRange, TrackId};
+use nota_core::{LogProb, SampleCount, SampleIndex, SampleRange, TrackId};
 
 /// Exit code for a bad handshake, bad arguments or a failed read or write.
 const EXIT_USAGE: u8 = 2;
@@ -48,6 +49,9 @@ const EXIT_USAGE: u8 = 2;
 const EXIT_GAP: u8 = 3;
 /// Exit code of `crash-after`, the code a Rust panic exits with.
 const EXIT_CRASH: u8 = 101;
+/// The log-probability `echo` gives its word, so a test can see it pass
+/// through to the stored text.
+const ECHO_LOG_PROB: f32 = -0.25;
 /// A length prefix over the frame limit, then some filler.
 const GARBAGE: [u8; 7] = [0xff, 0xff, 0xff, 0x7f, 1, 2, 3];
 
@@ -65,6 +69,7 @@ enum Mode {
     Deaf,
     WrongVersion,
     OldVersion,
+    NoLogProbsVersion,
 }
 
 impl Mode {
@@ -82,6 +87,7 @@ impl Mode {
             "deaf" => Self::Deaf,
             "wrong-version" => Self::WrongVersion,
             "old-version" => Self::OldVersion,
+            "no-log-probs-version" => Self::NoLogProbsVersion,
             _ => return None,
         })
     }
@@ -166,7 +172,11 @@ impl<W: Write> Engine<W> {
     fn new(args: Args, out: W) -> Self {
         let silent = matches!(
             args.mode,
-            Mode::Hang | Mode::NoHello | Mode::WrongVersion | Mode::OldVersion
+            Mode::Hang
+                | Mode::NoHello
+                | Mode::WrongVersion
+                | Mode::OldVersion
+                | Mode::NoLogProbsVersion
         );
         Self {
             args,
@@ -187,6 +197,7 @@ impl<W: Write> Engine<W> {
             Mode::NoHello => return Ok(()),
             Mode::WrongVersion => ProtocolVersion::new(ProtocolVersion::CURRENT.get() + 1),
             Mode::OldVersion => ProtocolVersion::WITHOUT_WORDS,
+            Mode::NoLogProbsVersion => ProtocolVersion::WITHOUT_LOG_PROBS,
             _ => ProtocolVersion::CURRENT,
         };
         write_frame(&mut self.out, &Frame::<FromEngine>::Hello(version))
@@ -283,7 +294,8 @@ impl<W: Write> Engine<W> {
             slow_down(self.args.delay_ms);
         }
         let text = format!("{}-{}", start.get(), end.get());
-        let word = HeardWord::new(text.clone(), range);
+        let word = HeardWord::new(text.clone(), range)
+            .map(|word| word.with_log_prob(LogProb::new(ECHO_LOG_PROB)));
         let Some(transcript) = Transcript::new(track, range, text) else {
             return Ok(());
         };

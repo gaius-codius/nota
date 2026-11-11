@@ -20,7 +20,7 @@
 use std::collections::BTreeMap;
 
 pub use nota_core::Word;
-use nota_core::{SessionId, SessionTime, TrackId, Utterance};
+use nota_core::{LogProb, SessionId, SessionTime, TrackId, Utterance};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::segments::{parse_track, session_exists};
@@ -106,6 +106,39 @@ fn parse_nanos(at: i64) -> Result<SessionTime, StoreError> {
         .map_err(|_| StoreError::Corrupt(format!("session time {at} is negative")))
 }
 
+/// A log-probability as SQLite holds it: a REAL, or NULL for unknown.
+/// Widening an `f32` to an `f64` is exact, so the value reads back as it
+/// was.
+pub(crate) fn stored_log_prob(log_prob: Option<LogProb>) -> Option<f64> {
+    log_prob.map(|value| f64::from(value.get()))
+}
+
+/// A stored log-probability: `None` for NULL, or the value written. A
+/// value no [`LogProb`] could have written (above zero, or not an `f32`'s)
+/// is corrupt, not unknown.
+pub(crate) fn parse_log_prob(stored: Option<f64>) -> Result<Option<LogProb>, StoreError> {
+    let Some(wide) = stored else {
+        return Ok(None);
+    };
+    let narrow = to_f32(wide);
+    // Widening back must give the same bits: then `wide` was an `f32`'s.
+    let exact = f64::from(narrow).to_bits() == wide.to_bits();
+    exact
+        .then(|| LogProb::from_bits(narrow.to_bits()))
+        .flatten()
+        .map(Some)
+        .ok_or_else(|| StoreError::Corrupt(format!("log-probability {wide} isn't one")))
+}
+
+/// `wide` rounded to an `f32`.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the caller widens the result back to check it lost nothing"
+)]
+const fn to_f32(wide: f64) -> f32 {
+    wide as f32
+}
+
 type RawUtterance = (i64, i64, i64, i64, String, String, String);
 
 fn parse_utterance(
@@ -133,7 +166,7 @@ fn parse_utterance(
 /// Every word of the session's utterances, by utterance, in order.
 fn words_of(conn: &Connection, key: i64) -> Result<BTreeMap<i64, Vec<Word>>, StoreError> {
     let mut stmt = conn.prepare(
-        "SELECT w.utterance_id, w.text, w.start_ns, w.end_ns FROM word w \
+        "SELECT w.utterance_id, w.text, w.start_ns, w.end_ns, w.log_prob FROM word w \
          JOIN utterance u ON u.id = w.utterance_id \
          WHERE u.session_id = ?1 ORDER BY w.utterance_id, w.position",
     )?;
@@ -144,16 +177,18 @@ fn words_of(conn: &Connection, key: i64) -> Result<BTreeMap<i64, Vec<Word>>, Sto
                 r.get::<_, String>(1)?,
                 r.get::<_, i64>(2)?,
                 r.get::<_, i64>(3)?,
+                r.get::<_, Option<f64>>(4)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     let mut words: BTreeMap<i64, Vec<Word>> = BTreeMap::new();
-    for (utterance, text, start, end) in raws {
+    for (utterance, text, start, end, log_prob) in raws {
         let word = Word::new(text, parse_nanos(start)?, parse_nanos(end)?).ok_or_else(|| {
             StoreError::Corrupt(format!(
                 "a word of utterance {utterance} ends before it starts"
             ))
         })?;
+        let word = word.with_log_prob(parse_log_prob(log_prob)?);
         words.entry(utterance).or_default().push(word);
     }
     Ok(words)
@@ -254,7 +289,10 @@ impl Store {
         let words = heard
             .words
             .iter()
-            .map(|w| Ok((w.text(), nanos(w.start())?, nanos(w.end())?)))
+            .map(|w| {
+                let log_prob = stored_log_prob(w.log_prob());
+                Ok((w.text(), nanos(w.start())?, nanos(w.end())?, log_prob))
+            })
             .collect::<Result<Vec<_>, StoreError>>()?;
         let tx = self
             .conn
@@ -279,11 +317,11 @@ impl Store {
             ],
         )?;
         let id = tx.last_insert_rowid();
-        for (position, (text, start, end)) in (0_i64..).zip(words) {
+        for (position, (text, start, end, log_prob)) in (0_i64..).zip(words) {
             tx.execute(
-                "INSERT INTO word (utterance_id, position, text, start_ns, end_ns) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![id, position, text, start, end],
+                "INSERT INTO word (utterance_id, position, text, start_ns, end_ns, log_prob) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![id, position, text, start, end, log_prob],
             )?;
         }
         tx.commit()?;

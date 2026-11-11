@@ -41,7 +41,7 @@ fn a_new_file_gets_the_current_schema() {
     let dir = TestDir::new("fresh");
     let store = Store::open(&dir.db()).unwrap();
     assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
-    assert_eq!(STEPS.len(), 9);
+    assert_eq!(STEPS.len(), 10);
     assert_eq!(STEPS.len(), usize::try_from(VERSION - FIRST + 1).unwrap());
     // Opening again changes nothing.
     drop(store);
@@ -785,4 +785,85 @@ fn version_9_upgrades_to_10_refusing_packs_recorded_without_a_digest() {
         })
         .unwrap();
     assert_eq!(broken, 0);
+}
+
+/// Acceptance (#157): a version 10 library keeps its heard and final
+/// words, which read back with their log-probabilities unknown, never
+/// zero; words stored after the upgrade keep theirs.
+#[test]
+fn version_10_upgrades_to_11_with_old_words_unknown() {
+    let dir = TestDir::new("v10");
+    {
+        let conn = crate::tests::library_at(&dir.db(), 10);
+        conn.execute_batch(
+            "INSERT INTO session (id, state, language) VALUES (1, 'stopped', 'en');
+             INSERT INTO utterance (id, session_id, track, start_ns, end_ns, text, engine, model)
+             VALUES (1, 1, 0, 0, 10, 'hyper profen', 'e', 'm');
+             INSERT INTO word VALUES (1, 0, 'hyper', 0, 5), (1, 1, 'profen', 5, 10);
+             INSERT INTO final_text VALUES (1, 0, 0, 100, 'hyper profen', 'e', 'm');
+             INSERT INTO final_word VALUES (1, 0, 0, 0, 'hyper', 0, 50), (1, 0, 0, 1, 'profen', 50, 100);
+             INSERT INTO final_progress VALUES (1, 0, 100);",
+        )
+        .unwrap();
+    }
+    let mut store = Store::open(&dir.db()).unwrap();
+    assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
+    let one = SessionId::new(1);
+    let heard = store.utterances(one).unwrap();
+    let live: Vec<_> = heard[0]
+        .heard
+        .words
+        .iter()
+        .map(|w| (w.text(), w.log_prob()))
+        .collect();
+    assert_eq!(live, [("hyper", None), ("profen", None)]);
+    let finals = store.final_texts(one).unwrap();
+    let final_words: Vec<_> = finals[0]
+        .words
+        .iter()
+        .map(|w| (w.text.as_str(), w.log_prob))
+        .collect();
+    assert_eq!(final_words, [("hyper", None), ("profen", None)]);
+
+    // A final text stored after the upgrade keeps its words' values.
+    let sure = nota_core::LogProb::new(-0.125);
+    let later = crate::FinalText {
+        track: TrackId::new(0),
+        range: nota_core::SampleRange::new(SampleIndex::new(100), SampleIndex::new(200)).unwrap(),
+        text: Some("ibuprofen".to_owned()),
+        words: vec![crate::FinalWord {
+            text: "ibuprofen".to_owned(),
+            range: nota_core::SampleRange::new(SampleIndex::new(100), SampleIndex::new(200))
+                .unwrap(),
+            log_prob: sure,
+        }],
+        heard_by: crate::HeardBy {
+            engine: "e".to_owned(),
+            model: "m".to_owned(),
+        },
+    };
+    store
+        .add_final_text(one, TrackId::new(0), SampleIndex::new(200), &[later])
+        .unwrap();
+    let finals = store.final_texts(one).unwrap();
+    assert_eq!(finals[1].words[0].log_prob, sure);
+    drop(store);
+
+    // The old words hold NULL, not zero, and still can't be changed.
+    let conn = raw(&dir.db());
+    let nulls: i64 = conn
+        .query_row(
+            "SELECT (SELECT count(*) FROM word WHERE log_prob IS NULL) \
+                  + (SELECT count(*) FROM final_word WHERE log_prob IS NULL)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(nulls, 4);
+    for sql in [
+        "UPDATE word SET log_prob = -1.0",
+        "UPDATE final_word SET log_prob = -1.0",
+    ] {
+        assert!(refused(&conn, sql), "{sql} was allowed");
+    }
 }

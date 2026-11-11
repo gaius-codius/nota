@@ -79,10 +79,30 @@ fn words_are_placed_through_the_epochs_within_their_utterance() {
     );
 }
 
+/// Each placed word keeps the log-probability it was heard with, and a
+/// word heard without one stays unknown.
+#[test]
+fn placed_words_keep_their_log_probabilities() {
+    let timeline = with_gap(MIC);
+    let unsure = LogProb::new(-1.25);
+    let t = heard(MIC, 1_900, 2_100, "before after")
+        .with_words(vec![
+            word("before", 1_900, 2_000).with_log_prob(unsure),
+            word("after", 2_000, 2_100),
+        ])
+        .unwrap();
+    let (_, words) = Utterance::place_with_words(t, &timeline).unwrap();
+    let scores: Vec<_> = words.iter().map(Word::log_prob).collect();
+    assert_eq!(scores, [unsure, None]);
+}
+
 #[test]
 fn a_word_is_rebuilt_unless_it_ends_before_it_starts() {
     let w = Word::new("x".to_owned(), ms(5), ms(5)).unwrap();
     assert_eq!((w.text(), w.start(), w.end()), ("x", ms(5), ms(5)));
+    assert_eq!(w.log_prob(), None);
+    let sure = LogProb::new(-0.01);
+    assert_eq!(w.with_log_prob(sure).log_prob(), sure);
     assert_eq!(Word::new("x".to_owned(), ms(5), ms(4)), None);
 }
 

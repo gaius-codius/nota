@@ -215,7 +215,12 @@ impl fmt::Display for OfflineReason {
             Self::StartTimeout => write!(f, "didn't start in time"),
             Self::Hung => write!(f, "stopped answering"),
             Self::Behind => write!(f, "fell too far behind"),
-            Self::Version(v) => write!(f, "speaks protocol v{}", v.get()),
+            Self::Version(v) => write!(
+                f,
+                "speaks protocol v{}, nota needs v{}",
+                v.get(),
+                ProtocolVersion::CURRENT.get()
+            ),
             Self::Protocol(what) => write!(f, "protocol error: {what}"),
         }
     }
@@ -1125,8 +1130,8 @@ mod tests {
     fn reasons_and_refusals_say_what_went_wrong() {
         assert_eq!(OfflineReason::Hung.to_string(), "stopped answering");
         assert_eq!(
-            OfflineReason::Version(ProtocolVersion::new(2)).to_string(),
-            "speaks protocol v2"
+            OfflineReason::Version(ProtocolVersion::new(7)).to_string(),
+            "speaks protocol v7, nota needs v2"
         );
         assert_eq!(
             OfflineReason::Protocol("bad".into()).to_string(),

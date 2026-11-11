@@ -49,6 +49,7 @@ fn chunk(track: TrackId, a: u64, b: u64, text: Option<&str>, words: &[&str]) -> 
             .map(|(i, w)| FinalWord {
                 text: (*w).to_owned(),
                 range: range(a + i * step, a + (i + 1) * step),
+                log_prob: None,
             })
             .collect(),
         heard_by: HeardBy {

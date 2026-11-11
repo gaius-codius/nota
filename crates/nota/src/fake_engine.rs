@@ -5,18 +5,23 @@
 //! It runs the real child loop and chunker ([`nota_engine::child::run`]):
 //! a sample louder than [`LOUD`] is speech, and the text of a chunk is how
 //! many samples it holds, so a test can check the text covers the audio,
-//! with a word over the whole chunk and one at its end.
+//! with a word over the whole chunk and one at its end. The first word has
+//! the log-probability [`COUNT_LOG_PROB`] and the second none, so a test
+//! can see both reach the stored text.
 
 use std::io;
 
 use nota_core::lifeline::{self, Tie};
-use nota_core::{SampleCount, SampleIndex, SampleRange};
+use nota_core::{LogProb, SampleCount, SampleIndex, SampleRange};
 use nota_engine::EngineError;
 use nota_engine::child::{Detector, Heard, Models, TimedWord, Transcriber, run as run_child};
 use nota_engine::chunker::{ChunkerConfig, Labels};
 
 /// The loudness above which a sample is speech.
 const LOUD: f32 = 0.01;
+
+/// The log-probability of each chunk's first word, its count.
+pub(crate) const COUNT_LOG_PROB: f32 = -0.5;
 
 /// Runs the protocol on stdin and stdout with the stand-in models, cutting
 /// as `chunking` says, until stdin closes or the recorder dies.
@@ -73,19 +78,25 @@ impl Detector for Loudness {
 
 impl Transcriber for Stand {
     /// "N samples", N the chunk's length, as two words: "N" over the whole
-    /// chunk and "samples" at its end.
+    /// chunk, with [`COUNT_LOG_PROB`], and "samples" at its end, with
+    /// none.
     fn transcribe(&mut self, audio: &[f32]) -> Heard {
         let len = SampleCount::new(audio.len() as u64);
-        let word = |text: String, from| TimedWord {
+        let word = |text: String, from, log_prob| TimedWord {
             text,
             from,
             to: len,
+            log_prob,
         };
         Heard {
             text: format!("{} samples", audio.len()),
             words: vec![
-                word(audio.len().to_string(), SampleCount::ZERO),
-                word("samples".to_owned(), len),
+                word(
+                    audio.len().to_string(),
+                    SampleCount::ZERO,
+                    LogProb::new(COUNT_LOG_PROB),
+                ),
+                word("samples".to_owned(), len, None),
             ],
         }
     }

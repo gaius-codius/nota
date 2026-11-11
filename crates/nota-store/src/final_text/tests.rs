@@ -38,6 +38,37 @@ fn text(track: TrackId, a: u64, b: u64, heard: Option<&str>) -> FinalText {
     }
 }
 
+/// Acceptance (#157): the final pass's words read back with their
+/// log-probabilities, and a word without one reads back unknown; the
+/// value is never changed once stored.
+#[test]
+fn final_words_read_back_with_their_log_probabilities() {
+    let (dir, mut store) = store("log-probs");
+    let mut worded = text(MIC, 0, 400, Some("amylodian is"));
+    worded.words = vec![
+        FinalWord {
+            text: "amylodian".into(),
+            range: range(10, 100),
+            log_prob: LogProb::new(-1.954),
+        },
+        FinalWord {
+            text: "is".into(),
+            range: range(120, 380),
+            log_prob: None,
+        },
+    ];
+    store
+        .add_final_text(S1, MIC, s(400), std::slice::from_ref(&worded))
+        .unwrap();
+    let read = store.final_texts(S1).unwrap();
+    let scores: Vec<_> = read[0].words.iter().map(|w| w.log_prob).collect();
+    assert_eq!(scores, [LogProb::new(-1.954), None]);
+    assert_eq!(read, [worded]);
+    drop(store);
+    let conn = crate::tests::raw(&dir.db());
+    assert!(refused(&conn, "UPDATE final_word SET log_prob = -1.0"));
+}
+
 /// Text and progress go in together and read back by track and sample;
 /// another session's are its own.
 #[test]
@@ -48,10 +79,12 @@ fn final_text_reads_back_by_track_and_sample_with_its_progress() {
         FinalWord {
             text: "good".into(),
             range: range(10, 100),
+            log_prob: None,
         },
         FinalWord {
             text: "morning".into(),
             range: range(120, 380),
+            log_prob: None,
         },
     ];
     store
@@ -179,10 +212,12 @@ fn sqlite_refuses_to_change_or_delete_final_text() {
         FinalWord {
             text: "good".into(),
             range: range(0, 40),
+            log_prob: None,
         },
         FinalWord {
             text: "morning".into(),
             range: range(40, 100),
+            log_prob: None,
         },
     ];
     let later = text(SYSTEM, 0, 50, Some("later"));

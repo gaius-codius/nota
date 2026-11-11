@@ -9,10 +9,10 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use nota_core::{SampleCount, SampleIndex, SampleRange, SampleRate};
+use nota_core::{LogProb, SampleCount, SampleIndex, SampleRange, SampleRate};
 use sherpa_onnx::{
-    OfflineRecognizer, OfflineRecognizerConfig, SileroVadModelConfig, VadModelConfig,
-    VoiceActivityDetector,
+    OfflineRecognizer, OfflineRecognizerConfig, OfflineRecognizerResult, SileroVadModelConfig,
+    VadModelConfig, VoiceActivityDetector,
 };
 
 use crate::EngineError;
@@ -42,6 +42,11 @@ const BACKDATE: SampleCount = SampleCount::new(2 * WINDOW as u64 + 4_000);
 /// samples, about an hour. sherpa-onnx counts samples in an `i32`, which
 /// would overflow after 37 hours.
 const RESET_AFTER: SampleCount = SampleCount::new(16_000 * 3_600);
+
+/// How far above zero a token's log-probability may be and still read as
+/// zero. The model's log-softmax can round a near-certain token a hair
+/// above it; anything further above isn't a log-probability.
+const ROUNDING_ABOVE_ZERO: f32 = 1e-4;
 
 /// Where the model files are.
 #[derive(Debug, Clone)]
@@ -167,21 +172,43 @@ impl Transcriber for Parakeet {
         let stream = self.recognizer.create_stream();
         stream.accept_waveform(RATE_HZ, audio);
         self.recognizer.decode(&stream);
-        let Some(result) = stream.get_result() else {
-            return Heard::default();
-        };
-        let len = SampleCount::new(audio.len() as u64);
-        let words = match (&result.timestamps, &result.durations) {
-            (Some(starts), durations) => {
-                words_of(&result.tokens, starts, durations.as_deref(), len)
-            }
-            (None, _) => Vec::new(),
-        };
-        Heard {
-            text: result.text.trim().to_owned(),
-            words,
-        }
+        stream.get_result().map_or_else(Heard::default, |result| {
+            heard_in(&result, SampleCount::new(audio.len() as u64))
+        })
     }
+}
+
+/// What the recogniser's `result` heard in `len` samples of audio: its
+/// text, and its words if it gave the tokens' times.
+fn heard_in(result: &OfflineRecognizerResult, len: SampleCount) -> Heard {
+    let words = match (&result.timestamps, &result.durations) {
+        (Some(starts), durations) => {
+            let tokens = Tokens {
+                text: &result.tokens,
+                starts,
+                durations: durations.as_deref(),
+                log_probs: result.ys_log_probs.as_deref(),
+            };
+            words_of(&tokens, len)
+        }
+        (None, _) => Vec::new(),
+    };
+    Heard {
+        text: result.text.trim().to_owned(),
+        words,
+    }
+}
+
+/// A recogniser's tokens, with what it gives for each, one for one.
+struct Tokens<'a> {
+    /// Each token's text; a leading space starts a word.
+    text: &'a [String],
+    /// When each starts, in seconds from the start of the audio.
+    starts: &'a [f32],
+    /// How long each lasts, in seconds, if the recogniser says.
+    durations: Option<&'a [f32]>,
+    /// Each one's log-probability, if the recogniser says.
+    log_probs: Option<&'a [f32]>,
 }
 
 /// The words in a recogniser's `tokens`, each started at its first token's
@@ -189,18 +216,24 @@ impl Transcriber for Parakeet {
 /// seconds from the start of `len` samples of audio), or, without
 /// durations, where the next word starts. A token after a space (its own,
 /// or a token that is only a space) starts a word; punctuation stays with
-/// the word before. Words are kept
-/// inside the audio, in order and not overlapping. Empty if the times
-/// don't match the tokens one for one.
-fn words_of(
-    tokens: &[String],
-    starts: &[f32],
-    durations: Option<&[f32]>,
-    len: SampleCount,
-) -> Vec<TimedWord> {
+/// the word before. Words are kept inside the audio, in order and not
+/// overlapping. Empty if the times don't match the tokens one for one.
+///
+/// Each word's log-probability is its tokens' lowest ([`Lowest`]), as T10
+/// (gaius-codius/nota#149) scored them. Log-probabilities that don't
+/// match the tokens one for one leave every word's unknown, and its times
+/// as they are.
+fn words_of(tokens: &Tokens<'_>, len: SampleCount) -> Vec<TimedWord> {
+    let Tokens {
+        text: tokens,
+        starts,
+        durations,
+        log_probs,
+    } = *tokens;
     if starts.len() != tokens.len() || durations.is_some_and(|d| d.len() != tokens.len()) {
         return Vec::new();
     }
+    let log_probs = log_probs.filter(|l| l.len() == tokens.len());
     let sample = |seconds: f32| {
         if seconds.is_nan() || seconds <= 0.0 {
             SampleCount::ZERO
@@ -209,6 +242,8 @@ fn words_of(
         }
     };
     let mut words: Vec<TimedWord> = Vec::new();
+    // Each word's lowest log-probability so far, beside it.
+    let mut lowest: Vec<Lowest> = Vec::new();
     // Whether the next token with text starts a word: the first does, and
     // so does any after a space, even a space on its own (Parakeet's lone
     // `▁`, before a number's digits).
@@ -220,11 +255,15 @@ fn words_of(
             continue;
         }
         let end = durations.map(|d| sample(starts[k] + d[k]));
+        let log_prob = log_probs.and_then(|l| token_log_prob(l[k]));
         match words.last_mut() {
             Some(word) if !new_word => {
                 word.text.push_str(trimmed);
                 if let Some(end) = end {
                     word.to = word.to.max(end);
+                }
+                if let Some(score) = lowest.last_mut() {
+                    score.add(trimmed, log_prob);
                 }
             }
             last => {
@@ -234,10 +273,17 @@ fn words_of(
                     text: trimmed.to_owned(),
                     from,
                     to: end.unwrap_or(from).max(from),
+                    log_prob: None,
                 });
+                let mut score = Lowest::default();
+                score.add(trimmed, log_prob);
+                lowest.push(score);
             }
         }
         new_word = false;
+    }
+    for (word, score) in words.iter_mut().zip(&lowest) {
+        word.log_prob = score.get();
     }
     // Without durations, each word runs on to the next, and the last to
     // the end of the audio.
@@ -249,6 +295,81 @@ fn words_of(
         }
     }
     words
+}
+
+/// A token's log-probability as the recogniser gave it: `None` if it
+/// isn't one (NaN, infinite, or above zero by more than rounding), and
+/// zero if it is above zero by no more than [`ROUNDING_ABOVE_ZERO`].
+fn token_log_prob(value: f32) -> Option<LogProb> {
+    // NaN fails the comparison; `min` takes a value just above zero to zero
+    // and leaves every other one.
+    if value <= ROUNDING_ABOVE_ZERO {
+        LogProb::new(value.min(0.0))
+    } else {
+        None
+    }
+}
+
+/// A word's score, built a token at a time: the lowest log-probability of
+/// its tokens with a letter or digit, so punctuation glued to the word
+/// doesn't count (as T10 left it out), not even when its value is missing.
+/// A word of punctuation alone is scored by all its tokens.
+#[derive(Debug, Clone, Copy, Default)]
+struct Lowest {
+    /// The tokens with a letter or digit.
+    of_text: Least,
+    /// All the tokens.
+    of_all: Least,
+}
+
+impl Lowest {
+    /// Adds `token`, whose log-probability is `log_prob`: `None` if the
+    /// recogniser gave none, or gave a value that isn't one.
+    fn add(&mut self, token: &str, log_prob: Option<LogProb>) {
+        self.of_all.add(log_prob);
+        if token.chars().any(char::is_alphanumeric) {
+            self.of_text.add(log_prob);
+        }
+    }
+
+    /// The word's score: its text tokens', or all its tokens' if it has
+    /// none with text; `None` if one of those had no value.
+    fn get(self) -> Option<LogProb> {
+        if self.of_text.seen {
+            self.of_text.get()
+        } else {
+            self.of_all.get()
+        }
+    }
+}
+
+/// The lowest of some tokens' log-probabilities.
+#[derive(Debug, Clone, Copy, Default)]
+struct Least {
+    /// The lowest value so far.
+    lowest: Option<LogProb>,
+    /// Whether a token had no value: the lowest is then unknown, since
+    /// the one missing might have been lower.
+    missing: bool,
+    /// Whether any token was added.
+    seen: bool,
+}
+
+impl Least {
+    /// Adds a token whose log-probability is `log_prob`; `None` if it had
+    /// none.
+    fn add(&mut self, log_prob: Option<LogProb>) {
+        self.seen = true;
+        match log_prob {
+            Some(value) => self.lowest = Some(self.lowest.map_or(value, |l| l.min(value))),
+            None => self.missing = true,
+        }
+    }
+
+    /// The lowest; `None` if a token had no value, or none was added.
+    fn get(self) -> Option<LogProb> {
+        if self.missing { None } else { self.lowest }
+    }
 }
 
 /// The sample `seconds` into the audio, to the nearest; `None` if negative,
@@ -505,6 +626,34 @@ mod tests {
         }
     }
 
+    /// With the real model, every word comes with a log-probability: the
+    /// linked library's result gives one per token, and the patched crate
+    /// reads them, one for one with the tokens.
+    #[test]
+    fn parakeet_gives_every_word_a_log_probability() {
+        let Some((mut models, audio)) = models_and_fixture() else {
+            return;
+        };
+        // The first 15 s is enough speech, and keeps the test quick.
+        let heard = models
+            .transcriber()
+            .transcribe(&audio[..audio.len().min(15 * 16_000)]);
+        assert!(!heard.words.is_empty(), "{heard:?}");
+        let unknown: Vec<_> = heard
+            .words
+            .iter()
+            .filter(|w| w.log_prob.is_none())
+            .collect();
+        assert!(unknown.is_empty(), "{unknown:?}");
+        // Not every word certain: the values are the model's, not a default.
+        let unsure = heard
+            .words
+            .iter()
+            .filter(|w| w.log_prob < Some(LogProb::CERTAIN))
+            .count();
+        assert!(unsure > 0, "{:?}", heard.words);
+    }
+
     #[test]
     fn a_reset_in_a_pause_changes_nothing() {
         let Some((models, audio)) = models_and_fixture() else {
@@ -532,6 +681,173 @@ mod tests {
         tokens.iter().map(|&t| t.to_owned()).collect()
     }
 
+    /// The words in `t`, timed by `starts` and `durations`, with no
+    /// log-probabilities.
+    fn timed_words(
+        t: &[String],
+        starts: &[f32],
+        durations: Option<&[f32]>,
+        len: SampleCount,
+    ) -> Vec<TimedWord> {
+        let tokens = Tokens {
+            text: t,
+            starts,
+            durations,
+            log_probs: None,
+        };
+        words_of(&tokens, len)
+    }
+
+    /// The words' log-probabilities, `None` for unknown.
+    fn scores(words: &[TimedWord]) -> Vec<Option<f32>> {
+        words.iter().map(|w| w.log_prob.map(LogProb::get)).collect()
+    }
+
+    /// Each word is scored by its lowest token log-probability, not the
+    /// mean, and punctuation glued to it doesn't count.
+    #[test]
+    fn a_word_is_scored_by_its_least_sure_token() {
+        // "amylodian." as T10 saw it: one bad token among sure ones.
+        let t = tokens(&[" amy", "lo", "dian", ".", " is"]);
+        let starts = [0.0, 0.1, 0.2, 0.3, 0.4];
+        let log_probs = [-0.2, -1.954, -0.05, -3.0, -0.01];
+        let tokens = Tokens {
+            text: &t,
+            starts: &starts,
+            durations: None,
+            log_probs: Some(&log_probs),
+        };
+        let words = words_of(&tokens, SampleCount::new(16_000));
+        // The full stop is surer of nothing, but isn't the word's.
+        assert_eq!(scores(&words), [Some(-1.954), Some(-0.01)]);
+        assert_eq!(words[0].text, "amylodian.");
+    }
+
+    /// A word of punctuation alone, which only the first can be, is scored
+    /// by its punctuation; a lone space token, in no word, counts for none.
+    #[test]
+    fn punctuation_alone_and_lone_spaces_are_scored_as_they_should_be() {
+        let t = tokens(&["\"", " ", "1", "9", " ok"]);
+        let starts = [0.0, 0.1, 0.1, 0.2, 0.3];
+        let log_probs = [-0.7, -5.0, -0.3, -0.2, -0.1];
+        let tokens = Tokens {
+            text: &t,
+            starts: &starts,
+            durations: None,
+            log_probs: Some(&log_probs),
+        };
+        let words = words_of(&tokens, SampleCount::new(16_000));
+        let texts: Vec<_> = words.iter().map(|w| w.text.as_str()).collect();
+        assert_eq!(texts, ["\"", "19", "ok"]);
+        assert_eq!(scores(&words), [Some(-0.7), Some(-0.3), Some(-0.1)]);
+    }
+
+    /// A token whose value isn't a log-probability leaves its word
+    /// unknown, not scored by the rest; a hair above zero is zero.
+    #[test]
+    fn a_token_without_a_log_probability_leaves_its_word_unknown() {
+        let t = tokens(&[" a", "b", " c", " d", " e", " f"]);
+        let starts = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5];
+        let log_probs = [-0.1, f32::NAN, 0.5, f32::NEG_INFINITY, 5e-5, -0.0];
+        let tokens = Tokens {
+            text: &t,
+            starts: &starts,
+            durations: None,
+            log_probs: Some(&log_probs),
+        };
+        let words = words_of(&tokens, SampleCount::new(16_000));
+        assert_eq!(scores(&words), [None, None, None, Some(0.0), Some(0.0)]);
+        // Zero is the one zero, whatever its sign came as.
+        assert_eq!(words[4].log_prob.map(LogProb::to_bits), Some(0));
+    }
+
+    /// The rounding allowance ends at [`ROUNDING_ABOVE_ZERO`]: that value is
+    /// zero, and the next `f32` above it isn't a log-probability.
+    #[test]
+    fn rounding_above_zero_stops_at_its_bound() {
+        let past = f32::from_bits(ROUNDING_ABOVE_ZERO.to_bits() + 1);
+        assert_eq!(token_log_prob(ROUNDING_ABOVE_ZERO), Some(LogProb::CERTAIN));
+        assert_eq!(token_log_prob(past), None);
+    }
+
+    /// Values either side of zero: the smallest above it counts as zero,
+    /// both zeros are the one zero, and the largest below it is kept.
+    #[test]
+    fn token_log_probs_either_side_of_zero() {
+        let tiny = f32::from_bits(1);
+        assert_eq!(token_log_prob(tiny), Some(LogProb::CERTAIN));
+        assert_eq!(token_log_prob(0.0).map(LogProb::to_bits), Some(0));
+        assert_eq!(token_log_prob(-0.0).map(LogProb::to_bits), Some(0));
+        assert_eq!(token_log_prob(-tiny).map(LogProb::get), Some(-tiny));
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1.0] {
+            assert_eq!(token_log_prob(bad), None, "{bad}");
+        }
+    }
+
+    /// A recogniser's result gives its trimmed text and its words, each
+    /// with its score; without the tokens' times, the text alone.
+    #[test]
+    fn a_result_gives_its_text_and_words() {
+        let mut result = OfflineRecognizerResult {
+            text: " hi amylo ".to_owned(),
+            tokens: tokens(&[" hi", " amy", "lo"]),
+            timestamps: Some(vec![0.0, 0.25, 0.5]),
+            durations: Some(vec![0.25, 0.25, 0.25]),
+            ys_log_probs: Some(vec![-0.1, -0.2, -1.954]),
+        };
+        let heard = heard_in(&result, SampleCount::new(16_000));
+        assert_eq!(heard.text, "hi amylo");
+        let words: Vec<_> = heard.words.iter().map(|w| w.text.as_str()).collect();
+        assert_eq!(words, ["hi", "amylo"]);
+        assert_eq!(heard.words[1].from, SampleCount::new(4_000));
+        assert_eq!(heard.words[1].to, SampleCount::new(12_000));
+        assert_eq!(scores(&heard.words), [Some(-0.1), Some(-1.954)]);
+
+        result.timestamps = None;
+        let heard = heard_in(&result, SampleCount::new(16_000));
+        assert_eq!(heard.text, "hi amylo");
+        assert!(heard.words.is_empty(), "{heard:?}");
+    }
+
+    /// Punctuation without a value doesn't take its word's score away,
+    /// since punctuation doesn't count toward it; in a word of punctuation
+    /// alone, it does.
+    #[test]
+    fn punctuation_without_a_value_leaves_its_words_score() {
+        let t = tokens(&[" amy", "lo", ".", " ?"]);
+        let starts = [0.0, 0.1, 0.2, 0.3];
+        let log_probs = [-0.2, -1.954, f32::NAN, f32::NAN];
+        let tokens = Tokens {
+            text: &t,
+            starts: &starts,
+            durations: None,
+            log_probs: Some(&log_probs),
+        };
+        let words = words_of(&tokens, SampleCount::new(16_000));
+        assert_eq!(scores(&words), [Some(-1.954), None]);
+    }
+
+    /// Log-probabilities that don't match the tokens one for one, or none
+    /// at all, leave every word unknown and keep its times.
+    #[test]
+    fn mismatched_log_probabilities_keep_the_words_without_scores() {
+        let t = tokens(&[" a", " b"]);
+        let starts = [0.0, 0.5];
+        let len = SampleCount::new(16_000);
+        let timed = timed_words(&t, &starts, None, len);
+        for log_probs in [Some(&[-0.1][..]), Some(&[-0.1, -0.2, -0.3][..]), None] {
+            let tokens = Tokens {
+                text: &t,
+                starts: &starts,
+                durations: None,
+                log_probs,
+            };
+            let words = words_of(&tokens, len);
+            assert_eq!(words, timed, "{log_probs:?}");
+            assert_eq!(scores(&words), [None, None], "{log_probs:?}");
+        }
+    }
+
     /// The words as (text, from, to) in samples.
     fn spans(words: &[TimedWord]) -> Vec<(&str, u64, u64)> {
         words
@@ -553,7 +869,7 @@ mod tests {
             0.32, 0.24, 0.24, 0.24, 0.16, 0.16, 0.32, 0.16, 0.24, 0.16, 0.08,
         ];
         let len = SampleCount::new(48_000);
-        let words = words_of(&t, &starts, Some(&durations), len);
+        let words = timed_words(&t, &starts, Some(&durations), len);
         assert_eq!(
             spans(&words),
             [
@@ -568,7 +884,7 @@ mod tests {
         );
         // Without durations, each word runs to the next, the last to the
         // end of the audio.
-        let words = words_of(&t[..4], &starts[..4], None, len);
+        let words = timed_words(&t[..4], &starts[..4], None, len);
         assert_eq!(
             spans(&words),
             [
@@ -588,7 +904,7 @@ mod tests {
         let t = tokens(&["Hi", " ", " there", " now", " end"]);
         let starts = [-0.5, 0.1, 0.2, 0.05, 2.0];
         let durations = [0.7, 0.0, 0.3, 0.1, 1.0];
-        let words = words_of(&t, &starts, Some(&durations), len);
+        let words = timed_words(&t, &starts, Some(&durations), len);
         assert_eq!(
             spans(&words),
             [
@@ -602,21 +918,21 @@ mod tests {
         // digits, starts a word too.
         let t = tokens(&[" in", " ", "1", "9", "9", "0", "."]);
         let starts = [0.1, 0.3, 0.3, 0.4, 0.5, 0.6, 0.7];
-        let words = words_of(&t, &starts, None, len);
+        let words = timed_words(&t, &starts, None, len);
         assert_eq!(
             spans(&words),
             [("in", 1_600, 4_800), ("1990.", 4_800, 16_000)]
         );
         // A time that isn't a number is the start.
-        let words = words_of(&tokens(&[" a", " b"]), &[f32::NAN, 0.5], None, len);
+        let words = timed_words(&tokens(&[" a", " b"]), &[f32::NAN, 0.5], None, len);
         assert_eq!(spans(&words), [("a", 0, 8_000), ("b", 8_000, 16_000)]);
         // Times that don't match the tokens give no words.
-        assert!(words_of(&t, &starts[..4], None, len).is_empty());
-        assert!(words_of(&t, &starts, Some(&durations[..2]), len).is_empty());
-        assert!(words_of(&[], &[], None, len).is_empty());
+        assert!(timed_words(&t, &starts[..4], None, len).is_empty());
+        assert!(timed_words(&t, &starts, Some(&durations[..2]), len).is_empty());
+        assert!(timed_words(&[], &[], None, len).is_empty());
         // A huge time is the end of the audio.
         assert_eq!(at_seconds(f32::MAX), None);
-        let words = words_of(&tokens(&[" x"]), &[f32::MAX], None, len);
+        let words = timed_words(&tokens(&[" x"]), &[f32::MAX], None, len);
         assert_eq!(spans(&words), [("x", 16_000, 16_000)]);
         // Seconds to the nearest sample, whatever f32 makes of them.
         assert_eq!(at_seconds(0.72), Some(SampleCount::new(11_520)));

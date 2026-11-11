@@ -2,8 +2,9 @@
 //! the messages between the recorder and the speech engine, with their wire
 //! encoding (the engine protocol), the engine's tie to its recorder, the
 //! messages between the screens and the recorder (the recorder protocol),
-//! heard speech placed in session time, and the decider's interface (a yes
-//! or no on each candidate correction, [`decide`]).
+//! heard speech placed in session time, how sure the engine was of each
+//! word ([`LogProb`]), and the decider's interface (a yes or no on each
+//! candidate correction, [`decide`]).
 //!
 //! Time has one source, the [`Clock`]. Each track maps its sample count to
 //! session time through a [`TrackTimeline`] of epochs; a new epoch starts
@@ -36,6 +37,7 @@ pub mod drift;
 pub mod epoch;
 pub mod ids;
 pub mod lifeline;
+pub mod log_prob;
 pub mod messages;
 pub mod protocol;
 pub mod recorder;
@@ -48,5 +50,6 @@ pub use clock::{Clock, ClockUnavailable, SystemClock, wall_now};
 pub use drift::{Drift, DriftMeter, Stamp};
 pub use epoch::{Epoch, EpochAnchor, EpochError, Gap, OpenedEpoch, TrackTimeline};
 pub use ids::{EpochId, SessionId, TrackId};
+pub use log_prob::LogProb;
 pub use time::{SampleCount, SampleIndex, SampleRange, SampleRate, SessionTime, WallTime};
 pub use utterance::{Utterance, Word};
