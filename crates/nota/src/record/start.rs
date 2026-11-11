@@ -1429,7 +1429,7 @@ mod tests {
         let transcript = Transcript::new(SYSTEM, range(8_000, 40_000), "hello there".into())
             .unwrap()
             .with_words(vec![
-                word("hello", 16_000, 24_000),
+                word("hello", 16_000, 24_000).with_log_prob(nota_core::LogProb::new(-0.75)),
                 word("there", 24_000, 32_000),
             ])
             .unwrap();
@@ -1457,6 +1457,9 @@ mod tests {
         for w in &heard.words {
             assert!(u.start() <= w.start() && w.end() <= u.end(), "{w:?}");
         }
+        // Each word keeps the log-probability it was heard with, or none.
+        let scores: Vec<_> = heard.words.iter().map(nota_core::Word::log_prob).collect();
+        assert_eq!(scores, [nota_core::LogProb::new(-0.75), None]);
         let _ = std::fs::remove_dir_all(&root);
     }
 

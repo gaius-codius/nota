@@ -24,11 +24,12 @@
 
 use std::collections::BTreeMap;
 
-use nota_core::{SampleIndex, SampleRange, SessionId, TrackId};
+use nota_core::{LogProb, SampleIndex, SampleRange, SessionId, TrackId};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::revisions::make_final_revision;
 use crate::segments::{parse_track, session_exists};
+use crate::transcript::{parse_log_prob, stored_log_prob};
 use crate::{Store, StoreError, session_key};
 
 /// The engine and model that heard a text.
@@ -40,13 +41,17 @@ pub struct HeardBy {
     pub model: String,
 }
 
-/// One word of a final-pass text, and its samples.
+/// One word of a final-pass text, its samples, and how sure the engine
+/// was of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FinalWord {
     /// The word.
     pub text: String,
     /// Where it was said.
     pub range: SampleRange,
+    /// The lowest log-probability of its tokens, punctuation left out;
+    /// `None` if unknown, as for every word stored before version 11.
+    pub log_prob: Option<LogProb>,
 }
 
 /// A run of one track's samples, and what the final pass heard in it.
@@ -114,20 +119,21 @@ fn words_of(
     start: i64,
 ) -> Result<Vec<FinalWord>, StoreError> {
     let mut stmt = conn.prepare(
-        "SELECT text, word_start, word_end FROM final_word \
+        "SELECT text, word_start, word_end, log_prob FROM final_word \
          WHERE session_id = ?1 AND track = ?2 AND start_sample = ?3 ORDER BY position",
     )?;
     let raws = stmt
         .query_map(params![key, track, start], |r| {
-            Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?))
+            Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     raws.into_iter()
-        .map(|(text, from, to)| {
+        .map(|(text, from, to, log_prob)| {
             Ok(FinalWord {
                 text,
                 range: SampleRange::new(parse_sample(from)?, parse_sample(to)?)
                     .ok_or_else(|| StoreError::Corrupt(format!("word at {from}..{to}")))?,
+                log_prob: parse_log_prob(log_prob)?,
             })
         })
         .collect()
@@ -197,8 +203,9 @@ impl Store {
             for (position, word) in (0_i64..).zip(&text.words) {
                 tx.execute(
                     "INSERT INTO final_word \
-                     (session_id, track, start_sample, position, text, word_start, word_end) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                     (session_id, track, start_sample, position, text, word_start, word_end, \
+                      log_prob) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                     params![
                         key,
                         i64::from(track.get()),
@@ -206,7 +213,8 @@ impl Store {
                         position,
                         word.text,
                         sample(word.range.start())?,
-                        sample(word.range.end())?
+                        sample(word.range.end())?,
+                        stored_log_prob(word.log_prob)
                     ],
                 )?;
             }

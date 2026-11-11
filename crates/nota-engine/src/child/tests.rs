@@ -62,12 +62,21 @@ impl Transcriber for FakeModels {
         }
         let len = audio.len() as u64;
         let at = |n: u64| SampleCount::new(n);
-        let word = |text: String, from, to| TimedWord { text, from, to };
+        let word = |text: String, from, to| TimedWord {
+            text,
+            from,
+            to,
+            log_prob: None,
+        };
         let end = len + u64::from(self.stray_words);
         Heard {
             text: format!("{loud} loud"),
             words: vec![
-                word(loud.to_string(), at(0), at(len / 2)),
+                // The count with a log-probability, the other without.
+                TimedWord {
+                    log_prob: count_log_prob(),
+                    ..word(loud.to_string(), at(0), at(len / 2))
+                },
                 word("loud".to_owned(), at(len / 2), at(end)),
             ],
         }
@@ -95,6 +104,11 @@ fn range(from: u64, to: u64) -> SampleRange {
 }
 
 const TRACK: TrackId = TrackId::new(3);
+
+/// The log-probability the fake models give the count, their first word.
+fn count_log_prob() -> Option<LogProb> {
+    LogProb::new(-0.5)
+}
 
 fn hello() -> Vec<u8> {
     encode::<ToEngine>(&Frame::Hello(ProtocolVersion::CURRENT)).unwrap()
@@ -315,7 +329,9 @@ fn stdin_closing_transcribes_what_each_track_still_holds() {
                 Transcript::new(TRACK, range(0, 1_600), "1600 loud".into())
                     .unwrap()
                     .with_words(vec![
-                        HeardWord::new("1600".into(), range(0, 800)).unwrap(),
+                        HeardWord::new("1600".into(), range(0, 800))
+                            .unwrap()
+                            .with_log_prob(count_log_prob()),
                         HeardWord::new("loud".into(), range(800, 1_600)).unwrap(),
                     ])
                     .unwrap()
@@ -344,6 +360,18 @@ fn a_mismatched_or_missing_hello_is_refused_before_loading() {
     };
     let other = encode::<ToEngine>(&Frame::Hello(ProtocolVersion::new(9))).unwrap();
     assert!(matches!(refuse(&other), EngineError::Version(v) if v.get() == 9));
+    // A recorder from before words carried log-probabilities would misread
+    // this engine's words, so it's refused, and the message names both.
+    let old = encode::<ToEngine>(&Frame::Hello(ProtocolVersion::WITHOUT_LOG_PROBS)).unwrap();
+    let err = refuse(&old);
+    assert!(
+        matches!(err, EngineError::Version(v) if v.get() == 1),
+        "{err:?}"
+    );
+    assert_eq!(
+        err.to_string(),
+        "the recorder speaks protocol v1, this engine v2"
+    );
     assert!(matches!(refuse(&flush()), EngineError::Protocol(_)));
     assert!(matches!(refuse(&[1, 2]), EngineError::Read(_)));
 }

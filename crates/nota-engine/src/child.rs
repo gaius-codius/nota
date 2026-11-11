@@ -12,7 +12,7 @@ use nota_core::messages::{
     AudioChunk, FromEngine, HeardWord, ProtocolVersion, ToEngine, Transcript,
 };
 use nota_core::protocol::{Frame, FrameReader, write_frame};
-use nota_core::{SampleCount, SampleIndex, SampleRange, SampleRate, TrackId};
+use nota_core::{LogProb, SampleCount, SampleIndex, SampleRange, SampleRate, TrackId};
 
 use crate::EngineError;
 use crate::chunker::{Chunk, Chunker, ChunkerConfig, Labels};
@@ -36,7 +36,8 @@ pub struct Heard {
     pub words: Vec<TimedWord>,
 }
 
-/// A word, and where in the audio it was said.
+/// A word, where in the audio it was said, and how sure the recogniser
+/// was of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimedWord {
     /// The word.
@@ -45,6 +46,9 @@ pub struct TimedWord {
     pub from: SampleCount,
     /// The sample after its last.
     pub to: SampleCount,
+    /// The lowest log-probability of its tokens, punctuation left out;
+    /// `None` if the recogniser didn't give one.
+    pub log_prob: Option<LogProb>,
 }
 
 /// A speech recogniser.
@@ -193,10 +197,10 @@ fn answer(
     Ok(())
 }
 
-/// `transcript` with `words`, located from its start. If they don't fit
-/// it (a word with no text, outside the audio, or out of order), it goes
-/// without them: the text is what matters, and the recogniser's timing is
-/// then not to be trusted.
+/// `transcript` with `words`, located from its start, each with its
+/// log-probability. If they don't fit it (a word with no text, outside the
+/// audio, or out of order), it goes without them: the text is what
+/// matters, and the recogniser's timing is then not to be trusted.
 fn with_words(transcript: Transcript, words: Vec<TimedWord>) -> Transcript {
     let start = transcript.range().start();
     let words: Option<Vec<HeardWord>> = words
@@ -204,7 +208,8 @@ fn with_words(transcript: Transcript, words: Vec<TimedWord>) -> Transcript {
         .map(|word| {
             let from = start.checked_add(word.from)?;
             let to = start.checked_add(word.to)?;
-            HeardWord::new(word.text, SampleRange::new(from, to)?)
+            let heard = HeardWord::new(word.text, SampleRange::new(from, to)?)?;
+            Some(heard.with_log_prob(word.log_prob))
         })
         .collect();
     match words {

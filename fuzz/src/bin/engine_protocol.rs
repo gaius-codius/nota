@@ -27,7 +27,8 @@ fn read_all<M: WireMessage + std::fmt::Debug>(data: &[u8], check: impl Fn(&Frame
 }
 
 /// A transcript's words lie inside its range, in order, and none is
-/// without text.
+/// without text; a word's log-probability, if it has one, is finite and
+/// at most zero, with zero's sign positive.
 fn check_from_engine(frame: &Frame<FromEngine>) {
     let Frame::Message(FromEngine::Transcript(t)) = frame else {
         return;
@@ -39,6 +40,12 @@ fn check_from_engine(frame: &Frame<FromEngine>) {
         assert!(word.range().start() >= from, "a word out of order");
         assert!(word.range().end() <= t.range().end(), "a word past its end");
         from = word.range().end();
+        if let Some(log_prob) = word.log_prob() {
+            let value = log_prob.get();
+            assert!(value.is_finite(), "a log-probability not finite");
+            assert!(value <= 0.0, "a log-probability above zero");
+            assert_ne!(log_prob.to_bits(), (-0.0_f32).to_bits(), "a negative zero");
+        }
     }
 }
 

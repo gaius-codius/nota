@@ -128,3 +128,11 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.sha2]
 opt-level = 3
+
+# sherpa-onnx 1.13.8 as published, with one field added: each token's
+# log-probability (`ys_log_probs`), which the C library's result JSON
+# carries and the published crate drops. The engine scores each word by it
+# (#157). No version of the crate has the field yet; drop the patch once
+# one does. The copy's only change is that field (vendor/README.md).
+[patch.crates-io]
+sherpa-onnx = { path = "vendor/sherpa-onnx" }

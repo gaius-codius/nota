@@ -8,7 +8,9 @@
 //! - every frame it accepts is canonical: re-encoding it gives exactly the
 //!   bytes it was read from, so no two byte strings mean the same message;
 //! - a stream cut short gives the whole frames before the cut, then
-//!   [`ReadError::Truncated`] (or a clean end if the cut is on a boundary).
+//!   [`ReadError::Truncated`] (or a clean end if the cut is on a boundary);
+//! - a word's log-probability field, whatever its bits, reads as unknown,
+//!   as a [`LogProb`] that re-encodes to those bits, or not at all.
 
 use proptest::prelude::*;
 
@@ -33,31 +35,52 @@ fn any_chunk() -> impl Strategy<Value = AudioChunk> {
         })
 }
 
+/// A word's log-probability: unknown, certain, or any value a [`LogProb`]
+/// takes, the extremes included.
+fn any_log_prob() -> impl Strategy<Value = Option<LogProb>> {
+    prop_oneof![
+        Just(None),
+        Just(Some(LogProb::CERTAIN)),
+        Just(LogProb::new(f32::MIN)),
+        Just(LogProb::new(-f32::MIN_POSITIVE)),
+        (-30.0_f32..=0.0).prop_map(LogProb::new),
+        any::<u32>().prop_filter_map("not a log-probability", |bits| {
+            LogProb::from_bits(bits).map(Some)
+        }),
+    ]
+}
+
 /// A transcript with up to 6 words, cut at sorted points inside its range
-/// (so some touch, and some are instants).
+/// (so some touch, and some are instants), each with any log-probability.
 fn any_transcript() -> impl Strategy<Value = Transcript> {
     (
         any::<u32>(),
         any::<u64>(),
         any::<u64>(),
         ".{0,40}",
-        prop::collection::vec((any::<u64>(), any::<u64>(), "\\PC{1,8}"), 0..6),
+        prop::collection::vec(
+            (any::<u64>(), any::<u64>(), "\\PC{1,8}", any_log_prob()),
+            0..6,
+        ),
     )
         .prop_filter("a transcript covers some audio", |(_, a, b, _, _)| a != b)
         .prop_map(|(track, a, b, text, words)| {
             let (lo, hi) = (a.min(b), a.max(b));
             let span = u128::from(hi - lo) + 1;
             let at = |x: u64| lo + u64::try_from(u128::from(x) % span).unwrap();
-            let mut points: Vec<u64> = words.iter().flat_map(|&(x, y, _)| [at(x), at(y)]).collect();
+            let mut points: Vec<u64> = words
+                .iter()
+                .flat_map(|&(x, y, _, _)| [at(x), at(y)])
+                .collect();
             points.sort_unstable();
             let words = points
                 .chunks(2)
                 .zip(words)
-                .map(|(pair, (_, _, word))| {
+                .map(|(pair, (_, _, word, log_prob))| {
                     let range =
                         SampleRange::new(SampleIndex::new(pair[0]), SampleIndex::new(pair[1]))
                             .unwrap();
-                    HeardWord::new(word, range).unwrap()
+                    HeardWord::new(word, range).unwrap().with_log_prob(log_prob)
                 })
                 .collect();
             let range = SampleRange::new(SampleIndex::new(lo), SampleIndex::new(hi)).unwrap();
@@ -211,6 +234,32 @@ proptest! {
             prop_assert!(end.is_ok());
         } else {
             prop_assert!(matches!(end, Err(ReadError::Truncated)), "{end:?}");
+        }
+    }
+
+    /// Any bits in a word's log-probability field: the word is refused, or
+    /// reads back as unknown or a value whose bits they are, so the frame
+    /// re-encodes to the same bytes.
+    #[test]
+    fn any_log_prob_field_is_read_exactly_or_refused(bits in any::<u32>()) {
+        let mut body = vec![0x81, 0, 0, 0, 0];
+        body.extend_from_slice(&0_u64.to_le_bytes());
+        body.extend_from_slice(&9_u64.to_le_bytes());
+        body.extend_from_slice(&1_u32.to_le_bytes());
+        body.extend_from_slice(&0_u64.to_le_bytes());
+        body.extend_from_slice(&9_u64.to_le_bytes());
+        body.extend_from_slice(&bits.to_le_bytes());
+        body.extend_from_slice(&1_u32.to_le_bytes());
+        body.extend_from_slice(b"aa");
+        match decode_body::<FromEngine>(&body) {
+            Ok(Frame::Message(FromEngine::Transcript(t))) => {
+                let read = t.words()[0].log_prob();
+                prop_assert_eq!(read.map_or(UNKNOWN_LOG_PROB, LogProb::to_bits), bits);
+                let frame = Frame::Message(FromEngine::Transcript(t));
+                prop_assert_eq!(&encode(&frame).unwrap()[4..], body.as_slice());
+            }
+            Ok(other) => prop_assert!(false, "{other:?}"),
+            Err(err) => prop_assert_eq!(err, DecodeError::BadWord),
         }
     }
 
