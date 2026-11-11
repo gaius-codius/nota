@@ -815,11 +815,14 @@ mod tests {
     /// rather than failing for ever, retrying an error ends the read
     /// instead of spinning.
     struct Script {
+        /// The reads still to come: bytes to hand over, or an error.
         steps: std::collections::VecDeque<Result<Vec<u8>, io::ErrorKind>>,
+        /// How many times the stream has been read.
         reads: usize,
     }
 
     impl Script {
+        /// A stream that plays `steps` in order, not yet read.
         fn new(steps: impl IntoIterator<Item = Result<Vec<u8>, io::ErrorKind>>) -> Self {
             Self {
                 steps: steps.into_iter().collect(),
@@ -847,6 +850,8 @@ mod tests {
         }
     }
 
+    /// An interruption is read past, and the failure after it ends the
+    /// frame as an error, from the second read.
     #[test]
     fn a_failing_stream_is_an_error_but_an_interruption_is_retried() {
         let mut stream = Script::new([
