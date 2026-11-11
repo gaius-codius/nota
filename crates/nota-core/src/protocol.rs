@@ -896,7 +896,8 @@ mod tests {
         let mut buf = [0_u8; 4];
         assert_eq!(read_full(&mut stream, &mut buf).unwrap(), 4);
         assert_eq!(buf, [1, 2, 3, 4]);
-        // Full, so it stops without asking for the fifth byte's read again.
+        // Full after the fifth read, so it doesn't read again for the byte
+        // left over.
         assert_eq!(stream.reads, 5);
     }
 
@@ -1028,10 +1029,10 @@ mod tests {
         let mut reader = FrameReader::new(stream);
         assert_eq!(reader.read_frame::<FromEngine>().unwrap(), Some(frame));
         // The next read reaches the break.
-        assert!(matches!(
-            reader.read_frame::<FromEngine>(),
-            Err(ReadError::Io(_))
-        ));
+        match reader.read_frame::<FromEngine>() {
+            Err(ReadError::Io(err)) => assert_eq!(err.kind(), io::ErrorKind::BrokenPipe),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
