@@ -2,7 +2,7 @@
 //! answers as it's told, by heard span and term, and notes every question
 //! and when it's dropped.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -42,6 +42,8 @@ pub(crate) struct Log {
 pub(crate) struct Fake {
     /// The yeses, by heard span and term, with the probability given.
     yes: Arc<BTreeMap<(String, String), Option<Probability>>>,
+    /// The yeses in one chunk only, by its text, heard span and term.
+    in_chunk: Arc<BTreeSet<(String, String, String)>>,
     /// Trouble for the question with this number (from 0, across every
     /// decider made from this one).
     trouble: Arc<BTreeMap<usize, Trouble>>,
@@ -68,10 +70,25 @@ impl Fake {
             .collect();
         Self {
             yes: Arc::new(yes),
+            in_chunk: Arc::new(BTreeSet::new()),
             trouble: Arc::new(BTreeMap::new()),
             flag_after: None,
             log: Arc::new(Log::default()),
         }
+    }
+
+    /// A decider that says yes to each `(chunk, heard, term)` in `yes`,
+    /// only in the chunk with that text.
+    pub(crate) fn saying_yes_in<'a>(
+        yes: impl IntoIterator<Item = (&'a str, &'a str, &'a str)>,
+    ) -> Self {
+        let mut fake = Self::saying_yes([]);
+        fake.in_chunk = Arc::new(
+            yes.into_iter()
+                .map(|(c, h, t)| (c.to_owned(), h.to_owned(), t.to_owned()))
+                .collect(),
+        );
+        fake
     }
 
     /// This decider, ending question `n` (from 0) with `trouble`.
@@ -90,6 +107,28 @@ impl Fake {
     /// How many questions it has been asked.
     pub(crate) fn questions(&self) -> usize {
         self.log.asked.lock().unwrap().len()
+    }
+}
+
+impl Fake {
+    /// Its answer on `heard` as `term` in the chunk `current`.
+    fn answer(&self, current: &str, heard: &str, term: &str) -> Decision {
+        let key = (heard.to_owned(), term.to_owned());
+        let in_chunk = (current.to_owned(), key.0.clone(), key.1.clone());
+        match self.yes.get(&key) {
+            Some(p) => Decision {
+                answer: Answer::Yes,
+                yes: *p,
+            },
+            None if self.in_chunk.contains(&in_chunk) => Decision {
+                answer: Answer::Yes,
+                yes: None,
+            },
+            None => Decision {
+                answer: Answer::No,
+                yes: None,
+            },
+        }
     }
 }
 
@@ -133,18 +172,7 @@ impl Decider for Fake {
         }
         let decisions = question
             .candidates()
-            .map(
-                |(_, c)| match self.yes.get(&(c.heard().to_owned(), c.term().to_owned())) {
-                    Some(p) => Decision {
-                        answer: Answer::Yes,
-                        yes: *p,
-                    },
-                    None => Decision {
-                        answer: Answer::No,
-                        yes: None,
-                    },
-                },
-            )
+            .map(|(_, c)| self.answer(question.current(), c.heard(), c.term()))
             .collect();
         Ok(Decisions::new(question, decisions).unwrap())
     }

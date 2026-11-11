@@ -59,6 +59,8 @@ nota-recorder = { path = "../nota-recorder", features = ["fake-fs"] }
 proptest.workspace = true
 # To make an M1 per-session store in the migration test.
 rusqlite.workspace = true
+# To read the local research bench's clean-up fixture.
+serde_json.workspace = true
 
 # A pseudo-terminal for the end-to-end test, and signals to send.
 [target.'cfg(target_os = "linux")'.dev-dependencies]

@@ -1753,6 +1753,7 @@ dependencies = [
  "ratatui",
  "rusqlite",
  "rustix",
+ "serde_json",
  "signal-hook",
  "toml",
 ]

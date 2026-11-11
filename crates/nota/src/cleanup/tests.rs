@@ -694,3 +694,6 @@ fn a_decider_stopped_mid_question_stores_nothing_for_it() {
     assert_eq!(fake.questions(), 2);
     assert_eq!(fixture.shown(), ["start amlodipine daily"]);
 }
+
+#[path = "bench.rs"]
+mod bench;
