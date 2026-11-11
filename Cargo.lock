@@ -2745,8 +2745,6 @@ dependencies = [
 [[package]]
 name = "sherpa-onnx"
 version = "1.13.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "efaa98d5f08380f3d47026e00f60fed182f6edaf4c0af290d88ac0e08d6e3b90"
 dependencies = [
  "serde",
  "serde_json",
