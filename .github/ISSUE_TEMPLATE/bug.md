@@ -1,7 +1,7 @@
 ---
 name: Bug
 about: Something nota does wrong
-labels: ["type:bug"]
+labels: ["type:build"]
 ---
 
 ## What happens

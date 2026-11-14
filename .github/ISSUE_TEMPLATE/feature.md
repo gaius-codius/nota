@@ -1,7 +1,7 @@
 ---
 name: Feature
 about: A change to what nota does for a user
-labels: ["type:feature"]
+labels: ["type:build"]
 ---
 
 ## What
