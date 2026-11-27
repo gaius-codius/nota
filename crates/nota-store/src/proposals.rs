@@ -115,7 +115,9 @@ pub enum Refusal {
 }
 
 impl Refusal {
-    const fn as_str(self) -> &'static str {
+    /// The rule's name, as a proposal row stores it (`dissimilar`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::EmptySpan => "empty-span",
             Self::SpanNotFound => "span-not-found",

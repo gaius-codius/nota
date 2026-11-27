@@ -34,6 +34,7 @@ use nota_engine::chunker::ChunkerConfig;
 use nota_engine::sherpa::ModelPaths;
 
 mod app;
+mod bench;
 mod cleanup;
 #[cfg(feature = "fake-capture")]
 mod fake_engine;

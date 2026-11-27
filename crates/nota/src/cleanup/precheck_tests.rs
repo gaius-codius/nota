@@ -294,3 +294,32 @@ fn the_job_decides_the_same_with_the_pre_check_as_without() {
         ]
     );
 }
+
+/// Acceptance (#160): the calls the pre-check saved are counted per
+/// session, from its proposals: a chunk whose every candidate was skipped
+/// is a question saved; a chunk asked about fewer candidates isn't.
+#[test]
+fn the_calls_saved_are_counted_per_session() {
+    let chunks = [EDEMA, "start amylo diping daily for her ankle amylo edema"];
+    let fixture = Fixture::new("c3-saved", &chunks, &["amlodipine"]);
+    let fake = Fake::saying_yes([]);
+    let mut clean_up = fixture.clean_up_with(Gives::Fake(fake.clone()), Precheck::On);
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(fake.questions(), 1);
+    assert_eq!(
+        saved(&fixture.proposals()),
+        Saved {
+            candidates: 2,
+            questions: 1
+        }
+    );
+}
+
+/// With the pre-check off, nothing is saved.
+#[test]
+fn with_the_pre_check_off_nothing_is_saved() {
+    let fixture = Fixture::new("c3-saved-off", &[EDEMA], &["amlodipine"]);
+    let mut clean_up = fixture.clean_up_with(Gives::Fake(Fake::saying_yes([])), Precheck::Off);
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(saved(&fixture.proposals()), Saved::default());
+}

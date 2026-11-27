@@ -52,8 +52,8 @@ use nota_checks::{
 use nota_core::decide::{Candidate, DecideError, Decider, Question};
 use nota_core::{LogProb, SampleIndex, SampleRate, SessionId, TrackId};
 use nota_store::{
-    ChunkKey, DecidedBy, FinalLine, JobEnd, JobKind, JobState, Origin, Outcome, Pack, Proposal,
-    RevisionNumber, SessionTerms, StoreError, Wait, WordSpan, Writer,
+    ChunkKey, DecidedBy, FinalLine, JobEnd, JobKind, JobState, NewProposal, Origin, Outcome, Pack,
+    Proposal, RevisionNumber, SessionTerms, StoreError, Wait, WordSpan, Writer,
 };
 
 use crate::jobs::Running;
@@ -225,7 +225,7 @@ fn stored(e: &StoreError) -> JobEnd {
 /// The thresholds a proposal records, as `name=value` pairs: the gate's,
 /// the lookup's, the card cap's, and whether the pre-check ran (with its
 /// low log-probability share).
-fn thresholds(precheck: Precheck) -> String {
+pub(crate) fn thresholds(precheck: Precheck) -> String {
     let precheck = match precheck {
         Precheck::Off => "precheck=off".to_owned(),
         Precheck::On => format!("precheck=on;low_log_prob_percent={LOW_LOG_PROB_PERCENT}"),
@@ -240,7 +240,7 @@ fn thresholds(precheck: Precheck) -> String {
 /// How a run sorts its new candidates before asking: C3 on or off, and
 /// the recording's low log-probability band it reads signals from.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct Screen {
+pub(crate) struct Screen {
     /// Whether C3 runs.
     precheck: Precheck,
     /// The recording's lowest log-probabilities, over every word of its
@@ -250,7 +250,7 @@ struct Screen {
 
 impl Screen {
     /// The screen for a run over `lines` with `precheck`.
-    fn new(precheck: Precheck, lines: &[FinalLine]) -> Self {
+    pub(crate) fn new(precheck: Precheck, lines: &[FinalLine]) -> Self {
         let known = lines
             .iter()
             .flat_map(|line| &line.heard.words)
@@ -265,7 +265,11 @@ impl Screen {
 
     /// `new` offers in `chunk`, split into those to ask about and those
     /// C3 skips (none while it's off), each in the order given.
-    fn sort(&self, chunk: &Chunk, new: Vec<Offer>) -> (Vec<Offer>, Vec<(Offer, Skipped)>) {
+    pub(crate) fn sort(
+        &self,
+        chunk: &Chunk,
+        new: Vec<Offer>,
+    ) -> (Vec<Offer>, Vec<(Offer, Skipped)>) {
         if self.precheck == Precheck::Off {
             return (new, Vec::new());
         }
@@ -290,18 +294,18 @@ impl Screen {
 }
 
 /// What a run reads before it starts.
-struct Read {
+pub(crate) struct Read {
     /// Revision 0, in session order.
-    lines: Vec<FinalLine>,
+    pub(crate) lines: Vec<FinalLine>,
     /// The session's vocabulary.
-    terms: SessionTerms,
+    pub(crate) terms: SessionTerms,
     /// The proposals made already.
-    proposals: Vec<Proposal>,
+    pub(crate) proposals: Vec<Proposal>,
 }
 
 /// Reads `session`'s final text, vocabulary (from `installed` packs) and
 /// proposals. A session with no final text has no lines.
-fn read(
+pub(crate) fn read(
     db: &nota_store::Store,
     session: SessionId,
     installed: &[Pack],
@@ -366,6 +370,48 @@ fn found(matched: Matched) -> nota_store::Found {
     }
 }
 
+/// A chunk of the final text and every candidate the lookup offers in
+/// it.
+pub(crate) type Offering = (Chunk, Vec<Offer>);
+
+/// The chunks of `lines` with their words stored, in session order, each
+/// with what the lookup offers in it from the session's vocabulary
+/// `terms`, in `english`.
+pub(crate) fn offering(
+    english: &English,
+    terms: &SessionTerms,
+    lines: &[FinalLine],
+) -> Vec<Offering> {
+    let (vocab, origins) = vocabulary(terms, english.code());
+    let chunks = lines.iter().filter_map(chunk_of).collect();
+    offering_in(
+        english,
+        &vocab,
+        &origins,
+        &|h, t| terms.allows(h, t),
+        chunks,
+    )
+}
+
+/// Each of `chunks` with what the lookup offers in it from `vocab`, as far
+/// as `allows` lets it; `origins` says where each term came from.
+pub(crate) fn offering_in(
+    english: &English,
+    vocab: &[Term],
+    origins: &BTreeMap<String, Origin>,
+    allows: &dyn Fn(&str, &str) -> bool,
+    chunks: Vec<Chunk>,
+) -> Vec<Offering> {
+    let lookup = Lookup::new(english, vocab);
+    chunks
+        .into_iter()
+        .map(|chunk| {
+            let offered = offers(&chunk, lookup.find(chunk.text(), allows), origins);
+            (chunk, offered)
+        })
+        .collect()
+}
+
 /// The candidates the lookup gave in `chunk`, as offers. The lookup's
 /// spans are always inside the chunk's words.
 fn offers(chunk: &Chunk, found_in: Vec<Found>, origins: &BTreeMap<String, Origin>) -> Vec<Offer> {
@@ -424,6 +470,32 @@ impl Held {
     }
 }
 
+/// What C3 saved a session's runs so far, counted from its proposals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct Saved {
+    /// Candidates it skipped, each rejected and logged without a call.
+    pub(crate) candidates: usize,
+    /// Questions it saved: chunks whose every proposal it skipped, so no
+    /// question was ever put about them. A chunk where it skipped some
+    /// candidates but not all was still asked, about fewer.
+    pub(crate) questions: usize,
+}
+
+/// What C3 saved the session whose proposals are `proposals`.
+pub(crate) fn saved(proposals: &[Proposal]) -> Saved {
+    let mut chunks: BTreeMap<ChunkKey, bool> = BTreeMap::new();
+    let mut candidates = 0;
+    for p in proposals {
+        let skipped = matches!(p.decided, nota_store::Decided::Skipped { .. });
+        candidates += usize::from(skipped);
+        *chunks.entry(p.proposed.chunk).or_insert(true) &= skipped;
+    }
+    Saved {
+        candidates,
+        questions: chunks.values().filter(|all| **all).count(),
+    }
+}
+
 /// One run over a session.
 struct Pass<'a> {
     /// The library.
@@ -472,17 +544,13 @@ impl Pass<'_> {
     /// proposals, and drops the decider once done. Gives how the run ends
     /// if it must end before placing.
     fn ask_each(&self, read: &Read, mut decider: Box<dyn Decider + Send>) -> Option<JobEnd> {
-        let (terms, origins) = vocabulary(&read.terms, self.english.code());
-        let lookup = Lookup::new(self.english, &terms);
-        let allows = |heard: &str, term: &str| read.terms.allows(heard, term);
         let held = Held::new(&read.proposals);
-        let chunks: Vec<Chunk> = read.lines.iter().filter_map(chunk_of).collect();
-        let total = u64::try_from(chunks.len()).unwrap_or(u64::MAX);
+        let offering = offering(self.english, &read.terms, &read.lines);
+        let total = u64::try_from(offering.len()).unwrap_or(u64::MAX);
         let mut answered = false;
-        for (i, chunk) in chunks.iter().enumerate() {
+        for (i, (chunk, offered)) in offering.iter().enumerate() {
             let done = u64::try_from(i).unwrap_or(u64::MAX);
             (self.running.progress)(nota_store::Progress { done, total });
-            let offered = offers(chunk, lookup.find(chunk.text(), &allows), &origins);
             let new: Vec<Offer> = offered
                 .iter()
                 .filter(|o| held.is_new(chunk.key(), o))
@@ -497,11 +565,14 @@ impl Pass<'_> {
             if (self.running.stop)() {
                 return Some(JobEnd::Waiting(None));
             }
-            let previous = i.checked_sub(1).and_then(|p| chunks.get(p));
+            let previous = i
+                .checked_sub(1)
+                .and_then(|p| offering.get(p))
+                .map(|(c, _)| c);
             let ask = Ask {
                 chunk,
                 previous,
-                offered: &offered,
+                offered,
                 asked: &asked,
                 skipped: &skipped,
                 blocked: held.blocked(chunk.key()),
@@ -522,54 +593,22 @@ impl Pass<'_> {
         None
     }
 
-    /// Asks the decider about `ask`'s candidates, if any are left after
-    /// the pre-check, and stores what it makes of them with the skipped
-    /// ones, together: a run stopped after it neither asks nor skips any
-    /// of them again.
+    /// Settles `ask`'s chunk ([`settle_chunk`]) and stores its
+    /// proposals together: a run stopped after it neither asks nor skips
+    /// any of them again.
     fn ask(&self, ask: &Ask<'_>, decider: &mut dyn Decider) -> Asked {
-        let mut answered = false;
-        let mut proposals = Vec::new();
-        if !ask.asked.is_empty() {
-            let answers = match self.answers(ask, decider) {
-                Ok(answers) => answers,
-                Err(end) => return Asked::Ended(end),
-            };
-            answered = matches!(answers, Answers::Given(_));
-            proposals = chunk::settle(
-                ask.chunk,
-                ask.offered,
-                ask.asked,
-                &answers,
-                ask.blocked,
-                &self.context,
-            );
-        }
-        proposals.extend(
-            ask.skipped
-                .iter()
-                .map(|(offer, skip)| chunk::skipped(ask.chunk, offer, *skip, &self.context)),
-        );
+        let settled = match settle_chunk(ask, decider, self.running.stop, &self.context) {
+            Ok(settled) => settled,
+            Err(end) => return Asked::Ended(end),
+        };
         match self
             .db
-            .with(|db| db.add_proposals(self.session, &proposals))
+            .with(|db| db.add_proposals(self.session, &settled.proposals))
         {
-            Ok(()) => Asked::Settled { answered },
+            Ok(()) => Asked::Settled {
+                answered: settled.answered,
+            },
             Err(e) => Asked::Ended(stored(&e)),
-        }
-    }
-
-    /// The decider's answers on `ask`'s candidates, or how the run ends if
-    /// it must end here.
-    fn answers(&self, ask: &Ask<'_>, decider: &mut dyn Decider) -> Result<Answers, JobEnd> {
-        let question = match question(ask) {
-            Ok(question) => question,
-            Err(why) => return Ok(Answers::None(why)),
-        };
-        match decider.decide(&question, self.running.stop) {
-            Ok(decisions) => Ok(Answers::Given(decisions.iter().map(|(_, d)| *d).collect())),
-            Err(DecideError::Stopped) => Err(JobEnd::Waiting(None)),
-            Err(e @ DecideError::Unavailable(_)) => Err(JobEnd::EngineDown(e.to_string())),
-            Err(e @ DecideError::Failed(_)) => Ok(Answers::None(e.to_string())),
         }
     }
 
@@ -589,19 +628,19 @@ impl Pass<'_> {
 }
 
 /// One chunk's question, and what settling it needs.
-struct Ask<'a> {
+pub(crate) struct Ask<'a> {
     /// The chunk.
-    chunk: &'a Chunk,
+    pub(crate) chunk: &'a Chunk,
     /// The chunk before it, for context.
-    previous: Option<&'a Chunk>,
+    pub(crate) previous: Option<&'a Chunk>,
     /// Every candidate the lookup offered in it.
-    offered: &'a [Offer],
+    pub(crate) offered: &'a [Offer],
     /// The new ones the pre-check left, which are asked about.
-    asked: &'a [Offer],
+    pub(crate) asked: &'a [Offer],
     /// The new ones it skipped, with C1's score on each.
-    skipped: &'a [(Offer, Skipped)],
+    pub(crate) skipped: &'a [(Offer, Skipped)],
     /// The words no new fix may change.
-    blocked: &'a [WordSpan],
+    pub(crate) blocked: &'a [WordSpan],
 }
 
 /// The decider's question for `ask`, or why it can't be asked (a span or
@@ -619,6 +658,74 @@ fn question(ask: &Ask<'_>) -> Result<Question, String> {
         candidates,
     )
     .map_err(|e| format!("the question couldn't be asked: {e}"))
+}
+
+/// What a chunk's candidates come to, before anything is stored.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Settled {
+    /// One proposal per candidate asked about, in order, then one per
+    /// candidate the pre-check skipped.
+    pub(crate) proposals: Vec<NewProposal>,
+    /// Whether a question was put to the decider: not when the pre-check
+    /// skipped every candidate.
+    pub(crate) asked: bool,
+    /// Whether the decider answered it, rather than giving an answer that
+    /// couldn't be read, or not being asked (a question that couldn't be
+    /// put, or none left after the pre-check).
+    pub(crate) answered: bool,
+}
+
+/// Asks `decider` about `ask`'s candidates left after the pre-check, if
+/// any, until `stop` says to stop, and settles them and the skipped ones
+/// as `context` records; or how a run must end here. Stores nothing.
+pub(crate) fn settle_chunk(
+    ask: &Ask<'_>,
+    decider: &mut dyn Decider,
+    stop: &dyn Fn() -> bool,
+    context: &Context,
+) -> Result<Settled, JobEnd> {
+    let mut settled = Settled {
+        proposals: Vec::new(),
+        asked: !ask.asked.is_empty(),
+        answered: false,
+    };
+    if settled.asked {
+        let answers = answers(ask, decider, stop)?;
+        settled.answered = matches!(answers, Answers::Given(_));
+        settled.proposals = chunk::settle(
+            ask.chunk,
+            ask.offered,
+            ask.asked,
+            &answers,
+            ask.blocked,
+            context,
+        );
+    }
+    settled.proposals.extend(
+        ask.skipped
+            .iter()
+            .map(|(offer, skip)| chunk::skipped(ask.chunk, offer, *skip, context)),
+    );
+    Ok(settled)
+}
+
+/// The decider's answers on `ask`'s candidates, or how the run ends if it
+/// must end here.
+fn answers(
+    ask: &Ask<'_>,
+    decider: &mut dyn Decider,
+    stop: &dyn Fn() -> bool,
+) -> Result<Answers, JobEnd> {
+    let question = match question(ask) {
+        Ok(question) => question,
+        Err(why) => return Ok(Answers::None(why)),
+    };
+    match decider.decide(&question, stop) {
+        Ok(decisions) => Ok(Answers::Given(decisions.iter().map(|(_, d)| *d).collect())),
+        Err(DecideError::Stopped) => Err(JobEnd::Waiting(None)),
+        Err(e @ DecideError::Unavailable(_)) => Err(JobEnd::EngineDown(e.to_string())),
+        Err(e @ DecideError::Failed(_)) => Ok(Answers::None(e.to_string())),
+    }
 }
 
 /// The chunk `line` holds, if its words are stored.
