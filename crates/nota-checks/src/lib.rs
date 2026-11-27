@@ -13,6 +13,8 @@
 //!   a fix is applied.
 //! - C4, the term lookup: [`Lookup`], with a [`Language`]'s rules
 //!   ([`English`]).
+//! - The hotword diff, the second source of candidates:
+//!   [`hotword_candidates`] with a [`HotwordList`].
 //!
 //! ```
 //! use nota_checks::letter_similarity;
@@ -39,6 +41,7 @@
 //! ```
 
 mod gate;
+mod hotword_diff;
 mod language;
 mod lookup;
 mod phonetic;
@@ -47,6 +50,10 @@ mod words;
 
 pub use gate::{
     AppliedFix, Decision, Gated, Offered, Proposal, Rejection, SIMILARITY_MIN, Verdict, gate,
+};
+pub use hotword_diff::{
+    HotwordCandidate, HotwordList, MAX_WORDS as MAX_HOTWORD_DIFF_WORDS, MIN_LISTED_WORD,
+    TooManyWords, propose as hotword_candidates,
 };
 pub use language::{English, Language};
 pub use lookup::{
