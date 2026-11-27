@@ -238,15 +238,21 @@ impl Models for SherpaModels {
                 "sherpa-onnx refused the boosted recognizer: its vocabulary or bpe settings".into(),
             )
         })?;
-        // The format's text can't hold a NUL (every hotword was checked at
-        // the protocol), so the crate's C string can't fail on it.
-        let hotwords = Some(prepared.hotwords).filter(|h| !h.is_empty());
         self.recognizer = Parakeet {
             recognizer,
-            hotwords,
+            hotwords: stream_hotwords(prepared.hotwords),
         };
         Ok(())
     }
+}
+
+/// What each stream boosts for the admitted terms in `hotwords`
+/// (sherpa-onnx's per-stream format): `None` when no term was admitted,
+/// since an empty list isn't one. The text can't hold a NUL (every
+/// hotword was checked at the protocol), so the crate's C string can't
+/// fail on it.
+fn stream_hotwords(hotwords: String) -> Option<String> {
+    Some(hotwords).filter(|h| !h.is_empty())
 }
 
 /// Writes the vocabulary `text` to `path`, where sherpa-onnx reads it, as
@@ -694,9 +700,68 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// The models and the fixture's audio, or `None` (said on stderr) if
-    /// they're absent. Fails instead when `NOTA_REQUIRE_TEST_MODELS=1`.
-    fn models_and_fixture() -> Option<(SherpaModels, Vec<f32>)> {
+    /// A vocabulary written where nothing is creates the file, holding
+    /// exactly the text.
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test scaffolding: a scratch directory, not a recording or the database"
+    )]
+    fn the_vocabulary_is_written_where_nothing_was() {
+        let dir = std::env::temp_dir().join(format!("nota-vocab-fresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let vocab = dir.join("hotword-vocab.txt");
+        write_vocab(&vocab, "a\t-1.0\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&vocab).unwrap(), "a\t-1.0\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Anything at the path that can't be removed, a directory here, stops
+    /// the write with the removal's own error, not a later one's.
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test scaffolding: a scratch directory, not a recording or the database"
+    )]
+    fn a_vocabulary_path_that_cannot_be_cleared_fails_with_why() {
+        let dir = std::env::temp_dir().join(format!("nota-vocab-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let vocab = dir.join("hotword-vocab.txt");
+        std::fs::create_dir_all(&vocab).unwrap();
+        // The error removing a directory gives on this system (EISDIR on
+        // Linux, EPERM on macOS); creating the file would fail differently.
+        let removing = std::fs::remove_file(&vocab).unwrap_err();
+        let Err(EngineError::Model(why)) = write_vocab(&vocab, "a\t-1.0\n") else {
+            panic!("a directory at the vocabulary's path was written over");
+        };
+        assert_eq!(why, format!("can't write {}: {removing}", vocab.display()));
+        assert!(vocab.is_dir());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The admitted terms are boosted as they are; with none admitted,
+    /// nothing is.
+    #[test]
+    fn only_admitted_terms_are_boosted() {
+        assert_eq!(
+            stream_hotwords("amlodipine/bisoprolol".to_owned()).as_deref(),
+            Some("amlodipine/bisoprolol")
+        );
+        assert_eq!(stream_hotwords(String::new()), None);
+    }
+
+    /// A UTF-8 path is given to sherpa-onnx as it is.
+    #[test]
+    fn a_utf8_path_is_its_text() {
+        let path = Path::new("/run/nota/hotword-vocab-é.txt");
+        assert_eq!(path_text(path).unwrap(), "/run/nota/hotword-vocab-é.txt");
+    }
+
+    /// The model files in the test models' folder, or `None` (said on
+    /// stderr) if they, or the `extra` files there, are absent. Fails
+    /// instead when `NOTA_REQUIRE_TEST_MODELS=1`.
+    fn test_models(extra: &[&str]) -> Option<(PathBuf, ModelPaths)> {
         let root = std::env::var_os("NOTA_TEST_MODELS")
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
@@ -705,13 +770,12 @@ mod tests {
                     .map(|h| PathBuf::from(h).join(".local/share/nota/test-models"))
             })
             .unwrap_or_default();
-        let wav = root.join("fixtures/invented-lecture.wav");
         let paths = ModelPaths {
             parakeet_dir: root.join("parakeet-tdt-0.6b-v3-int8"),
             vad_model: root.join("silero_vad_v6.onnx"),
             threads: 2,
         };
-        if !wav.is_file() || !paths.vad_model.is_file() {
+        if !paths.vad_model.is_file() || !extra.iter().all(|file| root.join(file).is_file()) {
             assert!(
                 std::env::var_os("NOTA_REQUIRE_TEST_MODELS").is_none_or(|v| v != "1"),
                 "NOTA_REQUIRE_TEST_MODELS=1 but no test models in {}",
@@ -724,9 +788,56 @@ mod tests {
             );
             return None;
         }
+        Some((root, paths))
+    }
+
+    /// The models and the fixture's audio, or `None` (said on stderr) if
+    /// they're absent. Fails instead when `NOTA_REQUIRE_TEST_MODELS=1`.
+    fn models_and_fixture() -> Option<(SherpaModels, Vec<f32>)> {
+        let wav = "fixtures/invented-lecture.wav";
+        let (root, paths) = test_models(&[wav])?;
         let models = SherpaModels::load(&paths).unwrap();
-        let wave = sherpa_onnx::Wave::read(wav.to_str().unwrap()).unwrap();
+        let wave = sherpa_onnx::Wave::read(root.join(wav).to_str().unwrap()).unwrap();
         Some((models, wave.samples().to_vec()))
+    }
+
+    /// Boosting writes the list's vocabulary where the setup says and
+    /// boosts the terms it admits in every stream; an empty list then
+    /// boosts nothing.
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test scaffolding: a scratch directory, not a recording or the database"
+    )]
+    fn boosting_writes_the_vocabulary_and_boosts_its_terms() {
+        let Some((_, paths)) = test_models(&[]) else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("nota-vocab-boost-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let setup = BoostSetup {
+            score: 2.0,
+            vocab: dir.join("hotword-vocab.txt"),
+        };
+        let mut models = SherpaModels::load_boosted(&paths, setup.clone()).unwrap();
+        let list = ["amlodipine", "Bisoprolol"].map(|t| Hotword::new(t).unwrap());
+        models.boost(&list).unwrap();
+        let tokens = read_tokens(&paths.parakeet_dir.join("tokens.txt")).unwrap();
+        let prepared = prepare(&tokens, &list);
+        assert_eq!(
+            std::fs::read_to_string(&setup.vocab).unwrap(),
+            prepared.vocab
+        );
+        assert_ne!(prepared.admitted, Vec::<String>::new());
+        assert_eq!(
+            models.recognizer.hotwords.as_deref(),
+            Some(prepared.hotwords.as_str())
+        );
+        // An empty list boosts nothing, rather than an empty term.
+        models.boost(&[]).unwrap();
+        assert_eq!(models.recognizer.hotwords, None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Runs a detector from `first` over `audio` in 100 ms pieces; returns

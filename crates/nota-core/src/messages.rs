@@ -380,6 +380,29 @@ mod tests {
         assert_eq!(got, want);
     }
 
+    /// Each reason a term is refused reads as the rule it broke, with the
+    /// length limit's real value.
+    #[test]
+    fn each_bad_hotword_says_which_rule() {
+        let got = [
+            BadHotword::Length,
+            BadHotword::Character,
+            BadHotword::Spacing,
+            BadHotword::ScoreLike,
+        ]
+        .map(|why| why.to_string());
+        assert_eq!(
+            got,
+            [
+                "a hotword must be 1 to 100 bytes",
+                "a hotword can't hold a slash or a control character",
+                "a hotword's words must be separated by single spaces",
+                "a hotword's words can't start with a colon",
+            ]
+        );
+        assert_eq!(MAX_HOTWORD_LEN, 100);
+    }
+
     #[test]
     fn chunk_range_matches_its_audio() {
         let chunk = AudioChunk::new(

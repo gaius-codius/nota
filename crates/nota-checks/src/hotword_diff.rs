@@ -250,8 +250,13 @@ fn differences<T: Eq>(a: &[T], b: &[T]) -> Vec<(Range<usize>, Range<usize>)> {
 }
 
 /// difflib's `get_matching_blocks`: the blocks its recursive longest-match
-/// finds, in order, adjacent ones joined, ending with an empty block at the
-/// ends of both sequences.
+/// finds, in order, ending with an empty block at the ends of both
+/// sequences.
+///
+/// difflib then joins adjacent blocks, which only junk can make. With no
+/// junk, each block is the longest in its region, and two adjacent blocks
+/// would make a longer one in the smallest region holding both, so there
+/// is nothing to join.
 fn matching_blocks<T: Eq>(a: &[T], b: &[T]) -> Vec<Block> {
     let mut found = Vec::new();
     let whole = Region {
@@ -260,46 +265,34 @@ fn matching_blocks<T: Eq>(a: &[T], b: &[T]) -> Vec<Block> {
     };
     collect_blocks(a, b, &whole, &mut found);
     found.sort_by_key(|block| (block.a, block.b));
-    let mut joined: Vec<Block> = Vec::new();
-    for block in found {
-        match joined.last_mut() {
-            Some(last) if last.a + last.len == block.a && last.b + last.len == block.b => {
-                last.len += block.len;
-            }
-            _ => joined.push(block),
-        }
-    }
-    joined.push(Block {
+    found.push(Block {
         a: a.len(),
         b: b.len(),
         len: 0,
     });
-    joined
+    found
 }
 
 /// Adds to `found` the longest block in `region` and, as difflib's queue
-/// does, the blocks either side of it. The depth is at most the number of
-/// blocks, which [`MAX_WORDS`] bounds.
+/// does, the blocks either side of it. A side empty in `a` or `b` has no
+/// block, so it ends there. The depth is at most one more than the number
+/// of blocks, which [`MAX_WORDS`] bounds.
 fn collect_blocks<T: Eq>(a: &[T], b: &[T], region: &Region, found: &mut Vec<Block>) {
     let best = longest_match(a, b, region);
     if best.len == 0 {
         return;
     }
     found.push(best);
-    if region.a.start < best.a && region.b.start < best.b {
-        let before = Region {
-            a: region.a.start..best.a,
-            b: region.b.start..best.b,
-        };
-        collect_blocks(a, b, &before, found);
-    }
-    if best.a + best.len < region.a.end && best.b + best.len < region.b.end {
-        let after = Region {
-            a: best.a + best.len..region.a.end,
-            b: best.b + best.len..region.b.end,
-        };
-        collect_blocks(a, b, &after, found);
-    }
+    let before = Region {
+        a: region.a.start..best.a,
+        b: region.b.start..best.b,
+    };
+    collect_blocks(a, b, &before, found);
+    let after = Region {
+        a: best.a + best.len..region.a.end,
+        b: best.b + best.len..region.b.end,
+    };
+    collect_blocks(a, b, &after, found);
 }
 
 #[cfg(test)]

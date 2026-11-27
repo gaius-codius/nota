@@ -7,7 +7,10 @@
 //! - every candidate's similarity is at least [`SIMILARITY_MIN`];
 //! - a beam pass that only drops words (a dropped sentence, or several)
 //!   gives no candidate;
-//! - the same heard and boosted words give no candidate.
+//! - the same heard and boosted words give no candidate;
+//! - the matching blocks are real matches, in order on both sides, and
+//!   never adjacent, so difflib's joining of adjacent blocks has nothing to
+//!   do.
 
 use proptest::prelude::*;
 
@@ -89,6 +92,26 @@ proptest! {
         let list = HotwordList::new(terms.iter().map(String::as_str));
         let boosted = kept(&heard, &drop);
         prop_assert_eq!(propose(&refs(&heard), &refs(&boosted), &list).unwrap(), Vec::new());
+    }
+
+    /// Each matching block is equal words on both sides, each starts after
+    /// the last one ends on both sides, and none starts where the last one
+    /// ends on both, which would make them one longer block.
+    #[test]
+    fn matching_blocks_are_ordered_real_and_never_adjacent(a in any_words(), b in any_words()) {
+        let blocks = matching_blocks(&a, &b);
+        prop_assert_eq!(blocks.last().copied(), Some(Block { a: a.len(), b: b.len(), len: 0 }));
+        for block in &blocks {
+            prop_assert_eq!(&a[block.a..block.a + block.len], &b[block.b..block.b + block.len]);
+        }
+        for pair in blocks.windows(2) {
+            let (last, next) = (pair[0], pair[1]);
+            prop_assert!(last.a + last.len <= next.a && last.b + last.len <= next.b, "{blocks:?}");
+            prop_assert!(
+                next.len == 0 || last.a + last.len != next.a || last.b + last.len != next.b,
+                "{blocks:?}"
+            );
+        }
     }
 
     /// The same words on both sides differ nowhere.

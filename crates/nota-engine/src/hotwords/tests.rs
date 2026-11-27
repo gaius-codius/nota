@@ -88,6 +88,73 @@ fn training_makes_the_splits_agree() {
         .map(|l| l.split('\t').next().unwrap())
         .collect();
     assert_eq!(pieces, ["a", "b", "bc", "c", "d", "▁", "▁a", "▁d"]);
+    // The words' pieces score -1, every other character -100: they already
+    // agree, so no round changes a score.
+    assert_eq!(
+        boost.vocab,
+        "a\t-100.0\nb\t-100.0\nbc\t-1.0\nc\t-100.0\nd\t-100.0\n▁\t-100.0\n▁a\t-1.0\n▁d\t-1.0\n"
+    );
+}
+
+/// Invented tokens where "ccca" and "c" can't both split as the model
+/// does: "cc" (1) merges before "▁c" (2), so the model splits "ccca" as
+/// "▁" "cc" "c" "a", which beats "▁c" "cc" "a" only if "▁" and "c" score
+/// more than "▁c"; but "c" is "▁c" whole, which needs the opposite.
+const CLASHING: &str = "cc 1\n▁c 2\n▁ 3\na 4\nc 5\n";
+
+/// Invented tokens where "aca" splits as "▁" "ac" "a" ("ac" is 1, "ca"
+/// 2), but with every piece at -1 ssentencepiece ties it with "▁" "a"
+/// "ca" and takes the shorter "a": a round of training is needed.
+const TIED: &str = "ac 1\nca 2\n▁ 3\na 4\nc 5\n";
+
+/// Two equal pairs merge the leftmost first, and a lower id merges before
+/// a pair further left: "ccca" ends "▁" "cc" "c" "a", where the rightmost
+/// "cc" or the "▁c" first would both end "▁c" "cc" "a".
+#[test]
+fn the_model_merges_the_leftmost_of_equal_pairs() {
+    let tokens = Tokens::parse(CLASHING).unwrap();
+    let split = tokens.model_split("ccca").unwrap();
+    assert_eq!(pieces(&split), ["▁", "cc", "c", "a"]);
+}
+
+/// A word split wrongly raises its model pieces a tenth and lowers the
+/// wrong split's, until it agrees: "ac" up and "ca" down, once.
+#[test]
+fn training_moves_the_scores_a_tenth_a_round_until_the_splits_agree() {
+    let tokens = Tokens::parse(TIED).unwrap();
+    // Untrained, ssentencepiece's tie goes against the model.
+    let untrained = Vocab::new(
+        ["a", "ac", "ca", "▁"]
+            .map(|p| (p.to_owned(), USED))
+            .into_iter()
+            .collect(),
+        tokens.longest,
+    );
+    assert_eq!(pieces(&untrained.split("aca")), ["▁", "a", "ca"]);
+    let boost = prepare(&tokens, &[hotword("aca"), hotword("ca")]);
+    assert_eq!(boost.admitted, ["aca", "ca"]);
+    assert_eq!(boost.left_out, Vec::<String>::new());
+    // "▁" and "a" were raised and lowered once each, so stay at -1.
+    assert_eq!(
+        boost.vocab,
+        "a\t-1.0\nac\t-0.9\nc\t-100.0\nca\t-1.1\n▁\t-1.0\n"
+    );
+}
+
+/// When no round makes every word agree, the earliest round with the
+/// fewest wrong is kept (here the first, untrained) and the term still
+/// split wrongly is left out, though the model can say it.
+#[test]
+fn a_term_that_never_agrees_is_left_out_and_the_earliest_best_round_kept() {
+    let tokens = Tokens::parse(CLASHING).unwrap();
+    let boost = prepare(&tokens, &[hotword("ccca"), hotword("c")]);
+    assert_eq!(boost.admitted, ["c"]);
+    assert_eq!(boost.left_out, ["ccca"]);
+    assert_eq!(boost.hotwords, "c");
+    assert_eq!(
+        boost.vocab,
+        "a\t-1.0\nc\t-1.0\ncc\t-1.0\n▁\t-1.0\n▁c\t-1.0\n"
+    );
 }
 
 /// A term the model can't say is left out, and the rest are still
@@ -119,6 +186,19 @@ fn a_bad_tokens_line_is_refused() {
     );
     assert_eq!(Tokens::parse("▁a x\n").unwrap_err(), TokensError::Line(1));
     assert_eq!(Tokens::parse(" 3\n").unwrap_err(), TokensError::Line(1));
+}
+
+/// Each parse error says what's wrong, and where.
+#[test]
+fn a_tokens_error_says_what_is_wrong() {
+    assert_eq!(
+        TokensError::Line(2).to_string(),
+        "tokens.txt line 2 isn't a piece and an id"
+    );
+    assert_eq!(
+        TokensError::TooLong.to_string(),
+        "tokens.txt has more than 100000 lines"
+    );
 }
 
 /// Parakeet's real `tokens.txt`, if the test models are installed

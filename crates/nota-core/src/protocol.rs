@@ -674,6 +674,16 @@ mod tests {
         );
     }
 
+    /// A hotwords frame with exactly [`MAX_HOTWORDS`] hotwords is sent and
+    /// read back; one more is refused (in `bad_hotwords_are_refused`).
+    #[test]
+    fn hotwords_at_the_limit_read_back() {
+        let hotwords = vec![Hotword::new("a").unwrap(); MAX_HOTWORDS];
+        let frame = Frame::Message(ToEngine::Hotwords(hotwords));
+        let bytes = encode(&frame).unwrap();
+        assert_eq!(decode_body::<ToEngine>(&bytes[4..]), Ok(frame));
+    }
+
     #[test]
     fn audio_layout() {
         let frame = Frame::Message(ToEngine::Audio(chunk(0x0102, vec![1, -2])));

@@ -211,3 +211,93 @@ fn a_lost_repeat_isnt_read_as_a_replacement() {
     let boosted = ["amlodipine", "take", "it"];
     assert_eq!(propose(&heard, &boosted, &list).unwrap(), Vec::new());
 }
+
+/// The matching blocks of the words of `a` and `b`, as the `(a, b, len)`
+/// triples Python's `get_matching_blocks` prints.
+fn blocks(a: &str, b: &str) -> Vec<(usize, usize, usize)> {
+    matching_blocks(&words(a), &words(b))
+        .iter()
+        .map(|block| (block.a, block.b, block.len))
+        .collect()
+}
+
+/// Two blocks that touch in `b` but have a word between them in `a` stay
+/// two blocks, as in Python: only blocks touching on both sides are one.
+#[test]
+fn blocks_touching_only_in_b_stay_apart() {
+    // Python: [(3, 0, 2), (6, 2, 2), (8, 4, 0)].
+    assert_eq!(
+        blocks("p q r A B X C D", "A B C D"),
+        [(3, 0, 2), (6, 2, 2), (8, 4, 0)]
+    );
+}
+
+/// The same with the sides swapped: touching in `a`, a word between them
+/// in `b`.
+#[test]
+fn blocks_touching_only_in_a_stay_apart() {
+    // Python: [(0, 3, 2), (2, 6, 2), (4, 8, 0)].
+    assert_eq!(
+        blocks("A B C D", "p q r A B X C D"),
+        [(0, 3, 2), (2, 6, 2), (4, 8, 0)]
+    );
+}
+
+/// A block before the longest one is found too, by matching the region
+/// left of it.
+#[test]
+fn a_block_left_of_the_longest_is_found() {
+    // Python: [(0, 0, 1), (1, 2, 2), (3, 4, 0)].
+    assert_eq!(
+        blocks("x A B", "x y A B"),
+        [(0, 0, 1), (1, 2, 2), (3, 4, 0)]
+    );
+}
+
+/// A block after the longest one is found too, by matching the region
+/// right of it, on whichever side the longest block starts late.
+#[test]
+fn a_block_right_of_the_longest_is_found() {
+    // Python: [(3, 0, 2), (5, 3, 1), (6, 4, 0)].
+    assert_eq!(
+        blocks("p q r A B C", "A B Y C"),
+        [(3, 0, 2), (5, 3, 1), (6, 4, 0)]
+    );
+    // Python: [(0, 3, 2), (3, 5, 1), (4, 6, 0)].
+    assert_eq!(
+        blocks("A B Y C", "p q r A B C"),
+        [(0, 3, 2), (3, 5, 1), (4, 6, 0)]
+    );
+}
+
+/// The word limit holds on the boosted side too: exactly [`MAX_WORDS`]
+/// words are compared.
+#[test]
+fn a_chunk_at_the_word_limit_is_compared() {
+    let long = vec!["word"; MAX_WORDS];
+    assert_eq!(
+        propose(&["word"], &long, &HotwordList::default()),
+        Ok(Vec::new())
+    );
+    assert_eq!(
+        propose(&long, &["word"], &HotwordList::default()),
+        Ok(Vec::new())
+    );
+}
+
+/// A word of exactly [`MIN_LISTED_WORD`] characters isn't listed: "ace"
+/// in "ace inhibitor" isn't, "inhibitor" is.
+#[test]
+fn a_word_at_the_listed_length_is_not_listed() {
+    let list = HotwordList::new(["ace inhibitor"]);
+    assert_eq!(list.words, BTreeSet::from(["inhibitor".to_owned()]));
+}
+
+/// The word-limit error says what the limit is.
+#[test]
+fn too_many_words_names_the_limit() {
+    assert_eq!(
+        TooManyWords.to_string(),
+        "too many words to compare: over 2000"
+    );
+}

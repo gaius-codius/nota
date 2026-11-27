@@ -75,16 +75,12 @@ pub trait Models {
     fn transcriber(&mut self) -> &mut Self::Transcriber;
 
     /// Boosts `hotwords` in every chunk from now on, in place of any list
-    /// given before. Models that don't boost ignore them, which is the
-    /// default.
+    /// given before. Models that can't boost ignore them and return `Ok`.
     ///
     /// # Errors
     ///
     /// If the boosted recogniser can't be built.
-    fn boost(&mut self, hotwords: &[Hotword]) -> Result<(), EngineError> {
-        let _ = hotwords;
-        Ok(())
-    }
+    fn boost(&mut self, hotwords: &[Hotword]) -> Result<(), EngineError>;
 }
 
 /// One track's state: its detector and chunker.

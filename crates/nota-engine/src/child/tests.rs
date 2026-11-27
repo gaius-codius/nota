@@ -97,6 +97,11 @@ impl Models for FakeModels {
     fn transcriber(&mut self) -> &mut Self {
         self
     }
+
+    /// Boosts nothing: the fake's text doesn't depend on a list.
+    fn boost(&mut self, _: &[Hotword]) -> Result<(), EngineError> {
+        Ok(())
+    }
 }
 
 fn range(from: u64, to: u64) -> SampleRange {

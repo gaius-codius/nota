@@ -259,8 +259,13 @@ impl Vocab {
         let mut route: Vec<(f32, Option<usize>)> = vec![(0.0, None); n + 1];
         for i in (0..n).rev() {
             let mut best: (f32, Option<usize>) = (f32::NEG_INFINITY, None);
-            for j in i + 1..=n.min(i + self.longest) {
-                if let Some(&t) = self.by_bytes.get(&bytes[i..j]) {
+            // Shortest piece first, ending at the word's end at the latest.
+            for len in 1..=self.longest {
+                let j = i + len;
+                let Some(piece) = bytes.get(i..j) else {
+                    break;
+                };
+                if let Some(&t) = self.by_bytes.get(piece) {
                     let score = score(t) + route[j].0;
                     // Strictly higher: the first, shortest piece wins a tie.
                     if score > best.0 {
