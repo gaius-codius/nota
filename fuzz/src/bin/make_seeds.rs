@@ -180,9 +180,11 @@ fn protocol_seeds(dir: &Path) -> Result<()> {
 /// exactly that one frame: AFL takes a seed the target refuses without a
 /// word, so a bad seed fails here instead.
 fn frame_seed(dir: &Path, name: &str, frame: &Frame<FromEngine>) -> Result<()> {
-    let bytes = encode(frame)?;
+    let bytes = encode(frame).map_err(|e| format!("the {name} seed doesn't encode: {e}"))?;
     let mut input = bytes.as_slice();
-    let read = FrameReader::new(&mut input).read_frame::<FromEngine>()?;
+    let read = FrameReader::new(&mut input)
+        .read_frame::<FromEngine>()
+        .map_err(|e| format!("the {name} seed doesn't read back: {e}"))?;
     if read.as_ref() != Some(frame) || !input.is_empty() {
         return Err(format!("the {name} seed doesn't read back as its frame").into());
     }
