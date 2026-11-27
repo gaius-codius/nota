@@ -2,7 +2,8 @@
 //! transcript, a yes or a no on each.
 //!
 //! Code finds the candidates (a heard span and a term it might be a
-//! misheard form of); the decider only answers, for each numbered
+//! misheard form of, and which time the span occurs in the chunk where it
+//! occurs more than once); the decider only answers, for each numbered
 //! candidate, whether the heard words really are that term. Its answer is never
 //! applied as it stands: the candidate gate (C2) checks every yes. A
 //! decider is a local model or a cloud one, and says which ([`Place`]), so
@@ -91,6 +92,43 @@ fn bounded(text: String, field: &'static str, limit: usize) -> Result<String, Qu
     }
 }
 
+/// Which of the times its heard words occur in the chunk a candidate is
+/// about, where they occur more than once: time 2 of 3. Only a repeat
+/// has one, so it always names one of at least two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Occurrence {
+    /// Which time, from 1.
+    nth: u32,
+    /// How many times the words occur in the chunk: at least 2.
+    of: u32,
+}
+
+impl Occurrence {
+    /// The `nth` (from 1) of `of` times, or `None` unless
+    /// `1 <= nth <= of` and `of` is at least 2: words that occur once
+    /// need no occurrence named.
+    #[must_use]
+    pub const fn new(nth: u32, of: u32) -> Option<Self> {
+        if nth >= 1 && nth <= of && of >= 2 {
+            Some(Self { nth, of })
+        } else {
+            None
+        }
+    }
+
+    /// Which time it is, from 1.
+    #[must_use]
+    pub const fn nth(self) -> u32 {
+        self.nth
+    }
+
+    /// How many times the words occur in the chunk: at least 2.
+    #[must_use]
+    pub const fn of(self) -> u32 {
+        self.of
+    }
+}
+
 /// One candidate correction: the recogniser wrote `heard`, and `term` may
 /// be what the speaker said.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,6 +139,9 @@ pub struct Candidate {
     term: String,
     /// A line about the term that helps tell it apart, if the pack has one.
     fact: Option<String>,
+    /// Which time the heard words occur in the chunk this candidate is
+    /// about, if they occur more than once.
+    occurrence: Option<Occurrence>,
 }
 
 impl Candidate {
@@ -118,7 +159,17 @@ impl Candidate {
             fact: fact
                 .map(|fact| bounded(fact, "fact", MAX_FACT_LEN))
                 .transpose()?,
+            occurrence: None,
         })
+    }
+
+    /// The candidate about the `occurrence` of its heard words in the
+    /// chunk, where they occur more than once. Without one, a question
+    /// with the same heard words twice can't say which a candidate is.
+    #[must_use]
+    pub const fn at(mut self, occurrence: Occurrence) -> Self {
+        self.occurrence = Some(occurrence);
+        self
     }
 
     /// The words as the recogniser wrote them.
@@ -137,6 +188,13 @@ impl Candidate {
     #[must_use]
     pub fn fact(&self) -> Option<&str> {
         self.fact.as_deref()
+    }
+
+    /// Which time its heard words occur in the chunk, if they occur more
+    /// than once and the asker said which.
+    #[must_use]
+    pub const fn occurrence(&self) -> Option<Occurrence> {
+        self.occurrence
     }
 }
 

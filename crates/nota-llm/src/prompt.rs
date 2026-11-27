@@ -2,12 +2,14 @@
 //!
 //! The English prompt is the research bench's (`pick.py`, the per-candidate
 //! yes or no), word for word, except that the subject is the session's
-//! rather than always "an Australian pharmacy lecture". The model answers
-//! by candidate number, in JSON that the request's schema holds it to.
+//! rather than always "an Australian pharmacy lecture", and that a
+//! candidate whose heard words occur more than once in the chunk says
+//! which time it's about. The model answers by candidate number, in JSON
+//! that the request's schema holds it to.
 
 use std::fmt::Write as _;
 
-use nota_core::decide::Question;
+use nota_core::decide::{Occurrence, Question};
 
 /// The words for one language: what the model is told it's doing, and how
 /// a question is put to it.
@@ -74,12 +76,13 @@ impl Prompt for English {
         user.push_str("\n\nCANDIDATES:\n");
         for (no, candidate) in question.candidates() {
             // Writing to a String can't fail.
-            let _ = write!(
-                user,
-                "{no}. heard \"{}\" -> {}",
-                candidate.heard(),
-                candidate.term()
-            );
+            let _ = write!(user, "{no}. heard \"{}\"", candidate.heard());
+            // Without it, the same words twice give two lines alike, and
+            // the model can't tell which time each is about.
+            if let Some(occurrence) = candidate.occurrence() {
+                let _ = write!(user, " ({})", times(occurrence));
+            }
+            let _ = write!(user, " -> {}", candidate.term());
             if let Some(fact) = candidate.fact() {
                 let _ = write!(user, "   [{fact}]");
             }
@@ -87,6 +90,16 @@ impl Prompt for English {
         }
         user
     }
+}
+
+/// Which time `occurrence` is, as the English prompt names it: "time 2
+/// of 3 in the current chunk".
+fn times(occurrence: Occurrence) -> String {
+    format!(
+        "time {} of {} in the current chunk",
+        occurrence.nth(),
+        occurrence.of()
+    )
 }
 
 /// The prompt for a session in `language` (its tag, "en" or "en-AU"), about
@@ -164,6 +177,30 @@ mod tests {
              CANDIDATES:\n\
              1. heard \"amylo diping\" -> amlodipine   [calcium channel blocker]\n\
              2. heard \"clinician\" -> clonidine\n"
+        );
+    }
+
+    /// Two candidates on the same heard words and term, at different
+    /// times in the chunk, get different lines, each naming its time.
+    #[test]
+    fn the_same_words_twice_get_different_lines() {
+        let twice = |nth| {
+            Candidate::new("amylo diping".to_owned(), "amlodipine".to_owned(), None)
+                .unwrap()
+                .at(Occurrence::new(nth, 2).unwrap())
+        };
+        let question = Question::new(
+            None,
+            "Start amylo diping, then stop amylo diping.".to_owned(),
+            vec![twice(1), twice(2)],
+        )
+        .unwrap();
+        assert_eq!(
+            English::new(None).user(&question),
+            "CURRENT CHUNK:\nStart amylo diping, then stop amylo diping.\n\n\
+             CANDIDATES:\n\
+             1. heard \"amylo diping\" (time 1 of 2 in the current chunk) -> amlodipine\n\
+             2. heard \"amylo diping\" (time 2 of 2 in the current chunk) -> amlodipine\n"
         );
     }
 

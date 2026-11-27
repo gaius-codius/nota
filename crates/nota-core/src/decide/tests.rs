@@ -112,6 +112,31 @@ fn candidates_are_numbered_from_one_in_order() {
     assert_eq!(numbered, [(1, "amlodipine"), (2, "ibuprofen")]);
 }
 
+/// An occurrence names one of at least two times, counted from 1, and
+/// gives back what it was made with.
+#[test]
+fn an_occurrence_is_one_of_at_least_two() {
+    let made = |nth, of| Occurrence::new(nth, of).map(|o| (o.nth(), o.of()));
+    assert_eq!(made(1, 2), Some((1, 2)));
+    assert_eq!(made(3, 3), Some((3, 3)));
+    // Words that occur once need no occurrence named.
+    assert_eq!(made(1, 1), None);
+    assert_eq!(made(0, 2), None);
+    assert_eq!(made(3, 2), None);
+    assert_eq!(made(0, 0), None);
+}
+
+/// A candidate has no occurrence until it's given one, and then keeps
+/// its text.
+#[test]
+fn a_candidate_keeps_the_occurrence_it_is_given() {
+    assert_eq!(amlodipine().occurrence(), None);
+    let second = Occurrence::new(2, 2).unwrap();
+    let at = amlodipine().at(second);
+    assert_eq!(at.occurrence(), Some(second));
+    assert_eq!((at.heard(), at.term()), ("amylo diping", "amlodipine"));
+}
+
 /// A candidate and a question give back the text they were made with,
 /// and a missing fact or previous chunk reads as missing.
 #[test]

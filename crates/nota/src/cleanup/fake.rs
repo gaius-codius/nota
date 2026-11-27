@@ -29,7 +29,9 @@ pub(crate) enum Trouble {
 pub(crate) struct Log {
     /// Each question's chunk, in order.
     pub(crate) asked: Mutex<Vec<String>>,
-    /// Each question's candidates as `heard -> term`, in order.
+    /// Each question's candidates as `heard -> term`, in order, with
+    /// `(nth of n)` after where the candidate names which time its words
+    /// occur.
     pub(crate) candidates: Mutex<Vec<Vec<String>>>,
     /// How many deciders were dropped.
     pub(crate) dropped: AtomicUsize,
@@ -175,7 +177,13 @@ impl Decider for Fake {
         self.log.candidates.lock().unwrap().push(
             question
                 .candidates()
-                .map(|(_, c)| format!("{} -> {}", c.heard(), c.term()))
+                .map(|(_, c)| {
+                    let line = format!("{} -> {}", c.heard(), c.term());
+                    match c.occurrence() {
+                        Some(o) => format!("{line} ({} of {})", o.nth(), o.of()),
+                        None => line,
+                    }
+                })
                 .collect(),
         );
         if self.flag_after.is_some_and(|after| n + 1 >= after) {
