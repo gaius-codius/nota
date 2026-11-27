@@ -74,7 +74,7 @@ pub(crate) fn sample(at: SampleIndex) -> Result<i64, StoreError> {
     i64::try_from(at.get()).map_err(|_| StoreError::OutOfRange)
 }
 
-fn parse_sample(at: i64) -> Result<SampleIndex, StoreError> {
+pub(crate) fn parse_sample(at: i64) -> Result<SampleIndex, StoreError> {
     u64::try_from(at)
         .map(SampleIndex::new)
         .map_err(|_| StoreError::Corrupt(format!("sample {at} is negative")))

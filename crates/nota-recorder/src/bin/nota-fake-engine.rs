@@ -27,6 +27,10 @@
 //! | `old-version` | Sends a `Hello` with version 0, from before transcripts carried words. |
 //! | `no-log-probs-version` | Sends a `Hello` with version 1, from before words carried log-probabilities. |
 //!
+//! Every mode keeps the last `Hotwords` it was sent; once it holds `H` of
+//! them, each transcript's text (and its word) ends `~H`, so a test can see
+//! a restarted engine was given the list again.
+//!
 //! Every mode first requires the recorder's `Hello` (else exit 2) and exits 0
 //! when stdin ends. Bad arguments exit 2. Like the real engine, every mode
 //! first ties itself to the recorder ([`nota_core::lifeline`]), so on Linux
@@ -166,6 +170,8 @@ struct Engine<W> {
     audio_frames: u64,
     /// Whether the engine has stopped answering.
     silent: bool,
+    /// How many hotwords the last `Hotwords` held; 0 before any.
+    hotwords: usize,
 }
 
 impl<W: Write> Engine<W> {
@@ -184,6 +190,7 @@ impl<W: Write> Engine<W> {
             tracks: BTreeMap::new(),
             audio_frames: 0,
             silent,
+            hotwords: 0,
         }
     }
 
@@ -208,6 +215,7 @@ impl<W: Write> Engine<W> {
             return Ok(Step::Continue);
         }
         match message {
+            ToEngine::Hotwords(hotwords) => self.hotwords = hotwords.len(),
             ToEngine::Flush { track } => {
                 self.answer(track, end_of(&self.tracks, track))?;
                 // As the real engine: the next audio may start anywhere.
@@ -293,7 +301,10 @@ impl<W: Write> Engine<W> {
         if self.args.delay_ms > 0 {
             slow_down(self.args.delay_ms);
         }
-        let text = format!("{}-{}", start.get(), end.get());
+        let text = match self.hotwords {
+            0 => format!("{}-{}", start.get(), end.get()),
+            held => format!("{}-{}~{held}", start.get(), end.get()),
+        };
         let word = HeardWord::new(text.clone(), range)
             .map(|word| word.with_log_prob(LogProb::new(ECHO_LOG_PROB)));
         let Some(transcript) = Transcript::new(track, range, text) else {

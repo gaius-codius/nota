@@ -315,6 +315,52 @@ fn no_job_starts_while_a_recording_runs() {
     until_states(&db, &[(S1, JobState::Done)]);
 }
 
+/// No hotword pass starts while a recording runs either: a session whose
+/// only job left is its hotword pass runs it once the recording stops.
+#[test]
+fn no_hotword_pass_starts_while_a_recording_runs() {
+    let dir = TestDir::new("capture-hotword");
+    let db = Writer::new(&dir.0.join("library.db"));
+    db.with(|db| {
+        db.create_session(&NewSession::bare(S1))?;
+        db.finish_recording(S1, None)?;
+        for job in db.session_jobs(S1)? {
+            if job.kind != JobKind::HotwordPass {
+                db.end_job(job.id, &JobEnd::Done)?;
+            }
+        }
+        Ok(())
+    })
+    .unwrap();
+    let hotword = || {
+        db.with(|db| db.jobs())
+            .unwrap()
+            .into_iter()
+            .find(|job| job.kind == JobKind::HotwordPass)
+            .map(|job| job.state)
+    };
+    let worker = Fake::default();
+    let recording = Switch::on();
+    let runner = spawn(&dir, &db, &worker, &recording, &Switch::on());
+    // Nothing shows when the runner looks, so this waits a while for a
+    // run that mustn't start.
+    pause(Duration::from_millis(1_500));
+    assert!(worker.ran().is_empty());
+    assert_eq!(hotword(), Some(JobState::Waiting(None)));
+    recording.set(false);
+    runner.wake();
+    let clock = SystemClock::start().unwrap();
+    while hotword() != Some(JobState::Done) {
+        assert!(
+            clock.now().elapsed() < Duration::from_secs(10),
+            "{:?}",
+            hotword()
+        );
+        pause(Duration::from_millis(20));
+    }
+    assert_eq!(worker.ran(), [S1]);
+}
+
 /// A job running when a recording starts stops at once and waits, keeping
 /// its progress, then runs again once the recording has stopped.
 #[test]
@@ -835,10 +881,10 @@ fn queue(db: &Writer, session: SessionId, waits: Option<Wait>) {
         })?;
         db.finish_recording(session, waits)?;
         // These tests are about the queue, which treats every kind alike:
-        // each session's clean-up is marked done, so the final pass is the
-        // one job each session has to run.
+        // each session's hotword pass and clean-up are marked done, so the
+        // final pass is the one job each session has to run.
         for job in db.session_jobs(session)? {
-            if job.kind == JobKind::CleanUp {
+            if job.kind != JobKind::FinalPass {
                 db.end_job(job.id, &JobEnd::Done)?;
             }
         }
@@ -915,8 +961,8 @@ fn a_spawned_runner_reads_the_supplied_clock() {
 }
 
 /// The runner's retries after one job of `kind`, in `S1`, ended with its
-/// engine answering, when every job of `S1` and `S2` (a final pass and a
-/// clean-up each) had backed off three times: how many times each
+/// engine answering, when every job of `S1` and `S2` (a final pass, a
+/// hotword pass and a clean-up each) had backed off three times: how many times each
 /// session's job of each kind has backed off since.
 fn backed_off_after_answer(name: &str, kind: JobKind) -> Vec<(SessionId, JobKind, u32)> {
     let (_dir, db) = library(name, &[]);
@@ -965,7 +1011,9 @@ fn a_decider_that_answers_resets_only_clean_up_retries() {
         backed_off_after_answer("decider-reset", JobKind::CleanUp),
         [
             (S1, JobKind::FinalPass, 3),
+            (S1, JobKind::HotwordPass, 3),
             (S2, JobKind::FinalPass, 3),
+            (S2, JobKind::HotwordPass, 3),
             (S2, JobKind::CleanUp, 0),
         ]
     );
@@ -979,8 +1027,28 @@ fn a_speech_engine_that_answers_resets_only_final_pass_retries() {
     assert_eq!(
         backed_off_after_answer("speech-reset", JobKind::FinalPass),
         [
+            (S1, JobKind::HotwordPass, 3),
             (S1, JobKind::CleanUp, 3),
             (S2, JobKind::FinalPass, 0),
+            (S2, JobKind::HotwordPass, 3),
+            (S2, JobKind::CleanUp, 3),
+        ]
+    );
+}
+
+/// The boosted engine answering in a hotword pass puts every other hotword
+/// pass back to the shortest wait, and leaves the final passes' and
+/// clean-up's spacing as it was: the boosted engine is its own, and the
+/// plain one may still be down.
+#[test]
+fn a_boosted_engine_that_answers_resets_only_hotword_retries() {
+    assert_eq!(
+        backed_off_after_answer("boosted-reset", JobKind::HotwordPass),
+        [
+            (S1, JobKind::FinalPass, 3),
+            (S1, JobKind::CleanUp, 3),
+            (S2, JobKind::FinalPass, 3),
+            (S2, JobKind::HotwordPass, 0),
             (S2, JobKind::CleanUp, 3),
         ]
     );

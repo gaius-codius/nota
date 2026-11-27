@@ -32,6 +32,8 @@ fn offer(chunk: &Chunk, window: &str, from: usize, term: &str) -> Offer {
         words: chunk.words(&span).unwrap(),
         span,
         term: term.to_owned(),
+        replacement: term.to_owned(),
+        inside: term.to_owned(),
         found: Found::Alias,
         origin: Origin::Learned,
     }
@@ -325,6 +327,7 @@ fn a_yes_is_gated_against_every_offer_in_the_chunk() {
     // Asked about a proposal whose term the asked list doesn't hold.
     let asked = [Offer {
         term: "amlodipine".to_owned(),
+        replacement: "amlodipine".to_owned(),
         ..offered[1].clone()
     }];
     let settled = settle(

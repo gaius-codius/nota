@@ -31,6 +31,7 @@
 
 pub mod child;
 pub mod chunker;
+pub mod hotwords;
 pub mod sherpa;
 
 use std::fmt;
@@ -93,8 +94,10 @@ impl std::error::Error for EngineError {
 }
 
 /// Runs `nota engine asr`: the protocol on stdin and stdout with the real
-/// models, cutting chunks as `chunking` says (the live pass's or the final
-/// pass's), until stdin closes or the recorder dies.
+/// models, cutting chunks as `chunking` says (the live pass's, the final
+/// pass's or the hotword pass's), until stdin closes or the recorder dies.
+/// With `boost`, it decodes by beam search and boosts the hotwords it's
+/// given (the hotword pass); without, greedily.
 ///
 /// It first ties itself to the recorder ([`lifeline::tie_to_recorder`]),
 /// before loading anything; if the recorder has already gone, it stops
@@ -111,14 +114,16 @@ impl std::error::Error for EngineError {
 pub fn run_asr(
     paths: &sherpa::ModelPaths,
     chunking: chunker::ChunkerConfig,
+    boost: Option<sherpa::BoostSetup>,
 ) -> Result<(), EngineError> {
     if lifeline::tie_to_recorder().map_err(EngineError::Tie)? == Tie::Orphaned {
         return Ok(());
     }
     let output = protocol_output().map_err(EngineError::Write)?;
     let input = io::BufReader::new(io::stdin().lock());
-    child::run(input, output, chunking, || {
-        sherpa::SherpaModels::load(paths)
+    child::run(input, output, chunking, || match boost {
+        Some(setup) => sherpa::SherpaModels::load_boosted(paths, setup),
+        None => sherpa::SherpaModels::load(paths),
     })
 }
 
@@ -146,10 +151,10 @@ mod tests {
 
     #[test]
     fn errors_say_what_went_wrong() {
-        let version = EngineError::Version(ProtocolVersion::new(3));
+        let version = EngineError::Version(ProtocolVersion::new(4));
         assert_eq!(
             version.to_string(),
-            "the recorder speaks protocol v3, this engine v2"
+            "the recorder speaks protocol v4, this engine v3"
         );
         assert_eq!(
             EngineError::Protocol("second hello").to_string(),

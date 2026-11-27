@@ -1,6 +1,7 @@
-//! The user's settings: for now, where the local decider's llama-server
-//! and model are, and which device it runs on. Until nota downloads its
-//! own server and model (M7), nothing else says where they are.
+//! The user's settings: where the local decider's llama-server and model
+//! are, and which device it runs on, and how strongly the hotword pass
+//! boosts the session's terms. Until nota downloads its own server and
+//! model (M7), nothing else says where they are.
 //!
 //! They're in `settings.toml` in nota's config directory
 //! (`~/.config/nota/settings.toml` on Linux). The user's guide to it is
@@ -15,6 +16,9 @@
 //!                      # it, or "cpu"; without it, the CPU
 //! socket_dir = "/run/user/1000/nota"  # without it, nota's folder under
 //!                                     # $XDG_RUNTIME_DIR
+//!
+//! [hotword_pass]
+//! boost = 3.0   # above 0 and at most 10; without it, 3
 //! ```
 //!
 //! [`local_decider`] reads them into what the clean-up job and the engines
@@ -24,7 +28,8 @@
 //! server's [`ServerConfig`], started through `nota engine llama-server`
 //! so it ends with nota. Only `Ready` has a config to start a server with.
 //! It looks at the files each time it's called, so a model installed while
-//! nota is open is seen at the next job.
+//! nota is open is seen at the next job. [`hotword_boost`] reads the
+//! hotword pass's boost the same way, at each run.
 //!
 //! The file is the user's own text, so it's parsed at the edge: a key
 //! nota doesn't know, a path that isn't absolute (or `~/…`), or a device
@@ -41,6 +46,8 @@ use std::sync::Arc;
 
 use nota_llm::server::{Device, GpuName, Launcher, ServerConfig};
 
+use crate::hotword_pass::Boost;
+
 #[cfg(test)]
 mod tests;
 
@@ -52,6 +59,12 @@ const MAX_LEN: u64 = 64 * 1024;
 
 /// The table that holds the local decider's settings.
 const TABLE: &str = "local_decider";
+
+/// The table that holds the hotword pass's settings.
+const HOTWORD_TABLE: &str = "hotword_pass";
+
+/// The keys the hotword pass's table may hold.
+const HOTWORD_KEYS: [&str; 1] = ["boost"];
 
 /// The keys the local decider's table may hold.
 const KEYS: [&str; 4] = ["program", "model", "device", "socket_dir"];
@@ -219,22 +232,40 @@ fn read(path: &Path) -> Result<Option<String>, Unavailable> {
     Ok(Some(text))
 }
 
+/// A settings file's `text` as TOML, if it holds no table nota doesn't
+/// know.
+fn tables(text: &str) -> Result<toml::Table, String> {
+    let file: toml::Table = text.parse().map_err(|e| format!("not TOML: {e}"))?;
+    if let Some(key) = file.keys().find(|k| *k != TABLE && *k != HOTWORD_TABLE) {
+        return Err(format!("nota has no setting {key}"));
+    }
+    Ok(file)
+}
+
+/// The table `name` in `file` (empty if it isn't there), if it holds only
+/// `keys`.
+fn table<'f>(
+    file: &'f toml::Table,
+    name: &str,
+    keys: &[&str],
+) -> Result<Option<&'f toml::Table>, String> {
+    let table = match file.get(name) {
+        None => return Ok(None),
+        Some(toml::Value::Table(t)) => t,
+        Some(_) => return Err(format!("{name} isn't a table")),
+    };
+    if let Some(key) = table.keys().find(|k| !keys.contains(&k.as_str())) {
+        return Err(format!("nota has no setting {name}.{key}"));
+    }
+    Ok(Some(table))
+}
+
 /// The local decider's settings in a settings file's `text`, with `~/`
 /// read as `home`.
 fn parse(text: &str, home: Option<&Path>) -> Result<Written, String> {
-    let file: toml::Table = text.parse().map_err(|e| format!("not TOML: {e}"))?;
-    if let Some(key) = file.keys().find(|k| *k != TABLE) {
-        return Err(format!("nota has no setting {key}"));
-    }
+    let file = tables(text)?;
     let empty = toml::Table::new();
-    let table = match file.get(TABLE) {
-        None => &empty,
-        Some(toml::Value::Table(t)) => t,
-        Some(_) => return Err(format!("{TABLE} isn't a table")),
-    };
-    if let Some(key) = table.keys().find(|k| !KEYS.contains(&k.as_str())) {
-        return Err(format!("nota has no setting {TABLE}.{key}"));
-    }
+    let table = table(&file, TABLE, &KEYS)?.unwrap_or(&empty);
     Ok(Written {
         program: text_of(table, "program")?
             .map(|p| program(p, home))
@@ -356,4 +387,48 @@ fn find_program(program: &Path, path: Option<&OsStr>) -> Result<PathBuf, Unavail
 fn is_program(path: &Path) -> bool {
     path.metadata()
         .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+/// The hotword pass's boost as the settings in `env` leave it: the
+/// setting `[hotword_pass] boost`, or [`Boost::DEFAULT`] without one (or
+/// without a settings file to hold one).
+///
+/// # Errors
+///
+/// [`Unavailable::Unreadable`] or [`Unavailable::TooLarge`] if the file
+/// can't be read, and [`Unavailable::Invalid`] if it doesn't parse or the
+/// boost isn't a number above 0 and at most [`Boost::MAX`].
+pub(crate) fn hotword_boost(env: &Environment) -> Result<Boost, Unavailable> {
+    let Some(file) = &env.settings else {
+        return Ok(Boost::DEFAULT);
+    };
+    match read(file)? {
+        Some(text) => parse_boost(&text).map_err(|why| Unavailable::Invalid(file.clone(), why)),
+        None => Ok(Boost::DEFAULT),
+    }
+}
+
+/// The hotword pass's boost in a settings file's `text`.
+fn parse_boost(text: &str) -> Result<Boost, String> {
+    let file = tables(text)?;
+    let Some(table) = table(&file, HOTWORD_TABLE, &HOTWORD_KEYS)? else {
+        return Ok(Boost::DEFAULT);
+    };
+    let (score, written) = match table.get("boost") {
+        None => return Ok(Boost::DEFAULT),
+        Some(toml::Value::Float(score)) => (*score, score.to_string()),
+        // A whole number is as good: `boost = 3` means 3. One too big for
+        // an `i32` is far over the maximum, and refused as that.
+        Some(toml::Value::Integer(score)) => (
+            i32::try_from(*score).map_or(f64::INFINITY, f64::from),
+            score.to_string(),
+        ),
+        Some(_) => return Err(format!("{HOTWORD_TABLE}.boost isn't a number")),
+    };
+    Boost::new(score).ok_or_else(|| {
+        format!(
+            "{HOTWORD_TABLE}.boost must be a number above 0 and at most {}: {written}",
+            Boost::MAX
+        )
+    })
 }

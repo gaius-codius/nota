@@ -4,7 +4,7 @@
 //! asserts the reader's contract on every frame it accepts. A violated
 //! assertion panics, which AFL records as a crash.
 
-use nota_core::messages::{FromEngine, ToEngine};
+use nota_core::messages::{FromEngine, MAX_HOTWORD_LEN, MAX_HOTWORDS, ToEngine};
 use nota_core::protocol::{Frame, FrameReader, WireMessage, encode};
 
 /// Reads `data` as frames of `M` until the end or the first error. Each
@@ -49,9 +49,33 @@ fn check_from_engine(frame: &Frame<FromEngine>) {
     }
 }
 
+/// A hotwords message holds at most [`MAX_HOTWORDS`], each one
+/// [`Hotword::new`] accepts as it stands, so none holds text sherpa-onnx's
+/// per-stream format would misread (a `/`, a control character, a word
+/// starting with `:`).
+fn check_to_engine(frame: &Frame<ToEngine>) {
+    let Frame::Message(ToEngine::Hotwords(hotwords)) = frame else {
+        return;
+    };
+    assert!(hotwords.len() <= MAX_HOTWORDS, "too many hotwords");
+    for hotword in hotwords {
+        // The engine's hotword format, read as sherpa-onnx reads it: phrases
+        // split at `/` and line ends, words at whitespace, a word starting
+        // with `:` a score. None of that may be in a hotword that got through.
+        let text = hotword.as_str();
+        assert!((1..=MAX_HOTWORD_LEN).contains(&text.len()), "a hotword's length");
+        assert!(!text.chars().any(|c| c == '/' || c.is_control()), "a hotword's character");
+        assert!(!text.chars().any(|c| c.is_whitespace() && c != ' '), "a hotword's spacing");
+        assert!(
+            text.split(' ').all(|w| !w.is_empty() && !w.starts_with(':')),
+            "a hotword's words"
+        );
+    }
+}
+
 fn main() {
     afl::fuzz!(|data: &[u8]| {
         read_all::<FromEngine>(data, check_from_engine);
-        read_all::<ToEngine>(data, |_| {});
+        read_all::<ToEngine>(data, check_to_engine);
     });
 }

@@ -57,6 +57,10 @@ pub struct TrackAudio {
     pub segments: Vec<SegmentRow>,
     /// Every sample before this is done already.
     pub from: SampleIndex,
+    /// Where the pass stops on it, flushing there: `None` for the end of
+    /// the last segment. The hotword pass feeds one final-pass chunk at a
+    /// time this way, so the engine decodes exactly that chunk.
+    pub until: Option<SampleIndex>,
 }
 
 /// Where a pass's results go.
@@ -347,20 +351,22 @@ struct Feed {
     unread: VecDeque<SampleRange>,
     /// Everything before this is confirmed.
     confirmed: SampleIndex,
-    /// The last published sample's end.
+    /// Where sending stops: the last published sample's end, or the
+    /// track's `until` if that comes first.
     end: SampleIndex,
 }
 
 impl Feed {
     /// The audio of `track` left to do, if any.
     fn new(track: &TrackAudio) -> Option<Self> {
+        let until = track.until.unwrap_or(SampleIndex::new(u64::MAX));
         let segments: VecDeque<SegmentRow> = track
             .segments
             .iter()
-            .filter(|row| row.range().end() > track.from)
+            .filter(|row| row.range().end() > track.from && row.range().start() < until)
             .copied()
             .collect();
-        let end = segments.back()?.range().end();
+        let end = segments.back()?.range().end().min(until);
         Some(Self {
             track: track.track,
             next: track.from.max(segments.front()?.range().start()),
@@ -441,13 +447,15 @@ impl Feed {
                 continue;
             };
             let start = self.next.max(row.range().start());
+            // A segment past the feed's end is sent only up to it.
+            let row_end = row.range().end().min(self.end);
             let frame = config.frame.get().max(1);
             let boundary = (start.get() / frame)
                 .saturating_add(1)
                 .saturating_mul(frame);
             // Never before `start`: a row overlapping the one before it
             // (the store refuses those) is passed over, not looped on.
-            let end = SampleIndex::new(boundary).min(row.range().end()).max(start);
+            let end = SampleIndex::new(boundary).min(row_end).max(start);
             let at = |sample: SampleIndex| {
                 usize::try_from(sample.saturating_count_since(row.range().start()).get())
                     .unwrap_or(usize::MAX)
@@ -464,7 +472,7 @@ impl Feed {
                 self.sent.push_back(range);
             }
             self.next = end;
-            if end >= row.range().end() {
+            if end >= row_end {
                 self.segments.pop_front();
                 self.audio = None;
                 self.previous = Some(row);
@@ -480,7 +488,8 @@ impl Feed {
     /// everything before them is confirmed.
     fn skip_unread(&mut self, engine: &EngineSupervisor, row: SegmentRow) {
         engine.flush(self.track);
-        if let Some(range) = SampleRange::new(self.next.max(row.range().start()), row.range().end())
+        let row_end = row.range().end().min(self.end);
+        if let Some(range) = SampleRange::new(self.next.max(row.range().start()), row_end)
             .filter(|range| !range.is_empty())
         {
             self.unread.push_back(range);

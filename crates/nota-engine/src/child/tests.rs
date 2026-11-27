@@ -97,6 +97,11 @@ impl Models for FakeModels {
     fn transcriber(&mut self) -> &mut Self {
         self
     }
+
+    /// Boosts nothing: the fake's text doesn't depend on a list.
+    fn boost(&mut self, _: &[Hotword]) -> Result<(), EngineError> {
+        Ok(())
+    }
 }
 
 fn range(from: u64, to: u64) -> SampleRange {
@@ -370,7 +375,7 @@ fn a_mismatched_or_missing_hello_is_refused_before_loading() {
     );
     assert_eq!(
         err.to_string(),
-        "the recorder speaks protocol v1, this engine v2"
+        "the recorder speaks protocol v1, this engine v3"
     );
     assert!(matches!(refuse(&flush()), EngineError::Protocol(_)));
     assert!(matches!(refuse(&[1, 2]), EngineError::Read(_)));

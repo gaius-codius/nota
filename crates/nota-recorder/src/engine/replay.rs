@@ -403,6 +403,7 @@ mod tests {
             .map(|f| match f {
                 ToEngine::Audio(c) => Some(c.range().start().get()),
                 ToEngine::Flush { .. } => None,
+                ToEngine::Hotwords(_) => panic!("the replay sends no hotwords"),
             })
             .collect()
     }
@@ -682,6 +683,7 @@ mod tests {
             .map(|f| match f {
                 ToEngine::Audio(c) => c.samples().len(),
                 ToEngine::Flush { .. } => 0,
+                ToEngine::Hotwords(_) => panic!("the replay sends no hotwords"),
             })
             .collect();
         assert_eq!(lens, [MAX_AUDIO_SAMPLES, MAX_AUDIO_SAMPLES, 1]);
