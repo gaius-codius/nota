@@ -33,6 +33,24 @@ fn words_are_counted_as_the_lookup_splits_them() {
     assert_eq!(time(text, "Amylo diping", 0), Some((1, 2)));
 }
 
+/// Quotes the split keeps on a word don't make it another word: the
+/// quoted time counts, so the decider's count and the question's agree.
+#[test]
+fn quotes_on_the_words_dont_make_them_other_words() {
+    let text = "Start amylo diping, quote 'amylo diping', then stop amylo diping.";
+    assert_eq!(time(text, "amylo diping", 6), Some((1, 3)));
+    assert_eq!(time(text, "'amylo diping'", 26), Some((2, 3)));
+    assert_eq!(time(text, "amylo diping", 52), Some((3, 3)));
+}
+
+/// A place the words aren't counted at names no time, rather than a
+/// wrong one.
+#[test]
+fn a_place_not_counted_names_no_time() {
+    let text = "amylo diping then amylo diping";
+    assert_eq!(time(text, "amylo diping", 3), None);
+}
+
 /// A blank window names no time, rather than panicking.
 #[test]
 fn a_blank_window_names_no_time() {
