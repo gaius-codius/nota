@@ -417,6 +417,83 @@ fn a_retry_left_running_is_taken_back_with_its_reason() {
     );
 }
 
+/// The job of `kind` for `session`.
+fn job_of(store: &Store, session: SessionId, kind: JobKind) -> Job {
+    let jobs = store.session_jobs(session).unwrap();
+    jobs.into_iter().find(|job| job.kind == kind).unwrap()
+}
+
+/// Runs job `id` and ends it as `end`.
+fn run_to(store: &mut Store, id: JobId, end: &JobEnd) {
+    assert!(store.start_job(id).unwrap());
+    store.end_job(id, end).unwrap();
+}
+
+/// A hotword pass that ends done sends its session's clean-up, done
+/// without it, back to waiting so it runs again; another session's
+/// clean-up is left done.
+#[test]
+fn a_hotword_pass_ending_done_runs_a_done_clean_up_again() {
+    let (_dir, mut store) = store("clean-up-again");
+    store.finish_recording(S1, None).unwrap();
+    store.finish_recording(S2, None).unwrap();
+    for session in [S1, S2] {
+        let clean_up = job_of(&store, session, JobKind::CleanUp).id;
+        run_to(&mut store, clean_up, &JobEnd::Done);
+    }
+    let hotwords = job_of(&store, S1, JobKind::HotwordPass).id;
+    run_to(&mut store, hotwords, &JobEnd::EngineDown("stalled".into()));
+    // Still down: clean-up stays done.
+    assert_eq!(job_of(&store, S1, JobKind::CleanUp).state, JobState::Done);
+    run_to(&mut store, hotwords, &JobEnd::Done);
+    assert_eq!(
+        job_of(&store, S1, JobKind::CleanUp).state,
+        JobState::Waiting(None)
+    );
+    assert_eq!(job_of(&store, S2, JobKind::CleanUp).state, JobState::Done);
+}
+
+/// Only a done clean-up runs again: one that failed stays failed, and
+/// one still waiting keeps what it waits for. A hotword pass ending any
+/// other way, or another kind of job ending done, changes no clean-up.
+#[test]
+fn only_a_done_clean_up_is_sent_back_by_a_done_hotword_pass() {
+    let (_dir, mut store) = store("clean-up-not-again");
+    store.finish_recording(S1, None).unwrap();
+    store.finish_recording(S2, None).unwrap();
+    let failed = job_of(&store, S1, JobKind::CleanUp).id;
+    run_to(&mut store, failed, &JobEnd::Failed("no packs".into()));
+    let waiting = job_of(&store, S2, JobKind::CleanUp).id;
+    run_to(&mut store, waiting, &JobEnd::Waiting(Some(Wait::Decider)));
+    for session in [S1, S2] {
+        let hotwords = job_of(&store, session, JobKind::HotwordPass).id;
+        run_to(&mut store, hotwords, &JobEnd::Done);
+    }
+    assert_eq!(
+        job_of(&store, S1, JobKind::CleanUp).state,
+        JobState::Failed("no packs".into())
+    );
+    assert_eq!(
+        job_of(&store, S2, JobKind::CleanUp).state,
+        JobState::Waiting(Some(Wait::Decider))
+    );
+}
+
+/// A final pass ending done, or a hotword pass failing, leaves a done
+/// clean-up done: only a done hotword pass has candidates to add.
+#[test]
+fn a_done_clean_up_stays_done_unless_the_hotword_pass_is_done() {
+    let (_dir, mut store) = store("clean-up-stays");
+    store.finish_recording(S1, None).unwrap();
+    let clean_up = job_of(&store, S1, JobKind::CleanUp).id;
+    run_to(&mut store, clean_up, &JobEnd::Done);
+    let final_pass = job_of(&store, S1, JobKind::FinalPass).id;
+    run_to(&mut store, final_pass, &JobEnd::Done);
+    let hotwords = job_of(&store, S1, JobKind::HotwordPass).id;
+    run_to(&mut store, hotwords, &JobEnd::Failed("no beam".into()));
+    assert_eq!(job_of(&store, S1, JobKind::CleanUp).state, JobState::Done);
+}
+
 /// A stored job that doesn't parse is an error, not a guess.
 #[test]
 fn a_bad_job_row_is_corrupt() {

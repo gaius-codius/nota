@@ -30,6 +30,13 @@
 //! screen shows it at its next refresh. It goes when that engine comes
 //! back ([`Store::engine_answered`]).
 //!
+//! **Clean-up again once the hotword pass is done.** Clean-up compares
+//! only a finished hotword pass's text, so it can only be done before the
+//! pass when it went on without it (the pass's engine kept failing). So
+//! when a hotword pass ends done, its session's clean-up, if done, waits
+//! to run again, in the same transaction, and adds the pass's candidates
+//! ([`Store::end_job`]).
+//!
 //! The Processing screen shows what this holds.
 
 use nota_core::SessionId;
@@ -278,6 +285,24 @@ pub(crate) fn queue(conn: &Connection, key: i64, waits: Option<Wait>) -> Result<
     Ok(())
 }
 
+/// If job `id` is a hotword pass, sends its session's clean-up back to
+/// waiting if it's done: it went on without the pass, and runs again to
+/// add its candidates. A clean-up not yet done reads the pass's text when
+/// it runs anyway, and a failed one isn't run again.
+fn again_after_hotwords(conn: &Connection, id: JobId) -> Result<(), StoreError> {
+    conn.execute(
+        "UPDATE job SET state = 'waiting', waits_for = NULL, detail = NULL \
+         WHERE kind = ?2 AND state = 'done' AND session_id = \
+             (SELECT session_id FROM job WHERE id = ?1 AND kind = ?3)",
+        params![
+            id.0,
+            JobKind::CleanUp.as_str(),
+            JobKind::HotwordPass.as_str()
+        ],
+    )?;
+    Ok(())
+}
+
 fn to_i64(n: u64) -> Result<i64, StoreError> {
     i64::try_from(n).map_err(|_| StoreError::OutOfRange)
 }
@@ -412,12 +437,16 @@ impl Store {
     }
 
     /// Ends a run of the job, as `end` says. A reason kept from an
-    /// earlier engine failure goes, or is replaced by this end's.
+    /// earlier engine failure goes, or is replaced by this end's. A
+    /// hotword pass that ends done sends its session's clean-up, if done,
+    /// back to waiting, in the same transaction, so it runs again with
+    /// the pass's candidates (the module's docs).
     ///
     /// # Errors
     ///
     /// [`StoreError::NoJob`] if there's no such job, and
-    /// [`StoreError::Sqlite`] for any SQLite failure.
+    /// [`StoreError::Sqlite`] for any SQLite failure. Nothing changes
+    /// then.
     pub fn end_job(&mut self, id: JobId, end: &JobEnd) -> Result<(), StoreError> {
         let (state, waits, detail) = match end {
             JobEnd::Done => ("done", None, None),
@@ -425,13 +454,20 @@ impl Store {
             JobEnd::EngineDown(why) => ("waiting", Some(Wait::Engine.as_str()), Some(why.as_str())),
             JobEnd::Failed(why) => ("failed", None, Some(why.as_str())),
         };
-        let changed = self.conn.execute(
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
             "UPDATE job SET state = ?2, waits_for = ?3, detail = ?4 WHERE id = ?1",
             params![id.0, state, waits, detail],
         )?;
         if changed == 0 {
             return Err(StoreError::NoJob(id.0));
         }
+        if *end == JobEnd::Done {
+            again_after_hotwords(&tx, id)?;
+        }
+        tx.commit()?;
         Ok(())
     }
 

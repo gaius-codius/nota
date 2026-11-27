@@ -86,6 +86,8 @@ fn the_schema_has_exactly_these_tables() {
             "heard_proposal",
             "heard_revision",
             "heard_revision_text",
+            "hotword_left_out",
+            "hotword_left_out_term",
             "hotword_progress",
             "hotword_text",
             "job",

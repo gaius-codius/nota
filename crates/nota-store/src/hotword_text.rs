@@ -12,6 +12,11 @@
 //! progress are committed together, so a pass stopped at any point carries
 //! on from its progress and adds each row once; a write retried after its
 //! answer was lost stores nothing twice.
+//!
+//! **What the engine left out** ([`LeftOut`]): how many terms the pass
+//! last gave its engine, and those the engine said it can't boost. It's
+//! what the engine said last, not a record: each report replaces the one
+//! before (version 15).
 
 use std::collections::BTreeMap;
 
@@ -33,6 +38,37 @@ pub struct HotwordText {
     pub text: Option<String>,
     /// The boost it ran at (sherpa-onnx's `hotwords_score`), above 0.
     pub boost: f64,
+}
+
+/// What the hotword pass's engine said of the terms it was given: how
+/// many it was given, and those it left out, unboosted. There are never
+/// more left out than given; only [`LeftOut::new`] makes one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeftOut {
+    given: usize,
+    terms: Vec<String>,
+}
+
+impl LeftOut {
+    /// `terms` left out of `given` terms, or `None` if that's more terms
+    /// than were given, or one of them is empty.
+    #[must_use]
+    pub fn new(given: usize, terms: Vec<String>) -> Option<Self> {
+        let fits = terms.len() <= given && terms.iter().all(|term| !term.is_empty());
+        fits.then_some(Self { given, terms })
+    }
+
+    /// How many terms the engine was given.
+    #[must_use]
+    pub const fn given(&self) -> usize {
+        self.given
+    }
+
+    /// The terms it left out, in the order they were given.
+    #[must_use]
+    pub fn terms(&self) -> &[String] {
+        &self.terms
+    }
 }
 
 /// How `text` stands against what's stored: `Some(true)` if stored exactly
@@ -162,6 +198,84 @@ impl Store {
         raws.into_iter()
             .map(|(track, up_to)| Ok((parse_track(track)?, parse_sample(up_to)?)))
             .collect()
+    }
+
+    /// Stores what the session's hotword engine said it left out, in place
+    /// of whatever it said before, in one transaction committed before
+    /// returning.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::NoSession`] if the session isn't in the library,
+    /// [`StoreError::OutOfRange`] if a count doesn't fit SQLite's integer,
+    /// and [`StoreError::Sqlite`] for any SQLite failure. Nothing changes
+    /// then.
+    pub fn set_hotword_left_out(
+        &mut self,
+        session: SessionId,
+        left_out: &LeftOut,
+    ) -> Result<(), StoreError> {
+        let key = session_key(session)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if !session_exists(&tx, key)? {
+            return Err(StoreError::NoSession(session));
+        }
+        let given = i64::try_from(left_out.given).map_err(|_| StoreError::OutOfRange)?;
+        // The terms first, since they name the count's row.
+        tx.execute(
+            "DELETE FROM hotword_left_out_term WHERE session_id = ?1",
+            [key],
+        )?;
+        tx.execute(
+            "INSERT INTO hotword_left_out (session_id, given) VALUES (?1, ?2) \
+             ON CONFLICT (session_id) DO UPDATE SET given = excluded.given",
+            params![key, given],
+        )?;
+        for (position, term) in left_out.terms.iter().enumerate() {
+            let position = i64::try_from(position).map_err(|_| StoreError::OutOfRange)?;
+            tx.execute(
+                "INSERT INTO hotword_left_out_term (session_id, position, term) \
+                 VALUES (?1, ?2, ?3)",
+                params![key, position, term],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// What the session's hotword engine last said it left out; `None` if
+    /// no engine has said.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] if the rows don't make one (more terms than
+    /// given, an empty term), and [`StoreError::Sqlite`] for any SQLite
+    /// failure.
+    pub fn hotword_left_out(&self, session: SessionId) -> Result<Option<LeftOut>, StoreError> {
+        let key = session_key(session)?;
+        let given: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT given FROM hotword_left_out WHERE session_id = ?1",
+                [key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(given) = given else {
+            return Ok(None);
+        };
+        let mut stmt = self.conn.prepare(
+            "SELECT term FROM hotword_left_out_term WHERE session_id = ?1 ORDER BY position",
+        )?;
+        let terms = stmt
+            .query_map([key], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let corrupt = || StoreError::Corrupt(format!("{} terms left out of {given}", terms.len()));
+        let given = usize::try_from(given).map_err(|_| corrupt())?;
+        let found = LeftOut::new(given, terms.clone()).ok_or_else(corrupt)?;
+        Ok(Some(found))
     }
 
     /// The hotword pass's texts for the session, by track and then sample.

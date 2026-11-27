@@ -25,6 +25,7 @@
 //! | `job` | work queued after a stop: its kind, state, progress and what it waits for (V5) | the job queue ([`crate::jobs`]) |
 //! | `final_text`, `final_word`, `final_progress` | the final pass's text, by track and sample, with its words' log-probabilities (V11; unknown before), beside the heard text and never in it, never changed (V8); how far it has got on each track (V5) | the final pass ([`crate::final_text`]) |
 //! | `hotword_text`, `hotword_progress` | what the hotword pass heard in each final-pass chunk, with its boost, never changed; how far it has got on each track (V14) | the hotword pass ([`crate::hotword_text`]) |
+//! | `hotword_left_out`, `hotword_left_out_term` | how many terms the hotword pass's engine was last given, and those it said it left out, in order; replaced whole at each report (V15) | the hotword pass ([`crate::hotword_text`]) |
 //! | `event` | the timeline: warnings raised and cleared, device changes, the transcriber's state, gaps | `nota record`, as each is sent to the screen ([`crate::timeline`]) |
 //! | `finding` | an index of each session's findings file: rows whose file didn't prove them, and rows that don't parse (V6) | the app, from the findings files ([`Store::index_findings`](crate::Store::index_findings)) |
 //! | `session_pack`, `session_packs_chosen` | the term packs a session chose, by name, version and digest (V10; none before), in order, and that it chose; never changed (V9) | Setup, when the session starts ([`Store::record_session_packs`](crate::Store::record_session_packs)) |
@@ -973,6 +974,28 @@ BEGIN SELECT RAISE(ABORT, 'the revision that applied a proposal is never changed
 CREATE TRIGGER proposal_reviewed_once BEFORE UPDATE OF review ON proposal
 WHEN OLD.review IS NOT NULL
 BEGIN SELECT RAISE(ABORT, 'a proposal is never reviewed twice'); END;
+";
+
+/// Version 15: the terms the hotword pass couldn't boost.
+/// `hotword_left_out` holds, for each session whose hotword engine has
+/// said, how many terms the pass last gave it, and
+/// `hotword_left_out_term` the ones it left out of them, in the list's
+/// order. A row with no terms is an engine that boosted them all, which a
+/// session with no row (never told) isn't. Unlike the pass's text these
+/// aren't a record: each report replaces the last, since a restarted
+/// engine, or a later run with other terms, says again.
+pub(crate) const V15: &str = "
+CREATE TABLE hotword_left_out (
+    session_id INTEGER PRIMARY KEY REFERENCES session(id),
+    given INTEGER NOT NULL CHECK (given >= 0)
+) STRICT;
+
+CREATE TABLE hotword_left_out_term (
+    session_id INTEGER NOT NULL REFERENCES hotword_left_out(session_id),
+    position INTEGER NOT NULL CHECK (position >= 0),
+    term TEXT NOT NULL CHECK (length(term) > 0),
+    PRIMARY KEY (session_id, position)
+) STRICT;
 ";
 
 #[cfg(test)]
