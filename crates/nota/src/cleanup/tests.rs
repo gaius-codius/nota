@@ -1035,3 +1035,49 @@ fn a_run_cut_off_after_giving_up_leaves_the_placing_to_the_next() {
     assert_eq!(log.asked.lock().unwrap().len(), 4);
     assert_eq!(fixture.shown(), ["start amlodipine daily", POISON]);
 }
+
+/// Acceptance (#278): another session's answer shows the decider works,
+/// so a session whose only chunk always fails is given up on once that
+/// chunk fails twice more.
+#[test]
+fn another_sessions_answer_lets_a_lone_failing_chunk_be_given_up_on() {
+    let fixture = Fixture::new("poison-two-sessions", &[POISON], &["amlodipine"]);
+    // A second session in the same library, its final pass done, with a
+    // chunk the decider answers on.
+    let other = SessionId::new(2);
+    fixture
+        .db
+        .with(|db| {
+            db.create_session(&NewSession::bare(other))?;
+            db.record_session_packs(other, &[fixture.pack.pack_ref()])?;
+            db.finish_recording(other, None)?;
+            let line = final_text(0, AMLODIPINE);
+            db.add_final_text(other, MIC, line.range.end(), &[line])?;
+            let pass = db.session_jobs(other)?.remove(0).id;
+            db.end_job(pass, &JobEnd::Done)
+        })
+        .unwrap();
+    let fake = Fake::saying_yes([("amylo diping", "amlodipine")])
+        .with_trouble_in(POISON, Trouble::Unavailable);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake));
+    let running = Running {
+        stop: &|| false,
+        progress: &|_| {},
+        answered: &|| {},
+        engine_down: &|_| {},
+    };
+    let mut run_on = |session| clean_up.run(&fixture.db, session, &running);
+    // With nothing answered yet, the lone chunk's failures count as one.
+    let mut ends: Vec<JobEnd> = (0..2).map(|_| run_on(SESSION)).collect();
+    ends.push(run_on(other));
+    ends.extend((0..2).map(|_| run_on(SESSION)));
+    let mut want = down(2);
+    want.push(JobEnd::Done);
+    want.extend(down(1));
+    want.push(JobEnd::Done);
+    assert_eq!(ends, want);
+    assert_eq!(
+        decisions(&fixture, &[POISON]),
+        [(POISON.to_owned(), "given up")]
+    );
+}

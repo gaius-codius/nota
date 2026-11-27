@@ -216,7 +216,7 @@ fn states(db: &Writer) -> Vec<(SessionId, JobState)> {
     db.with(|db| db.jobs())
         .unwrap()
         .into_iter()
-        .filter(|job| job.kind == nota_store::JobKind::FinalPass)
+        .filter(|job| job.kind == JobKind::FinalPass)
         .map(|job| (job.session, job.state))
         .collect()
 }
@@ -838,7 +838,7 @@ fn queue(db: &Writer, session: SessionId, waits: Option<Wait>) {
         // each session's clean-up is marked done, so the final pass is the
         // one job each session has to run.
         for job in db.session_jobs(session)? {
-            if job.kind == nota_store::JobKind::CleanUp {
+            if job.kind == JobKind::CleanUp {
                 db.end_job(job.id, &JobEnd::Done)?;
             }
         }

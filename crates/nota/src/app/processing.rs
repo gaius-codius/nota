@@ -598,9 +598,9 @@ mod tests {
         assert_eq!(clean_up(&fixture).name, "Fixing terms");
         assert_eq!(clean_up(&fixture).engine, "decider");
         let words = nota_store::WordSpan::new(0, 0).unwrap();
-        let proposal = nota_store::NewProposal {
+        let proposal = NewProposal {
             proposed: nota_store::Proposed {
-                chunk: nota_store::ChunkKey {
+                chunk: ChunkKey {
                     track: TrackId::new(0),
                     start: SampleIndex::ZERO,
                 },
@@ -634,7 +634,7 @@ mod tests {
         let words = nota_store::WordSpan::new(position, position).unwrap();
         NewProposal {
             proposed: nota_store::Proposed {
-                chunk: nota_store::ChunkKey {
+                chunk: ChunkKey {
                     track: TrackId::new(0),
                     start: SampleIndex::new(start),
                 },

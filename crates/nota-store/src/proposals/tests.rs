@@ -493,3 +493,28 @@ fn every_refusal_and_place_reads_back() {
         .collect();
     assert_eq!(read, added);
 }
+
+/// Only a decision clean-up gave up on says so: not a no answer of
+/// another kind, nor any decision the decider made.
+#[test]
+fn only_a_given_up_decision_says_it_gave_up() {
+    let (_dir, _store, chunk) = store("proposals-gave-up");
+    let gave_up: Vec<(String, bool)> = every_decision(chunk)
+        .into_iter()
+        .map(|p| (p.proposed.term, p.decided.gave_up()))
+        .collect();
+    assert_eq!(
+        gave_up,
+        [
+            ("amlodipine".to_owned(), false),
+            ("amiloride".to_owned(), false),
+            ("amlodipin".to_owned(), false),
+            ("amylo diping".to_owned(), false),
+            ("amylase".to_owned(), false),
+            ("ampicillin".to_owned(), false),
+            ("amoxicillin".to_owned(), false),
+            ("amiodarone".to_owned(), true),
+            ("amlodipine".to_owned(), false),
+        ]
+    );
+}
