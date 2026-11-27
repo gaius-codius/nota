@@ -8,7 +8,7 @@
 //! offered, and each chunk as the run revised it) and `c4_lookup.json`
 //! (the terms). The bench applied each yes whose C1 score was at least
 //! 0.6 (`pick.py`'s F output); nota's gate applies a yes on the same
-//! score, and every chunk reads the same.
+//! score, and every chunk reads the same, with C3 on as without.
 
 use std::path::{Path, PathBuf};
 
@@ -33,9 +33,9 @@ fn read(path: &Path) -> Value {
 }
 
 /// Runs the job over pick run `tag`'s chunks with a decider saying yes
-/// where Qwen did, in that chunk, and compares each chunk's revised
-/// text.
-fn agrees_with(tag: &str) {
+/// where Qwen did, in that chunk, with C3 as `precheck`, and compares each
+/// chunk's revised text.
+fn agrees_with(tag: &str, precheck: Precheck) {
     let fixtures = bench_fixtures();
     let terms: Vec<String> = read(&fixtures.join("c4_lookup.json"))["terms"]
         .as_array()
@@ -68,7 +68,7 @@ fn agrees_with(tag: &str) {
         .collect();
     let term_refs: Vec<&str> = terms.iter().map(String::as_str).collect();
     let fixture = Fixture::new(&format!("bench-{tag}"), &texts, &term_refs);
-    let mut clean_up = fixture.clean_up(Gives::Fake(Fake::saying_yes_in(yeses)));
+    let mut clean_up = fixture.clean_up_with(Gives::Fake(Fake::saying_yes_in(yeses)), precheck);
     assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
     let shown = fixture.shown();
     let mut wrong = Vec::new();
@@ -91,12 +91,21 @@ fn agrees_with(tag: &str) {
 #[test]
 #[ignore = "needs the local bench fixtures"]
 fn the_bench_reference_run_applies_the_same_fixes() {
-    agrees_with("q5-pick-nofacts");
+    agrees_with("q5-pick-nofacts", Precheck::Off);
 }
 
 /// The pick run with facts does too.
 #[test]
 #[ignore = "needs the local bench fixtures"]
 fn the_bench_run_with_facts_applies_the_same_fixes() {
-    agrees_with("q5-pick");
+    agrees_with("q5-pick", Precheck::Off);
+}
+
+/// With C3 on, the reference run still applies the same fixes: what it
+/// skips the gate would have refused. (The bench's transcript has no
+/// log-probabilities, so here it's a plain pre-check.)
+#[test]
+#[ignore = "needs the local bench fixtures"]
+fn the_bench_reference_run_applies_the_same_fixes_with_the_pre_check() {
+    agrees_with("q5-pick-nofacts", Precheck::On);
 }
