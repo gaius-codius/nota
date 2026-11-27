@@ -24,7 +24,9 @@
 //! [`HOTWORD_DOWN_RUNS`] times in a row (counted by the store, in any
 //! nota: [`nota_store::Job::engine_downs`]), clean-up goes on with the
 //! lookup alone, and the Processing screen says the hotword candidates
-//! are missing. The pass keeps being tried; if it then finishes, the
+//! are missing. So does a pass waiting for an engine this nota hasn't
+//! got ([`Wait::Engine`]): nothing would run it. The pass keeps being
+//! tried; if it then finishes, the
 //! store sends clean-up back to run again ([`nota_store::Store::end_job`]),
 //! and that run adds the pass's candidates. A lookup candidate isn't
 //! proposed twice (it has its proposal), and neither is a difference the
@@ -239,7 +241,8 @@ impl CleanUp {
         }
         // Only a finished hotword pass's text is compared: a failed one's
         // may stop partway, a session from before the pass has none, and
-        // one whose engine keeps failing isn't waited for.
+        // one whose engine keeps failing, or that has none, isn't waited
+        // for.
         let boosted = match hotword_job(db, session) {
             Ok(Some(job)) if job.state == JobState::Done => true,
             Ok(None) => false,
@@ -309,11 +312,13 @@ fn hotword_job(db: &Writer, session: SessionId) -> Result<Option<Job>, StoreErro
         .find(|job| job.kind == JobKind::HotwordPass))
 }
 
-/// Whether clean-up goes on without the hotword pass `job`, whose engine
-/// has kept failing: [`HOTWORD_DOWN_RUNS`] of its runs in a row ended with
-/// it down.
+/// Whether clean-up goes on without the hotword pass `job`: its engine
+/// has kept failing ([`HOTWORD_DOWN_RUNS`] of its runs in a row ended with
+/// it down), or there's no engine to run it (the runner marks it waiting
+/// for one).
 const fn past_hotwords(job: &Job) -> bool {
     job.engine_downs >= HOTWORD_DOWN_RUNS
+        || matches!(job.state, JobState::Waiting(Some(Wait::Engine)))
 }
 
 /// Whether a job in `state` has finished for good: done, or failed.

@@ -1237,7 +1237,9 @@ fn a_rejected_pair_isnt_offered_by_the_diff() {
 }
 
 /// Clean-up waits while the session's hotword pass is still to finish,
-/// whatever holds it up.
+/// whatever holds it up, short of no engine at all
+/// (`clean_up_goes_on_without_a_hotword_pass_that_has_no_engine`) or one
+/// that keeps failing.
 #[test]
 fn the_job_waits_for_the_hotword_pass() {
     let fixture = Fixture::new("waits-hotword", &[STATINS], &["statins"]);
@@ -1245,7 +1247,7 @@ fn the_job_waits_for_the_hotword_pass() {
     let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
     let id = fixture.job(JobKind::HotwordPass);
     let states = [
-        JobEnd::Waiting(Some(Wait::Engine)),
+        JobEnd::Waiting(Some(Wait::FinalText)),
         JobEnd::EngineDown("gone".to_owned()),
     ];
     for end in &states {
@@ -1379,6 +1381,49 @@ fn a_hotword_pass_that_finishes_later_adds_only_its_own_candidates() {
     assert_eq!((first.as_str(), second.as_str()), ("metoprolol", "statins"));
     assert_ne!(*lookup, nota_store::Found::Hotword);
     assert_eq!(*hotword, nota_store::Found::Hotword);
+}
+
+/// Acceptance (#306): a hotword pass waiting for an engine this nota
+/// hasn't got (the runner marks it so) doesn't hold clean-up up: it runs
+/// with the lookup alone, its wait and its run agreeing. A pass waiting
+/// for anything else is still waited for. Once an engine runs the pass to
+/// the end, clean-up runs again and adds only the pass's candidates.
+#[test]
+fn clean_up_goes_on_without_a_hotword_pass_that_has_no_engine() {
+    let metoprolol = "take the metro pro lol daily";
+    let fixture = Fixture::new(
+        "hotword-no-engine",
+        &[metoprolol, STATINS],
+        &["metoprolol", "statins"],
+    );
+    let fake = Fake::saying_yes([]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    for waits in [None, Some(Wait::FinalText)] {
+        fixture.end(JobKind::HotwordPass, &JobEnd::Waiting(waits));
+        assert_eq!(
+            clean_up.lacks(&fixture.db, SESSION),
+            Some(Wait::HotwordText)
+        );
+        assert_eq!(
+            run(&mut clean_up, &fixture),
+            JobEnd::Waiting(Some(Wait::HotwordText))
+        );
+    }
+    fixture.end(JobKind::HotwordPass, &JobEnd::Waiting(Some(Wait::Engine)));
+    assert_eq!(clean_up.lacks(&fixture.db, SESSION), None);
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(asked(&fake), [["metro pro lol -> metoprolol"]]);
+    fixture.end(JobKind::CleanUp, &JobEnd::Done);
+
+    // An engine is back, and the pass finishes.
+    fixture.boosted(&[Some("take the metoprolol daily"), Some("start the statins")]);
+    fixture.end(JobKind::HotwordPass, &JobEnd::Done);
+    assert_eq!(clean_up.lacks(&fixture.db, SESSION), None);
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(
+        asked(&fake),
+        [["metro pro lol -> metoprolol"], ["stat ins -> statins"]]
+    );
 }
 
 /// A session stopped before nota had the hotword pass has no such job:
