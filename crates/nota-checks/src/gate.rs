@@ -4,7 +4,8 @@
 //!
 //! It's the bench's gate U (`regate.py`), ported. A proposal is applied only
 //! if all of these hold, checked in this order:
-//! 1. the heard span is found in the chunk, on word boundaries;
+//! 1. the heard span is found in the chunk, on word boundaries (at its
+//!    place, if the proposal names one);
 //! 2. C1 ([`letter_similarity`], heard span first) is at least
 //!    [`SIMILARITY_MIN`];
 //! 3. an **offered** candidate's term is inside the replacement (in C1's
@@ -30,6 +31,11 @@
 //!   overlaps one is [`Rejection::AlreadyChanged`]. The bench replaced
 //!   inside its running result, so a later span could match inside an
 //!   earlier replacement. Every bench chunk revises to the same text.
+//! - **A proposal may name where its span is** ([`Proposal::at`]), as
+//!   clean-up's yes names the occurrence the lookup offered. Then rule 1
+//!   finds the span only there, and the fix goes only there: when the same
+//!   words occur twice, a yes on one never changes the other. The bench's
+//!   proposals name no place.
 //! - **A side C1 refuses is refused** ([`Rejection::TooLong`]): more than
 //!   [`crate::MAX_LETTERS`] letters and digits. No bench span comes near.
 //!
@@ -70,15 +76,21 @@ pub struct Offered {
     pub term: String,
 }
 
-/// What a model proposed: a span of the chunk as it heard it, and the text
-/// to put there. A yes to a candidate is the proposal of its window as the
-/// span and its term as the replacement.
+/// What a model proposed: a span of the chunk as it heard it, the text to
+/// put there, and where the span is, if the proposal says. A yes to a
+/// candidate is the proposal of its window as the span and its term as the
+/// replacement, at the window's place.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Proposal {
     /// The span of the chunk to replace.
     pub heard: String,
     /// The text to put in its place.
     pub replacement: String,
+    /// Where the span is in the chunk, in bytes: the gate finds it only
+    /// there, on word boundaries, and places the fix only there. With
+    /// `None`, it's every match, and the fix goes at the first that doesn't
+    /// overlap an earlier fix, as on the bench.
+    pub at: Option<Range<usize>>,
 }
 
 /// Why the gate refused a proposal, in the order the rules are checked.
@@ -86,7 +98,8 @@ pub struct Proposal {
 pub enum Rejection {
     /// The heard span has no letters or digits, so it can't be compared.
     EmptySpan,
-    /// The heard span isn't in the chunk on word boundaries (rule 1).
+    /// The heard span isn't in the chunk on word boundaries, or not at the
+    /// place the proposal names (rule 1).
     SpanNotFound,
     /// The span or the replacement is longer than C1 compares.
     TooLong,
@@ -97,8 +110,9 @@ pub enum Rejection {
     /// An offered term is inside the replacement, but no such candidate's
     /// window shares a word with the heard span (rule 4).
     WindowElsewhere,
-    /// Every rule held, but each match of the span overlaps a fix placed
-    /// before it, so there was nothing left to change.
+    /// Every rule held, but each match of the span (the one at the
+    /// proposal's place, if it names one) overlaps a fix placed before it,
+    /// so there was nothing left to change.
     AlreadyChanged,
 }
 
@@ -113,7 +127,7 @@ pub enum Rejection {
 /// use nota_checks::{AppliedFix, Offered, Proposal, gate, letter_similarity};
 ///
 /// let offered = [Offered { window: "amylo diping".to_owned(), term: "amlodipine".to_owned() }];
-/// let proposal = Proposal { heard: "amylo diping".to_owned(), replacement: "amlodipine".to_owned() };
+/// let proposal = Proposal { heard: "amylo diping".to_owned(), replacement: "amlodipine".to_owned(), at: None };
 /// let gated = gate("start amylo diping daily", &offered, &[proposal]);
 /// let fix: &AppliedFix = gated.applied().next().unwrap();
 /// assert_eq!(fix.range(), 6..18);
@@ -135,7 +149,7 @@ pub enum Rejection {
 ///     offered,
 ///     similarity: letter_similarity("amylo diping", "amlodipine").unwrap(),
 /// };
-/// # let _ = (gate, Proposal { heard: String::new(), replacement: String::new() });
+/// # let _ = (gate, Proposal { heard: String::new(), replacement: String::new(), at: None });
 /// ```
 ///
 /// or by its constructor:
@@ -146,7 +160,7 @@ pub enum Rejection {
 /// let offered = Offered { window: "amylo diping".to_owned(), term: "amlodipine".to_owned() };
 /// let similarity = letter_similarity("amylo diping", "amlodipine").unwrap();
 /// let fix = AppliedFix::new(6..18, "amylo diping", "amlodipine", &offered, similarity);
-/// # let _ = (gate, Proposal { heard: String::new(), replacement: String::new() });
+/// # let _ = (gate, Proposal { heard: String::new(), replacement: String::new(), at: None });
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct AppliedFix {
@@ -308,7 +322,8 @@ impl Gated {
 /// `offered` for it, in order, and makes the revised text.
 ///
 /// Each proposal is checked against the chunk as given; an earlier fix
-/// only changes where a later one may go (it can't overlap it).
+/// only changes where a later one may go (it can't overlap it), and a
+/// proposal that names its place goes there or nowhere.
 #[must_use]
 pub fn gate(chunk: &str, offered: &[Offered], proposals: &[Proposal]) -> Gated {
     let mut placed = Vec::new();
@@ -340,9 +355,9 @@ fn decide(
         Ok(passed) => passed,
         Err(refused) => return Decision::rejected(refused.rule, refused.similarity),
     };
-    // The first match clear of every earlier fix: a fix changes only the
+    // The first place clear of every earlier fix: a fix changes only the
     // chunk's own words, never another fix's replacement.
-    let free = matches(chunk, &proposal.heard).find(|r| !placed.iter().any(|p| overlap(p, r)));
+    let free = places(chunk, proposal).find(|r| !placed.iter().any(|p| overlap(p, r)));
     let Some(range) = free else {
         return Decision::rejected(Rejection::AlreadyChanged, Some(passed.similarity));
     };
@@ -383,7 +398,7 @@ fn check<'a>(
     if letters(&proposal.heard).next().is_none() {
         return Err(refused(Rejection::EmptySpan, None));
     }
-    if matches(chunk, &proposal.heard).next().is_none() {
+    if places(chunk, proposal).next().is_none() {
         return Err(refused(Rejection::SpanNotFound, None));
     }
     let similarity = letter_similarity(&proposal.heard, &proposal.replacement)
@@ -453,11 +468,21 @@ fn words(s: &str) -> BTreeSet<Vec<u8>> {
     out
 }
 
+/// Where `proposal`'s span may go in `chunk`: the match at its place, if
+/// it names one and the span is there, or else every match, by where they
+/// start. A place off a character boundary, or past the end, matches
+/// nothing, since no match starts or ends there.
+fn places<'a>(chunk: &'a str, proposal: &'a Proposal) -> impl Iterator<Item = Range<usize>> + 'a {
+    matches(chunk, &proposal.heard)
+        .filter(|range| proposal.at.as_ref().is_none_or(|at| at == range))
+}
+
 /// Every place `heard` is in `chunk` on word boundaries, ignoring case, as
 /// byte ranges, by where they start.
 ///
 /// Matches may overlap one another, unlike Python's `finditer`; the gate
-/// takes the first that's clear of earlier fixes.
+/// takes the first that's clear of earlier fixes (of those at the
+/// proposal's place, if it names one).
 fn matches<'a>(chunk: &'a str, heard: &'a str) -> impl Iterator<Item = Range<usize>> + 'a {
     let mut before = None;
     chunk.char_indices().filter_map(move |(start, c)| {

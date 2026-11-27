@@ -310,6 +310,9 @@ fn gate_yeses(
         .map(|&i| Proposal {
             heard: asked[i].window.clone(),
             replacement: asked[i].term.clone(),
+            // Where the lookup offered it: a yes on one occurrence of
+            // words that occur twice never changes the other.
+            at: Some(asked[i].span.clone()),
         })
         .collect();
     let offered: Vec<Offered> = offered.iter().map(Offer::offered).collect();
