@@ -285,7 +285,9 @@ impl Screen {
     }
 
     /// `new` offers in `chunk`, split into those to ask about and those
-    /// C3 skips (none while it's off), each in the order given.
+    /// C3 skips (none while it's off), each in the order given. An offer
+    /// that can't go in a question is asked about, so the question fails
+    /// as it would with C3 off, and C3 changes no other answer.
     pub(crate) fn sort(
         &self,
         chunk: &Chunk,
@@ -297,6 +299,10 @@ impl Screen {
         let mut asked = Vec::new();
         let mut skipped = Vec::new();
         for offer in new {
+            if Candidate::new(offer.window.clone(), offer.term.clone(), None).is_err() {
+                asked.push(offer);
+                continue;
+            }
             match precheck(&offer.window, &offer.term, self.signal(chunk, &offer)) {
                 PreCheck::Ask(_) => asked.push(offer),
                 PreCheck::Skip(skip) => skipped.push((offer, skip)),
@@ -496,9 +502,13 @@ impl Held {
 pub(crate) struct Saved {
     /// Candidates it skipped, each rejected and logged without a call.
     pub(crate) candidates: usize,
-    /// Questions it saved: chunks whose every proposal it skipped, so no
-    /// question was ever put about them. A chunk where it skipped some
-    /// candidates but not all was still asked, about fewer.
+    /// Questions it saved: chunks whose every stored proposal it skipped,
+    /// so no answer about them came from a decider. A chunk where it
+    /// skipped some candidates but not all was asked about the rest. It's
+    /// counted from what's stored, across runs: a chunk one run asked
+    /// about and a later run skipped wholly (a new term) isn't counted,
+    /// and a chunk whose question failed before a later run skipped it
+    /// wholly is.
     pub(crate) questions: usize,
 }
 
@@ -776,7 +786,7 @@ pub(crate) struct Settled {
     /// candidate the pre-check skipped.
     pub(crate) proposals: Vec<NewProposal>,
     /// Whether a question was put to the decider: not when the pre-check
-    /// skipped every candidate.
+    /// skipped every candidate, nor when the question couldn't be made.
     pub(crate) asked: bool,
 }
 
@@ -786,17 +796,24 @@ pub(crate) struct Settled {
 /// nothing, and tries nothing again: a decider that's down ends it, where
 /// a clean-up run probes and counts the failure. `nota bench` asks this
 /// way.
+///
+/// # Errors
+///
+/// How the asking ends, if the decider was asked and stopped or is down:
+/// an error always follows a question put to it.
 pub(crate) fn settle_chunk(
     ask: &Ask<'_>,
     decider: &mut dyn Decider,
     stop: &dyn Fn() -> bool,
     context: &Context,
 ) -> Result<Settled, JobEnd> {
-    let asked = !ask.asked.is_empty();
-    let answers = if asked {
-        Some(answer_once(ask, decider, stop)?)
+    let (answers, asked) = if ask.asked.is_empty() {
+        (None, false)
     } else {
-        None
+        match question(ask) {
+            Ok(question) => (Some(answer_once(&question, decider, stop)?), true),
+            Err(why) => (Some(Answers::None(why)), false),
+        }
     };
     Ok(Settled {
         proposals: proposals(ask, answers.as_ref(), context),
@@ -827,18 +844,14 @@ fn proposals(ask: &Ask<'_>, answers: Option<&Answers>, context: &Context) -> Vec
     proposals
 }
 
-/// The decider's answers on `ask`'s candidates, asked once, or how the
+/// The decider's answers to `question`, asked once, or how the
 /// asking ends if it must end here: stopped, or the decider down.
 fn answer_once(
-    ask: &Ask<'_>,
+    question: &Question,
     decider: &mut dyn Decider,
     stop: &dyn Fn() -> bool,
 ) -> Result<Answers, JobEnd> {
-    let question = match question(ask) {
-        Ok(question) => question,
-        Err(why) => return Ok(Answers::None(why)),
-    };
-    match decider.decide(&question, stop) {
+    match decider.decide(question, stop) {
         Ok(decisions) => Ok(Answers::Given(decisions.iter().map(|(_, d)| *d).collect())),
         Err(DecideError::Stopped) => Err(JobEnd::Waiting(None)),
         Err(e @ DecideError::Unavailable(_)) => Err(JobEnd::EngineDown(e.to_string())),

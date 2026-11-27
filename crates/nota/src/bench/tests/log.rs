@@ -164,6 +164,18 @@ fn a_log_is_never_overwritten() {
     assert_eq!(read(&path).unwrap(), first);
 }
 
+/// A log holds words from a transcript, so only its owner can read it.
+#[cfg(unix)]
+#[test]
+fn a_log_is_readable_by_its_owner_only() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = TestDir::new("private");
+    let (candidates, runs) = two_runs();
+    let path = write(&dir.0, STAMP, &runs[0], &candidates, None).unwrap();
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+}
+
 /// The log folder is made if it's missing, with the folders above it.
 #[test]
 fn the_log_folder_is_made_if_missing() {

@@ -98,8 +98,10 @@ expanded.
 
 `true` or `false`, with no quotes. Before asking the decider about a
 candidate, nota compares its letters with the term's. When they're too far
-apart for the fix ever to be applied, and the recogniser wasn't unsure of
-those words, it doesn't ask.
+apart for the fix ever to be applied, it doesn't ask, unless the recogniser
+was unsure of those words. A session transcribed before nota kept how sure
+the recogniser was has nothing to say that, so there nota never asks about
+such a candidate.
 
 Off by default while it's being measured. Without the key, or without the
 `[clean_up]` table, it's off. If the settings file can't be used, it's off

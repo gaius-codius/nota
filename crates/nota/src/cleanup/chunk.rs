@@ -180,7 +180,8 @@ pub(crate) enum Answers {
 /// What a chunk's proposals record beyond each candidate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Context {
-    /// The decider that was asked.
+    /// The decider the run asks: the one that answered, or for a
+    /// candidate C3 skipped, the one it would have asked.
     pub(crate) decided_by: DecidedBy,
     /// The thresholds in force.
     pub(crate) thresholds: String,

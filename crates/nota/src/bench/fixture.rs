@@ -75,11 +75,13 @@ pub(crate) fn from_fixture(path: &Path, precheck: Precheck) -> Result<Candidates
     })
 }
 
-/// `texts` as chunks on [`TRACK`], [`CHUNK_SAMPLES`] apart. An empty
-/// text is a chunk of one empty word, with nothing to offer.
+/// `texts` as chunks on [`TRACK`], [`CHUNK_SAMPLES`] apart. A blank text
+/// keeps its place but is no chunk: it has nothing to offer, and as the
+/// next chunk's context it would make that chunk's question unaskable.
 fn chunks(texts: &[String]) -> Vec<Chunk> {
     (0_u64..)
         .zip(texts)
+        .filter(|(_, text)| !text.trim().is_empty())
         .filter_map(|(i, text)| {
             let key = ChunkKey {
                 track: TRACK,

@@ -300,6 +300,8 @@ fn run_one(
         match settle_chunk(&ask, &mut *engine.decider, stop, &context) {
             Ok(settled) => note(&mut out, chunk, &asked, &skipped, &settled),
             Err(end) => {
+                // An error comes only from a question put to the decider.
+                out.questions += 1;
                 out.down = Some(ended(&end));
                 break;
             }
@@ -447,10 +449,24 @@ fn row_line(runs: &[EngineRun], key: &Key, row: &[Option<Verdict>]) -> String {
     format!(
         "{} \"{}\" → {}: {}",
         place(key.chunk),
-        key.window,
-        key.term,
+        plain(&key.window),
+        plain(&key.term),
         verdicts.join(" | ")
     )
+}
+
+/// `text` with its control characters escaped, so text from a log or a
+/// fixture can't start a new line or drive the terminal.
+pub(crate) fn plain(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
 }
 
 /// Where `chunk` starts, as `track N at m:ss`, at the final pass's rate.

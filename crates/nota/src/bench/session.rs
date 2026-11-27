@@ -2,9 +2,9 @@
 //! final text, its packs from those installed, and the proposals its own
 //! runs made, which C3's savings are counted from.
 //!
-//! The library is only read. It's opened through nota-store, which brings
-//! an older schema up to date as the app would; a missing library is
-//! refused first, so the bench never makes one.
+//! The library is only read. It's opened as it is: a missing library is
+//! refused rather than made, and one at an older schema is refused rather
+//! than upgraded, since the app that owns it may have it open.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -34,12 +34,13 @@ pub(crate) fn from_session(
     clock: Arc<dyn Clock>,
 ) -> Result<Candidates, String> {
     let path = data.join(LIBRARY_DB);
-    // Opening a missing library would make an empty one.
+    // Said plainly: SQLite's own words for a missing file are "unable to
+    // open database file".
     if !path.is_file() {
         return Err(format!("there's no library at {}", path.display()));
     }
     let n = session.get();
-    let db = nota_store::Store::open(&path)
+    let db = nota_store::Store::open_as_is(&path)
         .map_err(|e| format!("the library {} can't be opened: {e}", path.display()))?;
     let packs = Installed::new(data, clock).packs()?;
     let read = read(&db, session, &packs).map_err(|e| format!("session {n} can't be read: {e}"))?;

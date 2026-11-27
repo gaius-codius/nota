@@ -203,6 +203,8 @@ fn an_engine_that_goes_down_stops_and_says_why() {
         runs[1].down.as_deref(),
         Some("the decider isn't working: no server")
     );
+    // The question that found it down was put, and counts.
+    assert_eq!((runs[1].questions, down.questions()), (2, 2));
     assert_eq!(
         differences(&runs),
         [(
@@ -297,4 +299,18 @@ fn an_engine_is_timed_by_the_clock() {
     let runs = run(&candidates, vec![engine], &*clock, &|| false);
     assert_eq!(runs[0].questions, 2);
     assert_eq!(runs[0].took, Duration::from_secs(3));
+}
+
+/// Text from a log or a fixture is shown with its control characters
+/// escaped, so it can't start a line of its own or drive the terminal.
+#[test]
+fn control_characters_are_shown_escaped() {
+    assert_eq!(
+        plain("amylo\n  track 0 at 0:00 \u{1b}[2J"),
+        "amylo\\n  track 0 at 0:00 \\u{1b}[2J"
+    );
+    assert_eq!(
+        plain("hyper profen → ibuprofen"),
+        "hyper profen → ibuprofen"
+    );
 }

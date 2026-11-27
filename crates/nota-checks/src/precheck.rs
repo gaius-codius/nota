@@ -46,9 +46,10 @@ mod tests;
 /// value.
 pub const LOW_LOG_PROB_PERCENT: usize = 5; // check-bound
 
-/// A recording's lowest band of log-probabilities: the words at or below
-/// its cut are the [`LOW_LOG_PROB_PERCENT`] the recogniser was least sure
-/// of.
+/// A recording's lowest band of log-probabilities: the
+/// [`LOW_LOG_PROB_PERCENT`] of its words the recogniser was least sure of,
+/// and any that tie with the highest of them, since the band marks every
+/// word at or below its cut.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LowLogProb {
     /// The highest log-probability inside the band.

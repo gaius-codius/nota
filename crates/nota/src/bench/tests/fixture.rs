@@ -47,6 +47,30 @@ fn a_fixtures_candidates_are_what_the_lookup_offers_in_its_chunks() {
     );
 }
 
+/// A blank chunk keeps its place but isn't the next chunk's context, so
+/// the next chunk's candidate is still asked about.
+#[test]
+fn a_blank_chunk_keeps_its_place_and_the_next_is_asked() {
+    let dir = TestDir::new("fixture-blank");
+    let path = dir.0.join("terms.json");
+    let chunks = ["", "start amylo diping daily"];
+    let text = serde_json::json!({ "terms": ["amlodipine"], "chunks": chunks }).to_string();
+    write_file(&path, &text);
+    let candidates = from_fixture(&path, Precheck::Off).unwrap();
+    let fake = Fake::saying_yes([("amylo diping", "amlodipine")]);
+    let runs = run(&candidates, vec![engine("only", &fake)], &clock(), &|| {
+        false
+    });
+    assert_eq!(fake.questions(), 1);
+    assert_eq!(
+        runs[0]
+            .verdicts
+            .get(&key(1, 1, 2, "amylo diping", "amlodipine"))
+            .copied(),
+        Some(verdict(Said::Yes, Ending::Applied))
+    );
+}
+
 /// A file without its chunks isn't a fixture, and the message names the
 /// file and what's missing.
 #[test]

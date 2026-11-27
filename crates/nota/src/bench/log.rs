@@ -26,7 +26,7 @@ use nota_core::{SampleIndex, TrackId, WallTime};
 use nota_store::{ChunkKey, DecidedBy, Refusal, WordSpan};
 use serde_json::{Map, Value, json};
 
-use super::{Candidates, Ending, EngineRun, Key, Said, Verdict, place, read_text};
+use super::{Candidates, Ending, EngineRun, Key, Said, Verdict, place, plain, read_text};
 use crate::cleanup::Precheck;
 
 /// The log format's number, in each header's `nota_bench_log`.
@@ -124,14 +124,20 @@ fn create_dir(dir: &Path) -> io::Result<()> {
     std::fs::create_dir_all(dir)
 }
 
-/// Makes the new file `path`, refusing one that's there already.
+/// Makes the new file `path`, refusing one that's there already. It holds
+/// words from a transcript, so where the system has file modes it's
+/// readable by its owner only, as the library is.
 #[expect(
     clippy::disallowed_methods,
     reason = "a development log the bench writes is not a recording or the library, \
               so it doesn't go through the durable-write layer"
 )]
 fn create_file(path: &Path) -> io::Result<File> {
-    File::create_new(path)
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)
 }
 
 /// The log's first line: what ran, over what, and how it went.
@@ -425,8 +431,8 @@ fn write_changes(
         writeln!(
             out,
             "  {age}: {}, {} ({})",
-            log.engine,
-            log.source,
+            plain(&log.engine),
+            plain(&log.source),
             path.display()
         )?;
     }
@@ -447,8 +453,8 @@ fn change_line(change: &Change) -> String {
     format!(
         "{} \"{}\" → {}: {} → {}",
         place(change.key.chunk),
-        change.key.window,
-        change.key.term,
+        plain(&change.key.window),
+        plain(&change.key.term),
         shown(change.old),
         shown(change.new)
     )

@@ -182,24 +182,45 @@ pub(crate) fn dispatch(command: &BenchCommand, out: &mut dyn io::Write) -> Resul
     }
 }
 
-/// Runs the bench `args` ask for: the engines, the candidates, the report
-/// and each engine's log. The clocks, the log folder, the engines and the
-/// candidates are checked before any question is asked; a log that can't
-/// be written is found only after the run.
+/// Runs the bench `args` ask for: the engines, the candidates, each
+/// engine's log and the report. The clocks, the engines, the candidates
+/// and the log folder are checked, in that order, before any question is
+/// asked. Every engine's log is written before the report, so a report
+/// that can't be printed loses no run.
+///
+/// # Errors
+///
+/// The reason, for the user, if a check fails, a log can't be written,
+/// the report can't be printed, or no engine got through the candidates.
 fn bench(args: &RunArgs, out: &mut dyn io::Write) -> Result<(), String> {
     let clock: Arc<dyn Clock> =
         Arc::new(SystemClock::start().map_err(|_| "the system clock can't be read")?);
     let started = wall_now().ok_or("the calendar's time can't be read, to name the logs")?;
     let stamp = stamp(started).ok_or("the calendar's time can't be read, to name the logs")?;
-    log::make_folder(&args.log)?;
     let engines = engines(&args.engines, &clock)?;
     let candidates = candidates(&args.source, args.precheck, &clock)?;
+    log::make_folder(&args.log)?;
     let runs = super::run(&candidates, engines, &*clock, &|| false);
+    let logged: Vec<_> = runs
+        .iter()
+        .map(|run| log::write(&args.log, &stamp, run, &candidates, Some(started)))
+        .collect();
     let written = |e: io::Error| format!("couldn't write to stdout: {e}");
     super::report(&candidates, &runs, out).map_err(written)?;
-    for run in &runs {
-        let path = log::write(&args.log, &stamp, run, &candidates, Some(started))?;
-        writeln!(out, "Logged {}: {}", run.name, path.display()).map_err(written)?;
+    let mut failed = Vec::new();
+    for (run, log) in runs.iter().zip(logged) {
+        match log {
+            Ok(path) => {
+                writeln!(out, "Logged {}: {}", run.name, path.display()).map_err(written)?;
+            }
+            Err(why) => failed.push(why),
+        }
+    }
+    if !failed.is_empty() {
+        return Err(failed.join("; "));
+    }
+    if runs.iter().all(|run| run.down.is_some()) {
+        return Err("no engine got through the candidates".to_owned());
     }
     Ok(())
 }
