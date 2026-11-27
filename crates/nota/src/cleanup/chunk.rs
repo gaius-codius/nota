@@ -4,9 +4,11 @@
 //! **The chunk is its words.** The lookup and the gate read the chunk's
 //! words joined by single spaces, which is how every later revision shows
 //! a changed chunk, so a byte range in that text names words by position.
-//! A range is widened to the whole words it touches: the gate's
-//! boundaries are the bench's, so a span can sit inside a hyphenated word
-//! ("up" in "follow-up"), and the change keeps the rest of the word.
+//! A range is widened to the whole words it touches: the lookup splits
+//! words at punctuation the chunk's words keep, so a span can sit inside a
+//! word ("dose" in "dose."), and the change keeps the rest of the word.
+//! Each yes is gated at the place the lookup offered it, so it never
+//! changes another occurrence of the same words.
 //!
 //! **Every candidate ends in exactly one outcome** ([`Decided`]): a no,
 //! or no answer, is rejected and logged; a yes the gate refuses is to be

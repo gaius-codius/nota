@@ -161,9 +161,11 @@ pub enum Decided {
         similarity: f64,
     },
     /// A yes the gate let through, but for words that are already
-    /// reviewed or changed (it found an earlier occurrence than the
-    /// lookup offered): rejected and logged, so a reviewed span is never
-    /// changed.
+    /// reviewed or changed: rejected and logged, so a reviewed span is
+    /// never changed. Clean-up doesn't ask about offers on held words, so
+    /// this is a guard; proposals from before #279 may hold it for a
+    /// later occurrence than the one held, where the gate placed the fix
+    /// on the first.
     Covered {
         /// How likely the decider thought a yes was, if it said.
         yes: Option<Probability>,
@@ -196,10 +198,9 @@ pub enum Decided {
 pub struct Proposed {
     /// The chunk of the final text.
     pub chunk: ChunkKey,
-    /// Its words the outcome is for: where an applied fix landed (which
-    /// can be an earlier occurrence of the heard span than the one
-    /// offered), with any other fix in the same words; otherwise where the
-    /// lookup offered it.
+    /// Its words the outcome is for: an applied fix's change, which is the
+    /// words the lookup offered it at, widened to any other fix sharing a
+    /// word; otherwise where the lookup offered it.
     pub words: WordSpan,
     /// Its words where the lookup offered the term, which tell a
     /// candidate proposed already from a new one.
