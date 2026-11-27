@@ -437,6 +437,9 @@ impl Live {
                 self.confirm(track, range.end());
                 actions.updates.extend(self.transcribing_change());
             }
+            // The live pass sends no hotwords, so nothing is left out of
+            // what it hears.
+            EngineEvent::LeftOut(_) => {}
         }
         actions
     }

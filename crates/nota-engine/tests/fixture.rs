@@ -157,6 +157,7 @@ fn the_fixture_transcribes() {
                 texts.push(t.into_text());
             }
             Frame::Message(FromEngine::Confirmed { up_to, .. }) => confirmed = up_to.get(),
+            Frame::Message(FromEngine::LeftOut(_)) => panic!("left-out terms with no hotwords"),
             Frame::Hello(_) => panic!("second hello"),
         }
     }

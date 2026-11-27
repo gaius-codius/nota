@@ -163,8 +163,10 @@ pub struct Boost {
     /// The terms it boosts, lowercased, in the list's order.
     pub admitted: Vec<String>,
     /// The terms left out because the vocabulary doesn't split them as the
-    /// model does, or the model can't say them, in the list's order.
-    pub left_out: Vec<String>,
+    /// model does, or the model can't say them, in the list's order: each
+    /// as the list first gave it (a term given twice, in two cases, is
+    /// left out once), so the recorder is told of the terms it sent.
+    pub left_out: Vec<Hotword>,
 }
 
 /// What to boost for `hotwords`: each lowercased (Parakeet's lowercase
@@ -175,7 +177,7 @@ pub fn prepare(tokens: &Tokens, hotwords: &[Hotword]) -> Boost {
     let terms = distinct_lowercase(hotwords);
     let mut model: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut sayable = Vec::new();
-    for term in &terms {
+    for (term, _) in &terms {
         let splits: Option<Vec<(String, Vec<String>)>> = term
             .split(' ')
             .map(|word| Some((word.to_owned(), tokens.model_split(word)?)))
@@ -191,10 +193,15 @@ pub fn prepare(tokens: &Tokens, hotwords: &[Hotword]) -> Boost {
             .get(word)
             .is_some_and(|want| vocab.split(word) == *want)
     };
-    let (admitted, left_out): (Vec<String>, Vec<String>) = terms
-        .iter()
-        .cloned()
-        .partition(|term| sayable.contains(&term.as_str()) && term.split(' ').all(agrees));
+    let mut admitted = Vec::new();
+    let mut left_out = Vec::new();
+    for (term, given) in &terms {
+        if sayable.contains(&term.as_str()) && term.split(' ').all(agrees) {
+            admitted.push(term.clone());
+        } else {
+            left_out.push((*given).clone());
+        }
+    }
     Boost {
         vocab: vocab.text(),
         hotwords: admitted.join("/"),
@@ -203,13 +210,14 @@ pub fn prepare(tokens: &Tokens, hotwords: &[Hotword]) -> Boost {
     }
 }
 
-/// `hotwords` lowercased, each once, in their first order.
-fn distinct_lowercase(hotwords: &[Hotword]) -> Vec<String> {
+/// `hotwords` lowercased, each once, in their first order, with the
+/// hotword that first gave each.
+fn distinct_lowercase(hotwords: &[Hotword]) -> Vec<(String, &Hotword)> {
     let mut seen = BTreeSet::new();
     hotwords
         .iter()
-        .map(|hotword| hotword.as_str().to_lowercase())
-        .filter(|term| seen.insert(term.clone()))
+        .map(|hotword| (hotword.as_str().to_lowercase(), hotword))
+        .filter(|(term, _)| seen.insert(term.clone()))
         .collect()
 }
 

@@ -16,7 +16,11 @@ pub struct ProtocolVersion(u16);
 
 impl ProtocolVersion {
     /// The version these messages are.
-    pub const CURRENT: Self = Self(3);
+    pub const CURRENT: Self = Self(4);
+
+    /// The version before a boosting engine said which hotwords it left
+    /// out.
+    pub const WITHOUT_LEFT_OUT: Self = Self(3);
 
     /// The version before the recorder could give the engine hotwords.
     pub const WITHOUT_HOTWORDS: Self = Self(2);
@@ -150,6 +154,12 @@ pub enum FromEngine {
         /// The first sample not yet confirmed.
         up_to: SampleIndex,
     },
+    /// The terms of the last [`ToEngine::Hotwords`] that a boosting engine
+    /// left out, each as it was given: it can't boost them, so no chunk
+    /// from now on favours them. Sent once for each list a boosting
+    /// engine is given, with no terms if it boosts them all; an engine
+    /// that doesn't boost sends none. At most [`MAX_HOTWORDS`].
+    LeftOut(Vec<Hotword>),
 }
 
 /// A run of one track's audio: 16-bit mono PCM, contiguous from the start of
@@ -478,11 +488,13 @@ mod tests {
 
     #[test]
     fn protocol_version() {
-        assert_eq!(ProtocolVersion::CURRENT.get(), 3);
+        assert_eq!(ProtocolVersion::CURRENT.get(), 4);
+        assert_eq!(ProtocolVersion::WITHOUT_LEFT_OUT.get(), 3);
         assert_eq!(ProtocolVersion::WITHOUT_HOTWORDS.get(), 2);
         assert_eq!(ProtocolVersion::WITHOUT_LOG_PROBS.get(), 1);
         assert_eq!(ProtocolVersion::WITHOUT_WORDS.get(), 0);
         assert_eq!(ProtocolVersion::new(4).get(), 4);
+        assert_ne!(ProtocolVersion::WITHOUT_LEFT_OUT, ProtocolVersion::CURRENT);
         assert_ne!(ProtocolVersion::WITHOUT_HOTWORDS, ProtocolVersion::CURRENT);
         assert_ne!(ProtocolVersion::WITHOUT_WORDS, ProtocolVersion::CURRENT);
         assert_ne!(ProtocolVersion::WITHOUT_LOG_PROBS, ProtocolVersion::CURRENT);

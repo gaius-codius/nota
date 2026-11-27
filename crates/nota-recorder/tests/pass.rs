@@ -101,6 +101,8 @@ struct Committed {
     latest: Rc<Cell<u64>>,
     /// What the pass said of the engine being down, in order.
     downs: Rc<std::cell::RefCell<Vec<Option<String>>>>,
+    /// The terms each engine said it left out, in order.
+    left_out: Vec<Vec<String>>,
 }
 
 impl PassSink for Committed {
@@ -137,6 +139,12 @@ impl PassSink for Committed {
 
     fn engine_down(&mut self, why: Option<&str>) {
         self.downs.borrow_mut().push(why.map(str::to_owned));
+    }
+
+    fn left_out(&mut self, terms: Vec<Hotword>) -> Result<(), String> {
+        let terms = terms.iter().map(|t| t.as_str().to_owned()).collect();
+        self.left_out.push(terms);
+        Ok(())
     }
 }
 
@@ -716,6 +724,63 @@ fn bounded_feeds_are_each_decoded_whole() {
         .map(|(a, b)| (MIC, a, b, format!("{a}-{b}~2")));
     assert_eq!(sink.texts, want);
     assert_eq!(sink.progress, BTreeMap::from([(MIC, 23 * S)]));
+}
+
+/// The terms a boosting engine leaves out of its greeting reach the sink,
+/// once from each engine: a restarted one says so again.
+#[test]
+fn each_engine_tells_the_sink_what_it_left_out() {
+    let mut sink = Committed::default();
+    assert!(matches!(
+        run_bounded(&boosted(&["echo"]), &mut sink),
+        PassEnd::Done
+    ));
+    // The fake leaves out the term with a space, and keeps the other.
+    assert_eq!(sink.left_out, [vec!["varicose veins".to_owned()]]);
+    let mut sink = Committed::default();
+    // Three engines, as in the restart test below.
+    let end = run_bounded(&boosted(&["crash-after", "--after", "8"]), &mut sink);
+    assert!(matches!(end, PassEnd::Done), "{end:?}");
+    assert_eq!(sink.left_out, vec![vec!["varicose veins".to_owned()]; 3]);
+}
+
+/// A sink that can't commit the left-out terms stops the pass, with its
+/// error, before any audio is confirmed.
+#[test]
+fn a_sink_that_cannot_note_left_out_terms_stops_the_pass() {
+    struct Refusing(Committed);
+    impl PassSink for Refusing {
+        type Error = String;
+        fn confirmed(
+            &mut self,
+            track: TrackId,
+            up_to: SampleIndex,
+            texts: Vec<Transcript>,
+            skipped: Vec<SampleRange>,
+        ) -> Result<(), String> {
+            self.0.confirmed(track, up_to, texts, skipped)
+        }
+        fn engine_down(&mut self, why: Option<&str>) {
+            self.0.engine_down(why);
+        }
+        fn left_out(&mut self, _: Vec<Hotword>) -> Result<(), String> {
+            Err("disk full".to_owned())
+        }
+    }
+    let mut sink = Refusing(Committed::default());
+    let end = transcribe(
+        &bounded(0),
+        |row| Ok(audio(row)),
+        &boosted(&["echo"]),
+        &clock(),
+        &mut sink,
+        &|| false,
+    );
+    assert!(
+        matches!(&end, PassEnd::Sink(e) if e == "disk full"),
+        "{end:?}"
+    );
+    assert_eq!(sink.0.progress, BTreeMap::new());
 }
 
 /// An engine killed partway through the bounded feeds is restarted, given

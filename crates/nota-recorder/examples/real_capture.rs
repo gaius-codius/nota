@@ -2218,6 +2218,9 @@ mod linux {
                     }
                 }
                 EngineEvent::Skipped { .. } => skipped += 1,
+                // The live engine is sent no hotwords, so has none to
+                // leave out.
+                EngineEvent::LeftOut(_) => {}
             }
         }
         if let Some(s) = supervisor {

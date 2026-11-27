@@ -29,7 +29,9 @@
 //!
 //! Every mode keeps the last `Hotwords` it was sent; once it holds `H` of
 //! them, each transcript's text (and its word) ends `~H`, so a test can see
-//! a restarted engine was given the list again.
+//! a restarted engine was given the list again. It answers each list as a
+//! boosting engine does, naming the terms it leaves out (`LeftOut`): those
+//! with a space in them.
 //!
 //! Every mode first requires the recorder's `Hello` (else exit 2) and exits 0
 //! when stdin ends. Bad arguments exit 2. Like the real engine, every mode
@@ -215,7 +217,14 @@ impl<W: Write> Engine<W> {
             return Ok(Step::Continue);
         }
         match message {
-            ToEngine::Hotwords(hotwords) => self.hotwords = hotwords.len(),
+            ToEngine::Hotwords(hotwords) => {
+                self.hotwords = hotwords.len();
+                let left_out = hotwords
+                    .into_iter()
+                    .filter(|hotword| hotword.as_str().contains(' '))
+                    .collect();
+                self.send(FromEngine::LeftOut(left_out))?;
+            }
             ToEngine::Flush { track } => {
                 self.answer(track, end_of(&self.tracks, track))?;
                 // As the real engine: the next audio may start anywhere.

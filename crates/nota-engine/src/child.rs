@@ -75,12 +75,14 @@ pub trait Models {
     fn transcriber(&mut self) -> &mut Self::Transcriber;
 
     /// Boosts `hotwords` in every chunk from now on, in place of any list
-    /// given before. Models that can't boost ignore them and return `Ok`.
+    /// given before, and gives the terms of it left out, each as given
+    /// (none if all are boosted). Models that can't boost ignore the list
+    /// and give `None`, so they never claim to have boosted anything.
     ///
     /// # Errors
     ///
     /// If the boosted recogniser can't be built.
-    fn boost(&mut self, hotwords: &[Hotword]) -> Result<(), EngineError>;
+    fn boost(&mut self, hotwords: &[Hotword]) -> Result<Option<Vec<Hotword>>, EngineError>;
 }
 
 /// One track's state: its detector and chunker.
@@ -96,7 +98,9 @@ struct Track<D> {
 /// The recorder's `Hello` must come first; `load` is then called to load
 /// the models, and the engine's `Hello` tells the recorder it's ready.
 /// Every chunk is answered with its text (if any) and then a
-/// [`FromEngine::Confirmed`] up to its end. When `input` ends, every track
+/// [`FromEngine::Confirmed`] up to its end; a hotwords list, by a
+/// boosting engine, with the terms it left out
+/// ([`FromEngine::LeftOut`]). When `input` ends, every track
 /// still open is transcribed as if flushed, so the tail's text isn't lost.
 ///
 /// # Errors
@@ -139,7 +143,13 @@ pub fn run<M: Models>(
                     finish(&mut output, models.transcriber(), id, track)?;
                 }
             }
-            Frame::Message(ToEngine::Hotwords(hotwords)) => models.boost(&hotwords)?,
+            Frame::Message(ToEngine::Hotwords(hotwords)) => {
+                // Told before any audio decoded with the list, so the
+                // recorder knows which terms never had a chance.
+                if let Some(left_out) = models.boost(&hotwords)? {
+                    send(&mut output, &Frame::Message(FromEngine::LeftOut(left_out)))?;
+                }
+            }
         }
     }
     for (id, track) in tracks {

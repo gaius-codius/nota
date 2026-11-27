@@ -80,7 +80,7 @@ fn scores_are_written_in_tenths() {
 fn training_makes_the_splits_agree() {
     let boost = prepare(&tokens(), &[hotword("abc"), hotword("d")]);
     assert_eq!(boost.admitted, ["abc", "d"]);
-    assert_eq!(boost.left_out, Vec::<String>::new());
+    assert_eq!(boost.left_out, Vec::<Hotword>::new());
     assert_eq!(boost.hotwords, "abc/d");
     let pieces: Vec<&str> = boost
         .vocab
@@ -133,7 +133,7 @@ fn training_moves_the_scores_a_tenth_a_round_until_the_splits_agree() {
     assert_eq!(pieces(&untrained.split("aca")), ["▁", "a", "ca"]);
     let boost = prepare(&tokens, &[hotword("aca"), hotword("ca")]);
     assert_eq!(boost.admitted, ["aca", "ca"]);
-    assert_eq!(boost.left_out, Vec::<String>::new());
+    assert_eq!(boost.left_out, Vec::<Hotword>::new());
     // "▁" and "a" were raised and lowered once each, so stay at -1.
     assert_eq!(
         boost.vocab,
@@ -149,7 +149,7 @@ fn a_term_that_never_agrees_is_left_out_and_the_earliest_best_round_kept() {
     let tokens = Tokens::parse(CLASHING).unwrap();
     let boost = prepare(&tokens, &[hotword("ccca"), hotword("c")]);
     assert_eq!(boost.admitted, ["c"]);
-    assert_eq!(boost.left_out, ["ccca"]);
+    assert_eq!(boost.left_out, [hotword("ccca")]);
     assert_eq!(boost.hotwords, "c");
     assert_eq!(
         boost.vocab,
@@ -157,16 +157,21 @@ fn a_term_that_never_agrees_is_left_out_and_the_earliest_best_round_kept() {
     );
 }
 
-/// A term the model can't say is left out, and the rest are still
-/// boosted; duplicates and case go.
+/// A term the model can't say is left out, as it was first given, and the
+/// rest are still boosted; duplicates and case go.
 #[test]
 fn a_term_the_model_cannot_say_is_left_out() {
     let boost = prepare(
         &tokens(),
-        &[hotword("ABC"), hotword("abz d"), hotword("abc")],
+        &[
+            hotword("ABC"),
+            hotword("Abz D"),
+            hotword("abc"),
+            hotword("abz d"),
+        ],
     );
     assert_eq!(boost.admitted, ["abc"]);
-    assert_eq!(boost.left_out, ["abz d"]);
+    assert_eq!(boost.left_out, [hotword("Abz D")]);
 }
 
 /// The same list gives the same vocabulary, byte for byte, so a restarted
@@ -231,7 +236,7 @@ fn parakeet_splits_a_drug_list_as_the_model_does() {
     ]
     .map(hotword);
     let boost = prepare(&tokens, &list);
-    assert_eq!(boost.left_out, Vec::<String>::new());
+    assert_eq!(boost.left_out, Vec::<Hotword>::new());
     assert_eq!(boost.admitted.len(), list.len());
     assert_eq!(
         pieces(&tokens.model_split("amlodipine").unwrap()).concat(),

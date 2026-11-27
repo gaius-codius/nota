@@ -12,6 +12,9 @@ use super::*;
 struct FakeModels {
     transcribed: Vec<usize>,
     stray_words: bool,
+    /// The tokens a boosting fake splits hotwords by, as the real engine
+    /// does; `None` for one that doesn't boost.
+    tokens: Option<crate::hotwords::Tokens>,
 }
 
 /// Non-zero samples are speech. A run of them is reported once a zero
@@ -98,9 +101,14 @@ impl Models for FakeModels {
         self
     }
 
-    /// Boosts nothing: the fake's text doesn't depend on a list.
-    fn boost(&mut self, _: &[Hotword]) -> Result<(), EngineError> {
-        Ok(())
+    /// Without tokens, boosts nothing and says so; with them, leaves out
+    /// what the real engine would ([`crate::hotwords::prepare`]). The
+    /// fake's text doesn't depend on the list either way.
+    fn boost(&mut self, hotwords: &[Hotword]) -> Result<Option<Vec<Hotword>>, EngineError> {
+        Ok(self
+            .tokens
+            .as_ref()
+            .map(|tokens| crate::hotwords::prepare(tokens, hotwords).left_out))
     }
 }
 
@@ -130,8 +138,17 @@ fn flush() -> Vec<u8> {
 
 /// Runs the loop over `input`; returns its result and the frames it wrote.
 fn run_on(input: &[u8]) -> (Result<(), EngineError>, Vec<Frame<FromEngine>>) {
+    run_models(input, FakeModels::default())
+}
+
+/// Runs the loop over `input` with `models`; returns its result and the
+/// frames it wrote.
+fn run_models(
+    input: &[u8],
+    models: FakeModels,
+) -> (Result<(), EngineError>, Vec<Frame<FromEngine>>) {
     let mut output = Vec::new();
-    let result = run(input, &mut output, live(), || Ok(FakeModels::default()));
+    let result = run(input, &mut output, live(), || Ok(models));
     let mut reader = FrameReader::new(&output[..]);
     let mut frames = Vec::new();
     while let Some(frame) = reader.read_frame().unwrap() {
@@ -229,6 +246,7 @@ fn transcribes_speech_and_confirms_everything_on_flush() {
                 text.push((t.range(), t.text().to_owned()));
                 words.push((t.range(), t.words().to_vec()));
             }
+            Frame::Message(FromEngine::LeftOut(_)) => panic!("left-out terms with no hotwords"),
             Frame::Hello(_) => panic!("second hello"),
         }
     }
@@ -375,7 +393,7 @@ fn a_mismatched_or_missing_hello_is_refused_before_loading() {
     );
     assert_eq!(
         err.to_string(),
-        "the recorder speaks protocol v1, this engine v3"
+        "the recorder speaks protocol v1, this engine v4"
     );
     assert!(matches!(refuse(&flush()), EngineError::Protocol(_)));
     assert!(matches!(refuse(&[1, 2]), EngineError::Read(_)));
@@ -454,4 +472,65 @@ fn a_model_failure_is_returned() {
         || -> Result<FakeModels, _> { Err(EngineError::Model("no model".into())) },
     );
     assert!(matches!(result, Err(EngineError::Model(_))));
+}
+
+/// A tiny invented `tokens.txt`: "abc" splits as the model does once the
+/// vocabulary is trained, and "z" isn't a piece, so "abz" can't be said.
+const TOKENS: &str = "<unk> 0\n▁a 1\nbc 2\n▁ab 3\n▁ 5\na 6\nb 7\nc 8\n";
+
+/// `texts` as a hotwords frame.
+fn hotwords(texts: &[&str]) -> Vec<u8> {
+    let list = texts.iter().map(|t| Hotword::new(t).unwrap()).collect();
+    encode(&Frame::Message(ToEngine::Hotwords(list))).unwrap()
+}
+
+/// A boosting engine answers a hotwords list by naming the term it can't
+/// split as the model does, as given, and not the one it can.
+#[test]
+fn a_boosting_engine_names_the_terms_it_left_out() {
+    let models = FakeModels {
+        tokens: Some(crate::hotwords::Tokens::parse(TOKENS).unwrap()),
+        ..FakeModels::default()
+    };
+    let input = [hello(), hotwords(&["abc", "Abz"])].concat();
+    let (result, frames) = run_models(&input, models);
+    result.unwrap();
+    let left_out = vec![Hotword::new("Abz").unwrap()];
+    assert_eq!(
+        frames,
+        [
+            Frame::Hello(ProtocolVersion::CURRENT),
+            Frame::Message(FromEngine::LeftOut(left_out)),
+        ]
+    );
+}
+
+/// A boosting engine that boosts every term still answers, with none, so
+/// the recorder can tell "all boosted" from "not told".
+#[test]
+fn a_boosting_engine_that_boosts_them_all_says_so() {
+    let models = FakeModels {
+        tokens: Some(crate::hotwords::Tokens::parse(TOKENS).unwrap()),
+        ..FakeModels::default()
+    };
+    let input = [hello(), hotwords(&["abc"])].concat();
+    let (result, frames) = run_models(&input, models);
+    result.unwrap();
+    assert_eq!(
+        frames,
+        [
+            Frame::Hello(ProtocolVersion::CURRENT),
+            Frame::Message(FromEngine::LeftOut(Vec::new())),
+        ]
+    );
+}
+
+/// An engine that doesn't boost says nothing of a hotwords list, rather
+/// than claiming every term was boosted.
+#[test]
+fn an_engine_that_does_not_boost_says_nothing_of_hotwords() {
+    let input = [hello(), hotwords(&["abc", "abz"])].concat();
+    let (result, frames) = run_on(&input);
+    result.unwrap();
+    assert_eq!(frames, [Frame::Hello(ProtocolVersion::CURRENT)]);
 }
