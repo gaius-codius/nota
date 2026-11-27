@@ -157,8 +157,9 @@ fn a_term_that_never_agrees_is_left_out_and_the_earliest_best_round_kept() {
     );
 }
 
-/// A term the model can't say is left out, as it was first given, and the
-/// rest are still boosted; duplicates and case go.
+/// A term the model can't say is left out in every form it was given,
+/// each once, and the rest are still boosted; duplicates and case go from
+/// what's boosted.
 #[test]
 fn a_term_the_model_cannot_say_is_left_out() {
     let boost = prepare(
@@ -168,10 +169,11 @@ fn a_term_the_model_cannot_say_is_left_out() {
             hotword("Abz D"),
             hotword("abc"),
             hotword("abz d"),
+            hotword("Abz D"),
         ],
     );
     assert_eq!(boost.admitted, ["abc"]);
-    assert_eq!(boost.left_out, [hotword("Abz D")]);
+    assert_eq!(boost.left_out, [hotword("Abz D"), hotword("abz d")]);
 }
 
 /// The same list gives the same vocabulary, byte for byte, so a restarted

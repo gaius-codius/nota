@@ -258,6 +258,12 @@ fn lacks_with(
     lacks(&pass, SESSION)
 }
 
+/// A session with no hotwords and no terms.
+static NO_HOTWORDS: Hotwords = Hotwords {
+    list: Vec::new(),
+    refused: Vec::new(),
+};
+
 /// A boost source that always gives the default.
 const DEFAULT_BOOST: &dyn Fn() -> Result<Boost, String> = &|| Ok(Boost::DEFAULT);
 
@@ -333,7 +339,14 @@ fn confirmed_text_is_stored_per_chunk_with_its_progress() {
         engine_down: &|_| {},
     };
     let boost = Boost::new(2.5).unwrap();
-    let mut sink = Heard::new(fixture.db().clone(), SESSION, boost, &work, &running);
+    let mut sink = Heard::new(
+        fixture.db().clone(),
+        SESSION,
+        boost,
+        &work,
+        &NO_HOTWORDS,
+        &running,
+    );
     sink.confirmed(
         MIC,
         s(100),
@@ -368,6 +381,7 @@ fn a_confirmation_mid_chunk_commits_nothing_past_the_last_whole_chunk() {
         SESSION,
         Boost::DEFAULT,
         &work,
+        &NO_HOTWORDS,
         &running,
     );
     sink.confirmed(
@@ -407,6 +421,7 @@ fn skipped_or_silent_chunks_store_no_text() {
         SESSION,
         Boost::DEFAULT,
         &work,
+        &NO_HOTWORDS,
         &running,
     );
     sink.confirmed(MIC, s(50), vec![heard(0, 40, "lost")], vec![])
@@ -436,6 +451,7 @@ fn a_run_that_skips_before_hearing_anything_gives_up() {
         SESSION,
         Boost::DEFAULT,
         &work,
+        &NO_HOTWORDS,
         &running,
     );
     let gave_up = sink.gave_up();
@@ -460,6 +476,7 @@ fn a_run_that_skips_before_hearing_anything_gives_up() {
         SESSION,
         Boost::DEFAULT,
         &work,
+        &NO_HOTWORDS,
         &running,
     );
     sink.confirmed(MIC, s(100), vec![heard(0, 90, "a")], vec![])
@@ -470,21 +487,29 @@ fn a_run_that_skips_before_hearing_anything_gives_up() {
     assert_eq!(end_of(&mut sink, PassEnd::Done), JobEnd::Done);
 }
 
-/// The terms an engine says it left out are stored out of the run's list,
-/// and a later engine's report replaces them.
+/// The terms an engine says it left out are stored, after those that
+/// couldn't be hotwords, out of all the session's terms; a term it wasn't
+/// given is passed over, and a later engine's report replaces them.
 #[test]
-fn the_terms_an_engine_left_out_are_stored_out_of_the_runs_list() {
+fn the_terms_an_engine_left_out_are_stored_out_of_the_sessions_terms() {
     let fixture = Fixture::new("left-out", &[(0, 100, Some("a"))], &[]);
     let work = fixture.work();
     let running = quiet();
+    let hotwords = Hotwords {
+        list: vec![
+            Hotword::new("beta blocker").unwrap(),
+            Hotword::new("Mg2+").unwrap(),
+        ],
+        refused: vec!["TMP/SMX".to_owned()],
+    };
     let mut sink = Heard::new(
         fixture.db().clone(),
         SESSION,
         Boost::DEFAULT,
         &work,
+        &hotwords,
         &running,
     );
-    sink.given = 3;
     let stored = || {
         fixture
             .db()
@@ -492,11 +517,18 @@ fn the_terms_an_engine_left_out_are_stored_out_of_the_runs_list() {
             .unwrap()
     };
     assert_eq!(stored(), None);
-    sink.left_out(vec![Hotword::new("Mg2+").unwrap()]).unwrap();
-    assert_eq!(stored(), LeftOut::new(3, vec!["Mg2+".to_owned()]));
+    sink.left_out(vec![
+        Hotword::new("never sent").unwrap(),
+        Hotword::new("Mg2+").unwrap(),
+    ])
+    .unwrap();
+    assert_eq!(
+        stored(),
+        LeftOut::new(3, vec!["TMP/SMX".to_owned(), "Mg2+".to_owned()])
+    );
     // A restarted engine says again; what it says now is what's kept.
     sink.left_out(Vec::new()).unwrap();
-    assert_eq!(stored(), LeftOut::new(3, Vec::new()));
+    assert_eq!(stored(), LeftOut::new(3, vec!["TMP/SMX".to_owned()]));
 }
 
 /// An engine that names what it left out and then skips its first audio
@@ -511,9 +543,9 @@ fn an_engine_that_reports_then_skips_still_gives_up() {
         SESSION,
         Boost::DEFAULT,
         &work,
+        &NO_HOTWORDS,
         &running,
     );
-    sink.given = 1;
     sink.left_out(Vec::new()).unwrap();
     sink.confirmed(MIC, s(100), vec![], vec![range(0, 100)])
         .unwrap();
@@ -532,6 +564,7 @@ fn a_boosted_engine_that_cant_start_fails_the_job() {
         SESSION,
         Boost::DEFAULT,
         &work,
+        &NO_HOTWORDS,
         &running,
     );
     assert_eq!(
@@ -567,6 +600,7 @@ fn text_less_chunks_are_stored_without_being_fed() {
         SESSION,
         Boost::DEFAULT,
         &work,
+        &NO_HOTWORDS,
         &running,
     );
     sink.confirmed(MIC, s(200), vec![heard(100, 180, "bee")], vec![])
@@ -596,6 +630,7 @@ fn a_run_starts_after_its_stored_progress() {
         SESSION,
         Boost::DEFAULT,
         &work,
+        &NO_HOTWORDS,
         &running,
     );
     sink.confirmed(MIC, s(100), vec![heard(0, 90, "a")], vec![])
@@ -643,6 +678,7 @@ fn the_runner_hears_the_engine_answer_once_and_why_its_down() {
         SESSION,
         Boost::DEFAULT,
         &work,
+        &NO_HOTWORDS,
         &running,
     );
     sink.confirmed(MIC, s(100), vec![], vec![range(0, 100)])
@@ -671,6 +707,29 @@ fn no_terms_is_done_without_an_engine() {
         JobEnd::Done
     );
     assert_eq!(fixture.texts(), []);
+    let left_out = fixture.db().with(|db| db.hotword_left_out(SESSION));
+    assert_eq!(left_out.unwrap(), None);
+}
+
+/// With only terms that can't be hotwords there's nothing to boost: the
+/// job is done without an engine, and stores them all as left out.
+#[test]
+fn only_terms_that_cant_be_hotwords_are_left_out_without_an_engine() {
+    let fixture = Fixture::new("all-refused", &[(0, 100, Some("a"))], &["TMP/SMX"]);
+    let clean_up = fixture.clean_up(Gives::NotSetUp);
+    assert_eq!(lacks_with(&fixture, &clean_up, None), None);
+    let engine = missing_engine();
+    assert_eq!(
+        run_job(&fixture, &clean_up, Some(&engine), DEFAULT_BOOST, &|| {
+            false
+        }),
+        JobEnd::Done
+    );
+    let left_out = fixture.db().with(|db| db.hotword_left_out(SESSION));
+    assert_eq!(
+        left_out.unwrap(),
+        LeftOut::new(1, vec!["TMP/SMX".to_owned()])
+    );
 }
 
 /// The job waits for its session's final pass, then (with terms to boost)
@@ -834,6 +893,7 @@ fn play(fixture: &Fixture, work: &Work, cut: Option<usize>) {
         SESSION,
         Boost::DEFAULT,
         work,
+        &NO_HOTWORDS,
         &running,
     );
     for (i, feed) in work.feeds.iter().enumerate() {

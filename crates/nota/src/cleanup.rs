@@ -21,7 +21,8 @@
 //!
 //! **A hotword pass whose engine keeps failing** doesn't hold clean-up up
 //! for good: once the pass has ended with its engine down
-//! [`HOTWORD_DOWN_RUNS`] times in this nota, clean-up goes on with the
+//! [`HOTWORD_DOWN_RUNS`] times in a row (counted by the store, in any
+//! nota: [`nota_store::Job::engine_downs`]), clean-up goes on with the
 //! lookup alone, and the Processing screen says the hotword candidates
 //! are missing. The pass keeps being tried; if it then finishes, the
 //! store sends clean-up back to run again ([`nota_store::Store::end_job`]),
@@ -66,8 +67,8 @@ use nota_core::decide::{Candidate, DecideError, Decider, Question, QuestionError
 use nota_core::messages::{Hotword, MAX_HOTWORDS};
 use nota_core::{SampleIndex, SampleRate, SessionId, TrackId};
 use nota_store::{
-    ChunkKey, DecidedBy, FinalLine, JobEnd, JobKind, JobState, Origin, Outcome, Pack, Proposal,
-    RevisionNumber, SessionTerms, StoreError, Wait, WordSpan, Writer,
+    ChunkKey, DecidedBy, FinalLine, Job, JobEnd, JobKind, JobState, Origin, Outcome, Pack,
+    Proposal, RevisionNumber, SessionTerms, StoreError, Wait, WordSpan, Writer,
 };
 
 use crate::hotword_pass::job_state;
@@ -117,13 +118,14 @@ pub(crate) trait Sources: Send {
     fn packs(&self) -> Result<Vec<Pack>, String>;
 }
 
-/// How many times a session's hotword pass ends with its engine down,
-/// in one nota, before clean-up goes on without it. Each such run is an
-/// engine that couldn't start, or one that stopped working (a stall takes
-/// the pass's 10 minutes), with the runner's growing spacing between, so
-/// three is several minutes to most of an hour: long enough to ride out
-/// an engine briefly down, and the candidates still come later if the
-/// pass finishes.
+/// How many runs in a row of a session's hotword pass end with its engine
+/// down before clean-up goes on without it. Such a run is one whose engine
+/// stalled (the pass gives up after 10 minutes with nothing confirmed) or
+/// whose supervisor couldn't start; an engine that can't start, or dies
+/// on its first audio, fails the pass at once instead. So three is about
+/// half an hour of stalls, with the runner's spacing between: long enough
+/// to ride out an engine briefly stuck, and the candidates still come
+/// later if the pass gets through.
 pub(crate) const HOTWORD_DOWN_RUNS: u32 = 3;
 
 /// Runs term clean-up jobs.
@@ -138,9 +140,6 @@ pub(crate) struct CleanUp {
     english: Option<Arc<English>>,
     /// The chunks whose question found the decider down, across runs.
     suspects: Suspects,
-    /// How many times each session's hotword pass has ended with its
-    /// engine down in this nota, since it last finished or failed.
-    hotword_down: BTreeMap<SessionId, u32>,
 }
 
 impl CleanUp {
@@ -152,33 +151,7 @@ impl CleanUp {
             rate,
             english: None,
             suspects: Suspects::default(),
-            hotword_down: BTreeMap::new(),
         }
-    }
-
-    /// Notes how a run of `session`'s hotword pass ended: each end with
-    /// its engine down counts towards [`HOTWORD_DOWN_RUNS`], whether or not
-    /// the engine answered first, and a pass that finishes or fails starts
-    /// the count again. A pause changes nothing.
-    pub(crate) fn hotword_ended(&mut self, session: SessionId, end: &JobEnd) {
-        match end {
-            JobEnd::EngineDown(_) => {
-                let downs = self.hotword_down.entry(session).or_default();
-                *downs = downs.saturating_add(1);
-            }
-            JobEnd::Done | JobEnd::Failed(_) => {
-                self.hotword_down.remove(&session);
-            }
-            JobEnd::Waiting(_) => {}
-        }
-    }
-
-    /// Whether clean-up of `session` goes on without its hotword pass,
-    /// whose engine has kept failing.
-    fn past_hotwords(&self, session: SessionId) -> bool {
-        self.hotword_down
-            .get(&session)
-            .is_some_and(|&downs| downs >= HOTWORD_DOWN_RUNS)
     }
 
     /// What a clean-up job of `session` waits for now, if anything: its
@@ -196,9 +169,9 @@ impl CleanUp {
         // none at all (an older session) leaves nothing to wait for.
         // The same test as the run's, so the runner never starts a run
         // that only waits again.
-        if let Ok(Some(state)) = job_state(db, session, JobKind::HotwordPass)
-            && !settled(&state)
-            && !self.past_hotwords(session)
+        if let Ok(Some(job)) = hotword_job(db, session)
+            && !settled(&job.state)
+            && !past_hotwords(&job)
         {
             return Some(Wait::HotwordText);
         }
@@ -207,13 +180,14 @@ impl CleanUp {
 
     /// The session's hotwords: the terms of its packs, in the session's
     /// order, each once, as the hotword pass boosts them and clean-up
-    /// compares its text by them ([`hotwords`]).
+    /// compares its text by them, with the terms that can't be hotwords
+    /// ([`hotwords`]).
     ///
     /// # Errors
     ///
     /// How the job asking ends if they can't be read: failed if the packs
     /// can't be, and as [`stored`] says on a store error.
-    pub(crate) fn hotwords(&self, db: &Writer, session: SessionId) -> Result<Vec<Hotword>, JobEnd> {
+    pub(crate) fn hotwords(&self, db: &Writer, session: SessionId) -> Result<Hotwords, JobEnd> {
         let packs = self.sources.packs().map_err(JobEnd::Failed)?;
         let terms = db
             .with(|db| db.session_terms(session, &packs))
@@ -235,10 +209,10 @@ impl CleanUp {
         // Only a finished hotword pass's text is compared: a failed one's
         // may stop partway, a session from before the pass has none, and
         // one whose engine keeps failing isn't waited for.
-        let boosted = match job_state(db, session, JobKind::HotwordPass) {
-            Ok(Some(JobState::Done)) => true,
-            Ok(Some(JobState::Failed(_)) | None) => false,
-            Ok(Some(_)) if self.past_hotwords(session) => false,
+        let boosted = match hotword_job(db, session) {
+            Ok(Some(job)) if job.state == JobState::Done => true,
+            Ok(None) => false,
+            Ok(Some(job)) if settled(&job.state) || past_hotwords(&job) => false,
             Ok(Some(_)) => return JobEnd::Waiting(Some(Wait::HotwordText)),
             Err(e) => return stored(&e),
         };
@@ -293,24 +267,61 @@ impl CleanUp {
     }
 }
 
+/// `session`'s hotword pass job, if it has one (a session from before the
+/// pass has none).
+fn hotword_job(db: &Writer, session: SessionId) -> Result<Option<Job>, StoreError> {
+    let jobs = db.with(|db| db.session_jobs(session))?;
+    Ok(jobs
+        .into_iter()
+        .find(|job| job.kind == JobKind::HotwordPass))
+}
+
+/// Whether clean-up goes on without the hotword pass `job`, whose engine
+/// has kept failing: [`HOTWORD_DOWN_RUNS`] of its runs in a row ended with
+/// it down.
+const fn past_hotwords(job: &Job) -> bool {
+    job.engine_downs >= HOTWORD_DOWN_RUNS
+}
+
 /// Whether a job in `state` has finished for good: done, or failed.
 const fn settled(state: &JobState) -> bool {
     matches!(state, JobState::Done | JobState::Failed(_))
 }
 
+/// A session's hotwords, and its terms that can't be.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Hotwords {
+    /// The hotwords, in the session's order: what the engine is given.
+    pub(crate) list: Vec<Hotword>,
+    /// The session's terms that aren't in the list, in its order: ones the
+    /// engine can't take as a hotword (a `/` in it, say), and any past
+    /// [`MAX_HOTWORDS`]. They're never boosted.
+    pub(crate) refused: Vec<String>,
+}
+
+impl Hotwords {
+    /// How many of the session's terms there are, each once.
+    pub(crate) const fn terms(&self) -> usize {
+        self.list.len() + self.refused.len()
+    }
+}
+
 /// The hotwords from a session's vocabulary `terms`: its packs' terms, in
-/// the session's order, each once, without aliases or learned pairs. A
-/// term the engine can't take as a hotword (a `/` in it, say) is passed
-/// over, and there are at most [`MAX_HOTWORDS`].
-fn hotwords(terms: &SessionTerms) -> Vec<Hotword> {
+/// the session's order, each once, without aliases or learned pairs, and
+/// at most [`MAX_HOTWORDS`]. A term that can't be one is refused.
+fn hotwords(terms: &SessionTerms) -> Hotwords {
     let mut seen = BTreeSet::new();
-    terms
-        .terms
-        .iter()
-        .filter(|offered| seen.insert(offered.term.as_str()))
-        .filter_map(|offered| Hotword::new(&offered.term).ok())
-        .take(MAX_HOTWORDS)
-        .collect()
+    let mut hotwords = Hotwords::default();
+    for offered in &terms.terms {
+        if !seen.insert(offered.term.as_str()) {
+            continue;
+        }
+        match Hotword::new(&offered.term) {
+            Ok(hotword) if hotwords.list.len() < MAX_HOTWORDS => hotwords.list.push(hotword),
+            _ => hotwords.refused.push(offered.term.clone()),
+        }
+    }
+    hotwords
 }
 
 /// How a job ends on a store error: waiting for space if the disk is
@@ -600,7 +611,7 @@ impl Pass<'_> {
         let lookup = Lookup::new(self.english, &terms);
         let allows = |heard: &str, term: &str| read.terms.allows(heard, term);
         let hotwords = hotwords(&read.terms);
-        let list = HotwordList::new(hotwords.iter().map(Hotword::as_str));
+        let list = HotwordList::new(hotwords.list.iter().map(Hotword::as_str));
         let diff = Diff {
             list: &list,
             origins: &origins,

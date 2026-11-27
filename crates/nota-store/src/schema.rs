@@ -22,7 +22,7 @@
 //! | `proposal` | each candidate term clean-up offered for a run of a chunk's words (from the lookup, or the hotword pass's difference, V14): where its term came from, the decider's answer, the gate's rule and scores, its outcome and its review (V12; V8's table, which nothing wrote, is kept closed as `proposal_v8`), and whether clean-up gave up asking about its chunk (V13); only its outcome's ranking, the revision that applied it and its review are ever changed, once each | term clean-up ([`crate::proposals`]) |
 //! | `heard_revision`, `heard_revision_text`, `heard_proposal` | the heard text's revisions and proposals from before V8, kept as they were and never added to | nothing since V8 |
 //! | `mark`, `note` | marks and notes made while recording, in session time | `nota record`, as each is made ([`crate::annotations`]) |
-//! | `job` | work queued after a stop: its kind, state, progress and what it waits for (V5) | the job queue ([`crate::jobs`]) |
+//! | `job` | work queued after a stop: its kind, state, progress and what it waits for (V5), and its runs in a row that ended with the engine down (V15) | the job queue ([`crate::jobs`]) |
 //! | `final_text`, `final_word`, `final_progress` | the final pass's text, by track and sample, with its words' log-probabilities (V11; unknown before), beside the heard text and never in it, never changed (V8); how far it has got on each track (V5) | the final pass ([`crate::final_text`]) |
 //! | `hotword_text`, `hotword_progress` | what the hotword pass heard in each final-pass chunk, with its boost, never changed; how far it has got on each track (V14) | the hotword pass ([`crate::hotword_text`]) |
 //! | `hotword_left_out`, `hotword_left_out_term` | how many terms the hotword pass's engine was last given, and those it said it left out, in order; replaced whole at each report (V15) | the hotword pass ([`crate::hotword_text`]) |
@@ -976,7 +976,8 @@ WHEN OLD.review IS NOT NULL
 BEGIN SELECT RAISE(ABORT, 'a proposal is never reviewed twice'); END;
 ";
 
-/// Version 15: the terms the hotword pass couldn't boost.
+/// Version 15: the terms the hotword pass couldn't boost, and how many
+/// runs of each job have ended with its engine down.
 /// `hotword_left_out` holds, for each session whose hotword engine has
 /// said, how many terms the pass last gave it, and
 /// `hotword_left_out_term` the ones it left out of them, in the list's
@@ -984,7 +985,14 @@ BEGIN SELECT RAISE(ABORT, 'a proposal is never reviewed twice'); END;
 /// session with no row (never told) isn't. Unlike the pass's text these
 /// aren't a record: each report replaces the last, since a restarted
 /// engine, or a later run with other terms, says again.
+///
+/// `job.engine_downs` counts a job's runs in a row that ended with its
+/// engine down, since it last finished or failed ([`crate::jobs`]): clean-up
+/// stops waiting for a hotword pass that has done so too often, whichever
+/// nota ran it. Every job stored before this version starts at 0.
 pub(crate) const V15: &str = "
+ALTER TABLE job ADD COLUMN engine_downs INTEGER NOT NULL DEFAULT 0 CHECK (engine_downs >= 0);
+
 CREATE TABLE hotword_left_out (
     session_id INTEGER PRIMARY KEY REFERENCES session(id),
     given INTEGER NOT NULL CHECK (given >= 0)

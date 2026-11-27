@@ -24,7 +24,7 @@
 //! | 12 | term clean-up's proposals, `proposal` (replacing V8's unused table), and its job |
 //! | 13 | whether clean-up gave up on a proposal's chunk, `proposal.gave_up` |
 //! | 14 | the hotword pass's text and progress, `hotword_text` and `hotword_progress`, and proposals from it (`proposal.source` `hotword`) |
-//! | 15 | the terms the hotword pass's engine left out, `hotword_left_out` and `hotword_left_out_term` |
+//! | 15 | the terms the hotword pass's engine left out, `hotword_left_out` and `hotword_left_out_term`, and each job's engine-down runs, `job.engine_downs` |
 //!
 //! # The per-session stores
 //!

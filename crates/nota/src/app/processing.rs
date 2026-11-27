@@ -288,14 +288,8 @@ fn missing_note(state: &JobState, hotword: Option<&JobState>) -> Option<String> 
     match hotword? {
         _ if !started => None,
         JobState::Done => None,
-        JobState::Failed(_) => {
-            Some("without the terms heard again: hearing them again failed".to_owned())
-        }
-        _ => Some(
-            "without the terms heard again: their engine keeps failing; \
-             they're added if it gets through"
-                .to_owned(),
-        ),
+        JobState::Failed(_) => Some("terms not heard again: that step failed".to_owned()),
+        _ => Some("terms not heard again yet: added if that step ends".to_owned()),
     }
 }
 
@@ -793,10 +787,7 @@ mod tests {
         end(&fixture, JobKind::CleanUp, &JobEnd::Done);
         assert_eq!(
             note(&fixture).as_deref(),
-            Some(
-                "without the terms heard again: their engine keeps failing; \
-                 they're added if it gets through"
-            )
+            Some("terms not heard again yet: added if that step ends")
         );
         // The pass gets through: clean-up runs again with its candidates.
         end(&fixture, JobKind::HotwordPass, &JobEnd::Done);
@@ -834,7 +825,7 @@ mod tests {
         assert_eq!(
             fixture.read().jobs[3].note.as_deref(),
             Some(
-                "without the terms heard again: hearing them again failed; \
+                "terms not heard again: that step failed; \
                  1 chunk left unfixed: the decider kept failing on it"
             )
         );

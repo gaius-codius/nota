@@ -429,6 +429,57 @@ fn run_to(store: &mut Store, id: JobId, end: &JobEnd) {
     store.end_job(id, end).unwrap();
 }
 
+/// Each run that ends with the engine down counts one more, a wait or a
+/// pause leaves the count, and a finished or failed run starts it again.
+#[test]
+fn engine_down_runs_are_counted_until_a_run_finishes_or_fails() {
+    let (_dir, mut store) = store("engine-downs");
+    store.finish_recording(S1, None).unwrap();
+    let id = job_of(&store, S1, JobKind::HotwordPass).id;
+    let downs = |store: &Store| job_of(store, S1, JobKind::HotwordPass).engine_downs;
+    assert_eq!(downs(&store), 0);
+    store
+        .end_job(id, &JobEnd::EngineDown("stalled".into()))
+        .unwrap();
+    store.end_job(id, &JobEnd::Waiting(None)).unwrap();
+    store
+        .end_job(id, &JobEnd::Waiting(Some(Wait::Engine)))
+        .unwrap();
+    store
+        .end_job(id, &JobEnd::EngineDown("stalled".into()))
+        .unwrap();
+    assert_eq!(downs(&store), 2);
+    store.end_job(id, &JobEnd::Done).unwrap();
+    assert_eq!(downs(&store), 0);
+    store
+        .end_job(id, &JobEnd::EngineDown("stalled".into()))
+        .unwrap();
+    store
+        .end_job(id, &JobEnd::Failed("no beam".into()))
+        .unwrap();
+    assert_eq!(downs(&store), 0);
+}
+
+/// A clean-up sent back to waiting starts its progress again, so its step
+/// doesn't show the last run's as if it were this one's.
+#[test]
+fn a_clean_up_sent_back_starts_its_progress_again() {
+    let (_dir, mut store) = store("clean-up-progress");
+    store.finish_recording(S1, None).unwrap();
+    let clean_up = job_of(&store, S1, JobKind::CleanUp).id;
+    assert!(store.start_job(clean_up).unwrap());
+    let all = Progress { done: 9, total: 9 };
+    store.job_progress(clean_up, all).unwrap();
+    store.end_job(clean_up, &JobEnd::Done).unwrap();
+    let hotwords = job_of(&store, S1, JobKind::HotwordPass).id;
+    run_to(&mut store, hotwords, &JobEnd::Done);
+    let again = job_of(&store, S1, JobKind::CleanUp);
+    assert_eq!(
+        (again.state, again.progress),
+        (JobState::Waiting(None), Progress::default())
+    );
+}
+
 /// A hotword pass that ends done sends its session's clean-up, done
 /// without it, back to waiting so it runs again; another session's
 /// clean-up is left done.

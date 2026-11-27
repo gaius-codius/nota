@@ -255,8 +255,9 @@ impl Store {
     /// failure.
     pub fn hotword_left_out(&self, session: SessionId) -> Result<Option<LeftOut>, StoreError> {
         let key = session_key(session)?;
-        let given: Option<i64> = self
-            .conn
+        // One snapshot: the count comes with its terms.
+        let tx = self.conn.unchecked_transaction()?;
+        let given: Option<i64> = tx
             .query_row(
                 "SELECT given FROM hotword_left_out WHERE session_id = ?1",
                 [key],
@@ -266,16 +267,18 @@ impl Store {
         let Some(given) = given else {
             return Ok(None);
         };
-        let mut stmt = self.conn.prepare(
+        let mut stmt = tx.prepare(
             "SELECT term FROM hotword_left_out_term WHERE session_id = ?1 ORDER BY position",
         )?;
         let terms = stmt
             .query_map([key], |r| r.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
-        let corrupt = || StoreError::Corrupt(format!("{} terms left out of {given}", terms.len()));
-        let given = usize::try_from(given).map_err(|_| corrupt())?;
-        let found = LeftOut::new(given, terms.clone()).ok_or_else(corrupt)?;
-        Ok(Some(found))
+        let corrupt = format!("{} terms left out of {given}", terms.len());
+        usize::try_from(given)
+            .ok()
+            .and_then(|given| LeftOut::new(given, terms))
+            .map(Some)
+            .ok_or(StoreError::Corrupt(corrupt))
     }
 
     /// The hotword pass's texts for the session, by track and then sample.
