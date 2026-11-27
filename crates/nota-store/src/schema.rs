@@ -808,9 +808,9 @@ BEGIN SELECT RAISE(ABORT, 'a proposal is never reviewed twice'); END;
 ";
 
 /// Version 13: whether clean-up gave up on a proposal's chunk,
-/// `proposal.gave_up`. A chunk whose question found the decider down on
-/// several runs in a row, while the decider answered other questions, has
-/// its candidates stored with no answer and `gave_up` set
+/// `proposal.gave_up`. A chunk whose question found the decider down
+/// several times, while the decider answered other questions, has its
+/// candidates stored with no answer and `gave_up` set
 /// ([`crate::Decided::GaveUp`]), so the Processing screen can say how many
 /// chunks were given up on without reading the reason's words.
 ///

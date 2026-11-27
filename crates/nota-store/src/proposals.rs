@@ -189,9 +189,9 @@ pub enum Decided {
     /// or a question that couldn't be asked), for the reason given: rejected
     /// and logged, never applied.
     NoAnswer(String),
-    /// Clean-up gave up asking: the decider was unavailable every time
-    /// this candidate's chunk was asked, on several runs in a row, while it
-    /// answered other questions. Rejected and logged, never applied, for
+    /// Clean-up gave up asking: the decider was unavailable several times
+    /// this candidate's chunk was asked, while it answered other
+    /// questions. Rejected and logged, never applied, for
     /// the reason given (the decider's last failure). Stored as a no
     /// answer with `gave_up` set (schema version 13).
     GaveUp(String),
