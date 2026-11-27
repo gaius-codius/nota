@@ -1,5 +1,6 @@
-//! One chunk of clean-up: the candidates the lookup offered in it, the
-//! decider's answers, the gate on each yes, and the outcome each ends in.
+//! One chunk of clean-up: the candidates offered in it (by the lookup, and
+//! by the hotword diff), the decider's answers, the gate on each yes, and
+//! the outcome each ends in.
 //!
 //! **The chunk is its words.** The lookup and the gate read the chunk's
 //! words joined by single spaces, which is how every later revision shows
@@ -86,8 +87,16 @@ impl Chunk {
         WordSpan::new(position(first), position(last))
     }
 
+    /// Its words, by position.
+    pub(crate) fn word_texts(&self) -> Vec<&str> {
+        self.spans
+            .iter()
+            .filter_map(|span| self.text.get(span.clone()))
+            .collect()
+    }
+
     /// Where `words` are in [`Chunk::text`], in bytes.
-    fn bytes(&self, words: WordSpan) -> Range<usize> {
+    pub(crate) fn bytes(&self, words: WordSpan) -> Range<usize> {
         let at = |n: u32| usize::try_from(n).unwrap_or(usize::MAX);
         let start = self.spans.get(at(words.first())).map_or(0, |s| s.start);
         let end = self
@@ -132,11 +141,11 @@ fn position(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
 
-/// A candidate the lookup offered in a chunk, with where its term came
-/// from.
+/// A candidate offered in a chunk, by the lookup or the hotword diff, with
+/// where its term came from.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Offer {
-    /// The heard words, as the lookup gave them.
+    /// The heard words, as the lookup or the diff gave them.
     pub(crate) window: String,
     /// Where they are in the chunk's text, in bytes.
     pub(crate) span: Range<usize>,
@@ -144,6 +153,13 @@ pub(crate) struct Offer {
     pub(crate) words: WordSpan,
     /// The term offered.
     pub(crate) term: String,
+    /// The text a yes puts in place of the heard words: the term, for the
+    /// lookup's; the boosted words, for the diff's.
+    pub(crate) replacement: String,
+    /// What the gate's offered list holds as the term, which it looks for
+    /// inside a yes's replacement: the term, for the lookup's; the listed
+    /// word the boosted words hold, for the diff's.
+    pub(crate) inside: String,
     /// How the lookup found it.
     pub(crate) found: Found,
     /// Where the term came from.
@@ -155,7 +171,7 @@ impl Offer {
     fn offered(&self) -> Offered {
         Offered {
             window: self.window.clone(),
-            term: self.term.clone(),
+            term: self.inside.clone(),
         }
     }
 }
@@ -272,7 +288,8 @@ pub(crate) fn settle(
         .map(|(i, ((offer, said), verdict))| {
             let decided = decided(said, verdict.as_ref(), fixes.kept(i));
             let (words, replacement) = fixes.words_of(i).unwrap_or_else(|| {
-                let text = chunk.rewritten(offer.words, &[(offer.span.clone(), &offer.term)]);
+                let text =
+                    chunk.rewritten(offer.words, &[(offer.span.clone(), &offer.replacement)]);
                 (offer.words, text)
             });
             NewProposal {
@@ -309,7 +326,7 @@ fn gate_yeses(
         .iter()
         .map(|&i| Proposal {
             heard: asked[i].window.clone(),
-            replacement: asked[i].term.clone(),
+            replacement: asked[i].replacement.clone(),
         })
         .collect();
     let offered: Vec<Offered> = offered.iter().map(Offer::offered).collect();

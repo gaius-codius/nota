@@ -209,7 +209,8 @@ impl Data<'_> {
         let engine = engine.as_deref().unwrap_or_else(|| self.engines.label());
         steps.extend(jobs.into_iter().map(|job| {
             let by = match job.kind {
-                JobKind::FinalPass => engine,
+                // The hotword pass runs the same speech engine, boosted.
+                JobKind::FinalPass | JobKind::HotwordPass => engine,
                 JobKind::CleanUp => decider,
             };
             step(job, by)
@@ -290,6 +291,7 @@ fn step(job: Job, engine: &str) -> ProcessingJob {
                 Some(Wait::Space) => ProcessingWait::Space,
                 Some(Wait::Decider) => ProcessingWait::Decider,
                 Some(Wait::FinalText) => ProcessingWait::FinalText,
+                Some(Wait::HotwordText) => ProcessingWait::HotwordText,
                 None => ProcessingWait::Queued,
             },
             progress,
@@ -309,6 +311,7 @@ fn step(job: Job, engine: &str) -> ProcessingJob {
     ProcessingJob {
         name: match job.kind {
             JobKind::FinalPass => "Final transcript",
+            JobKind::HotwordPass => "Hearing terms again",
             JobKind::CleanUp => "Fixing terms",
         }
         .into(),
@@ -541,6 +544,20 @@ mod tests {
         );
     }
 
+    /// The hotword pass is a step of its own after the final transcript,
+    /// named for the speech engine it boosts.
+    #[test]
+    fn the_hotword_pass_is_a_step_naming_the_speech_engine() {
+        let fixture = Fixture::new("the_hotword_pass_is_a_step_naming_the_speech_engine");
+        fixture.finish();
+        fixture.final_text();
+        let step = fixture.read().jobs[2].clone();
+        assert_eq!(
+            (step.name.as_str(), step.engine.as_str()),
+            ("Hearing terms again", "stored-engine · stored-model")
+        );
+    }
+
     /// The clean-up step names its decider, not the speech engine: the
     /// one its proposals name, or just "decider" before there are any.
     #[test]
@@ -559,7 +576,7 @@ mod tests {
             db.add_final_text(fixture.id, TrackId::new(0), SampleIndex::new(100), &[line])
         })
         .unwrap();
-        let clean_up = |fixture: &Fixture| fixture.read().jobs[2].clone();
+        let clean_up = |fixture: &Fixture| fixture.read().jobs[3].clone();
         assert_eq!(clean_up(&fixture).name, "Fixing terms");
         assert_eq!(clean_up(&fixture).engine, "decider");
         let words = nota_store::WordSpan::new(0, 0).unwrap();

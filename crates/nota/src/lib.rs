@@ -38,6 +38,7 @@ mod cleanup;
 #[cfg(feature = "fake-capture")]
 mod fake_engine;
 mod final_pass;
+mod hotword_pass;
 mod inhibit;
 mod jobs;
 mod latency;

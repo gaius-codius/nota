@@ -70,6 +70,8 @@ fn any_offers(chunk: Chunk) -> impl Strategy<Value = Vec<Offer>> {
                         span: bytes,
                         words,
                         term: term.to_owned(),
+                        replacement: term.to_owned(),
+                        inside: term.to_owned(),
                         found: Found::Alias,
                         origin: Origin::Learned,
                     }

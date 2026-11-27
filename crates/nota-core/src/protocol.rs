@@ -163,7 +163,8 @@ impl WireMessage for ToEngine {
 /// # Errors
 ///
 /// [`EncodeError::TooLarge`] past [`MAX_HOTWORDS`]; each hotword is at most
-/// [`MAX_HOTWORD_LEN`] bytes, so that many always fit a frame.
+/// [`MAX_HOTWORD_LEN`](crate::messages::MAX_HOTWORD_LEN) bytes, so that
+/// many always fit a frame.
 fn encode_hotwords(hotwords: &[Hotword], out: &mut Vec<u8>) -> Result<(), EncodeError> {
     let count = u32::try_from(hotwords.len())
         .ok()

@@ -41,6 +41,9 @@ pub enum ProcessingWait {
     Decider,
     /// The final transcript, which the step reads.
     FinalText,
+    /// The hotword pass's transcript, which the step compares with the
+    /// final one.
+    HotwordText,
 }
 
 impl ProcessingWait {
@@ -59,6 +62,7 @@ impl ProcessingWait {
             Self::Queued => "queued or paused for a recording".into(),
             Self::Decider => "waiting for a decider to be set up".into(),
             Self::FinalText => "waiting for the final transcript".into(),
+            Self::HotwordText => "waiting for the terms to be heard again".into(),
         }
     }
 }

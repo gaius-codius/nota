@@ -769,8 +769,9 @@ fn home_shows_failed_job_reason() {
     assert_eq!(shown.detail, ["processing failed: broken"]);
 }
 
-/// A finished final pass leaves the clean-up to run; once that's done,
-/// or waits for a decider nothing else needs, the session is ready.
+/// A finished final pass leaves the hotword pass and then clean-up to
+/// run; once clean-up is done, or waits for a decider nothing else needs,
+/// the session is ready.
 #[test]
 fn home_shows_done_job() {
     let tmp = TestDir::new("job-done");
@@ -780,6 +781,26 @@ fn home_shows_done_job() {
         library.db().with(|db| db.end_job(id, &end)).unwrap();
     };
     end(job.id, nota_store::JobEnd::Done);
+    let mut jobs = library
+        .db()
+        .with(|db| db.session_jobs(SessionId::new(3)))
+        .unwrap();
+    let clean_up = jobs.remove(2);
+    let hotword = jobs.remove(1);
+    assert_eq!(
+        (hotword.kind, clean_up.kind),
+        (JobKind::HotwordPass, JobKind::CleanUp)
+    );
+    // The hotword pass comes next, and shows as the work going on.
+    let shown = shown_job(&library);
+    assert_eq!(
+        (shown.status, shown.detail),
+        (
+            Status::Processing,
+            vec!["terms heard again queued or running".to_owned()]
+        )
+    );
+    end(hotword.id, nota_store::JobEnd::Done);
     let shown = shown_job(&library);
     assert_eq!(
         (shown.status, shown.detail),
@@ -788,12 +809,6 @@ fn home_shows_done_job() {
             vec!["term fixes queued or running".to_owned()]
         )
     );
-    let clean_up = library
-        .db()
-        .with(|db| db.session_jobs(SessionId::new(3)))
-        .unwrap()
-        .remove(1);
-    assert_eq!(clean_up.kind, JobKind::CleanUp);
     end(
         clean_up.id,
         nota_store::JobEnd::Waiting(Some(Wait::Decider)),

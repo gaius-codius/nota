@@ -2,16 +2,25 @@
 //! specialist terms in its text, as tracked changes.
 //!
 //! For each chunk of the final text (revision 0), in session order:
-//! **propose** (C4's lookup offers terms from the session's packs and the
-//! learned pairs), **decide** (the decider answers yes or no on each),
-//! **gate** (C2 checks every yes), and store every candidate as a proposal
-//! with its outcome ([`chunk`]). A chunk's proposals are committed
-//! together. At the end, the yeses the gate refused are ranked as "to
-//! check" cards up to the cap, and the applied fixes become one new
+//! **propose**, **decide** (the decider answers yes or no on each
+//! candidate), **gate** (C2 checks every yes), and store every candidate
+//! as a proposal with its outcome ([`chunk`]). A chunk's proposals are
+//! committed together. At the end, the yeses the gate refused are ranked
+//! as "to check" cards up to the cap, and the applied fixes become one new
 //! revision, together in one transaction ([`cards`]).
 //!
+//! **Two sources of candidates.** C4's lookup offers terms from the
+//! session's packs and the learned pairs. Then the hotword diff compares
+//! the chunk with what the hotword pass heard in it
+//! ([`crate::hotword_pass`]), and offers each difference that brings in a
+//! pack term, with the boosted words as the replacement; one the lookup
+//! already offered (the same words and term) isn't offered twice. The job
+//! waits while the session's hotword pass is still to run, and goes on
+//! without its candidates if that failed or the session has none (it
+//! stopped before nota had the pass).
+//!
 //! **No fix without the model's yes**: only a yes reaches the gate, and
-//! only the gate places a fix.
+//! only the gate places a fix, whichever source offered it.
 //!
 //! **Safe to run again.** A candidate the session has a proposal for
 //! already (the same chunk, offered words, heard span and term) isn't
@@ -32,16 +41,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nota_checks::{
-    Bar, Candidate as Found, English, KEEP, KEEP_RARE, Language, Lookup, MAX_CANDIDATES, Matched,
-    SIMILARITY_MIN, Term,
+    Bar, Candidate as Found, English, HotwordList, KEEP, KEEP_RARE, Language, Lookup,
+    MAX_CANDIDATES, Matched, SIMILARITY_MIN, Term, hotword_candidates,
 };
 use nota_core::decide::{Candidate, DecideError, Decider, Question};
+use nota_core::messages::{Hotword, MAX_HOTWORDS};
 use nota_core::{SampleIndex, SampleRate, SessionId, TrackId};
 use nota_store::{
     ChunkKey, DecidedBy, FinalLine, JobEnd, JobKind, JobState, Origin, Outcome, Pack, Proposal,
     RevisionNumber, SessionTerms, StoreError, Wait, WordSpan, Writer,
 };
 
+use crate::hotword_pass::job_state;
 use crate::jobs::Running;
 
 pub(crate) mod cards;
@@ -109,22 +120,45 @@ impl CleanUp {
     }
 
     /// What a clean-up job of `session` waits for now, if anything: its
-    /// session's final pass, then a decider.
+    /// session's final pass, its hotword pass, then a decider.
     pub(crate) fn lacks(&self, db: &Writer, session: SessionId) -> Option<Wait> {
-        match final_pass(db, session) {
+        match job_state(db, session, JobKind::FinalPass) {
             Ok(Some(JobState::Done) | None) => {}
             // A failed final pass, or one that can't be read, is reported
             // by the run, without waiting for a decider first.
             Ok(Some(JobState::Failed(_))) | Err(_) => return None,
             Ok(Some(_)) => return Some(Wait::FinalText),
         }
+        // A hotword pass that can't be read is reported by the run too;
+        // none at all (an older session) leaves nothing to wait for.
+        if let Ok(Some(state)) = job_state(db, session, JobKind::HotwordPass)
+            && !settled(&state)
+        {
+            return Some(Wait::HotwordText);
+        }
         matches!(self.sources.decider(), Setup::NotSetUp).then_some(Wait::Decider)
+    }
+
+    /// The session's hotwords: the terms of its packs, in the session's
+    /// order, each once, as the hotword pass boosts them and clean-up
+    /// compares its text by them ([`hotwords`]).
+    ///
+    /// # Errors
+    ///
+    /// How the job asking ends if they can't be read: failed if the packs
+    /// can't be, and as [`stored`] says on a store error.
+    pub(crate) fn hotwords(&self, db: &Writer, session: SessionId) -> Result<Vec<Hotword>, JobEnd> {
+        let packs = self.sources.packs().map_err(JobEnd::Failed)?;
+        let terms = db
+            .with(|db| db.session_terms(session, &packs))
+            .map_err(|e| stored(&e))?;
+        Ok(hotwords(&terms))
     }
 
     /// Runs clean-up over `session` until it's done or `running` says to
     /// stop.
     pub(crate) fn run(&mut self, db: &Writer, session: SessionId, running: &Running<'_>) -> JobEnd {
-        match final_pass(db, session) {
+        match job_state(db, session, JobKind::FinalPass) {
             Ok(Some(JobState::Done) | None) => {}
             Ok(Some(JobState::Failed(why))) => {
                 return JobEnd::Failed(format!("there's no final transcript to fix: {why}"));
@@ -132,6 +166,14 @@ impl CleanUp {
             Ok(Some(_)) => return JobEnd::Waiting(Some(Wait::FinalText)),
             Err(e) => return stored(&e),
         }
+        // Only a finished hotword pass's text is compared: a failed one's
+        // may stop partway, and a session from before the pass has none.
+        let boosted = match job_state(db, session, JobKind::HotwordPass) {
+            Ok(Some(JobState::Done)) => true,
+            Ok(Some(JobState::Failed(_)) | None) => false,
+            Ok(Some(_)) => return JobEnd::Waiting(Some(Wait::HotwordText)),
+            Err(e) => return stored(&e),
+        };
         let (decider, by) = match self.sources.decider() {
             Setup::NotSetUp => return JobEnd::Waiting(Some(Wait::Decider)),
             Setup::Unavailable(why) => return JobEnd::EngineDown(why),
@@ -145,7 +187,7 @@ impl CleanUp {
             Ok(packs) => packs,
             Err(why) => return JobEnd::Failed(why),
         };
-        let found = db.with(|db| read(db, session, &packs));
+        let found = db.with(|db| read(db, session, &packs, boosted));
         let read = match found {
             Ok(read) => read,
             Err(e) => return stored(&e),
@@ -175,13 +217,24 @@ impl CleanUp {
     }
 }
 
-/// The state of `session`'s final pass, if it has one.
-fn final_pass(db: &Writer, session: SessionId) -> Result<Option<JobState>, StoreError> {
-    let jobs = db.with(|db| db.session_jobs(session))?;
-    Ok(jobs
-        .into_iter()
-        .find(|job| job.kind == JobKind::FinalPass)
-        .map(|job| job.state))
+/// Whether a job in `state` has finished for good: done, or failed.
+const fn settled(state: &JobState) -> bool {
+    matches!(state, JobState::Done | JobState::Failed(_))
+}
+
+/// The hotwords from a session's vocabulary `terms`: its packs' terms, in
+/// the session's order, each once, without aliases or learned pairs. A
+/// term the engine can't take as a hotword (a `/` in it, say) is passed
+/// over, and there are at most [`MAX_HOTWORDS`].
+fn hotwords(terms: &SessionTerms) -> Vec<Hotword> {
+    let mut seen = BTreeSet::new();
+    terms
+        .terms
+        .iter()
+        .filter(|offered| seen.insert(offered.term.as_str()))
+        .filter_map(|offered| Hotword::new(&offered.term).ok())
+        .take(MAX_HOTWORDS)
+        .collect()
 }
 
 /// How a job ends on a store error: waiting for space if the disk is
@@ -207,24 +260,43 @@ struct Read {
     terms: SessionTerms,
     /// The proposals made already.
     proposals: Vec<Proposal>,
+    /// What the hotword pass heard in each chunk it heard text in.
+    boosted: BTreeMap<ChunkKey, String>,
 }
 
 /// Reads `session`'s final text, vocabulary (from `installed` packs) and
-/// proposals. A session with no final text has no lines.
+/// proposals, and if `boosted` the hotword pass's texts. A session with no
+/// final text has no lines.
 fn read(
     db: &nota_store::Store,
     session: SessionId,
     installed: &[Pack],
+    boosted: bool,
 ) -> Result<Read, StoreError> {
     let lines = match db.revision(session, RevisionNumber::FINAL) {
         Ok(lines) => lines,
         Err(StoreError::NoRevision(..)) => Vec::new(),
         Err(e) => return Err(e),
     };
+    let texts = if boosted {
+        db.hotword_texts(session)?
+    } else {
+        Vec::new()
+    };
     Ok(Read {
         lines,
         terms: db.session_terms(session, installed)?,
         proposals: db.proposals(session)?,
+        boosted: texts
+            .into_iter()
+            .filter_map(|heard| {
+                let key = ChunkKey {
+                    track: heard.track,
+                    start: heard.range.start(),
+                };
+                Some((key, heard.text?))
+            })
+            .collect(),
     })
 }
 
@@ -288,9 +360,63 @@ fn offers(chunk: &Chunk, found_in: Vec<Found>, origins: &BTreeMap<String, Origin
                 span: c.span(),
                 words,
                 term: c.term().to_owned(),
+                replacement: c.term().to_owned(),
+                inside: c.term().to_owned(),
                 found: found(c.matched()),
                 origin: origins.get(c.term()).cloned().unwrap_or(Origin::Learned),
             })
+        })
+        .collect()
+}
+
+/// What a chunk's hotword offers are found from.
+struct Diff<'a> {
+    /// The session's hotwords, as the diff lists them.
+    list: &'a HotwordList,
+    /// Where each term came from.
+    origins: &'a BTreeMap<String, Origin>,
+    /// Whether a term may be offered for a heard span (the learned
+    /// rejections).
+    allows: &'a dyn Fn(&str, &str) -> bool,
+}
+
+/// The hotword diff's candidates in `chunk`, against what the hotword pass
+/// heard there (`boosted`), as offers, leaving out any the lookup offered
+/// already in `lookup` (the same words and term). A chunk too long to
+/// compare gives none.
+fn hotword_offers(chunk: &Chunk, boosted: &str, lookup: &[Offer], diff: &Diff<'_>) -> Vec<Offer> {
+    let heard = chunk.word_texts();
+    let beam: Vec<&str> = boosted.split_whitespace().collect();
+    let Ok(candidates) = hotword_candidates(&heard, &beam, diff.list) else {
+        return Vec::new();
+    };
+    candidates
+        .into_iter()
+        .filter(|c| (diff.allows)(&c.heard_text, &c.term))
+        .filter_map(|c| {
+            let last = c.heard.end.checked_sub(1)?;
+            let words = WordSpan::new(
+                u32::try_from(c.heard.start).ok()?,
+                u32::try_from(last).ok()?,
+            )?;
+            let offer = Offer {
+                span: chunk.bytes(words),
+                words,
+                origin: diff
+                    .origins
+                    .get(&c.term)
+                    .cloned()
+                    .unwrap_or(Origin::Learned),
+                window: c.heard_text,
+                term: c.term,
+                replacement: c.replacement,
+                inside: c.word,
+                found: nota_store::Found::Hotword,
+            };
+            let offered = lookup
+                .iter()
+                .any(|o| o.words == offer.words && o.term == offer.term);
+            (!offered).then_some(offer)
         })
         .collect()
 }
@@ -382,6 +508,13 @@ impl Pass<'_> {
         let (terms, origins) = vocabulary(&read.terms, self.english.code());
         let lookup = Lookup::new(self.english, &terms);
         let allows = |heard: &str, term: &str| read.terms.allows(heard, term);
+        let hotwords = hotwords(&read.terms);
+        let list = HotwordList::new(hotwords.iter().map(Hotword::as_str));
+        let diff = Diff {
+            list: &list,
+            origins: &origins,
+            allows: &allows,
+        };
         let held = Held::new(&read.proposals);
         let chunks: Vec<Chunk> = read.lines.iter().filter_map(chunk_of).collect();
         let total = u64::try_from(chunks.len()).unwrap_or(u64::MAX);
@@ -389,7 +522,11 @@ impl Pass<'_> {
         for (i, chunk) in chunks.iter().enumerate() {
             let done = u64::try_from(i).unwrap_or(u64::MAX);
             (self.running.progress)(nota_store::Progress { done, total });
-            let offered = offers(chunk, lookup.find(chunk.text(), &allows), &origins);
+            let mut offered = offers(chunk, lookup.find(chunk.text(), &allows), &origins);
+            if let Some(boosted) = read.boosted.get(&chunk.key()) {
+                let more = hotword_offers(chunk, boosted, &offered, &diff);
+                offered.extend(more);
+            }
             let asked: Vec<Offer> = offered
                 .iter()
                 .filter(|o| held.is_new(chunk.key(), o))
@@ -495,7 +632,8 @@ fn question(ask: &Ask<'_>) -> Result<Question, String> {
     let candidates = ask
         .asked
         .iter()
-        .map(|o| Candidate::new(o.window.clone(), o.term.clone(), None))
+        // The text a yes would put in: the term, for the lookup's.
+        .map(|o| Candidate::new(o.window.clone(), o.replacement.clone(), None))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("the question couldn't be asked: {e}"))?;
     Question::new(
