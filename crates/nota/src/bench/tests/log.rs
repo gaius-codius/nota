@@ -227,6 +227,30 @@ fn a_bad_verdict_line_is_refused_with_its_line_number() {
     );
 }
 
+/// A log that gives one candidate's verdict twice is refused at the
+/// second line: a log holds one verdict for each candidate.
+#[test]
+fn a_candidate_given_twice_is_refused_at_its_second_line() {
+    let dir = TestDir::new("twice");
+    let (candidates, runs) = two_runs();
+    let written = write(&dir.0, STAMP, &runs[0], &candidates, None).unwrap();
+    let text = read_text(&written, 1 << 20).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    // The first verdict again as the third line, in place of the second.
+    let path = dir.0.join("twice.jsonl");
+    write_file(
+        &path,
+        &format!("{}\n{}\n{}\n", lines[0], lines[1], lines[1]),
+    );
+    assert_eq!(
+        read(&path).unwrap_err(),
+        format!(
+            "{}: line 3: not a bench log line: its candidate is there already",
+            path.display()
+        )
+    );
+}
+
 /// A refused ending without its rule is refused: the log can't say which
 /// rule refused it.
 #[test]
