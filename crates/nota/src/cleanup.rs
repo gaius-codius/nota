@@ -524,8 +524,12 @@ impl Pass<'_> {
             (self.running.progress)(nota_store::Progress { done, total });
             let mut offered = offers(chunk, lookup.find(chunk.text(), &allows), &origins);
             if let Some(boosted) = read.boosted.get(&chunk.key()) {
+                // A question holds a bounded number of candidates, and one
+                // with more is no question at all: the lookup's come first,
+                // and the diff's fill what's left.
+                let room = nota_core::decide::MAX_CANDIDATES.saturating_sub(offered.len());
                 let more = hotword_offers(chunk, boosted, &offered, &diff);
-                offered.extend(more);
+                offered.extend(more.into_iter().take(room));
             }
             let asked: Vec<Offer> = offered
                 .iter()

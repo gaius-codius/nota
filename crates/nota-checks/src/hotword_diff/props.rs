@@ -22,6 +22,8 @@ fn any_word() -> impl Strategy<Value = String> {
         Just("amylo".to_owned()),
         Just("Amlodipine.".to_owned()),
         Just("care".to_owned()),
+        Just("Care.".to_owned()),
+        Just("cared".to_owned()),
         Just("self-care".to_owned()),
     ]
 }
@@ -37,6 +39,7 @@ fn any_terms() -> impl Strategy<Value = Vec<String>> {
         prop_oneof![
             "[a-d]{1,6}( [a-d]{1,6})?",
             Just("amlodipine".to_owned()),
+            Just("care".to_owned()),
             Just("self-care".to_owned())
         ],
         0..5,

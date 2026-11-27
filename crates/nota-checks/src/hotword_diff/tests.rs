@@ -186,3 +186,15 @@ fn a_repeated_word_lines_up_as_in_python() {
     // Python: [('equal',0,1,0,1), ('delete',1,3,1,1)].
     assert_eq!(differences(&a, &b), [(1..3, 1..1)]);
 }
+
+/// A beam text that only lost sentences gives nothing, even where the
+/// matching pairs a lost word with a kept one: here difflib lines up the
+/// kept "Care." words with the heard ones so that a lost "Cared." sits
+/// opposite a kept "Care.", which would read as a listed word coming in.
+#[test]
+fn a_beam_text_that_only_lost_words_gives_nothing_however_it_aligns() {
+    let list = HotwordList::new(["care"]);
+    let heard = ["Care.", "Cared.", "Care.", "Care.", "Cared."];
+    let boosted = ["Care.", "Care.", "Care."];
+    assert_eq!(propose(&heard, &boosted, &list).unwrap(), Vec::new());
+}

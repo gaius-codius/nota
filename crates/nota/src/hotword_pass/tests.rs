@@ -420,6 +420,57 @@ fn skipped_or_silent_chunks_store_no_text() {
     );
 }
 
+/// A run whose engines skipped audio and never confirmed any themselves
+/// (an engine that can't be boosted dies at every chunk) fails rather than
+/// reading as done; one that skipped some but heard the rest is done.
+#[test]
+fn a_run_that_heard_nothing_but_skips_fails() {
+    let fixture = Fixture::new(
+        "all-skipped",
+        &[(0, 100, Some("a")), (100, 200, Some("c"))],
+        &[],
+    );
+    let work = fixture.work();
+    let running = quiet();
+    let mut sink = Heard::new(
+        fixture.db().clone(),
+        SESSION,
+        Boost::DEFAULT,
+        &work,
+        &running,
+    );
+    sink.confirmed(MIC, s(100), vec![], vec![range(0, 100)])
+        .unwrap();
+    sink.confirmed(MIC, s(200), vec![], vec![range(100, 200)])
+        .unwrap();
+    assert!(
+        matches!(finished(&mut sink), JobEnd::Failed(ref why) if why.contains("none of the audio")),
+    );
+    // What it skipped is stored, so a later run doesn't feed it again.
+    assert_eq!(
+        fixture.texts(),
+        [(MIC, 0, 100, None), (MIC, 100, 200, None)]
+    );
+    let fixture = Fixture::new(
+        "some-skipped",
+        &[(0, 100, Some("a")), (100, 200, Some("c"))],
+        &[],
+    );
+    let work = fixture.work();
+    let mut sink = Heard::new(
+        fixture.db().clone(),
+        SESSION,
+        Boost::DEFAULT,
+        &work,
+        &running,
+    );
+    sink.confirmed(MIC, s(100), vec![], vec![range(0, 100)])
+        .unwrap();
+    sink.confirmed(MIC, s(200), vec![heard(100, 190, "c")], vec![])
+        .unwrap();
+    assert_eq!(finished(&mut sink), JobEnd::Done);
+}
+
 /// Chunks the final pass heard nothing in aren't fed: one before a fed
 /// chunk is stored when a confirmation passes it, and one after the last
 /// when the run finishes.
@@ -619,12 +670,15 @@ fn a_stop_leaves_the_job_waiting() {
     assert_eq!(fixture.texts(), []);
 }
 
-/// A session whose only chunks heard nothing has nothing to feed: they're
-/// stored text-less and the job is done without an engine.
+/// A session whose only chunks heard nothing has nothing to feed: the
+/// job waits for no engine, its chunks are stored text-less and it's done
+/// without one.
 #[test]
 fn only_text_less_chunks_are_done_without_an_engine() {
     let fixture = Fixture::new("all-silent", &[(0, 100, None)], &["amlodipine"]);
     let clean_up = fixture.clean_up(Gives::NotSetUp);
+    fixture.end(JobKind::FinalPass, &JobEnd::Done);
+    assert_eq!(lacks_with(&fixture, &clean_up, None), None);
     assert_eq!(
         run_job(&fixture, &clean_up, None, DEFAULT_BOOST, &|| false),
         JobEnd::Done
@@ -657,14 +711,28 @@ fn the_real_engine_is_given_its_boost_and_vocabulary() {
     assert_eq!(args(&HotwordEngine::Stand(command)), ["engine", "asr"]);
 }
 
-/// A boost is above 0 and at most 10.
+/// A boost is above 0 and at most 10, and never so small the engine would
+/// read it as 0.
 #[test]
 fn a_boost_is_above_zero_and_at_most_ten() {
-    let taken: Vec<bool> = [0.0, -1.0, 0.1, 10.0, 10.5, f64::NAN, f64::INFINITY]
-        .into_iter()
-        .map(|score| Boost::new(score).is_some())
-        .collect();
-    assert_eq!(taken, [false, false, true, true, false, false, false]);
+    let taken: Vec<bool> = [
+        0.0,
+        -1.0,
+        0.1,
+        10.0,
+        10.5,
+        f64::NAN,
+        f64::INFINITY,
+        1e-100,
+        f64::from(f32::MIN_POSITIVE),
+    ]
+    .into_iter()
+    .map(|score| Boost::new(score).is_some())
+    .collect();
+    assert_eq!(
+        taken,
+        [false, false, true, true, false, false, false, false, true]
+    );
 }
 
 /// The session for the resume test: two chunks with text around one with

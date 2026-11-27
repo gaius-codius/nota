@@ -14,7 +14,11 @@
 //!
 //! A sentence the beam pass drops is a difference with no boosted words, so
 //! rule 1 refuses it: the beam's known habit of losing whole sentences can't
-//! become a proposal.
+//! become a proposal. Nor can a beam text that **only** lost words, however
+//! the matching lines it up: if the boosted words are the heard ones with
+//! some left out (a subsequence, once normalised), the chunk gives nothing,
+//! though the longest-match alignment may set a lost word opposite a kept
+//! one and read it as a replacement.
 //!
 //! Where it differs from `propose.py`, deliberately (the code checks spec,
 //! "The hotword diff"):
@@ -26,6 +30,8 @@
 //! - **A chunk with more than [`MAX_WORDS`] words on either side gives no
 //!   candidates** ([`TooManyWords`]), which bounds the work; a final-pass
 //!   chunk is at most 25 s of speech, far shorter.
+//! - **A beam text that only lost words gives nothing,** as above.
+//!   `propose.py` compared the alignment alone; no bench chunk is affected.
 
 use std::collections::BTreeSet;
 use std::error::Error;
@@ -136,6 +142,9 @@ pub fn propose(
     }
     let a: Vec<String> = heard.iter().map(|w| normalise(w)).collect();
     let b: Vec<String> = boosted.iter().map(|w| normalise(w)).collect();
+    if is_subsequence(&b, &a) {
+        return Ok(Vec::new());
+    }
     Ok(differences(&a, &b)
         .into_iter()
         .filter_map(|(old, new)| {
@@ -182,6 +191,12 @@ fn candidate(
         word: word.to_owned(),
         similarity,
     })
+}
+
+/// Whether `short` is `long` with some (or no) items left out, in order.
+fn is_subsequence<T: Eq>(short: &[T], long: &[T]) -> bool {
+    let mut rest = long.iter();
+    short.iter().all(|item| rest.any(|other| other == item))
 }
 
 /// `propose.py`'s word normalisation: lowercased, keeping only `a`–`z`,

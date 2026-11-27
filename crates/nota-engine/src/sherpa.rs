@@ -245,14 +245,28 @@ impl Models for SherpaModels {
     }
 }
 
-/// Writes the vocabulary `text` to `path`, where sherpa-onnx reads it.
+/// Writes the vocabulary `text` to `path`, where sherpa-onnx reads it, as
+/// a new file: whatever is at `path` is removed first (a symlink itself,
+/// never what it points to), and the file is created only if nothing is
+/// there, so the write can't follow a link onto another file.
 #[expect(
     clippy::disallowed_methods,
     reason = "the engine's own scratch file, rewritten for every list: neither a recording nor the database"
 )]
 fn write_vocab(path: &Path, text: &str) -> Result<(), EngineError> {
-    std::fs::write(path, text)
-        .map_err(|e| EngineError::Model(format!("can't write {}: {e}", path.display())))
+    let failed =
+        |e: std::io::Error| EngineError::Model(format!("can't write {}: {e}", path.display()));
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(failed(e)),
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(failed)?;
+    std::io::Write::write_all(&mut file, text.as_bytes()).map_err(failed)
 }
 
 /// `path` as the UTF-8 text sherpa-onnx's config takes.
@@ -649,6 +663,32 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    /// The vocabulary is written as a new file: a symlink at its path is
+    /// replaced, never followed, so the file it points to (a recording,
+    /// say) is left as it was; a file there is replaced.
+    #[cfg(unix)]
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test scaffolding: a scratch directory, not a recording or the database"
+    )]
+    fn the_vocabulary_never_follows_a_link() {
+        let dir = std::env::temp_dir().join(format!("nota-vocab-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let other = dir.join("segment-000001.flac");
+        std::fs::write(&other, b"audio").unwrap();
+        let vocab = dir.join("hotword-vocab.txt");
+        std::os::unix::fs::symlink(&other, &vocab).unwrap();
+        write_vocab(&vocab, "a 0\n").unwrap();
+        assert_eq!(std::fs::read(&other).unwrap(), b"audio");
+        assert!(!std::fs::symlink_metadata(&vocab).unwrap().is_symlink());
+        assert_eq!(std::fs::read_to_string(&vocab).unwrap(), "a 0\n");
+        write_vocab(&vocab, "b 0\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&vocab).unwrap(), "b 0\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     /// The models and the fixture's audio, or `None` (said on stderr) if
     /// they're absent. Fails instead when `NOTA_REQUIRE_TEST_MODELS=1`.

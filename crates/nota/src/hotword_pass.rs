@@ -67,10 +67,12 @@ impl Boost {
     /// The highest boost taken: the engine's `--boost` takes no more.
     pub(crate) const MAX: f64 = 10.0;
 
-    /// The boost `score`, or `None` unless it's above 0 and at most
-    /// [`Boost::MAX`] (so never NaN or infinite).
+    /// The boost `score`, or `None` unless it's at least the smallest
+    /// normal `f32` (the engine reads it as one, so a smaller score would
+    /// reach it as 0, which it refuses) and at most [`Boost::MAX`] (so
+    /// never NaN or infinite).
     pub(crate) fn new(score: f64) -> Option<Self> {
-        (score > 0.0 && score <= Self::MAX).then_some(Self(score))
+        (score >= f64::from(f32::MIN_POSITIVE) && score <= Self::MAX).then_some(Self(score))
     }
 
     /// The score.
@@ -153,13 +155,34 @@ pub(crate) fn lacks(pass: &Pass<'_>, session: SessionId) -> Option<Wait> {
         Ok(Some(JobState::Failed(_))) | Err(_) => return None,
         Ok(Some(_)) => return Some(Wait::FinalText),
     }
-    // Without hotwords the run is done at once, engine or not, and
-    // clean-up mustn't wait behind it for one.
+    // Without hotwords, or without a chunk left to feed, the run is done
+    // at once, engine or not, and clean-up mustn't wait behind it for one.
+    if pass.engine.is_some() {
+        return None;
+    }
+    let db = pass.library.db();
     let boosted = pass
         .clean_up
-        .hotwords(pass.library.db(), session)
+        .hotwords(db, session)
         .is_ok_and(|hotwords| !hotwords.is_empty());
-    (boosted && pass.engine.is_none()).then_some(Wait::Engine)
+    (boosted && feeds_left(db, session)).then_some(Wait::Engine)
+}
+
+/// Whether `session` has a final-pass chunk with text that the hotword
+/// pass hasn't done yet. One that can't be read is taken to have one: the
+/// run reports the error.
+fn feeds_left(db: &Writer, session: SessionId) -> bool {
+    let found = db.with(|db| Ok((db.final_texts(session)?, db.hotword_progress(session)?)));
+    let Ok((finals, progress)) = found else {
+        return true;
+    };
+    finals.iter().any(|text| {
+        let from = progress
+            .get(&text.track)
+            .copied()
+            .unwrap_or(SampleIndex::ZERO);
+        text.text.is_some() && text.range.end() > from
+    })
 }
 
 /// The state of `session`'s job of `kind`, if it has one.
@@ -241,12 +264,21 @@ pub(crate) fn run(pass: &Pass<'_>, session: SessionId, running: &Running<'_>) ->
 }
 
 /// How a run ends once the engine has done every chunk: done, once the
-/// chunks left (those it wasn't fed) are stored.
+/// chunks left (those it wasn't fed) are stored; but failed if the engines
+/// skipped audio and never once confirmed any themselves. That's an engine
+/// that can't be boosted at all (its vocabulary can't be written, or its
+/// beam recognizer can't be built), which dies at every chunk until each
+/// is skipped: a pass that heard nothing mustn't read as done.
 fn finished(sink: &mut Heard<'_>) -> JobEnd {
-    match sink.finish() {
-        Ok(()) => JobEnd::Done,
-        Err(e) => stored(&e),
+    if let Err(e) = sink.finish() {
+        return stored(&e);
     }
+    if sink.lost && !sink.told {
+        return JobEnd::Failed(
+            "the boosted engine heard none of the audio: it kept failing on every chunk".to_owned(),
+        );
+    }
+    JobEnd::Done
 }
 
 /// One final-pass chunk the pass has still to store.
@@ -377,8 +409,12 @@ struct Heard<'a> {
     answered: &'a dyn Fn(),
     /// Tells the runner why the engine is down now, or that it's back.
     engine_down: &'a dyn Fn(Option<&str>),
-    /// Whether it has been told yet: once is enough.
+    /// Whether it has been told yet: once is enough. Also whether the
+    /// engine itself confirmed any audio this run.
     told: bool,
+    /// Whether any audio was skipped, the engines having kept failing on
+    /// it.
+    lost: bool,
 }
 
 impl<'a> Heard<'a> {
@@ -420,6 +456,7 @@ impl<'a> Heard<'a> {
             answered: running.answered,
             engine_down: running.engine_down,
             told: false,
+            lost: false,
         }
     }
 
@@ -508,6 +545,7 @@ impl PassSink for Heard<'_> {
         // With nothing skipped, the engine itself confirmed this audio:
         // it works, whatever stopped an earlier run.
         let engine_answered = skipped.is_empty();
+        self.lost |= !engine_answered;
         self.note(track, texts, &skipped);
         // Only chunks wholly confirmed are stored, so the progress stored
         // is always a chunk's end: a run that stops mid-chunk decodes that

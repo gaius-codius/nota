@@ -988,6 +988,60 @@ fn a_hotword_offer_the_gate_refuses_changes_nothing() {
     assert_eq!(fixture.shown(), ["check the sampler"]);
 }
 
+/// A yes on a diff's offer is placed only at the words the diff named: here
+/// the beam changed the second "stat ins" of two, so the gate's first
+/// match, the first, is refused and nothing changes.
+#[test]
+fn a_hotword_offer_is_placed_only_at_its_own_words() {
+    let text = "stop the stat ins now and start the stat ins later";
+    let fixture = Fixture::new("hotword-repeated", &[text], &["statins"]);
+    fixture.boosted(&[Some("stop the stat ins now and start the statins later")]);
+    let fake = Fake::saying_yes([("stat ins", "statins")]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    // The lookup's own offer, on the first "stat ins now", is a no.
+    assert_eq!(
+        asked(&fake),
+        [["stat ins now -> statins", "stat ins -> statins"]]
+    );
+    let proposals = fixture.proposals();
+    let [_, p] = &proposals[..] else {
+        panic!("{proposals:?}")
+    };
+    assert_eq!(p.proposed.found, nota_store::Found::Hotword);
+    assert_eq!(p.proposed.words, WordSpan::new(8, 9).unwrap());
+    assert!(
+        matches!(
+            p.decided,
+            Decided::Refused {
+                rule: Refusal::WindowElsewhere,
+                ..
+            }
+        ),
+        "{p:?}"
+    );
+    assert_eq!(fixture.shown(), [text]);
+}
+
+/// A chunk's question holds at most the decider's limit of candidates:
+/// the lookup's come first and the diff's fill what's left, so a chunk
+/// with more differences is still asked about.
+#[test]
+fn a_chunks_hotword_offers_fit_one_question() {
+    let max = nota_core::decide::MAX_CANDIDATES;
+    let heard: Vec<String> = (0..=max).map(|n| format!("w{n} stat ins")).collect();
+    let boosted: Vec<String> = (0..=max).map(|n| format!("w{n} statins")).collect();
+    let heard = heard.join(" ");
+    let fixture = Fixture::new("hotword-many", &[heard.as_str()], &["statins"]);
+    fixture.boosted(&[Some(boosted.join(" ").as_str())]);
+    let fake = Fake::saying_yes([]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    let questions = asked(&fake);
+    assert_eq!(questions.len(), 1, "{questions:?}");
+    assert_eq!(questions[0].len(), max);
+}
+
 /// A difference the lookup offered already (the same words and term) is
 /// asked about once, as the lookup's.
 #[test]

@@ -333,9 +333,28 @@ fn gate_yeses(
     let gated = gate(chunk.text(), &offered, &proposals);
     let mut verdicts = vec![None; asked.len()];
     for (&i, decision) in yes.iter().zip(gated.decisions()) {
-        verdicts[i] = Some(Verdict::of(decision));
+        verdicts[i] = Some(at_its_words(&asked[i], Verdict::of(decision)));
     }
     verdicts
+}
+
+/// `verdict` on `offer`, refused if the offer is the hotword diff's and the
+/// gate placed it anywhere but the words the diff named. The gate places a
+/// fix at the first match of its span, which is right for the lookup (it
+/// offers every match of a window alike) but not for the diff, which saw
+/// the beam change one occurrence of a phrase the chunk holds twice.
+fn at_its_words(offer: &Offer, verdict: Verdict) -> Verdict {
+    match verdict {
+        Verdict::Placed {
+            ref range,
+            similarity,
+            ..
+        } if offer.found == Found::Hotword && *range != offer.span => Verdict::Refused {
+            rule: Refusal::WindowElsewhere,
+            similarity: Some(similarity),
+        },
+        verdict => verdict,
+    }
 }
 
 /// What a fix the gate placed comes to.
