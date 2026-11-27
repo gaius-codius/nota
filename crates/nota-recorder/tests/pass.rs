@@ -19,7 +19,7 @@ use nota_core::{Clock, EpochId, SampleCount, SampleIndex, SampleRange, SystemClo
 use nota_recorder::engine::EngineCommand;
 use nota_recorder::engine::pass::{PassConfig, PassEnd, PassSink, TrackAudio, transcribe};
 use nota_recorder::segment::ReadSegmentError;
-use nota_store::{SegmentRow, Sha256Digest};
+use nota_store::{AudioDigest, SegmentRow, Sha256Digest};
 
 const MIC: TrackId = TrackId::new(0);
 const SYSTEM: TrackId = TrackId::new(1);
@@ -843,4 +843,38 @@ fn a_row_with_another_digest_is_read_again() {
     feeds.extend(chunks_of(&[other], &[(5 * S, 12 * S)]));
     let (_, reads) = run_counting(&feeds, |row| Ok(audio(row)));
     assert_eq!(reads, [first, other]);
+}
+
+/// The same holds for a row that differs only in its audio digest, the
+/// other way a file can be proven against its row.
+#[test]
+fn a_row_with_another_audio_digest_is_read_again() {
+    let first = row(MIC, 0, 0, 30 * S);
+    let other = first.with_audio(AudioDigest::new([1; 32]));
+    let mut feeds = chunks_of(&[first], &[(0, 5 * S)]);
+    feeds.extend(chunks_of(&[other], &[(5 * S, 12 * S)]));
+    let (_, reads) = run_counting(&feeds, |row| Ok(audio(row)));
+    assert_eq!(reads, [first, other]);
+}
+
+/// A segment the disk failed to give is read again by the next chunk in
+/// it, so one failed read loses only its own chunk; once read, it serves
+/// the chunks after it.
+#[test]
+fn a_segment_the_disk_failed_to_give_is_read_again_by_the_next_chunk() {
+    let segment = row(MIC, 0, 0, 30 * S);
+    let chunks = [(0, 5 * S), (5 * S, 12 * S), (12 * S, 20 * S)];
+    let failed = Cell::new(false);
+    let (sink, reads) = run_counting(&chunks_of(&[segment], &chunks), |row| {
+        // The first read fails as a disk error would; the rest succeed.
+        if failed.replace(true) {
+            Ok(audio(row))
+        } else {
+            Err(ReadSegmentError::Io(std::io::Error::other("busy")))
+        }
+    });
+    assert_eq!(reads, [segment, segment]);
+    assert_eq!(sink.skipped, [(MIC, 0, 5 * S)]);
+    let want = [(5 * S, 12 * S), (12 * S, 20 * S)].map(|(a, b)| (MIC, a, b, format!("{a}-{b}~2")));
+    assert_eq!(sink.texts, want);
 }

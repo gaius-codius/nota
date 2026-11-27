@@ -36,8 +36,11 @@
 //! [`TrackAudio`] that starts in the segment the one before it ended in
 //! (the hotword pass feeds a segment's chunks one after the other) doesn't
 //! read, prove and decode it again: a segment is read once for a run of
-//! feeds over it, and one that couldn't be read is tried once. Audio is
-//! only used for a row equal to the one it was read and proven for.
+//! feeds over it. One that failed its proof or its decode is tried once,
+//! since its file will fail the same way again; one that couldn't be read
+//! from the disk is tried again by the next feed, since that may pass.
+//! Audio is only used for a row equal to the one it was read and proven
+//! for.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -347,7 +350,8 @@ pub fn transcribe<K: PassSink>(
 struct Reader<R> {
     /// Reads, proves and decodes a segment.
     read: R,
-    /// The row last read, and its audio, or `None` if it couldn't be read.
+    /// The row last read, and its audio, or `None` if its file isn't its
+    /// row's audio (it failed its proof or its decode).
     last: Option<(SegmentRow, Option<Rc<Vec<i16>>>)>,
 }
 
@@ -358,7 +362,7 @@ impl<R: FnMut(&SegmentRow) -> Result<Vec<i16>, ReadSegmentError>> Reader<R> {
     }
 
     /// The audio of `row`, or `None` if it can't be read: what was read
-    /// last if that was for an equal row (the same samples and digest, so
+    /// last if that was for an equal row (the same samples and digests, so
     /// proven against this row), and otherwise what `read` gives now.
     fn audio(&mut self, row: &SegmentRow) -> Option<Rc<Vec<i16>>> {
         if let Some((last, audio)) = &self.last
@@ -368,7 +372,13 @@ impl<R: FnMut(&SegmentRow) -> Result<Vec<i16>, ReadSegmentError>> Reader<R> {
         }
         // Let the last segment go first, so the pass never holds two.
         self.last = None;
-        let audio = (self.read)(row).ok().map(Rc::new);
+        let audio = match (self.read)(row) {
+            Ok(samples) => Some(Rc::new(samples)),
+            // The disk may give it next time: nothing is kept, so the next
+            // feed over it reads it again.
+            Err(ReadSegmentError::Io(_)) => return None,
+            Err(_) => None,
+        };
         self.last = Some((*row, audio.as_ref().map(Rc::clone)));
         audio
     }
