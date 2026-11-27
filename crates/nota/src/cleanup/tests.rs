@@ -1266,6 +1266,92 @@ fn a_failed_hotword_pass_leaves_only_the_lookup() {
     assert_eq!(fixture.shown(), [STATINS]);
 }
 
+/// Acceptance (#297): a hotword pass whose engine keeps failing holds
+/// clean-up up only until it has ended with its engine down
+/// [`HOTWORD_DOWN_RUNS`] times; then clean-up runs with the lookup alone,
+/// its wait and its run agreeing at each count. A pause doesn't count,
+/// and a pass that finishes starts the count again.
+#[test]
+fn clean_up_goes_on_without_a_hotword_pass_whose_engine_keeps_failing() {
+    let fixture = Fixture::new("hotword-down", &[AMLODIPINE], &["amlodipine"]);
+    fixture.end(JobKind::HotwordPass, &JobEnd::EngineDown("stalled".into()));
+    let fake = Fake::saying_yes([("amylo diping", "amlodipine")]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    for _ in 1..HOTWORD_DOWN_RUNS {
+        clean_up.hotword_ended(SESSION, &JobEnd::EngineDown("stalled".into()));
+        // A pause between runs says nothing about the engine.
+        clean_up.hotword_ended(SESSION, &JobEnd::Waiting(None));
+        assert_eq!(
+            clean_up.lacks(&fixture.db, SESSION),
+            Some(Wait::HotwordText)
+        );
+        assert_eq!(
+            run(&mut clean_up, &fixture),
+            JobEnd::Waiting(Some(Wait::HotwordText))
+        );
+    }
+    assert_eq!(fake.questions(), 0);
+    clean_up.hotword_ended(SESSION, &JobEnd::EngineDown("stalled".into()));
+    assert_eq!(clean_up.lacks(&fixture.db, SESSION), None);
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(fixture.shown(), ["start amlodipine daily"]);
+    // A pass that finishes starts the count again: a later failing pass
+    // is waited for afresh.
+    clean_up.hotword_ended(SESSION, &JobEnd::Done);
+    assert_eq!(
+        clean_up.lacks(&fixture.db, SESSION),
+        Some(Wait::HotwordText)
+    );
+}
+
+/// Acceptance (#297): once a hotword pass clean-up went on without
+/// finishes, clean-up runs again and adds the pass's candidates, without
+/// proposing a lookup candidate twice, nor a difference the lookup also
+/// offers.
+#[test]
+fn a_hotword_pass_that_finishes_later_adds_only_its_own_candidates() {
+    let metoprolol = "take the metro pro lol daily";
+    let fixture = Fixture::new(
+        "hotword-later",
+        &[metoprolol, STATINS],
+        &["metoprolol", "statins"],
+    );
+    fixture.end(JobKind::HotwordPass, &JobEnd::EngineDown("stalled".into()));
+    let fake = Fake::saying_yes([]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    for _ in 0..HOTWORD_DOWN_RUNS {
+        clean_up.hotword_ended(SESSION, &JobEnd::EngineDown("stalled".into()));
+    }
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(asked(&fake), [["metro pro lol -> metoprolol"]]);
+    fixture.end(JobKind::CleanUp, &JobEnd::Done);
+
+    // The pass finishes: its texts are stored, and it ends done.
+    fixture.boosted(&[Some("take the metoprolol daily"), Some("start the statins")]);
+    fixture.end(JobKind::HotwordPass, &JobEnd::Done);
+    clean_up.hotword_ended(SESSION, &JobEnd::Done);
+    let state = job_state(&fixture.db, SESSION, JobKind::CleanUp);
+    assert_eq!(state.unwrap(), Some(JobState::Waiting(None)));
+    assert_eq!(clean_up.lacks(&fixture.db, SESSION), None);
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    // Only the difference no lookup offered is asked about this time.
+    assert_eq!(
+        asked(&fake),
+        [["metro pro lol -> metoprolol"], ["stat ins -> statins"]]
+    );
+    let found: Vec<(String, nota_store::Found)> = fixture
+        .proposals()
+        .into_iter()
+        .map(|p| (p.proposed.term, p.proposed.found))
+        .collect();
+    let [(first, lookup), (second, hotword)] = &found[..] else {
+        panic!("{found:?}")
+    };
+    assert_eq!((first.as_str(), second.as_str()), ("metoprolol", "statins"));
+    assert_ne!(*lookup, nota_store::Found::Hotword);
+    assert_eq!(*hotword, nota_store::Found::Hotword);
+}
+
 /// A session stopped before nota had the hotword pass has no such job:
 /// clean-up runs with the lookup alone.
 #[test]

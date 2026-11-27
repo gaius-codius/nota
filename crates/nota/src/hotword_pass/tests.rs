@@ -470,6 +470,56 @@ fn a_run_that_skips_before_hearing_anything_gives_up() {
     assert_eq!(end_of(&mut sink, PassEnd::Done), JobEnd::Done);
 }
 
+/// The terms an engine says it left out are stored out of the run's list,
+/// and a later engine's report replaces them.
+#[test]
+fn the_terms_an_engine_left_out_are_stored_out_of_the_runs_list() {
+    let fixture = Fixture::new("left-out", &[(0, 100, Some("a"))], &[]);
+    let work = fixture.work();
+    let running = quiet();
+    let mut sink = Heard::new(
+        fixture.db().clone(),
+        SESSION,
+        Boost::DEFAULT,
+        &work,
+        &running,
+    );
+    sink.given = 3;
+    let stored = || {
+        fixture
+            .db()
+            .with(|db| db.hotword_left_out(SESSION))
+            .unwrap()
+    };
+    assert_eq!(stored(), None);
+    sink.left_out(vec![Hotword::new("Mg2+").unwrap()]).unwrap();
+    assert_eq!(stored(), LeftOut::new(3, vec!["Mg2+".to_owned()]));
+    // A restarted engine says again; what it says now is what's kept.
+    sink.left_out(Vec::new()).unwrap();
+    assert_eq!(stored(), LeftOut::new(3, Vec::new()));
+}
+
+/// An engine that names what it left out and then skips its first audio
+/// still gives the run up: the report isn't a sign that it decodes.
+#[test]
+fn an_engine_that_reports_then_skips_still_gives_up() {
+    let fixture = Fixture::new("reports-then-dies", &[(0, 100, Some("a"))], &[]);
+    let work = fixture.work();
+    let running = quiet();
+    let mut sink = Heard::new(
+        fixture.db().clone(),
+        SESSION,
+        Boost::DEFAULT,
+        &work,
+        &running,
+    );
+    sink.given = 1;
+    sink.left_out(Vec::new()).unwrap();
+    sink.confirmed(MIC, s(100), vec![], vec![range(0, 100)])
+        .unwrap();
+    assert!(sink.gave_up().get());
+}
+
 /// A boosted engine that can't start fails the job, with the reason, so
 /// clean-up goes on with the lookup alone instead of waiting for it.
 #[test]

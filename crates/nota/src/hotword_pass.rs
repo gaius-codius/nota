@@ -25,6 +25,13 @@
 //! order, each once ([`crate::cleanup::CleanUp::hotwords`]); with none,
 //! there's nothing to boost and the job is done without an engine. The
 //! boost is the setting `[hotword_pass] boost`, read at each run.
+//!
+//! **What the engine left out.** A term the engine can't boost (its
+//! vocabulary can't split it as the model does) is left out of the list,
+//! and the engine says which as soon as it has the list. Each engine's
+//! report is stored, with how many terms the run gave it, in place of the
+//! last ([`nota_store::hotword_text::LeftOut`]), so the session shows how
+//! many of its terms were never boosted.
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, VecDeque};
@@ -32,12 +39,13 @@ use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use nota_core::messages::{ToEngine, Transcript};
+use nota_core::messages::{Hotword, ToEngine, Transcript};
 use nota_core::{Clock, SampleIndex, SampleRange, SessionId, TrackId};
 use nota_recorder::engine::EngineCommand;
 use nota_recorder::engine::pass::{PassConfig, PassEnd, PassSink, TrackAudio, transcribe};
 use nota_recorder::fs::StdFs;
 use nota_recorder::segment::read_segment;
+use nota_store::hotword_text::LeftOut;
 use nota_store::{
     FinalText, HotwordText, JobEnd, JobKind, JobState, Progress, SegmentRow, StoreError, Wait,
     Writer,
@@ -246,6 +254,8 @@ pub(crate) fn run(pass: &Pass<'_>, session: SessionId, running: &Running<'_>) ->
         Err(why) => return JobEnd::Failed(why),
     };
     let mut sink = Heard::new(db.clone(), session, boost, &work, running);
+    // What the engine leaves out is out of this list.
+    sink.given = hotwords.len();
     (running.progress)(sink.progress());
     if work.feeds.is_empty() {
         return finished(&mut sink);
@@ -448,6 +458,9 @@ struct Heard<'a> {
     gave_up: Rc<Cell<bool>>,
     /// Why the engine was last down, for the job's reason if it gives up.
     last_down: Option<String>,
+    /// How many hotwords the run gives the engine, which its left-out
+    /// terms are out of.
+    given: usize,
 }
 
 impl<'a> Heard<'a> {
@@ -491,6 +504,7 @@ impl<'a> Heard<'a> {
             told: false,
             gave_up: Rc::new(Cell::new(false)),
             last_down: None,
+            given: 0,
         }
     }
 
@@ -614,5 +628,21 @@ impl PassSink for Heard<'_> {
             self.last_down = Some(why.to_owned());
         }
         (self.engine_down)(why);
+    }
+
+    /// Stores what the engine left out, in place of what an earlier engine
+    /// said. Not a sign the engine works: an engine that reports and then
+    /// dies on its first audio still gives the run up.
+    fn left_out(&mut self, terms: Vec<Hotword>) -> Result<(), StoreError> {
+        let terms: Vec<String> = terms.iter().map(|t| t.as_str().to_owned()).collect();
+        // The engine is sent this run's list, so it leaves out no more
+        // than that; should one say it did, the count grows to fit rather
+        // than the report being lost. A hotword is never empty, so the
+        // report always builds.
+        let Some(left_out) = LeftOut::new(self.given.max(terms.len()), terms) else {
+            return Ok(());
+        };
+        self.db
+            .with(|db| db.set_hotword_left_out(self.session, &left_out))
     }
 }

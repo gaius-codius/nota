@@ -102,7 +102,13 @@ impl Worker for Jobs {
                 }
                 None => JobEnd::Waiting(Some(Wait::Engine)),
             },
-            JobKind::HotwordPass => hotword_pass::run(&self.hotword_pass(), job.session, running),
+            JobKind::HotwordPass => {
+                let end = hotword_pass::run(&self.hotword_pass(), job.session, running);
+                // Clean-up counts the engine's failures, to know when to
+                // go on without the pass.
+                self.clean_up.hotword_ended(job.session, &end);
+                end
+            }
             JobKind::CleanUp => self.clean_up.run(self.library.db(), job.session, running),
         }
     }

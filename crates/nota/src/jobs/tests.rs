@@ -325,9 +325,14 @@ fn no_hotword_pass_starts_while_a_recording_runs() {
         db.create_session(&NewSession::bare(S1))?;
         db.finish_recording(S1, None)?;
         for job in db.session_jobs(S1)? {
-            if job.kind != JobKind::HotwordPass {
-                db.end_job(job.id, &JobEnd::Done)?;
-            }
+            // A done clean-up would run again once the hotword pass is
+            // done; failed, it's out of the way of this test.
+            let end = match job.kind {
+                JobKind::HotwordPass => continue,
+                JobKind::CleanUp => JobEnd::Failed("not this test's".into()),
+                JobKind::FinalPass => JobEnd::Done,
+            };
+            db.end_job(job.id, &end)?;
         }
         Ok(())
     })

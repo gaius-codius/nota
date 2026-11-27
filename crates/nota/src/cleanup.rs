@@ -19,6 +19,16 @@
 //! without its candidates if that failed or the session has none (it
 //! stopped before nota had the pass).
 //!
+//! **A hotword pass whose engine keeps failing** doesn't hold clean-up up
+//! for good: once the pass has ended with its engine down
+//! [`HOTWORD_DOWN_RUNS`] times in this nota, clean-up goes on with the
+//! lookup alone, and the Processing screen says the hotword candidates
+//! are missing. The pass keeps being tried; if it then finishes, the
+//! store sends clean-up back to run again ([`nota_store::Store::end_job`]),
+//! and that run adds the pass's candidates. A lookup candidate isn't
+//! proposed twice (it has its proposal), and neither is a difference the
+//! lookup offers too (it's checked against the lookup's offers first).
+//!
 //! **No fix without the model's yes**: only a yes reaches the gate, and
 //! only the gate places a fix, whichever source offered it.
 //!
@@ -107,6 +117,15 @@ pub(crate) trait Sources: Send {
     fn packs(&self) -> Result<Vec<Pack>, String>;
 }
 
+/// How many times a session's hotword pass ends with its engine down,
+/// in one nota, before clean-up goes on without it. Each such run is an
+/// engine that couldn't start, or one that stopped working (a stall takes
+/// the pass's 10 minutes), with the runner's growing spacing between, so
+/// three is several minutes to most of an hour: long enough to ride out
+/// an engine briefly down, and the candidates still come later if the
+/// pass finishes.
+pub(crate) const HOTWORD_DOWN_RUNS: u32 = 3;
+
 /// Runs term clean-up jobs.
 pub(crate) struct CleanUp {
     /// Where the decider and packs come from.
@@ -119,6 +138,9 @@ pub(crate) struct CleanUp {
     english: Option<Arc<English>>,
     /// The chunks whose question found the decider down, across runs.
     suspects: Suspects,
+    /// How many times each session's hotword pass has ended with its
+    /// engine down in this nota, since it last finished or failed.
+    hotword_down: BTreeMap<SessionId, u32>,
 }
 
 impl CleanUp {
@@ -130,11 +152,38 @@ impl CleanUp {
             rate,
             english: None,
             suspects: Suspects::default(),
+            hotword_down: BTreeMap::new(),
         }
     }
 
+    /// Notes how a run of `session`'s hotword pass ended: each end with
+    /// its engine down counts towards [`HOTWORD_DOWN_RUNS`], whether or not
+    /// the engine answered first, and a pass that finishes or fails starts
+    /// the count again. A pause changes nothing.
+    pub(crate) fn hotword_ended(&mut self, session: SessionId, end: &JobEnd) {
+        match end {
+            JobEnd::EngineDown(_) => {
+                let downs = self.hotword_down.entry(session).or_default();
+                *downs = downs.saturating_add(1);
+            }
+            JobEnd::Done | JobEnd::Failed(_) => {
+                self.hotword_down.remove(&session);
+            }
+            JobEnd::Waiting(_) => {}
+        }
+    }
+
+    /// Whether clean-up of `session` goes on without its hotword pass,
+    /// whose engine has kept failing.
+    fn past_hotwords(&self, session: SessionId) -> bool {
+        self.hotword_down
+            .get(&session)
+            .is_some_and(|&downs| downs >= HOTWORD_DOWN_RUNS)
+    }
+
     /// What a clean-up job of `session` waits for now, if anything: its
-    /// session's final pass, its hotword pass, then a decider.
+    /// session's final pass, its hotword pass (unless its engine has kept
+    /// failing), then a decider.
     pub(crate) fn lacks(&self, db: &Writer, session: SessionId) -> Option<Wait> {
         match job_state(db, session, JobKind::FinalPass) {
             Ok(Some(JobState::Done) | None) => {}
@@ -145,8 +194,11 @@ impl CleanUp {
         }
         // A hotword pass that can't be read is reported by the run too;
         // none at all (an older session) leaves nothing to wait for.
+        // The same test as the run's, so the runner never starts a run
+        // that only waits again.
         if let Ok(Some(state)) = job_state(db, session, JobKind::HotwordPass)
             && !settled(&state)
+            && !self.past_hotwords(session)
         {
             return Some(Wait::HotwordText);
         }
@@ -181,10 +233,12 @@ impl CleanUp {
             Err(e) => return stored(&e),
         }
         // Only a finished hotword pass's text is compared: a failed one's
-        // may stop partway, and a session from before the pass has none.
+        // may stop partway, a session from before the pass has none, and
+        // one whose engine keeps failing isn't waited for.
         let boosted = match job_state(db, session, JobKind::HotwordPass) {
             Ok(Some(JobState::Done)) => true,
             Ok(Some(JobState::Failed(_)) | None) => false,
+            Ok(Some(_)) if self.past_hotwords(session) => false,
             Ok(Some(_)) => return JobEnd::Waiting(Some(Wait::HotwordText)),
             Err(e) => return stored(&e),
         };
