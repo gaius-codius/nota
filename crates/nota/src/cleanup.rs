@@ -57,7 +57,7 @@ use nota_checks::{
     Bar, Candidate as Found, English, KEEP, KEEP_RARE, LOW_LOG_PROB_PERCENT, Language, Lookup,
     LowLogProb, MAX_CANDIDATES, Matched, PreCheck, SIMILARITY_MIN, Signal, Skipped, Term, precheck,
 };
-use nota_core::decide::{Candidate, DecideError, Decider, Question};
+use nota_core::decide::{Candidate, DecideError, Decider, Question, QuestionError};
 use nota_core::{LogProb, SampleIndex, SampleRate, SessionId, TrackId};
 use nota_store::{
     ChunkKey, DecidedBy, FinalLine, JobEnd, JobKind, JobState, NewProposal, Origin, Outcome, Pack,
@@ -70,6 +70,7 @@ pub(crate) mod cards;
 pub(crate) mod chunk;
 #[cfg(test)]
 pub(crate) mod fake;
+mod repeats;
 pub(crate) mod sources;
 pub(crate) mod suspects;
 
@@ -763,13 +764,22 @@ pub(crate) struct Ask<'a> {
 }
 
 /// The decider's question for `ask`, or why it can't be asked (a span or
-/// chunk longer than a question holds).
+/// chunk longer than a question holds). A candidate whose heard words
+/// occur more than once in the chunk says which time it's about, held
+/// times counted too: the decider reads them all.
 fn question(ask: &Ask<'_>) -> Result<Question, String> {
+    let text = ask.chunk.text();
     let candidates = ask
         .asked
         .iter()
-        .map(|o| Candidate::new(o.window.clone(), o.term.clone(), None))
-        .collect::<Result<Vec<_>, _>>()
+        .map(|o| {
+            let candidate = Candidate::new(o.window.clone(), o.term.clone(), None)?;
+            Ok(match repeats::occurrence(text, &o.window, o.span.start) {
+                Some(at) => candidate.at(at),
+                None => candidate,
+            })
+        })
+        .collect::<Result<Vec<_>, QuestionError>>()
         .map_err(|e| format!("the question couldn't be asked: {e}"))?;
     Question::new(
         ask.previous.map(|c| c.text().to_owned()),

@@ -730,6 +730,66 @@ fn a_review_leaves_the_same_words_elsewhere_free_to_fix() {
     );
 }
 
+/// The candidates the fake decider was asked about, question by question.
+fn asked_candidates(fake: &Fake) -> Vec<Vec<String>> {
+    fake.log.candidates.lock().unwrap().clone()
+}
+
+/// Acceptance: where a chunk says the same words twice and both are
+/// asked, each candidate names which time it's about, so the two read
+/// differently.
+#[test]
+fn the_same_words_twice_are_asked_as_two_times() {
+    let chunks = ["chronic conditions here and chronic conditions there"];
+    let fixture = Fixture::new("asked-twice", &chunks, &["chronic kidney disease"]);
+    let fake = Fake::saying_yes([]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(
+        asked_candidates(&fake),
+        [[
+            "chronic conditions -> chronic kidney disease (1 of 2)",
+            "chronic conditions -> chronic kidney disease (2 of 2)",
+        ]]
+    );
+}
+
+/// Acceptance: where a review holds one time the words occur, the one
+/// asked about still says it's the second of two, since the decider reads
+/// both in the chunk.
+#[test]
+fn a_time_asked_beside_a_held_one_names_its_place() {
+    let chunks = ["chronic conditions here and chronic conditions there"];
+    let fixture = Fixture::new("asked-beside-held", &chunks, &["chronic kidney disease"]);
+    let fake = Fake::saying_yes([("chronic conditions", "chronic kidney disease")]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    let first = fixture.proposals();
+    fixture
+        .db
+        .with(|db| db.review_proposal(first[0].id, Reviewed::Rejected))
+        .unwrap();
+    let at = WallTime::from_unix_seconds(1_762_765_200).unwrap();
+    fixture
+        .db
+        .with(|db| {
+            db.learn(
+                SESSION,
+                "chronic conditions",
+                "chronic condition",
+                Verdict::Accepted,
+                at,
+            )
+        })
+        .unwrap();
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    // The second run asks only about the time no review holds.
+    assert_eq!(
+        asked_candidates(&fake).last().unwrap(),
+        &["chronic conditions -> chronic condition (2 of 2)"]
+    );
+}
+
 /// A run cut off before placing leaves its fixes applied but not yet
 /// written; they hold their words all the same, so a term learned since
 /// that overlaps one isn't asked, and the next run writes the fix.
