@@ -98,11 +98,13 @@ fn the_pass_starts_each_track_where_it_got_to() {
                 track: MIC,
                 segments: vec![row(MIC, 0, 50), row(MIC, 50, 60)],
                 from: s(30),
+                until: None,
             },
             TrackAudio {
                 track: SYSTEM,
                 segments: vec![row(SYSTEM, 0, 10), row(SYSTEM, 10, 20)],
                 from: s(0),
+                until: None,
             },
         ]
     );

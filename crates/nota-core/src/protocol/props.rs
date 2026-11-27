@@ -10,7 +10,10 @@
 //! - a stream cut short gives the whole frames before the cut, then
 //!   [`ReadError::Truncated`] (or a clean end if the cut is on a boundary);
 //! - a word's log-probability field, whatever its bits, reads as unknown,
-//!   as a [`LogProb`] that re-encodes to those bits, or not at all.
+//!   as a [`LogProb`] that re-encodes to those bits, or not at all;
+//! - a hotwords message, whatever its texts, reads back only as hotwords
+//!   [`Hotword::new`] accepts, so none holds a `/`, a control character or
+//!   a word starting with `:`.
 
 use proptest::prelude::*;
 
@@ -91,8 +94,16 @@ fn any_transcript() -> impl Strategy<Value = Transcript> {
         })
 }
 
+/// A hotword: words of letters, digits and punctuation the format allows,
+/// non-ASCII letters among them.
+fn any_hotword() -> impl Strategy<Value = Hotword> {
+    "[a-zé0-9'.-]{1,12}( [a-zé0-9'.-]{1,12}){0,3}".prop_map(|text| Hotword::new(&text).unwrap())
+}
+
 fn to_engine() -> impl Strategy<Value = Frame<ToEngine>> {
     prop_oneof![
+        prop::collection::vec(any_hotword(), 0..20)
+            .prop_map(|hotwords| Frame::Message(ToEngine::Hotwords(hotwords))),
         any::<u16>().prop_map(|v| Frame::Hello(ProtocolVersion::new(v))),
         any_chunk().prop_map(|chunk| Frame::Message(ToEngine::Audio(chunk))),
         any::<u32>().prop_map(|track| Frame::Message(ToEngine::Flush {
@@ -295,6 +306,41 @@ impl Read for OneByte<'_> {
                 Ok(1)
             }
             _ => Ok(0),
+        }
+    }
+}
+
+/// A hotwords message's body with these `texts`, each any bytes up to the
+/// length field's limit, as a peer could write it.
+fn hotwords_body(texts: &[Vec<u8>]) -> Vec<u8> {
+    let mut body = vec![TAG_HOTWORDS];
+    body.extend_from_slice(&u32::try_from(texts.len()).unwrap().to_le_bytes());
+    for text in texts {
+        body.extend_from_slice(&u16::try_from(text.len()).unwrap().to_le_bytes());
+        body.extend_from_slice(text);
+    }
+    body
+}
+
+proptest! {
+    /// Whatever texts a hotwords message carries, it decodes only to
+    /// hotwords that are valid as given, and re-encodes to the same body.
+    #[test]
+    fn hotwords_read_back_only_as_valid_hotwords(
+        texts in prop::collection::vec(
+            prop::collection::vec(prop_oneof![Just(b'/'), Just(0u8), Just(b'\n'), Just(b' '), Just(b':'), any::<u8>()], 0..16),
+            0..8,
+        ),
+    ) {
+        let body = hotwords_body(&texts);
+        if let Ok(Frame::Message(ToEngine::Hotwords(hotwords))) = decode_body::<ToEngine>(&body) {
+            prop_assert_eq!(hotwords.len(), texts.len());
+            for (hotword, text) in hotwords.iter().zip(&texts) {
+                prop_assert_eq!(hotword.as_str().as_bytes(), text.as_slice());
+                prop_assert_eq!(Hotword::new(hotword.as_str()), Ok(hotword.clone()));
+            }
+            let frame = encode(&Frame::Message(ToEngine::Hotwords(hotwords))).unwrap();
+            prop_assert_eq!(&frame[4..], body.as_slice());
         }
     }
 }

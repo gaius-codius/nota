@@ -38,7 +38,7 @@ fn main() -> Result<()> {
             return Err("child expects pass, model directory, VAD and threads".into());
         }
         let paths = paths(&args[2..5])?;
-        nota_engine::run_asr(&paths, config(&args[1].to_string_lossy())?)?;
+        nota_engine::run_asr(&paths, config(&args[1].to_string_lossy())?, None)?;
         return Ok(());
     }
     if args.len() < 4 {

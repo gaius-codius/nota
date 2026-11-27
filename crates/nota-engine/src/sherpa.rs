@@ -15,9 +15,12 @@ use sherpa_onnx::{
     VadModelConfig, VoiceActivityDetector,
 };
 
+use nota_core::messages::Hotword;
+
 use crate::EngineError;
 use crate::child::{Detector, Heard, Models, TimedWord, Transcriber};
 use crate::chunker::Labels;
+use crate::hotwords::{Tokens as HotwordTokens, prepare};
 
 /// The only rate the models take.
 const RATE_HZ: i32 = 16_000;
@@ -60,11 +63,39 @@ pub struct ModelPaths {
     pub threads: u16,
 }
 
+/// How the hotword pass boosts: the score each hotword's tokens add, and
+/// where the engine writes the vocabulary it splits them with.
+#[derive(Debug, Clone)]
+pub struct BoostSetup {
+    /// What each matched hotword token adds to a beam's score
+    /// (sherpa-onnx's `hotwords_score`, 0 by default, which boosts
+    /// nothing): the bench ran 1.5, 2.0 and 3.0.
+    pub score: f32,
+    /// The vocabulary file the engine writes for each list (sherpa-onnx
+    /// reads it by path when the recogniser is built). It's the engine's
+    /// own: rewritten for every list, never read by nota.
+    pub vocab: PathBuf,
+}
+
 /// Parakeet and Silero, loaded.
 #[derive(Debug)]
 pub struct SherpaModels {
     recognizer: Parakeet,
     vad: VadModelConfig,
+    /// How to rebuild the recogniser for a hotword list; `None` for the
+    /// greedy passes, which don't boost.
+    boost: Option<Booster>,
+}
+
+/// What the hotword pass keeps to rebuild its recogniser for a list.
+#[derive(Debug)]
+struct Booster {
+    /// The beam recogniser's config, without a vocabulary.
+    config: OfflineRecognizerConfig,
+    /// Parakeet's tokens, which the vocabulary is built from.
+    tokens: HotwordTokens,
+    /// The score and the vocabulary's path.
+    setup: BoostSetup,
 }
 
 impl SherpaModels {
@@ -75,43 +106,97 @@ impl SherpaModels {
     /// [`EngineError::Model`] if a file is missing or sherpa-onnx refuses
     /// it.
     pub fn load(paths: &ModelPaths) -> Result<Self, EngineError> {
-        let file = |name: &str| existing(&paths.parakeet_dir.join(name));
-        let mut config = OfflineRecognizerConfig::default();
-        config.model_config.transducer.encoder = Some(file("encoder.int8.onnx")?);
-        config.model_config.transducer.decoder = Some(file("decoder.int8.onnx")?);
-        config.model_config.transducer.joiner = Some(file("joiner.int8.onnx")?);
-        config.model_config.tokens = Some(file("tokens.txt")?);
-        config.model_config.model_type = Some("nemo_transducer".into());
-        config.model_config.num_threads = i32::from(paths.threads.max(1));
-        config.model_config.provider = Some("cpu".into());
-        config.decoding_method = Some("greedy_search".into());
-        let recognizer = OfflineRecognizer::create(&config)
-            .ok_or_else(|| EngineError::Model("sherpa-onnx refused the Parakeet model".into()))?;
-
-        let vad = VadModelConfig {
-            silero_vad: SileroVadModelConfig {
-                model: Some(existing(&paths.vad_model)?),
-                threshold: 0.5,
-                // The pause threshold: a pause this long ends a segment.
-                min_silence_duration: 0.15,
-                min_speech_duration: 0.25,
-                window_size: 512,
-                // A real value: a huge one silently disables
-                // `min_silence_duration` in 1.13.8.
-                max_speech_duration: 30.0,
-            },
-            sample_rate: RATE_HZ,
-            num_threads: 1,
-            provider: Some("cpu".into()),
-            ..VadModelConfig::default()
-        };
-        // Fail now rather than on the first audio.
-        create_vad(&vad)?;
+        let config = parakeet_config(paths)?;
+        let recognizer = create_recognizer(&config)?;
         Ok(Self {
-            recognizer: Parakeet { recognizer },
-            vad,
+            recognizer: Parakeet {
+                recognizer,
+                hotwords: None,
+            },
+            vad: vad_config(paths)?,
+            boost: None,
         })
     }
+
+    /// Loads the recogniser for the hotword pass: modified beam search,
+    /// boosting nothing until [`Models::boost`] gives it a list, which
+    /// rebuilds it with that list's vocabulary.
+    ///
+    /// # Errors
+    ///
+    /// As [`SherpaModels::load`], or [`EngineError::Model`] if
+    /// `tokens.txt` can't be read or parsed.
+    pub fn load_boosted(paths: &ModelPaths, setup: BoostSetup) -> Result<Self, EngineError> {
+        let mut config = parakeet_config(paths)?;
+        config.decoding_method = Some("modified_beam_search".into());
+        config.hotwords_score = setup.score;
+        let tokens = read_tokens(&paths.parakeet_dir.join("tokens.txt"))?;
+        let recognizer = create_recognizer(&config)?;
+        Ok(Self {
+            recognizer: Parakeet {
+                recognizer,
+                hotwords: None,
+            },
+            vad: vad_config(paths)?,
+            boost: Some(Booster {
+                config,
+                tokens,
+                setup,
+            }),
+        })
+    }
+}
+
+/// The greedy Parakeet config for the files in `paths`.
+fn parakeet_config(paths: &ModelPaths) -> Result<OfflineRecognizerConfig, EngineError> {
+    let file = |name: &str| existing(&paths.parakeet_dir.join(name));
+    let mut config = OfflineRecognizerConfig::default();
+    config.model_config.transducer.encoder = Some(file("encoder.int8.onnx")?);
+    config.model_config.transducer.decoder = Some(file("decoder.int8.onnx")?);
+    config.model_config.transducer.joiner = Some(file("joiner.int8.onnx")?);
+    config.model_config.tokens = Some(file("tokens.txt")?);
+    config.model_config.model_type = Some("nemo_transducer".into());
+    config.model_config.num_threads = i32::from(paths.threads.max(1));
+    config.model_config.provider = Some("cpu".into());
+    config.decoding_method = Some("greedy_search".into());
+    Ok(config)
+}
+
+/// The recogniser for `config`.
+fn create_recognizer(config: &OfflineRecognizerConfig) -> Result<OfflineRecognizer, EngineError> {
+    OfflineRecognizer::create(config)
+        .ok_or_else(|| EngineError::Model("sherpa-onnx refused the Parakeet model".into()))
+}
+
+/// Parakeet's tokens, read from `path`.
+fn read_tokens(path: &Path) -> Result<HotwordTokens, EngineError> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| EngineError::Model(format!("can't read {}: {e}", path.display())))?;
+    HotwordTokens::parse(&text).map_err(|e| EngineError::Model(e.to_string()))
+}
+
+/// The Silero config for the model in `paths`, checked to load.
+fn vad_config(paths: &ModelPaths) -> Result<VadModelConfig, EngineError> {
+    let vad = VadModelConfig {
+        silero_vad: SileroVadModelConfig {
+            model: Some(existing(&paths.vad_model)?),
+            threshold: 0.5,
+            // The pause threshold: a pause this long ends a segment.
+            min_silence_duration: 0.15,
+            min_speech_duration: 0.25,
+            window_size: 512,
+            // A real value: a huge one silently disables
+            // `min_silence_duration` in 1.13.8.
+            max_speech_duration: 30.0,
+        },
+        sample_rate: RATE_HZ,
+        num_threads: 1,
+        provider: Some("cpu".into()),
+        ..VadModelConfig::default()
+    };
+    // Fail now rather than on the first audio.
+    create_vad(&vad)?;
+    Ok(vad)
 }
 
 impl Models for SherpaModels {
@@ -136,6 +221,45 @@ impl Models for SherpaModels {
     fn transcriber(&mut self) -> &mut Parakeet {
         &mut self.recognizer
     }
+
+    /// Rebuilds the beam recogniser with `hotwords`' vocabulary and boosts
+    /// the terms it splits as the model does. The greedy passes ignore it.
+    fn boost(&mut self, hotwords: &[Hotword]) -> Result<(), EngineError> {
+        let Some(booster) = &self.boost else {
+            return Ok(());
+        };
+        let prepared = prepare(&booster.tokens, hotwords);
+        write_vocab(&booster.setup.vocab, &prepared.vocab)?;
+        let mut config = booster.config.clone();
+        config.model_config.modeling_unit = Some("bpe".into());
+        config.model_config.bpe_vocab = Some(path_text(&booster.setup.vocab)?);
+        let recognizer = create_recognizer(&config)?;
+        // The format's text can't hold a NUL (every hotword was checked at
+        // the protocol), so the crate's C string can't fail on it.
+        let hotwords = Some(prepared.hotwords).filter(|h| !h.is_empty());
+        self.recognizer = Parakeet {
+            recognizer,
+            hotwords,
+        };
+        Ok(())
+    }
+}
+
+/// Writes the vocabulary `text` to `path`, where sherpa-onnx reads it.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the engine's own scratch file, rewritten for every list: neither a recording nor the database"
+)]
+fn write_vocab(path: &Path, text: &str) -> Result<(), EngineError> {
+    std::fs::write(path, text)
+        .map_err(|e| EngineError::Model(format!("can't write {}: {e}", path.display())))
+}
+
+/// `path` as the UTF-8 text sherpa-onnx's config takes.
+fn path_text(path: &Path) -> Result<String, EngineError> {
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| EngineError::Model(format!("path isn't UTF-8: {}", path.display())))
 }
 
 fn existing(path: &Path) -> Result<String, EngineError> {
@@ -156,9 +280,12 @@ fn create_vad(config: &VadModelConfig) -> Result<VoiceActivityDetector, EngineEr
         .ok_or_else(|| EngineError::Model("sherpa-onnx refused the Silero VAD model".into()))
 }
 
-/// Parakeet TDT 0.6B v3, greedy.
+/// Parakeet TDT 0.6B v3: greedy, or beam search with hotwords.
 pub struct Parakeet {
     recognizer: OfflineRecognizer,
+    /// The hotwords each chunk's stream boosts, in sherpa-onnx's
+    /// per-stream format; `None` boosts nothing.
+    hotwords: Option<String>,
 }
 
 impl std::fmt::Debug for Parakeet {
@@ -169,7 +296,10 @@ impl std::fmt::Debug for Parakeet {
 
 impl Transcriber for Parakeet {
     fn transcribe(&mut self, audio: &[f32]) -> Heard {
-        let stream = self.recognizer.create_stream();
+        let stream = match &self.hotwords {
+            Some(hotwords) => self.recognizer.create_stream_with_hotwords(hotwords),
+            None => self.recognizer.create_stream(),
+        };
         stream.accept_waveform(RATE_HZ, audio);
         self.recognizer.decode(&stream);
         stream.get_result().map_or_else(Heard::default, |result| {

@@ -370,7 +370,7 @@ fn a_mismatched_or_missing_hello_is_refused_before_loading() {
     );
     assert_eq!(
         err.to_string(),
-        "the recorder speaks protocol v1, this engine v2"
+        "the recorder speaks protocol v1, this engine v3"
     );
     assert!(matches!(refuse(&flush()), EngineError::Protocol(_)));
     assert!(matches!(refuse(&[1, 2]), EngineError::Read(_)));

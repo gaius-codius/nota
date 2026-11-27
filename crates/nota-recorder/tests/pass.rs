@@ -14,7 +14,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nota_core::messages::Transcript;
+use nota_core::messages::{Hotword, ToEngine, Transcript};
 use nota_core::{Clock, EpochId, SampleCount, SampleIndex, SampleRange, SystemClock, TrackId};
 use nota_recorder::engine::EngineCommand;
 use nota_recorder::engine::pass::{PassConfig, PassEnd, PassSink, TrackAudio, transcribe};
@@ -76,6 +76,7 @@ fn tracks(from: &BTreeMap<TrackId, u64>) -> Vec<TrackAudio> {
                 track,
                 segments,
                 from: SampleIndex::new(from.get(&track).copied().unwrap_or(0)),
+                until: None,
             }
         })
         .collect()
@@ -250,6 +251,7 @@ fn the_pass_stays_within_its_window() {
         track: MIC,
         segments,
         from: SampleIndex::ZERO,
+        until: None,
     }];
     let mut config = config(&["echo"]);
     config.in_flight = SampleCount::new(S);
@@ -594,6 +596,7 @@ fn overlapping_rows_send_each_sample_once() {
         track: MIC,
         segments: vec![row(MIC, 0, 0, 3 * S), row(MIC, 0, 2 * S, 4 * S)],
         from: SampleIndex::ZERO,
+        until: None,
     }];
     let mut sink = Committed::default();
     let end = transcribe(
@@ -659,6 +662,87 @@ fn an_engine_that_hangs_mid_pass_is_restarted_and_matches_an_uninterrupted_pass(
     let end = run(&config, &mut sink, &|| false);
     assert!(matches!(end, PassEnd::Done), "{end:?}");
     assert!(sink.skipped.is_empty());
+    assert_eq!(sink.texts, reference.texts);
+    assert_eq!(sink.progress, reference.progress);
+}
+
+/// Three chunks of the mic, as the hotword pass feeds a final pass's
+/// chunks: two in the first run (the second ending mid-segment), one in
+/// the run after the gap. Chunks wholly before `from` are done already.
+fn bounded(from: u64) -> Vec<TrackAudio> {
+    let segments = published().swap_remove(0);
+    [(S, 4 * S), (4 * S, 11 * S), (21 * S, 23 * S)]
+        .into_iter()
+        .filter(|&(_, end)| end > from)
+        .map(|(start, end)| TrackAudio {
+            track: MIC,
+            segments: segments.clone(),
+            from: SampleIndex::new(start.max(from)),
+            until: Some(SampleIndex::new(end)),
+        })
+        .collect()
+}
+
+/// The fake answering only at a flush, with a greeting of two hotwords.
+fn boosted(mode: &[&str]) -> PassConfig {
+    let mut config = config(&[mode, &["--every", "1000"]].concat());
+    let hotwords = ["amlodipine", "varicose veins"].map(|t| Hotword::new(t).unwrap());
+    config.engine.greeting = vec![ToEngine::Hotwords(hotwords.to_vec())];
+    config
+}
+
+/// Runs the bounded feeds from where `sink` got to.
+fn run_bounded(config: &PassConfig, sink: &mut Committed) -> PassEnd<String> {
+    let from = sink.progress.get(&MIC).copied().unwrap_or(0);
+    transcribe(
+        &bounded(from),
+        |row| Ok(audio(row)),
+        config,
+        &clock(),
+        sink,
+        &|| false,
+    )
+}
+
+/// Each bounded feed is sent up to its end and flushed there, so the
+/// engine decodes exactly that chunk, and nothing outside the chunks is
+/// sent; the greeting reaches the engine before the audio.
+#[test]
+fn bounded_feeds_are_each_decoded_whole() {
+    let mut sink = Committed::default();
+    let end = run_bounded(&boosted(&["echo"]), &mut sink);
+    assert!(matches!(end, PassEnd::Done), "{end:?}");
+    let want = [(S, 4 * S), (4 * S, 11 * S), (21 * S, 23 * S)]
+        .map(|(a, b)| (MIC, a, b, format!("{a}-{b}~2")));
+    assert_eq!(sink.texts, want);
+    assert_eq!(sink.progress, BTreeMap::from([(MIC, 23 * S)]));
+}
+
+/// An engine killed partway through the bounded feeds is restarted, given
+/// the greeting again before its audio, and the pass ends with the text an
+/// uninterrupted one gives.
+#[test]
+fn a_restarted_engine_is_greeted_again_and_gives_the_same_text() {
+    let mut reference = Committed::default();
+    assert!(matches!(
+        run_bounded(&boosted(&["echo"]), &mut reference),
+        PassEnd::Done
+    ));
+    let mut sink = Committed::default();
+    // Each engine dies at its ninth frame: in the second chunk the first
+    // time (3 + 6), then in the third (7 + 2), and the third finishes.
+    let end = run_bounded(&boosted(&["crash-after", "--after", "8"]), &mut sink);
+    assert!(matches!(end, PassEnd::Done), "{end:?}");
+    assert_eq!(sink.skipped, Vec::new());
+    // It did die on the way, twice: the pass saw it down each time.
+    let downs = sink.downs.borrow().iter().filter(|d| d.is_some()).count();
+    assert_eq!(downs, 2, "{:?}", sink.downs.borrow());
+    // Every engine, the restarted ones too, held the two hotwords.
+    assert!(
+        sink.texts.iter().all(|t| t.3.ends_with("~2")),
+        "{:?}",
+        sink.texts
+    );
     assert_eq!(sink.texts, reference.texts);
     assert_eq!(sink.progress, reference.progress);
 }

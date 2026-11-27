@@ -68,6 +68,26 @@ impl ChunkerConfig {
         }
     }
 
+    /// The hotword pass at `rate`: cut only where the recorder flushes. It
+    /// decodes the final pass's chunks again, each sent and then flushed,
+    /// so the pause, the target and the cap are all 26 s, past the final
+    /// pass's 25 s cap: no chunk it is sent is cut, and one sent longer by
+    /// mistake is still cut well under 30 s.
+    #[must_use]
+    pub fn hotword_pass(rate: SampleRate) -> Self {
+        let hz = u64::from(rate.hz());
+        let whole = SampleCount::new((hz * 26).max(5));
+        // In range for every rate: the pause, target and cap are equal,
+        // and the window and frame as in the other configs.
+        Self {
+            min_pause: whole,
+            target: whole,
+            cap: whole,
+            fallback_window: SampleCount::new((hz * 8).max(5)),
+            frame: SampleCount::new((hz * 3 / 100).max(1)),
+        }
+    }
+
     /// A config from sample counts, or `None` unless
     /// `0 < frame`, `2 <= min_pause <= target <= cap`, and
     /// `frame <= fallback_window <= cap`.

@@ -188,6 +188,7 @@ fn tracks(rows: Vec<SegmentRow>, from: &BTreeMap<TrackId, SampleIndex>) -> Vec<T
                 track,
                 segments,
                 from: from.get(&track).copied().unwrap_or(SampleIndex::ZERO),
+                until: None,
             }
         })
         .collect()

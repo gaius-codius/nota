@@ -112,14 +112,19 @@ pub struct EngineConfig {
     /// chunk at the engine's cap, the most it decodes at once (10 s for
     /// the live pass, 25 s for the final pass).
     pub poison_skip: SampleCount,
+    /// What every engine is sent once it says hello, before any audio:
+    /// the hotword pass's [`ToEngine::Hotwords`]. A restarted engine is
+    /// sent it again, so it decodes as the one it replaced did. Empty for
+    /// the live and final passes.
+    pub greeting: Vec<ToEngine>,
 }
 
 impl EngineConfig {
     /// The defaults: 60 s to start, 20 s per request, backoff from 250 ms to
     /// 30 s, a flush after 5 s without audio, 10 minutes of audio at
     /// 16 kHz kept while down, up to 30 s at shutdown for the last text,
-    /// and 10 s of audio skipped when engines keep failing on it (the live
-    /// pass's cap).
+    /// 10 s of audio skipped when engines keep failing on it (the live
+    /// pass's cap), and no greeting.
     #[must_use]
     pub const fn new(command: EngineCommand) -> Self {
         Self {
@@ -132,6 +137,7 @@ impl EngineConfig {
             max_unconfirmed: SampleCount::new(16_000 * 600),
             shutdown_wait: Duration::from_secs(30),
             poison_skip: SampleCount::new(160_000),
+            greeting: Vec::new(),
         }
     }
 }
@@ -704,7 +710,20 @@ impl Supervisor {
         for track in tracks {
             self.trim(track, half);
         }
+        self.send_greeting();
         self.send_unsent();
+    }
+
+    /// Sends the configured greeting to the engine that just said hello,
+    /// before its first audio.
+    fn send_greeting(&self) {
+        let Phase::Online(running) = &self.phase else {
+            return;
+        };
+        for message in &self.config.greeting {
+            // As in `send_unsent`: a failed send shows as the output ending.
+            let _ = running.writer.send(Frame::Message(message.clone()));
+        }
     }
 
     fn on_message(&mut self, message: FromEngine) -> Result<(), &'static str> {
@@ -1131,7 +1150,7 @@ mod tests {
         assert_eq!(OfflineReason::Hung.to_string(), "stopped answering");
         assert_eq!(
             OfflineReason::Version(ProtocolVersion::new(7)).to_string(),
-            "speaks protocol v7, nota needs v2"
+            "speaks protocol v7, nota needs v3"
         );
         assert_eq!(
             OfflineReason::Protocol("bad".into()).to_string(),

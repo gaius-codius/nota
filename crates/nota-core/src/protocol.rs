@@ -11,14 +11,15 @@
 //! | `0x00` | both | [`Frame::Hello`] | `b"nota"`, version `u16` |
 //! | `0x01` | to engine | [`ToEngine::Audio`] | track `u32`, first sample `u64`, rate `u32`, samples `i16`… |
 //! | `0x02` | to engine | [`ToEngine::Flush`] | track `u32` |
+//! | `0x03` | to engine | [`ToEngine::Hotwords`] | count `u32`, then each hotword's length in bytes `u16` and its UTF-8 text |
 //! | `0x81` | from engine | [`FromEngine::Transcript`] | track `u32`, start `u64`, end `u64`, word count `u32`, the words, UTF-8 text… |
 //! | `0x82` | from engine | [`FromEngine::Confirmed`] | track `u32`, up to `u64` |
 //!
 //! Each word of a transcript is its first sample `u64`, its end `u64`, its
 //! log-probability (the `f32` bits of a [`LogProb`], or
 //! [`UNKNOWN_LOG_PROB`] if the engine gave none) `u32`, its text's length
-//! in bytes `u32`, then its UTF-8 text. Version 1 had no log-probabilities,
-//! and version 0 no word count or words.
+//! in bytes `u32`, then its UTF-8 text. Version 2 had no hotwords, version
+//! 1 no log-probabilities, and version 0 no word count or words.
 //!
 //! All integers are little-endian. Each side sends `Hello` first and refuses
 //! a peer whose version isn't [`ProtocolVersion::CURRENT`]; the magic bytes
@@ -39,7 +40,9 @@ use std::io::{self, Read, Write};
 
 use crate::ids::TrackId;
 use crate::log_prob::LogProb;
-use crate::messages::{AudioChunk, FromEngine, HeardWord, ProtocolVersion, ToEngine, Transcript};
+use crate::messages::{
+    AudioChunk, FromEngine, HeardWord, Hotword, MAX_HOTWORDS, ProtocolVersion, ToEngine, Transcript,
+};
 use crate::time::{SampleIndex, SampleRange, SampleRate};
 
 /// The largest frame body, in bytes: 1 MiB.
@@ -58,6 +61,7 @@ const MAGIC: [u8; 4] = *b"nota";
 const TAG_HELLO: u8 = 0x00;
 const TAG_AUDIO: u8 = 0x01;
 const TAG_FLUSH: u8 = 0x02;
+const TAG_HOTWORDS: u8 = 0x03;
 const TAG_TRANSCRIPT: u8 = 0x81;
 const TAG_CONFIRMED: u8 = 0x82;
 
@@ -121,6 +125,7 @@ impl WireMessage for ToEngine {
                 out.push(TAG_FLUSH);
                 out.extend_from_slice(&track.get().to_le_bytes());
             }
+            Self::Hotwords(hotwords) => encode_hotwords(hotwords, out)?,
         }
         Ok(())
     }
@@ -147,9 +152,57 @@ impl WireMessage for ToEngine {
                 fields.end()?;
                 Ok(Self::Flush { track })
             }
+            TAG_HOTWORDS => decode_hotwords(fields).map(Self::Hotwords),
             other => Err(DecodeError::UnknownTag(other)),
         }
     }
+}
+
+/// Appends [`ToEngine::Hotwords`]' tag and fields to `out`.
+///
+/// # Errors
+///
+/// [`EncodeError::TooLarge`] past [`MAX_HOTWORDS`]; each hotword is at most
+/// [`MAX_HOTWORD_LEN`] bytes, so that many always fit a frame.
+fn encode_hotwords(hotwords: &[Hotword], out: &mut Vec<u8>) -> Result<(), EncodeError> {
+    let count = u32::try_from(hotwords.len())
+        .ok()
+        .filter(|_| hotwords.len() <= MAX_HOTWORDS)
+        .ok_or(EncodeError::TooLarge)?;
+    out.push(TAG_HOTWORDS);
+    out.extend_from_slice(&count.to_le_bytes());
+    for hotword in hotwords {
+        // A hotword is at most MAX_HOTWORD_LEN bytes, so its length fits.
+        let len = u16::try_from(hotword.as_str().len()).map_err(|_| EncodeError::TooLarge)?;
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(hotword.as_str().as_bytes());
+    }
+    Ok(())
+}
+
+/// [`ToEngine::Hotwords`]' fields: each checked as a [`Hotword`], so the
+/// engine never sees text the per-stream format would misread.
+///
+/// # Errors
+///
+/// [`DecodeError::BadHotword`] for more than [`MAX_HOTWORDS`] or a text
+/// that isn't a hotword, [`DecodeError::NotUtf8`], or a short or overlong
+/// body.
+fn decode_hotwords(fields: &mut Fields<'_>) -> Result<Vec<Hotword>, DecodeError> {
+    let count = usize::try_from(fields.u32()?).unwrap_or(usize::MAX);
+    if count > MAX_HOTWORDS {
+        return Err(DecodeError::BadHotword);
+    }
+    // Each hotword takes at least three bytes, so a count the body can't
+    // hold fails on its first missing field before this grows past it.
+    let mut hotwords = Vec::new();
+    for _ in 0..count {
+        let len = usize::from(fields.u16()?);
+        let text = std::str::from_utf8(fields.bytes(len)?).map_err(|_| DecodeError::NotUtf8)?;
+        hotwords.push(Hotword::new(text).map_err(|_| DecodeError::BadHotword)?);
+    }
+    fields.end()?;
+    Ok(hotwords)
 }
 
 impl WireMessage for FromEngine {
@@ -485,6 +538,9 @@ pub enum DecodeError {
     /// log-probability field that is neither a [`LogProb`] nor
     /// [`UNKNOWN_LOG_PROB`].
     BadWord,
+    /// More than [`MAX_HOTWORDS`] hotwords, or a text that isn't a
+    /// [`Hotword`].
+    BadHotword,
 }
 
 impl fmt::Display for DecodeError {
@@ -502,6 +558,7 @@ impl fmt::Display for DecodeError {
             Self::EmptyRange => write!(f, "transcript range holds no samples"),
             Self::NotUtf8 => write!(f, "transcript text isn't UTF-8"),
             Self::BadWord => write!(f, "a word without text, or out of its place"),
+            Self::BadHotword => write!(f, "too many hotwords, or one the engine can't take"),
         }
     }
 }
@@ -565,7 +622,55 @@ mod tests {
     #[test]
     fn hello_layout() {
         let bytes = encode::<ToEngine>(&Frame::Hello(ProtocolVersion::CURRENT)).unwrap();
-        assert_eq!(bytes, [7, 0, 0, 0, 0x00, b'n', b'o', b't', b'a', 2, 0]);
+        assert_eq!(bytes, [7, 0, 0, 0, 0x00, b'n', b'o', b't', b'a', 3, 0]);
+    }
+
+    /// A hotwords frame is its count, then each hotword's length and text,
+    /// and reads back to the same hotwords.
+    #[test]
+    fn hotwords_layout() {
+        let hotwords = ["amlodipine", "varicose veins"].map(|t| Hotword::new(t).unwrap());
+        let frame = Frame::Message(ToEngine::Hotwords(hotwords.to_vec()));
+        let bytes = encode(&frame).unwrap();
+        let mut want = vec![33, 0, 0, 0, 0x03, 2, 0, 0, 0, 10, 0];
+        want.extend_from_slice(b"amlodipine");
+        want.extend_from_slice(&[14, 0]);
+        want.extend_from_slice(b"varicose veins");
+        assert_eq!(bytes, want);
+        assert_eq!(decode_body::<ToEngine>(&bytes[4..]), Ok(frame));
+    }
+
+    /// A hotwords frame is refused for each way it could be wrong: a text
+    /// the per-stream format would misread, too many, bytes that aren't
+    /// UTF-8, a count the body doesn't hold, or bytes after the last.
+    #[test]
+    fn bad_hotwords_are_refused() {
+        let body = |count: u32, texts: &[&[u8]]| {
+            let mut body = vec![TAG_HOTWORDS];
+            body.extend_from_slice(&count.to_le_bytes());
+            for text in texts {
+                body.extend_from_slice(&u16::try_from(text.len()).unwrap().to_le_bytes());
+                body.extend_from_slice(text);
+            }
+            body
+        };
+        let refused = |bytes: &[u8]| decode_body::<ToEngine>(bytes).unwrap_err();
+        assert_eq!(refused(&body(1, &[b"mmol/L"])), DecodeError::BadHotword);
+        assert_eq!(refused(&body(1, &[b"a\0b"])), DecodeError::BadHotword);
+        assert_eq!(refused(&body(1, &[b"dose :3"])), DecodeError::BadHotword);
+        assert_eq!(refused(&body(1, &[b""])), DecodeError::BadHotword);
+        let over = u32::try_from(MAX_HOTWORDS + 1).unwrap();
+        assert_eq!(refused(&body(over, &[])), DecodeError::BadHotword);
+        assert_eq!(refused(&body(1, &[b"\xff"])), DecodeError::NotUtf8);
+        assert_eq!(refused(&body(2, &[b"amlodipine"])), DecodeError::Short);
+        let mut trailing = body(1, &[b"amlodipine"]);
+        trailing.push(0);
+        assert_eq!(refused(&trailing), DecodeError::TrailingBytes);
+        let too_many = vec![Hotword::new("a").unwrap(); MAX_HOTWORDS + 1];
+        assert_eq!(
+            encode(&Frame::Message(ToEngine::Hotwords(too_many))),
+            Err(EncodeError::TooLarge)
+        );
     }
 
     #[test]

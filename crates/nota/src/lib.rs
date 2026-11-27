@@ -31,7 +31,7 @@ use std::process::ExitCode;
 use nota_core::SampleRate;
 use nota_core::recorder::{self, Input, Setup};
 use nota_engine::chunker::ChunkerConfig;
-use nota_engine::sherpa::ModelPaths;
+use nota_engine::sherpa::{BoostSetup, ModelPaths};
 
 mod app;
 mod cleanup;
@@ -58,6 +58,8 @@ usage: nota [--data DIR] [--parakeet DIR --vad FILE]
        nota record [--title TEXT] [--data DIR] [--parakeet DIR --vad FILE]
                    [--mic NODE] [--system NODE]
        nota engine asr --parakeet DIR --vad FILE [--threads N] [--pass live|final]
+       nota engine asr --parakeet DIR --vad FILE [--threads N] --pass hotword
+                       --boost SCORE --vocab FILE
        nota engine llama-server PROGRAM [ARGS...]
        nota pack build DIR --out FILE
        nota pack glossary FILE --out FILE --author NAME [--name NAME]
@@ -70,7 +72,8 @@ enum Command {
     /// Home, and recordings from it.
     App(RecordArgs),
     Record(RecordArgs),
-    EngineAsr(ModelPaths, ChunkerConfig),
+    /// `nota engine asr`: the speech engine child.
+    EngineAsr(EngineSetup),
     /// `nota engine llama-server`: the server program and its arguments.
     EngineLlama(Vec<OsString>),
     /// `nota pack`: builds a pack, or writes its credits.
@@ -102,10 +105,12 @@ pub fn main(args: &[OsString]) -> ExitCode {
         }
         // The child's stderr is the recorder's to route; it never reaches
         // the screen's terminal.
-        Command::EngineAsr(paths, chunking) => match nota_engine::run_asr(&paths, chunking) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(err) => fail(&format!("nota engine asr: {err}"), 1),
-        },
+        Command::EngineAsr(setup) => {
+            match nota_engine::run_asr(&setup.paths, setup.chunking, setup.boost) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => fail(&format!("nota engine asr: {err}"), 1),
+            }
+        }
         // Returns only if the server couldn't be started in its place.
         Command::EngineLlama(server) => {
             let err = nota_llm::lifeline::exec_tied(&server);
@@ -159,8 +164,7 @@ fn parse(args: &[OsString]) -> Result<Command, String> {
     let mut words = args.iter();
     match words.next().and_then(|a| a.to_str()) {
         Some("engine") if words.next().and_then(|a| a.to_str()) == Some("asr") => {
-            parse_engine(words.as_slice())
-                .map(|(paths, chunking)| Command::EngineAsr(paths, chunking))
+            parse_engine(words.as_slice()).map(Command::EngineAsr)
         }
         Some("engine") if args.get(1).and_then(|a| a.to_str()) == Some("llama-server") => {
             match args.get(2..) {
@@ -195,11 +199,35 @@ fn pairs(args: &[OsString]) -> Result<Vec<(&str, &OsString)>, String> {
     Ok(out)
 }
 
+/// How `nota engine asr` runs: its models, how it cuts the audio, and how
+/// it boosts hotwords (the hotword pass only).
+#[derive(Debug)]
+struct EngineSetup {
+    /// The model files and threads.
+    paths: ModelPaths,
+    /// Where it cuts chunks.
+    chunking: ChunkerConfig,
+    /// The boost score and vocabulary file, for `--pass hotword`.
+    boost: Option<BoostSetup>,
+}
+
+/// Which pass `--pass` names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    /// The live pass, the default.
+    Live,
+    /// The final pass after a recording stops.
+    Final,
+    /// The hotword pass: the final pass's chunks again, boosted.
+    Hotword,
+}
+
 /// `engine asr` and its options: the models, and how to cut the audio
-/// (`--pass live`, the default, or `--pass final`).
-fn parse_engine(args: &[OsString]) -> Result<(ModelPaths, ChunkerConfig), String> {
+/// (`--pass live`, the default, `--pass final` or `--pass hotword`, which
+/// alone takes `--boost` and `--vocab`, and needs both).
+fn parse_engine(args: &[OsString]) -> Result<EngineSetup, String> {
     let (mut parakeet, mut vad, mut threads) = (None, None, 4_u16);
-    let mut chunking = ChunkerConfig::live(SampleRate::SPEECH);
+    let (mut which, mut score, mut vocab) = (Pass::Live, None, None);
     for (flag, value) in pairs(args)? {
         match flag {
             "--parakeet" => parakeet = Some(PathBuf::from(value)),
@@ -211,7 +239,9 @@ fn parse_engine(args: &[OsString]) -> Result<(ModelPaths, ChunkerConfig), String
                     .filter(|&n| n > 0)
                     .ok_or("--threads takes a positive number")?;
             }
-            "--pass" => chunking = pass(value)?,
+            "--pass" => which = pass(value)?,
+            "--boost" => score = Some(boost_score(value)?),
+            "--vocab" => vocab = Some(PathBuf::from(value)),
             _ => return Err(format!("unknown option {flag}")),
         }
     }
@@ -220,16 +250,42 @@ fn parse_engine(args: &[OsString]) -> Result<(ModelPaths, ChunkerConfig), String
         vad_model: vad.ok_or("--vad is required")?,
         threads,
     };
-    Ok((paths, chunking))
+    let (chunking, boost) = match (which, score, vocab) {
+        (Pass::Hotword, Some(score), Some(vocab)) => (
+            ChunkerConfig::hotword_pass(SampleRate::SPEECH),
+            Some(BoostSetup { score, vocab }),
+        ),
+        (Pass::Hotword, _, _) => return Err("--pass hotword needs --boost and --vocab".into()),
+        (_, Some(_), _) | (_, _, Some(_)) => {
+            return Err("--boost and --vocab are for --pass hotword".into());
+        }
+        (Pass::Live, None, None) => (ChunkerConfig::live(SampleRate::SPEECH), None),
+        (Pass::Final, None, None) => (ChunkerConfig::final_pass(SampleRate::SPEECH), None),
+    };
+    Ok(EngineSetup {
+        paths,
+        chunking,
+        boost,
+    })
 }
 
-/// `--pass`'s value: how the engine cuts the audio.
-fn pass(value: &OsString) -> Result<ChunkerConfig, String> {
+/// `--pass`'s value: which pass the engine runs.
+fn pass(value: &OsString) -> Result<Pass, String> {
     match value.to_str() {
-        Some("live") => Ok(ChunkerConfig::live(SampleRate::SPEECH)),
-        Some("final") => Ok(ChunkerConfig::final_pass(SampleRate::SPEECH)),
-        _ => Err("--pass takes live or final".into()),
+        Some("live") => Ok(Pass::Live),
+        Some("final") => Ok(Pass::Final),
+        Some("hotword") => Ok(Pass::Hotword),
+        _ => Err("--pass takes live, final or hotword".into()),
     }
+}
+
+/// `--boost`'s value: a hotword score above 0 and at most 10.
+fn boost_score(value: &OsString) -> Result<f32, String> {
+    value
+        .to_str()
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|s| *s > 0.0 && *s <= 10.0)
+        .ok_or_else(|| "--boost takes a number above 0 and at most 10".into())
 }
 
 /// `engine fake`'s only option, `--pass`.
@@ -238,7 +294,13 @@ fn parse_pass(args: &[OsString]) -> Result<ChunkerConfig, String> {
     let mut chunking = ChunkerConfig::live(SampleRate::SPEECH);
     for (flag, value) in pairs(args)? {
         match flag {
-            "--pass" => chunking = pass(value)?,
+            "--pass" => {
+                chunking = match pass(value)? {
+                    Pass::Live => ChunkerConfig::live(SampleRate::SPEECH),
+                    Pass::Final => ChunkerConfig::final_pass(SampleRate::SPEECH),
+                    Pass::Hotword => ChunkerConfig::hotword_pass(SampleRate::SPEECH),
+                };
+            }
             _ => return Err(format!("unknown option {flag}")),
         }
     }

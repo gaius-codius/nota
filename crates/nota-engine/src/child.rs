@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 
 use nota_core::messages::{
-    AudioChunk, FromEngine, HeardWord, ProtocolVersion, ToEngine, Transcript,
+    AudioChunk, FromEngine, HeardWord, Hotword, ProtocolVersion, ToEngine, Transcript,
 };
 use nota_core::protocol::{Frame, FrameReader, write_frame};
 use nota_core::{LogProb, SampleCount, SampleIndex, SampleRange, SampleRate, TrackId};
@@ -73,6 +73,18 @@ pub trait Models {
 
     /// The recogniser.
     fn transcriber(&mut self) -> &mut Self::Transcriber;
+
+    /// Boosts `hotwords` in every chunk from now on, in place of any list
+    /// given before. Models that don't boost ignore them, which is the
+    /// default.
+    ///
+    /// # Errors
+    ///
+    /// If the boosted recogniser can't be built.
+    fn boost(&mut self, hotwords: &[Hotword]) -> Result<(), EngineError> {
+        let _ = hotwords;
+        Ok(())
+    }
 }
 
 /// One track's state: its detector and chunker.
@@ -131,6 +143,7 @@ pub fn run<M: Models>(
                     finish(&mut output, models.transcriber(), id, track)?;
                 }
             }
+            Frame::Message(ToEngine::Hotwords(hotwords)) => models.boost(&hotwords)?,
         }
     }
     for (id, track) in tracks {
