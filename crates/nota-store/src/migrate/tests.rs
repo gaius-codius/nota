@@ -41,7 +41,7 @@ fn a_new_file_gets_the_current_schema() {
     let dir = TestDir::new("fresh");
     let store = Store::open(&dir.db()).unwrap();
     assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
-    assert_eq!(STEPS.len(), 11);
+    assert_eq!(STEPS.len(), 12);
     assert_eq!(STEPS.len(), usize::try_from(VERSION - FIRST + 1).unwrap());
     // Opening again changes nothing.
     drop(store);
@@ -429,11 +429,14 @@ fn version_4_upgrades_to_5_keeping_its_jobs() {
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].state, JobState::Waiting(None));
     assert_eq!(jobs[0].progress, crate::Progress::default());
-    // Stopped again, it keeps its final pass and gains only the clean-up
-    // it lacked.
+    // Stopped again, it keeps its final pass and gains only the hotword
+    // pass and the clean-up it lacked.
     store.finish_recording(SessionId::new(1), None).unwrap();
     let kinds: Vec<JobKind> = store.jobs().unwrap().iter().map(|j| j.kind).collect();
-    assert_eq!(kinds, [JobKind::FinalPass, JobKind::CleanUp]);
+    assert_eq!(
+        kinds,
+        [JobKind::FinalPass, JobKind::HotwordPass, JobKind::CleanUp]
+    );
     assert!(store.final_texts(SessionId::new(1)).unwrap().is_empty());
 }
 
@@ -916,6 +919,7 @@ fn version_11_upgrades_to_12_with_clean_up_proposals() {
         kinds(&store, two),
         [
             (JobKind::FinalPass, JobState::Waiting(None)),
+            (JobKind::HotwordPass, JobState::Waiting(None)),
             (JobKind::CleanUp, JobState::Waiting(None))
         ]
     );
@@ -970,6 +974,111 @@ fn version_11_upgrades_to_12_with_clean_up_proposals() {
         "INSERT INTO proposal_v8 SELECT * FROM proposal_v8",
         "UPDATE proposal_v8 SET replacement = 'other'",
         "DELETE FROM proposal_v8",
+    ] {
+        assert!(refused(&conn, sql), "{sql}");
+    }
+}
+
+/// A version 12 library keeps its clean-up proposals when the proposal
+/// table is rebuilt to take the hotword pass's, and the rebuilt table's
+/// keys and guards hold.
+#[test]
+fn version_12_upgrades_to_13_keeping_its_proposals() {
+    let dir = TestDir::new("v12");
+    {
+        let conn = crate::tests::library_at(&dir.db(), 12);
+        conn.execute_batch(
+            "INSERT INTO session (id, state, language) VALUES (1, 'stopped', 'en');
+             INSERT INTO job (session_id, kind, state) VALUES (1, 'final-pass', 'done'), \
+                 (1, 'clean-up', 'done');
+             INSERT INTO final_text VALUES (1, 0, 0, 100, 'amylo diping', 'e', 'm');
+             INSERT INTO revision VALUES (1, 0, NULL);
+             INSERT INTO final_word VALUES (1, 0, 0, 0, 'amylo', 0, 50, -0.5), \
+                 (1, 0, 0, 1, 'diping', 50, 100, NULL);
+             INSERT INTO final_progress VALUES (1, 0, 100);
+             INSERT INTO proposal (session_id, revision, track, start_sample, first_word,
+                                   last_word, offered_first, offered_last, heard, term,
+                                   replacement, source, matched, decider, decider_model,
+                                   decider_place, answer, outcome, rule, thresholds,
+                                   log_version)
+             VALUES (1, 0, 0, 0, 0, 1, 0, 1, 'amylo diping', 'amlodipine', 'amlodipine',
+                     'lookup', 'alias', 'llama-server', 'qwen', 'local', 'no', 'rejected',
+                     'no', 'similarity=0.6', 1);",
+        )
+        .unwrap();
+    }
+    let mut store = Store::open(&dir.db()).unwrap();
+    assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
+    let one = SessionId::new(1);
+    // The old session gets no hotword pass: its clean-up is done.
+    let kinds: Vec<JobKind> = store
+        .session_jobs(one)
+        .unwrap()
+        .iter()
+        .map(|j| j.kind)
+        .collect();
+    assert_eq!(kinds, [JobKind::FinalPass, JobKind::CleanUp]);
+    let kept = store.proposals(one).unwrap();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].proposed.found, crate::Found::Alias);
+    assert_eq!(kept[0].proposed.term, "amlodipine");
+    // A hotword proposal goes in beside it and reads back as one.
+    let words = crate::WordSpan::new(0, 1).unwrap();
+    let new = crate::NewProposal {
+        proposed: crate::Proposed {
+            chunk: crate::ChunkKey {
+                track: TrackId::new(0),
+                start: SampleIndex::new(0),
+            },
+            words,
+            offered: words,
+            heard: "amylo diping".to_owned(),
+            term: "amlodipine".to_owned(),
+            replacement: "Amlodipine".to_owned(),
+            origin: crate::Origin::Learned,
+            found: crate::Found::Hotword,
+            decided_by: crate::DecidedBy {
+                name: "llama-server".to_owned(),
+                model: "qwen".to_owned(),
+                place: nota_core::decide::Place::Local,
+            },
+            log_prob: nota_core::LogProb::new(-0.5),
+            thresholds: "similarity=0.6".to_owned(),
+        },
+        decided: crate::Decided::No { yes: None },
+    };
+    store
+        .add_proposals(one, std::slice::from_ref(&new))
+        .unwrap();
+    let read = store.proposals(one).unwrap();
+    assert_eq!(read.len(), 2);
+    assert_eq!(read[1].proposed, new.proposed);
+    drop(store);
+    let conn = raw(&dir.db());
+    let sources: Vec<(String, String)> = conn
+        .prepare("SELECT source, matched FROM proposal ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        sources,
+        [
+            ("lookup".to_owned(), "alias".to_owned()),
+            ("hotword".to_owned(), "diff".to_owned())
+        ]
+    );
+    let broken: i64 = conn
+        .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(broken, 0);
+    for sql in [
+        "DELETE FROM proposal",
+        "UPDATE proposal SET source = 'hotword' WHERE source = 'lookup'",
+        "UPDATE proposal SET matched = 'diff' WHERE matched = 'alias'",
     ] {
         assert!(refused(&conn, sql), "{sql}");
     }
