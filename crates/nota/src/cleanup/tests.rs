@@ -652,6 +652,62 @@ fn a_reviewed_card_holds_its_words() {
     );
 }
 
+/// Acceptance: words a review holds don't stop the same words elsewhere in
+/// the chunk being fixed. One chunk says "chronic conditions" twice; both
+/// yeses are refused, the first as a card the user reviews, the second over
+/// the cap. A pair learned since offers a new term on both: the reviewed
+/// occurrence isn't asked, and the yes on the other is applied there.
+#[test]
+fn a_review_leaves_the_same_words_elsewhere_free_to_fix() {
+    let chunks = ["chronic conditions here and chronic conditions there"];
+    let fixture = Fixture::new("held-once", &chunks, &["chronic kidney disease"]);
+    let fake = Fake::saying_yes([
+        ("chronic conditions", "chronic kidney disease"),
+        ("chronic conditions", "chronic condition"),
+    ]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake));
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    let first = fixture.proposals();
+    let outcomes: Vec<Outcome> = first.iter().map(|p| p.outcome).collect();
+    assert_eq!(outcomes, [Outcome::Card, Outcome::OverCap]);
+    fixture
+        .db
+        .with(|db| db.review_proposal(first[0].id, Reviewed::Rejected))
+        .unwrap();
+    let at = WallTime::from_unix_seconds(1_762_765_200).unwrap();
+    fixture
+        .db
+        .with(|db| {
+            db.learn(
+                SESSION,
+                "chronic conditions",
+                "chronic condition",
+                Verdict::Accepted,
+                at,
+            )
+        })
+        .unwrap();
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    // Placed at the free occurrence, the yes is applied rather than taken
+    // for the reviewed one and stored as covered.
+    let written = fixture.revisions()[1];
+    let added: Vec<(WordSpan, Outcome)> = fixture.proposals()[2..]
+        .iter()
+        .map(|p| (p.proposed.words, p.outcome))
+        .collect();
+    assert_eq!(
+        added,
+        [(
+            WordSpan::new(4, 5).unwrap(),
+            Outcome::Applied(Some(written))
+        )]
+    );
+    assert_eq!(
+        fixture.shown(),
+        ["chronic conditions here and chronic condition there"]
+    );
+}
+
 /// A run cut off before placing leaves its fixes applied but not yet
 /// written; they hold their words all the same, so a term learned since
 /// that overlaps one isn't asked, and the next run writes the fix.

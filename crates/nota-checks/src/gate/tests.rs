@@ -16,6 +16,15 @@ fn propose(heard: &str, replacement: &str) -> Proposal {
     Proposal {
         heard: heard.to_owned(),
         replacement: replacement.to_owned(),
+        at: None,
+    }
+}
+
+/// A proposal to replace `heard` with `replacement` at `at` only.
+fn propose_at(heard: &str, replacement: &str, at: Range<usize>) -> Proposal {
+    Proposal {
+        at: Some(at),
+        ..propose(heard, replacement)
     }
 }
 
@@ -360,6 +369,60 @@ fn a_fix_never_overlaps_an_earlier_one() {
     let ranges: Vec<_> = gated.applied().map(AppliedFix::range).collect();
     assert_eq!(ranges, [0..12, 18..24]);
     assert_eq!(gated.text(), "amlodipine then dipine");
+}
+
+/// A proposal that names its place is fixed there, even with the span
+/// earlier in the chunk too.
+#[test]
+fn a_fix_goes_where_its_proposal_says() {
+    let gated = gate(
+        "Inhale, then Inhale",
+        &[offer("Inhale", "inhaler")],
+        &[propose_at("Inhale", "inhaler", 13..19)],
+    );
+    let applied: Vec<_> = gated.applied().collect();
+    let [fix] = applied[..] else {
+        panic!("{gated:?}")
+    };
+    assert_eq!(fix.range(), 13..19);
+    assert_eq!(gated.text(), "Inhale, then inhaler");
+}
+
+/// A proposal whose place an earlier fix holds is already changed, though
+/// the span is free elsewhere: it never moves to another occurrence.
+#[test]
+fn a_fix_whose_place_is_taken_does_not_move() {
+    let gated = gate(
+        "Inhale, then Inhale",
+        &[offer("Inhale", "inhaler")],
+        &[
+            propose_at("Inhale", "inhaler", 0..6),
+            propose_at("Inhale", "inhaler", 0..6),
+        ],
+    );
+    let rejections: Vec<_> = gated.decisions().iter().map(Decision::rejection).collect();
+    assert_eq!(rejections, [None, Some(Rejection::AlreadyChanged)]);
+    assert_eq!(gated.text(), "inhaler, then Inhale");
+}
+
+/// A place the span isn't at, on word boundaries, finds nothing: a range
+/// over other words, part of the span, inside a longer word, off a
+/// character boundary or past the end.
+#[test]
+fn a_span_not_at_its_place_is_refused() {
+    let chunk = "Inhale, then Inhalers é";
+    let offered = [offer("Inhale", "inhaler")];
+    for at in [8..14, 0..5, 1..7, 13..19, 22..23, 22..30, 30..36] {
+        let decision = one(chunk, &offered, propose_at("Inhale", "inhaler", at.clone()));
+        assert_eq!(
+            decision,
+            Decision::rejected(Rejection::SpanNotFound, None),
+            "{at:?}"
+        );
+    }
+    // The span at its place, ignoring case, is found.
+    let found = one(chunk, &offered, propose_at("inhale", "inhaler", 0..6));
+    assert_eq!(found.applied().map(AppliedFix::range), Some(0..6));
 }
 
 /// A fix's replacement is never matched by a later span: each is placed in

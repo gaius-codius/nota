@@ -12,6 +12,8 @@
 //! - only a yes is applied, refused or covered;
 //! - an applied fix changes the text, names words no review holds, and
 //!   reads with its term in place;
+//! - an applied fix's change holds the words it was offered at, never
+//!   another occurrence of them;
 //! - the changes of one chunk never share a word, so they go in one
 //!   revision.
 
@@ -169,6 +171,10 @@ proptest! {
             if matches!(p.decided, Decided::Applied { .. }) {
                 let words = p.proposed.words;
                 prop_assert!(blocked.iter().all(|b| !b.overlaps(words)));
+                // A change may be wider than its offer, where fixes share
+                // a word, but always holds it.
+                let at = offer.words;
+                prop_assert!(words.first() <= at.first() && at.last() <= words.last(), "{:?} offered at {:?}", words, at);
                 let was = &chunk.text()[chunk.bytes(words)];
                 prop_assert_ne!(was, p.proposed.replacement.as_str());
                 prop_assert!(p.proposed.replacement.contains(offer.term.as_str()));
