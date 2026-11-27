@@ -8,7 +8,7 @@
 //! offered, and each chunk as the run revised it) and `c4_lookup.json`
 //! (the terms). The bench applied each yes whose C1 score was at least
 //! 0.6 (`pick.py`'s F output); nota's gate applies a yes on the same
-//! score, and every chunk reads the same.
+//! score, and every chunk reads the same, with C3 on as without.
 
 use std::path::{Path, PathBuf};
 
@@ -33,9 +33,9 @@ fn read(path: &Path) -> Value {
 }
 
 /// Runs the job over pick run `tag`'s chunks with a decider saying yes
-/// where Qwen did, in that chunk, and compares each chunk's revised
-/// text.
-fn agrees_with(tag: &str) {
+/// where Qwen did, in that chunk, with C3 as `precheck`, compares each
+/// chunk's revised text, and gives the run's proposals.
+fn agrees_with(tag: &str, precheck: Precheck) -> Vec<Proposal> {
     let fixtures = bench_fixtures();
     let terms: Vec<String> = read(&fixtures.join("c4_lookup.json"))["terms"]
         .as_array()
@@ -68,7 +68,7 @@ fn agrees_with(tag: &str) {
         .collect();
     let term_refs: Vec<&str> = terms.iter().map(String::as_str).collect();
     let fixture = Fixture::new(&format!("bench-{tag}"), &texts, &term_refs);
-    let mut clean_up = fixture.clean_up(Gives::Fake(Fake::saying_yes_in(yeses)));
+    let mut clean_up = fixture.clean_up_with(Gives::Fake(Fake::saying_yes_in(yeses)), precheck);
     assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
     let shown = fixture.shown();
     let mut wrong = Vec::new();
@@ -84,6 +84,7 @@ fn agrees_with(tag: &str) {
     }
     assert_eq!(shown.len(), 60); // check-bound
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    fixture.proposals()
 }
 
 /// Acceptance: the pick run without facts, the reference, applies the
@@ -91,12 +92,61 @@ fn agrees_with(tag: &str) {
 #[test]
 #[ignore = "needs the local bench fixtures"]
 fn the_bench_reference_run_applies_the_same_fixes() {
-    agrees_with("q5-pick-nofacts");
+    agrees_with("q5-pick-nofacts", Precheck::Off);
 }
 
 /// The pick run with facts does too.
 #[test]
 #[ignore = "needs the local bench fixtures"]
 fn the_bench_run_with_facts_applies_the_same_fixes() {
-    agrees_with("q5-pick");
+    agrees_with("q5-pick", Precheck::Off);
+}
+
+/// With C3 on, the reference run still applies the same fixes and
+/// rejects the same candidates: each it skips the decider said no to, or
+/// said yes to and the gate refused for C1's score. (The bench's
+/// transcript has no log-probabilities, so here it's a plain pre-check.)
+#[test]
+#[ignore = "needs the local bench fixtures"]
+fn the_bench_reference_run_applies_the_same_fixes_with_the_pre_check() {
+    let key = |p: &Proposal| {
+        (
+            p.proposed.chunk,
+            p.proposed.offered,
+            p.proposed.heard.clone(),
+            p.proposed.term.clone(),
+        )
+    };
+    let by_key = |proposals: Vec<Proposal>| -> BTreeMap<_, _> {
+        proposals.into_iter().map(|p| (key(&p), p)).collect()
+    };
+    let off = by_key(agrees_with("q5-pick-nofacts", Precheck::Off));
+    let on = by_key(agrees_with("q5-pick-nofacts", Precheck::On));
+    assert_eq!(
+        on.keys().collect::<Vec<_>>(),
+        off.keys().collect::<Vec<_>>()
+    );
+    let mut skipped = 0;
+    for (key, without) in &off {
+        let with = &on[key];
+        let applied = |p: &Proposal| matches!(p.outcome, Outcome::Applied(_));
+        assert_eq!(applied(with), applied(without), "{key:?}");
+        if with.decided == without.decided {
+            continue;
+        }
+        skipped += 1;
+        assert!(
+            matches!(with.decided, Decided::Skipped { .. })
+                && matches!(
+                    without.decided,
+                    Decided::No { .. }
+                        | Decided::Refused {
+                            rule: Refusal::Dissimilar,
+                            ..
+                        }
+                ),
+            "{key:?}: {without:?} → {with:?}"
+        );
+    }
+    assert!(skipped > 0, "the pre-check skipped nothing");
 }

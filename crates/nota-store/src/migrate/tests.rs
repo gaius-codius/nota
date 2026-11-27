@@ -289,6 +289,31 @@ fn version_2(path: &Path) {
     .unwrap();
 }
 
+/// Opened as it is, an older library is refused and left at its version,
+/// a missing one isn't made, and a current one opens.
+#[test]
+fn a_library_opened_as_it_is_is_never_made_or_upgraded() {
+    let dir = TestDir::new("as-is");
+    assert!(
+        matches!(Store::open_as_is(&dir.db()), Err(StoreError::Sqlite(_))),
+        "a missing library opened"
+    );
+    assert!(!dir.db().exists());
+    version_2(&dir.db());
+    assert!(matches!(
+        Store::open_as_is(&dir.db()),
+        Err(StoreError::NotCurrent(2))
+    ));
+    let found: i64 = raw(&dir.db())
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(found, 2);
+    drop(Store::open(&dir.db()).unwrap());
+    let store = Store::open_as_is(&dir.db()).unwrap();
+    assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
+    assert_eq!(store.pragma_text("foreign_keys"), "1");
+}
+
 /// A version 2 library gains `started_at`, null on the sessions it had,
 /// and keeps them; new sessions get their start time.
 #[test]

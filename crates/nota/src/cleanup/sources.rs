@@ -21,7 +21,7 @@ use nota_llm::local::LocalDecider;
 use nota_store::DecidedBy;
 use nota_store::Pack;
 
-use super::{Setup, Sources};
+use super::{Precheck, Setup, Sources};
 #[cfg(unix)]
 use crate::settings::{self, Environment};
 
@@ -71,11 +71,21 @@ impl Sources for Installed {
         installed(&self.packs)
             .map_err(|e| format!("the packs in {} can't be read: {e}", self.packs.display()))
     }
+
+    fn precheck(&self) -> Precheck {
+        #[cfg(unix)]
+        let precheck = settings::precheck(&Environment::current());
+        // The settings are read on unix only.
+        #[cfg(not(unix))]
+        let precheck = Precheck::Off;
+        precheck
+    }
 }
 
-/// The local decider the settings in `env` describe, timed by `clock`.
+/// The local decider the settings in `env` describe, timed by `clock`:
+/// clean-up's, and the bench's `local` engine.
 #[cfg(unix)]
-fn local_decider(env: &Environment, clock: &Arc<dyn Clock>) -> Setup {
+pub(crate) fn local_decider(env: &Environment, clock: &Arc<dyn Clock>) -> Setup {
     match settings::local_decider(env) {
         settings::LocalDecider::NotSetUp => Setup::NotSetUp,
         settings::LocalDecider::Unavailable(why) => {

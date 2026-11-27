@@ -55,6 +55,17 @@ struct Fixture {
 
 impl Fixture {
     fn new(name: &str, chunks: &[&str], terms: &[&str]) -> Self {
+        Self::heard(name, chunks, terms, &|_| None)
+    }
+
+    /// The fixture, each word of its chunks heard with the log-probability
+    /// `log_prob` gives it.
+    fn heard(
+        name: &str,
+        chunks: &[&str],
+        terms: &[&str],
+        log_prob: &dyn Fn(&str) -> Option<LogProb>,
+    ) -> Self {
         let dir = TestDir::new(name);
         let db = Writer::new(&dir.0.join("library.db"));
         let pack = glossary(
@@ -72,7 +83,7 @@ impl Fixture {
             db.record_session_packs(SESSION, &[pack.pack_ref()])?;
             db.finish_recording(SESSION, None)?;
             for (i, text) in (0_u64..).zip(chunks) {
-                let line = final_text(i * CHUNK, text);
+                let line = final_text_heard(i * CHUNK, text, log_prob);
                 db.add_final_text(SESSION, MIC, line.range.end(), &[line])?;
             }
             Ok(())
@@ -101,9 +112,16 @@ impl Fixture {
     /// Clean-up with `gives` as its decider and this session's pack
     /// installed.
     fn clean_up(&self, gives: Gives) -> CleanUp {
+        self.clean_up_with(gives, Precheck::Off)
+    }
+
+    /// Clean-up with `gives` as its decider, this session's pack
+    /// installed, and the pre-check as `precheck` says.
+    fn clean_up_with(&self, gives: Gives, precheck: Precheck) -> CleanUp {
         let sources = FakeSources {
             gives,
             packs: vec![self.pack.clone()],
+            precheck,
         };
         CleanUp::new(Box::new(sources), SampleRate::SPEECH)
     }
@@ -161,8 +179,12 @@ fn asked(fake: &Fake) -> Vec<Vec<String>> {
 }
 
 /// The final text at sample `start`: `text`'s words spread evenly over
-/// [`CHUNK`].
-fn final_text(start: u64, text: &str) -> FinalText {
+/// [`CHUNK`], each with the log-probability `log_prob` gives it.
+fn final_text_heard(
+    start: u64,
+    text: &str,
+    log_prob: &dyn Fn(&str) -> Option<LogProb>,
+) -> FinalText {
     let words: Vec<&str> = text.split(' ').collect();
     let step = CHUNK / u64::try_from(words.len()).unwrap();
     let range =
@@ -176,7 +198,7 @@ fn final_text(start: u64, text: &str) -> FinalText {
             .map(|(i, w)| FinalWord {
                 text: (*w).to_owned(),
                 range: range(start + i * step, start + (i + 1) * step),
-                log_prob: None,
+                log_prob: log_prob(w),
             })
             .collect(),
         heard_by: HeardBy {
@@ -270,7 +292,7 @@ fn a_yes_the_gate_passes_is_applied_in_a_new_revision() {
             digest: fixture.pack.pack_ref().digest(),
         }
     );
-    assert_eq!(p.proposed.thresholds, thresholds());
+    assert_eq!(p.proposed.thresholds, thresholds(Precheck::Off));
 }
 
 /// A no is rejected and logged: nothing changes, and no revision is made.
@@ -883,6 +905,7 @@ fn a_missing_pack_fails_the_job() {
     let sources = FakeSources {
         gives: Gives::Fake(Fake::saying_yes([])),
         packs: Vec::new(),
+        precheck: Precheck::Off,
     };
     let mut clean_up = CleanUp::new(Box::new(sources), SampleRate::SPEECH);
     let end = run(&mut clean_up, &fixture);
@@ -968,6 +991,9 @@ fn a_decider_stopped_mid_question_stores_nothing_for_it() {
 #[path = "bench.rs"]
 mod bench;
 
+#[path = "precheck_tests.rs"]
+mod precheck;
+
 /// A decider's earlier failure is cleared once, after its first real
 /// answer: not after an answer that couldn't be read, and not again.
 #[test]
@@ -992,7 +1018,8 @@ fn proposals_record_their_thresholds() {
     assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
     assert_eq!(
         fixture.proposals()[0].proposed.thresholds,
-        "similarity_min=0.6;keep=0.58;keep_rare=0.42;max_candidates=6;card_every_s=600"
+        "similarity_min=0.6;keep=0.58;keep_rare=0.42;max_candidates=6;card_every_s=600;\
+         precheck=off"
     );
 }
 
@@ -1524,6 +1551,7 @@ fn another_decider_counts_failures_from_nothing() {
     clean_up.sources = Box::new(Renamed(FakeSources {
         gives: Gives::Fake(fake),
         packs: vec![fixture.pack.clone()],
+        precheck: Precheck::Off,
     }));
     assert_eq!(runs(&mut clean_up, &fixture, 2), down(2));
     assert_eq!(fixture.proposals(), []);
@@ -1547,5 +1575,9 @@ impl Sources for Renamed {
 
     fn packs(&self) -> Result<Vec<Pack>, String> {
         self.0.packs()
+    }
+
+    fn precheck(&self) -> Precheck {
+        self.0.precheck()
     }
 }

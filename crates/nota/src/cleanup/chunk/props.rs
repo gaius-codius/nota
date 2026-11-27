@@ -158,7 +158,9 @@ proptest! {
                 (Decided::NoAnswer(_) | Decided::GaveUp(_), Err(none)) => {
                     prop_assert_eq!(&p.decided, none);
                 }
-                (Decided::NoAnswer(_) | Decided::GaveUp(_), Ok(_)) | (_, Err(_)) => {
+                // Settling never skips: only the pre-check, before it, does.
+                (Decided::NoAnswer(_) | Decided::GaveUp(_) | Decided::Skipped { .. }, Ok(_))
+                | (_, Err(_)) => {
                     prop_assert!(false, "answer {:?} decided {:?}", said, p.decided);
                 }
                 (Decided::No { .. }, _) => prop_assert!(!yes),

@@ -557,5 +557,6 @@ fn revise<'a>(chunk: &str, fixes: impl Iterator<Item = &'a AppliedFix>) -> Strin
 #[cfg(test)]
 mod tests;
 
+// The pre-check's properties gate the same cases.
 #[cfg(test)]
-mod props;
+pub(crate) mod props;

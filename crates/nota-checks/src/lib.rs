@@ -11,6 +11,8 @@
 //! - C1, letter similarity: [`letter_similarity`].
 //! - C2, the candidate gate: [`gate()`], whose [`AppliedFix`] is the only way
 //!   a fix is applied.
+//! - C3, the similarity pre-check (proposed): [`precheck()`], whose
+//!   [`Skipped`] is the only way a candidate goes unasked.
 //! - C4, the term lookup: [`Lookup`], with a [`Language`]'s rules
 //!   ([`English`]).
 //! - The hotword diff, the second source of candidates:
@@ -45,6 +47,7 @@ mod hotword_diff;
 mod language;
 mod lookup;
 mod phonetic;
+mod precheck;
 mod similarity;
 mod words;
 
@@ -62,5 +65,6 @@ pub use lookup::{
     SHORT_WORD_LEN, Score, Term,
 };
 pub use phonetic::Sounds;
+pub use precheck::{Asked, LOW_LOG_PROB_PERCENT, LowLogProb, PreCheck, Signal, Skipped, precheck};
 pub use similarity::{MAX_LETTERS, Similarity, TooLong, letter_similarity};
 pub use words::{WordListError, Zipf};

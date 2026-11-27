@@ -1,7 +1,8 @@
 //! The user's settings: where the local decider's llama-server and model
-//! are, and which device it runs on, and how strongly the hotword pass
-//! boosts the session's terms. Until nota downloads its own server and
-//! model (M7), nothing else says where they are.
+//! are, which device it runs on, how strongly the hotword pass boosts the
+//! session's terms, and whether the clean-up job runs its similarity
+//! pre-check. Until nota downloads its own server and model (M7), nothing
+//! else says where they are.
 //!
 //! They're in `settings.toml` in nota's config directory
 //! (`~/.config/nota/settings.toml` on Linux). The user's guide to it is
@@ -19,6 +20,9 @@
 //!
 //! [hotword_pass]
 //! boost = 3.0   # above 0 and at most 10; without it, 3
+//!
+//! [clean_up]
+//! similarity_precheck = true  # without it, off
 //! ```
 //!
 //! [`local_decider`] reads them into what the clean-up job and the engines
@@ -29,7 +33,8 @@
 //! so it ends with nota. Only `Ready` has a config to start a server with.
 //! It looks at the files each time it's called, so a model installed while
 //! nota is open is seen at the next job. [`hotword_boost`] reads the
-//! hotword pass's boost the same way, at each run.
+//! hotword pass's boost the same way, at each run. [`precheck`] reads the
+//! clean-up table the same way, and is off unless the file turns it on.
 //!
 //! The file is the user's own text, so it's parsed at the edge: a key
 //! nota doesn't know, a path that isn't absolute (or `~/…`), or a device
@@ -46,6 +51,7 @@ use std::sync::Arc;
 
 use nota_llm::server::{Device, GpuName, Launcher, ServerConfig};
 
+use crate::cleanup::Precheck;
 use crate::hotword_pass::Boost;
 
 #[cfg(test)]
@@ -69,7 +75,16 @@ const HOTWORD_KEYS: [&str; 1] = ["boost"];
 /// The keys the local decider's table may hold.
 const KEYS: [&str; 4] = ["program", "model", "device", "socket_dir"];
 
-/// What nota is given to find the local decider: the settings file and the
+/// The table that holds the clean-up job's settings.
+const CLEAN_UP: &str = "clean_up";
+
+/// The clean-up key that turns the similarity pre-check on.
+const PRECHECK: &str = "similarity_precheck";
+
+/// The keys the clean-up table may hold.
+const CLEAN_UP_KEYS: [&str; 1] = [PRECHECK];
+
+/// What nota is given to read its settings: the settings file and the
 /// parts of its environment that the settings lean on. Passed in, so tests
 /// can give their own.
 #[derive(Debug)]
@@ -181,6 +196,15 @@ impl Error for Unavailable {
     }
 }
 
+/// The settings file as written, before anything it names is looked at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Settings {
+    /// The local decider's table, `[local_decider]`.
+    decider: Written,
+    /// `clean_up.similarity_precheck`; off if it isn't set.
+    precheck: Precheck,
+}
+
 /// The local decider's settings as written, before anything is looked at.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Written {
@@ -197,19 +221,40 @@ struct Written {
 /// The local decider as the settings in `env` leave it, looking at the
 /// files they name now.
 pub(crate) fn local_decider(env: &Environment) -> LocalDecider {
-    let Some(file) = &env.settings else {
-        return LocalDecider::Unavailable(Unavailable::NoSettingsFile);
-    };
-    let written = match read(file) {
-        Ok(Some(text)) => parse(&text, env.home.as_deref()),
+    match load(env) {
+        Ok(Some(settings)) => ready(settings.decider, env),
         // No file: nothing is set up.
-        Ok(None) => return LocalDecider::NotSetUp,
-        Err(why) => return LocalDecider::Unavailable(why),
-    };
-    match written {
-        Ok(written) => ready(written, env),
-        Err(why) => LocalDecider::Unavailable(Unavailable::Invalid(file.clone(), why)),
+        Ok(None) => LocalDecider::NotSetUp,
+        Err(why) => LocalDecider::Unavailable(why),
     }
+}
+
+/// Whether the clean-up job puts its candidates through the similarity
+/// pre-check, as the settings in `env` say: [`Precheck::Off`] unless the
+/// file sets `clean_up.similarity_precheck = true`.
+///
+/// It has no way to report a problem, so a settings file that's missing,
+/// can't be read or isn't usable leaves the pre-check off. The engines
+/// screen reports that file through [`local_decider`], which reads it the
+/// same way.
+pub(crate) fn precheck(env: &Environment) -> Precheck {
+    match load(env) {
+        Ok(Some(settings)) => settings.precheck,
+        Ok(None) | Err(_) => Precheck::Off,
+    }
+}
+
+/// The settings in `env`'s settings file, `None` if there's no file.
+fn load(env: &Environment) -> Result<Option<Settings>, Unavailable> {
+    let Some(file) = &env.settings else {
+        return Err(Unavailable::NoSettingsFile);
+    };
+    let Some(text) = read(file)? else {
+        return Ok(None);
+    };
+    parse(&text, env.home.as_deref())
+        .map(Some)
+        .map_err(|why| Unavailable::Invalid(file.clone(), why))
 }
 
 /// The settings file's text, `None` if there's no file.
@@ -236,13 +281,30 @@ fn read(path: &Path) -> Result<Option<String>, Unavailable> {
 /// know.
 fn tables(text: &str) -> Result<toml::Table, String> {
     let file: toml::Table = text.parse().map_err(|e| format!("not TOML: {e}"))?;
-    if let Some(key) = file.keys().find(|k| *k != TABLE && *k != HOTWORD_TABLE) {
+    if let Some(key) = file
+        .keys()
+        .find(|k| *k != TABLE && *k != HOTWORD_TABLE && *k != CLEAN_UP)
+    {
         return Err(format!("nota has no setting {key}"));
     }
     Ok(file)
 }
 
-/// The table `name` in `file` (empty if it isn't there), if it holds only
+/// The settings in a settings file's `text`, with `~/` read as `home`.
+/// The hotword pass's table is read on its own, by [`hotword_boost`].
+fn parse(text: &str, home: Option<&Path>) -> Result<Settings, String> {
+    let file = tables(text)?;
+    // Both tables' keys are checked before any value, so a misspelt key is
+    // named even when another value is wrong too.
+    let decider = table(&file, TABLE, &KEYS)?;
+    let clean_up = table(&file, CLEAN_UP, &CLEAN_UP_KEYS)?;
+    Ok(Settings {
+        decider: written(decider.unwrap_or(&toml::Table::new()), home)?,
+        precheck: clean_up.map_or(Ok(Precheck::Off), precheck_of)?,
+    })
+}
+
+/// The table `name` in `file`, if it's there, once it holds no key but
 /// `keys`.
 fn table<'f>(
     file: &'f toml::Table,
@@ -260,12 +322,8 @@ fn table<'f>(
     Ok(Some(table))
 }
 
-/// The local decider's settings in a settings file's `text`, with `~/`
-/// read as `home`.
-fn parse(text: &str, home: Option<&Path>) -> Result<Written, String> {
-    let file = tables(text)?;
-    let empty = toml::Table::new();
-    let table = table(&file, TABLE, &KEYS)?.unwrap_or(&empty);
+/// The local decider's settings in its `table`, with `~/` read as `home`.
+fn written(table: &toml::Table, home: Option<&Path>) -> Result<Written, String> {
     Ok(Written {
         program: text_of(table, "program")?
             .map(|p| program(p, home))
@@ -278,6 +336,16 @@ fn parse(text: &str, home: Option<&Path>) -> Result<Written, String> {
             .map(|p| absolute("socket_dir", p, home))
             .transpose()?,
     })
+}
+
+/// The pre-check the clean-up `table` asks for: off unless
+/// `similarity_precheck` is `true`.
+fn precheck_of(table: &toml::Table) -> Result<Precheck, String> {
+    match table.get(PRECHECK) {
+        None | Some(toml::Value::Boolean(false)) => Ok(Precheck::Off),
+        Some(toml::Value::Boolean(true)) => Ok(Precheck::On),
+        Some(_) => Err(format!("{CLEAN_UP}.{PRECHECK} isn't true or false")),
+    }
 }
 
 /// The text of `key` in `table`, if it's there.
