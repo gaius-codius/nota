@@ -985,3 +985,51 @@ fn a_speech_engine_that_answers_resets_only_final_pass_retries() {
         ]
     );
 }
+
+/// A final pass still waiting out a long spacing doesn't hold up a
+/// clean-up retry that is due: each kind's retries take turns among
+/// themselves.
+#[test]
+fn a_final_pass_backed_off_doesnt_hold_up_a_clean_up_retry() {
+    let (_dir, db) = library("turns-per-kind", &[]);
+    for session in [S1, S2] {
+        db.with(|db| {
+            db.create_session(&NewSession::bare(session))?;
+            db.finish_recording(session, None)
+        })
+        .unwrap();
+    }
+    let jobs = db.with(|db| db.jobs()).unwrap();
+    let find = |session, kind| {
+        jobs.iter()
+            .find(|job| job.session == session && job.kind == kind)
+            .unwrap()
+            .clone()
+    };
+    let (pass, clean_up) = (find(S1, JobKind::FinalPass), find(S2, JobKind::CleanUp));
+    // Only these two wait to run: the other jobs are done.
+    for job in &jobs {
+        if job.id != pass.id && job.id != clean_up.id {
+            db.with(|db| db.end_job(job.id, &JobEnd::Done)).unwrap();
+        }
+    }
+    for job in [&pass, &clean_up] {
+        db.with(|db| db.end_job(job.id, &JobEnd::EngineDown("down".into())))
+            .unwrap();
+    }
+    let clock = Arc::new(nota_core::FakeClock::new(SessionTime::ZERO));
+    let mut runner = loop_with_clock(&db, &Fake::default(), &clock);
+    // The final pass ended first and has backed off to 40 s; the clean-up
+    // job ended a second later at the shortest spacing.
+    let mut backed_off = Retry::first(JobKind::FinalPass, SessionTime::ZERO);
+    for _ in 0..3 {
+        backed_off = backed_off.failed_again(SessionTime::ZERO);
+    }
+    runner.retries.insert(pass.id, backed_off);
+    let one = SessionTime::from_nanos(1_000_000_000);
+    runner
+        .retries
+        .insert(clean_up.id, Retry::first(JobKind::CleanUp, one));
+    let next = due_after(&runner, &clock, Duration::from_secs(6));
+    assert_eq!((next.session, next.kind), (S2, JobKind::CleanUp));
+}

@@ -27,12 +27,13 @@
 //! between questions, the job returns at once, which drops the decider
 //! and the server it keeps loaded.
 //!
-//! **A chunk the decider always fails on.** A chunk whose question found
-//! the decider down is asked after the rest on later runs, and once it has
-//! failed [`suspects::GIVE_UP`] runs in a row while the decider answered
-//! other questions, its candidates are logged as given up on and the run
-//! carries on ([`suspects`]). So one bad chunk doesn't keep a session
-//! from its revision and cards.
+//! **A chunk the decider always fails on.** After a question finds the
+//! decider down, clean-up asks it a fixed question of its own; if that is
+//! answered, the failure is the chunk's. Such a chunk is asked after the
+//! rest on later runs, and at its [`suspects::GIVE_UP`]th such failure its
+//! candidates are logged as given up on and the run carries on
+//! ([`suspects`]). So one bad chunk doesn't keep a session from its
+//! revision and cards, and a decider that is down gives up on nothing.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -59,7 +60,7 @@ pub(crate) mod sources;
 pub(crate) mod suspects;
 
 use chunk::{Answers, Chunk, Context, Offer};
-use suspects::{Failed, Suspects};
+use suspects::{Failed, Suspects, probe};
 
 #[cfg(test)]
 mod tests;
@@ -162,6 +163,7 @@ impl CleanUp {
             Ok(read) => read,
             Err(e) => return stored(&e),
         };
+        self.suspects.asking(&by);
         let mut pass = Pass {
             db,
             session,
@@ -172,6 +174,7 @@ impl CleanUp {
             },
             running,
             suspects: &mut self.suspects,
+            answered: false,
         };
         let end = pass.run(&read, decider, self.rate);
         // A session whose clean-up has ended asks the decider nothing more.
@@ -366,18 +369,27 @@ struct Pass<'a> {
     running: &'a Running<'a>,
     /// The chunks whose question found the decider down, across runs.
     suspects: &'a mut Suspects,
+    /// Whether the decider has answered in this run, and the runner been
+    /// told.
+    answered: bool,
 }
 
 /// How a chunk's question went.
 enum Asked {
     /// Answered, or no answer to read: the chunk's proposals are stored.
-    Settled {
-        /// Whether the decider answered, rather than giving an answer
-        /// that couldn't be read or not being asked.
-        answered: bool,
-    },
+    Settled,
     /// The run must end here, as given.
     Ended(JobEnd),
+}
+
+/// What the probe after a chunk's failure showed.
+enum Probed {
+    /// The decider answered it: the failure was the chunk's.
+    Works,
+    /// It failed too: the decider is down.
+    Down,
+    /// A stop came while it was asked.
+    Stopped,
 }
 
 impl Pass<'_> {
@@ -405,7 +417,6 @@ impl Pass<'_> {
         let held = Held::new(&read.proposals);
         let chunks: Vec<Chunk> = read.lines.iter().filter_map(chunk_of).collect();
         let total = u64::try_from(chunks.len()).unwrap_or(u64::MAX);
-        let mut answered = false;
         for (n, i) in self.order(&chunks).into_iter().enumerate() {
             let Some(chunk) = chunks.get(i) else {
                 continue;
@@ -434,23 +445,8 @@ impl Pass<'_> {
                 asked: &asked,
                 blocked: held.blocked(chunk.key()),
             };
-            match self.ask(&ask, &mut *decider, answered) {
-                Asked::Settled { answered: true } => {
-                    self.suspects.settled(self.session, chunk.key());
-                    // Every suspect, in any session, now has a decider
-                    // that works on other questions.
-                    self.suspects.answered();
-                    if !answered {
-                        // The decider works: any reason shown for an
-                        // earlier failure goes, and the runner tries
-                        // clean-up jobs that wait on it again soon.
-                        (self.running.answered)();
-                        answered = true;
-                    }
-                }
-                Asked::Settled { answered: false } => {
-                    self.suspects.settled(self.session, chunk.key());
-                }
+            match self.ask(&ask, &mut *decider) {
+                Asked::Settled => self.suspects.settled(self.session, chunk.key()),
                 Asked::Ended(end) => return Some(end),
             }
         }
@@ -468,21 +464,35 @@ impl Pass<'_> {
         rest.into_iter().chain(suspect).collect()
     }
 
+    /// Notes that the decider answered: the first time in a run, the
+    /// runner is told, so any reason shown for an earlier failure goes and
+    /// the clean-up jobs that wait on the decider are tried again soon.
+    fn note_answer(&mut self) {
+        if !self.answered {
+            (self.running.answered)();
+            self.answered = true;
+        }
+    }
+
     /// Asks the decider about `ask`'s candidates and stores what it
-    /// makes of them. `answered_before` says whether the decider has
-    /// answered a question in this run already.
-    fn ask(&mut self, ask: &Ask<'_>, decider: &mut dyn Decider, answered_before: bool) -> Asked {
+    /// makes of them.
+    fn ask(&mut self, ask: &Ask<'_>, decider: &mut dyn Decider) -> Asked {
         let answers = match question(ask) {
             Ok(question) => match decider.decide(&question, self.running.stop) {
-                Ok(decisions) => Answers::Given(decisions.iter().map(|(_, d)| *d).collect()),
-                Err(DecideError::Stopped) => return Asked::Ended(JobEnd::Waiting(None)),
-                Err(e @ DecideError::Unavailable(_)) => {
-                    let key = ask.chunk.key();
-                    match self.suspects.failed(self.session, key, answered_before) {
-                        Failed::TryAgain => return Asked::Ended(JobEnd::EngineDown(e.to_string())),
-                        Failed::GiveUp => Answers::GaveUp(e.to_string()),
-                    }
+                Ok(decisions) => {
+                    // Told before the proposals are stored: the decider
+                    // works even if the store fails.
+                    self.note_answer();
+                    Answers::Given(decisions.iter().map(|(_, d)| *d).collect())
                 }
+                Err(DecideError::Stopped) => return Asked::Ended(JobEnd::Waiting(None)),
+                Err(e @ DecideError::Unavailable(_)) => match self.failed(ask.chunk, decider) {
+                    Ok(Failed::GiveUp) => Answers::GaveUp(e.to_string()),
+                    Ok(Failed::TryAgain) => return Asked::Ended(JobEnd::EngineDown(e.to_string())),
+                    Err(end) => {
+                        return Asked::Ended(end.unwrap_or(JobEnd::EngineDown(e.to_string())));
+                    }
+                },
                 Err(e @ DecideError::Failed(_)) => Answers::None(e.to_string()),
             },
             Err(why) => Answers::None(why),
@@ -499,10 +509,41 @@ impl Pass<'_> {
             .db
             .with(|db| db.add_proposals(self.session, &proposals))
         {
-            Ok(()) => Asked::Settled {
-                answered: matches!(answers, Answers::Given(_)),
-            },
+            Ok(()) => Asked::Settled,
             Err(e) => Asked::Ended(stored(&e)),
+        }
+    }
+
+    /// After `chunk`'s question found the decider down: asks the probe,
+    /// and if the decider answers it, counts the failure as the chunk's.
+    /// Gives what the count says to do, or `Err` if nothing counted: with
+    /// how the run ends if a stop came, or `None` for the decider being
+    /// down.
+    fn failed(
+        &mut self,
+        chunk: &Chunk,
+        decider: &mut dyn Decider,
+    ) -> Result<Failed, Option<JobEnd>> {
+        match self.probe(decider) {
+            Probed::Works => Ok(self.suspects.failed(self.session, chunk.key())),
+            Probed::Down => Err(None),
+            Probed::Stopped => Err(Some(JobEnd::Waiting(None))),
+        }
+    }
+
+    /// Asks the decider the probe question. An answer that can't be read
+    /// still shows it works; what it says is never stored.
+    fn probe(&mut self, decider: &mut dyn Decider) -> Probed {
+        let Ok(question) = probe() else {
+            return Probed::Down;
+        };
+        match decider.decide(&question, self.running.stop) {
+            Ok(_) | Err(DecideError::Failed(_)) => {
+                self.note_answer();
+                Probed::Works
+            }
+            Err(DecideError::Unavailable(_)) => Probed::Down,
+            Err(DecideError::Stopped) => Probed::Stopped,
         }
     }
 

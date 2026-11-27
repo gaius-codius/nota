@@ -32,9 +32,10 @@
 //! passes, the decider for clean-up. One engine working says nothing
 //! about the other. Jobs not waiting on an engine retry
 //! go first, in queue order; then the retries take turns, the one whose
-//! last run ended longest ago first, and none runs before an older one that
-//! isn't due yet. So each waiting session is tried before any is tried
-//! again, however long the runs take and however far each has backed off.
+//! last run ended longest ago first, and none runs before an older one of
+//! its kind that isn't due yet. So each waiting session is tried before
+//! any is tried again, however long the runs take and however far each
+//! has backed off.
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -371,8 +372,8 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
 
     /// The first job that can run now: those not waiting on an engine
     /// retry in queue order, then the retries, the one that last ran
-    /// longest ago first, as long as no older one is still waiting out its
-    /// spacing. A waiting job that lacks what it needs is marked as waiting
+    /// longest ago first, as long as no older one of its kind is still
+    /// waiting out its spacing. A waiting job that lacks what it needs is marked as waiting
     /// for it, so the Processing screen can say why.
     fn next(&self) -> Result<Option<Job>, StoreError> {
         let mut jobs = self.db.with(|db| db.jobs())?;
@@ -381,14 +382,16 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
         // Taking the oldest retry first means a session tried a while ago
         // isn't passed over by one whose runs keep ending sooner.
         jobs.sort_by_key(|job| self.retries.get(&job.id).map(|retry| retry.ended));
-        let mut turn = Turn::Open;
+        // Each kind's retries take turns among themselves: one engine's
+        // long spacing doesn't hold up the other's retries.
+        let mut turns: BTreeMap<JobKind, Turn> = BTreeMap::new();
         for job in jobs {
             let waits = match &job.state {
                 JobState::Waiting(waits) => *waits,
                 JobState::EngineDown(_) => Some(Wait::Engine),
                 _ => continue,
             };
-            if !self.has_turn(job.id, &mut turn) {
+            if !self.has_turn(job.id, turns.entry(job.kind).or_insert(Turn::Open)) {
                 continue;
             }
             // A job waiting for space keeps waiting for it until there's
@@ -412,8 +415,8 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
     }
 
     /// Whether job `id` may run now as far as engine retries go, given the
-    /// retries before it in turn order; a retry not due yet closes `turn`
-    /// to every retry after it.
+    /// retries of its kind before it in turn order; a retry not due yet
+    /// closes `turn` to every retry of its kind after it.
     fn has_turn(&self, id: JobId, turn: &mut Turn) -> bool {
         let Some(retry) = self.retries.get(&id) else {
             return true;
