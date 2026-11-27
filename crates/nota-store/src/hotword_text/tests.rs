@@ -107,6 +107,8 @@ fn misplaced_text_is_refused() {
     no_boost.boost = 0.0;
     let mut nan = boosted(MIC, 400, 900, None);
     nan.boost = f64::NAN;
+    let mut endless = boosted(MIC, 400, 900, None);
+    endless.boost = f64::INFINITY;
     let cases = [
         (MIC, 900, boosted(MIC, 400, 800, None)),
         (MIC, 900, boosted(MIC, 300, 900, None)),
@@ -114,6 +116,7 @@ fn misplaced_text_is_refused() {
         (MIC, 800, boosted(MIC, 400, 900, None)),
         (MIC, 900, no_boost),
         (MIC, 900, nan),
+        (MIC, 900, endless),
         (MIC, 400, boosted(MIC, 0, 400, Some("other"))),
     ];
     for (track, up_to, text) in cases {

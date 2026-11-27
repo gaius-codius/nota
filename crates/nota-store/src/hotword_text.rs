@@ -106,8 +106,8 @@ impl Store {
                 track,
                 start: text.range.start(),
             };
-            // A NaN boost fails this too.
-            let bad_boost = !(text.boost > 0.0);
+            // A NaN or infinite boost is refused too.
+            let bad_boost = !text.boost.is_finite() || text.boost <= 0.0;
             if text.track != track || text.range.end() > up_to || bad_boost {
                 return Err(misplaced());
             }
