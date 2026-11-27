@@ -67,12 +67,20 @@ impl Boost {
     pub(crate) const DEFAULT: Self = Self(3.0);
 
     /// The highest boost taken: the engine's `--boost` takes no more.
+    #[cfg_attr(
+        all(not(unix), not(test)),
+        expect(dead_code, reason = "only unix reads the boost's setting")
+    )]
     pub(crate) const MAX: f64 = 10.0;
 
     /// The boost `score`, or `None` unless it's at least the smallest
     /// normal `f32` (the engine reads it as one, so a smaller score would
     /// reach it as 0, which it refuses) and at most [`Boost::MAX`] (so
     /// never NaN or infinite).
+    #[cfg_attr(
+        all(not(unix), not(test)),
+        expect(dead_code, reason = "only unix reads the boost's setting")
+    )]
     pub(crate) fn new(score: f64) -> Option<Self> {
         (score >= f64::from(f32::MIN_POSITIVE) && score <= Self::MAX).then_some(Self(score))
     }
