@@ -11,7 +11,8 @@
 //!
 //! **Its outcome moves once, at the run's end.** A proposal is stored
 //! with what its chunk's decisions made of it: applied, rejected and
-//! logged, or to be ranked (a yes the gate refused). The run's end
+//! logged (a candidate the similarity pre-check skipped among them), or
+//! to be ranked (a yes the gate refused). The run's end
 //! ([`Store::place_proposals`]) ranks those as "to check" cards or as over
 //! the cap, and writes the applied ones' changes as one new revision, all
 //! in one transaction, so a run killed before it leaves its proposals to
@@ -189,7 +190,21 @@ pub enum Decided {
     /// or a question that couldn't be asked), for the reason given: rejected
     /// and logged, never applied.
     NoAnswer(String),
+    /// The decider wasn't asked: C3, the similarity pre-check, scored it
+    /// below the gate's minimum with nothing else marking its span, so no
+    /// yes on it could have been applied. Rejected and logged, never
+    /// applied. Stored as a no-answer row with [`SKIPPED`] as its reason
+    /// and C1's score, which no other no-answer row has, so it needs no
+    /// new schema.
+    Skipped {
+        /// C1's score, below the gate's minimum.
+        similarity: f64,
+    },
 }
+
+/// The reason a [`Decided::Skipped`] row gives for having no answer.
+pub const SKIPPED: &str = "not asked: the similarity pre-check (C3) found C1 below the gate's \
+                           minimum and nothing else marking the span";
 
 /// What a proposal records about its candidate, apart from the decision.
 #[derive(Debug, Clone, PartialEq)]
@@ -363,6 +378,15 @@ fn decided_columns(decided: &Decided) -> DecidedColumns {
             None,
             None,
             None,
+            "rejected",
+            Some("no-answer"),
+        ),
+        Decided::Skipped { similarity } => (
+            "none",
+            Some(SKIPPED.to_owned()),
+            None,
+            None,
+            Some(*similarity),
             "rejected",
             Some("no-answer"),
         ),
@@ -632,7 +656,11 @@ impl RawDecision {
                 similarity: self.similarity,
             },
             ("no", None, Some("no")) => Decided::No { yes },
-            ("none", None, Some("no-answer")) => Decided::NoAnswer(self.no_answer?),
+            // Only a skipped candidate's row has a score without an answer.
+            ("none", None, Some("no-answer")) => match self.similarity {
+                Some(similarity) => Decided::Skipped { similarity },
+                None => Decided::NoAnswer(self.no_answer?),
+            },
             _ => return None,
         };
         let outcome = match (&decided, self.outcome.as_str()) {

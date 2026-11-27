@@ -196,6 +196,8 @@ pub(crate) struct FakeSources {
     pub(crate) gives: Gives,
     /// The installed packs.
     pub(crate) packs: Vec<Pack>,
+    /// Whether the pre-check runs.
+    pub(crate) precheck: super::Precheck,
 }
 
 /// What the fake decider is recorded as.
@@ -219,6 +221,10 @@ impl Sources for FakeSources {
     fn packs(&self) -> Result<Vec<Pack>, String> {
         Ok(self.packs.clone())
     }
+
+    fn precheck(&self) -> super::Precheck {
+        self.precheck
+    }
 }
 
 /// Clean-up with no decider set up and no packs: its jobs wait.
@@ -226,6 +232,7 @@ pub(crate) fn idle() -> super::CleanUp {
     let sources = FakeSources {
         gives: Gives::NotSetUp,
         packs: Vec::new(),
+        precheck: super::Precheck::Off,
     };
     super::CleanUp::new(Box::new(sources), nota_core::SampleRate::SPEECH)
 }

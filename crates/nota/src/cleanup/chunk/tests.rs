@@ -78,6 +78,7 @@ fn summary(proposals: &[NewProposal]) -> Vec<(WordSpan, &str, &'static str)> {
                 Decided::Refused { .. } => "refused",
                 Decided::No { .. } => "no",
                 Decided::NoAnswer(_) => "no answer",
+                Decided::Skipped { .. } => "skipped",
             };
             (p.proposed.words, p.proposed.replacement.as_str(), kind)
         })

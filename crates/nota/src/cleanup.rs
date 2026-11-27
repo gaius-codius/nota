@@ -13,6 +13,20 @@
 //! **No fix without the model's yes**: only a yes reaches the gate, and
 //! only the gate places a fix.
 //!
+//! **C3, the similarity pre-check** (off unless the settings turn it on,
+//! until test 3 decides whether it's adopted, #168): a candidate C1 scores
+//! below the gate's minimum is rejected and logged without being asked
+//! about, unless a low log-probability marks its span (its words among
+//! the recording's lowest [`LOW_LOG_PROB_PERCENT`]), since a yes on it
+//! can still make a card. A chunk whose every new candidate is skipped is
+//! no question at all. The gate still checks each yes against every
+//! candidate the lookup offered, so skipping changes no other decision;
+//! what it does change is the cards: a skipped yes is no card, which
+//! leaves room under the cap for another (the code checks spec, C3). A
+//! session's words with no log-probability mark nothing, so there it's a
+//! plain pre-check. A skipped candidate is a proposal like any other, so
+//! a later run doesn't ask it either, with the pre-check on or off.
+//!
 //! **Safe to run again.** A candidate the session has a proposal for
 //! already (the same chunk, offered words, heard span and term) isn't
 //! proposed again, and neither is one whose words a review or an applied
@@ -32,11 +46,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nota_checks::{
-    Bar, Candidate as Found, English, KEEP, KEEP_RARE, Language, Lookup, MAX_CANDIDATES, Matched,
-    SIMILARITY_MIN, Term,
+    Bar, Candidate as Found, English, KEEP, KEEP_RARE, LOW_LOG_PROB_PERCENT, Language, Lookup,
+    LowLogProb, MAX_CANDIDATES, Matched, PreCheck, SIMILARITY_MIN, Signal, Skipped, Term, precheck,
 };
 use nota_core::decide::{Candidate, DecideError, Decider, Question};
-use nota_core::{SampleIndex, SampleRate, SessionId, TrackId};
+use nota_core::{LogProb, SampleIndex, SampleRate, SessionId, TrackId};
 use nota_store::{
     ChunkKey, DecidedBy, FinalLine, JobEnd, JobKind, JobState, Origin, Outcome, Pack, Proposal,
     RevisionNumber, SessionTerms, StoreError, Wait, WordSpan, Writer,
@@ -72,10 +86,26 @@ pub(crate) enum Setup {
     Ready(Box<dyn Decider + Send>, DecidedBy),
 }
 
+/// Whether a run puts its candidates through C3, the similarity
+/// pre-check, before asking about them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum Precheck {
+    /// Every new candidate is asked about: what nota does until test 3
+    /// says otherwise.
+    #[default]
+    Off,
+    /// A candidate C1 scores below the gate's minimum, with nothing else
+    /// marking its span, isn't.
+    On,
+}
+
 /// Where a run finds its decider and the installed packs.
 pub(crate) trait Sources: Send {
     /// The decider, as the settings leave it now.
     fn decider(&self) -> Setup;
+
+    /// Whether the settings turn the similarity pre-check on now.
+    fn precheck(&self) -> Precheck;
 
     /// The packs installed on this machine.
     ///
@@ -150,15 +180,17 @@ impl CleanUp {
             Ok(read) => read,
             Err(e) => return stored(&e),
         };
+        let precheck = self.sources.precheck();
         let pass = Pass {
             db,
             session,
             english: &english,
             context: Context {
                 decided_by: by,
-                thresholds: thresholds(),
+                thresholds: thresholds(precheck),
             },
             running,
+            screen: Screen::new(precheck, &read.lines),
         };
         pass.run(&read, decider, self.rate)
     }
@@ -190,13 +222,71 @@ fn stored(e: &StoreError) -> JobEnd {
     crate::final_pass::stored(e)
 }
 
-/// The thresholds a proposal records, as `name=value` pairs.
-fn thresholds() -> String {
+/// The thresholds a proposal records, as `name=value` pairs: the gate's,
+/// the lookup's, the card cap's, and whether the pre-check ran (with its
+/// low log-probability share).
+fn thresholds(precheck: Precheck) -> String {
+    let precheck = match precheck {
+        Precheck::Off => "precheck=off".to_owned(),
+        Precheck::On => format!("precheck=on;low_log_prob_percent={LOW_LOG_PROB_PERCENT}"),
+    };
     format!(
         "similarity_min={SIMILARITY_MIN};keep={KEEP};keep_rare={KEEP_RARE};\
-         max_candidates={MAX_CANDIDATES};card_every_s={}",
+         max_candidates={MAX_CANDIDATES};card_every_s={};{precheck}",
         cards::CARD_EVERY.as_secs()
     )
+}
+
+/// How a run sorts its new candidates before asking: C3 on or off, and
+/// the recording's low log-probability band it reads signals from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Screen {
+    /// Whether C3 runs.
+    precheck: Precheck,
+    /// The recording's lowest log-probabilities, over every word of its
+    /// final text on both tracks; none if too few words have one.
+    low: Option<LowLogProb>,
+}
+
+impl Screen {
+    /// The screen for a run over `lines` with `precheck`.
+    fn new(precheck: Precheck, lines: &[FinalLine]) -> Self {
+        let known = lines
+            .iter()
+            .flat_map(|line| &line.heard.words)
+            .filter_map(|word| word.log_prob)
+            .map(LogProb::get);
+        let low = match precheck {
+            Precheck::Off => None,
+            Precheck::On => LowLogProb::of(known),
+        };
+        Self { precheck, low }
+    }
+
+    /// `new` offers in `chunk`, split into those to ask about and those
+    /// C3 skips (none while it's off), each in the order given.
+    fn sort(&self, chunk: &Chunk, new: Vec<Offer>) -> (Vec<Offer>, Vec<(Offer, Skipped)>) {
+        if self.precheck == Precheck::Off {
+            return (new, Vec::new());
+        }
+        let mut asked = Vec::new();
+        let mut skipped = Vec::new();
+        for offer in new {
+            match precheck(&offer.window, &offer.term, self.signal(chunk, &offer)) {
+                PreCheck::Ask(_) => asked.push(offer),
+                PreCheck::Skip(skip) => skipped.push((offer, skip)),
+            }
+        }
+        (asked, skipped)
+    }
+
+    /// What marks `offer`'s span in `chunk` as suspect, if anything: one
+    /// of its words in the recording's low band.
+    fn signal(&self, chunk: &Chunk, offer: &Offer) -> Option<Signal> {
+        let low = self.low?;
+        let lowest = chunk.lowest_log_prob(offer.words)?;
+        low.marks(lowest.get()).then_some(Signal::LowLogProb)
+    }
 }
 
 /// What a run reads before it starts.
@@ -346,6 +436,8 @@ struct Pass<'a> {
     context: Context,
     /// The runner's stop, progress and engine notes.
     running: &'a Running<'a>,
+    /// Which candidates are asked about.
+    screen: Screen,
 }
 
 /// How a chunk's question went.
@@ -353,7 +445,8 @@ enum Asked {
     /// Answered, or no answer to read: the chunk's proposals are stored.
     Settled {
         /// Whether the decider answered, rather than giving an answer
-        /// that couldn't be read or not being asked.
+        /// that couldn't be read, or not being asked (a question that
+        /// couldn't be put, or none left after the pre-check).
         answered: bool,
     },
     /// The run must end here, as given.
@@ -390,14 +483,15 @@ impl Pass<'_> {
             let done = u64::try_from(i).unwrap_or(u64::MAX);
             (self.running.progress)(nota_store::Progress { done, total });
             let offered = offers(chunk, lookup.find(chunk.text(), &allows), &origins);
-            let asked: Vec<Offer> = offered
+            let new: Vec<Offer> = offered
                 .iter()
                 .filter(|o| held.is_new(chunk.key(), o))
                 .cloned()
                 .collect();
-            if asked.is_empty() {
+            if new.is_empty() {
                 continue;
             }
+            let (asked, skipped) = self.screen.sort(chunk, new);
             // Checked before each question too: the decider sees the stop
             // only while it answers, and returning drops it.
             if (self.running.stop)() {
@@ -409,6 +503,7 @@ impl Pass<'_> {
                 previous,
                 offered: &offered,
                 asked: &asked,
+                skipped: &skipped,
                 blocked: held.blocked(chunk.key()),
             };
             match self.ask(&ask, &mut *decider) {
@@ -427,36 +522,54 @@ impl Pass<'_> {
         None
     }
 
-    /// Asks the decider about `ask`'s candidates and stores what it
-    /// makes of them.
+    /// Asks the decider about `ask`'s candidates, if any are left after
+    /// the pre-check, and stores what it makes of them with the skipped
+    /// ones, together: a run stopped after it neither asks nor skips any
+    /// of them again.
     fn ask(&self, ask: &Ask<'_>, decider: &mut dyn Decider) -> Asked {
-        let answers = match question(ask) {
-            Ok(question) => match decider.decide(&question, self.running.stop) {
-                Ok(decisions) => Answers::Given(decisions.iter().map(|(_, d)| *d).collect()),
-                Err(DecideError::Stopped) => return Asked::Ended(JobEnd::Waiting(None)),
-                Err(e @ DecideError::Unavailable(_)) => {
-                    return Asked::Ended(JobEnd::EngineDown(e.to_string()));
-                }
-                Err(e @ DecideError::Failed(_)) => Answers::None(e.to_string()),
-            },
-            Err(why) => Answers::None(why),
-        };
-        let proposals = chunk::settle(
-            ask.chunk,
-            ask.offered,
-            ask.asked,
-            &answers,
-            ask.blocked,
-            &self.context,
+        let mut answered = false;
+        let mut proposals = Vec::new();
+        if !ask.asked.is_empty() {
+            let answers = match self.answers(ask, decider) {
+                Ok(answers) => answers,
+                Err(end) => return Asked::Ended(end),
+            };
+            answered = matches!(answers, Answers::Given(_));
+            proposals = chunk::settle(
+                ask.chunk,
+                ask.offered,
+                ask.asked,
+                &answers,
+                ask.blocked,
+                &self.context,
+            );
+        }
+        proposals.extend(
+            ask.skipped
+                .iter()
+                .map(|(offer, skip)| chunk::skipped(ask.chunk, offer, *skip, &self.context)),
         );
         match self
             .db
             .with(|db| db.add_proposals(self.session, &proposals))
         {
-            Ok(()) => Asked::Settled {
-                answered: matches!(answers, Answers::Given(_)),
-            },
+            Ok(()) => Asked::Settled { answered },
             Err(e) => Asked::Ended(stored(&e)),
+        }
+    }
+
+    /// The decider's answers on `ask`'s candidates, or how the run ends if
+    /// it must end here.
+    fn answers(&self, ask: &Ask<'_>, decider: &mut dyn Decider) -> Result<Answers, JobEnd> {
+        let question = match question(ask) {
+            Ok(question) => question,
+            Err(why) => return Ok(Answers::None(why)),
+        };
+        match decider.decide(&question, self.running.stop) {
+            Ok(decisions) => Ok(Answers::Given(decisions.iter().map(|(_, d)| *d).collect())),
+            Err(DecideError::Stopped) => Err(JobEnd::Waiting(None)),
+            Err(e @ DecideError::Unavailable(_)) => Err(JobEnd::EngineDown(e.to_string())),
+            Err(e @ DecideError::Failed(_)) => Ok(Answers::None(e.to_string())),
         }
     }
 
@@ -483,8 +596,10 @@ struct Ask<'a> {
     previous: Option<&'a Chunk>,
     /// Every candidate the lookup offered in it.
     offered: &'a [Offer],
-    /// The new ones, which are asked about.
+    /// The new ones the pre-check left, which are asked about.
     asked: &'a [Offer],
+    /// The new ones it skipped, with C1's score on each.
+    skipped: &'a [(Offer, Skipped)],
     /// The words no new fix may change.
     blocked: &'a [WordSpan],
 }

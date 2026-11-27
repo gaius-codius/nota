@@ -30,10 +30,14 @@ program = "~/llama.cpp/build/bin/llama-server"
 model = "~/models/decider.gguf"
 device = "Vulkan0"
 # socket_dir = "/run/user/1000/nota"
+
+[clean_up]
+# similarity_precheck = true
 ```
 
-The file holds one table, `[local_decider]`, with the four keys below. All
-of them are text, in quotes.
+The file holds two tables. `[local_decider]` has the four keys below, all
+of them text, in quotes. `[clean_up]` has one key, described under "The
+clean-up table". You can leave out either table.
 
 ## The keys
 
@@ -88,6 +92,19 @@ Other relative paths (`"models/decider.gguf"`, `"./llama-server"`) aren't
 accepted, and nor is `~user/`. Environment variables such as `$HOME` aren't
 expanded.
 
+## The clean-up table
+
+### `similarity_precheck`
+
+`true` or `false`, with no quotes. Before asking the decider about a
+candidate, nota compares its letters with the term's. When they're too far
+apart for the fix ever to be applied, and the recogniser wasn't unsure of
+those words, it doesn't ask.
+
+Off by default while it's being measured. Without the key, or without the
+`[clean_up]` table, it's off. If the settings file can't be used, it's off
+too, and the engines screen says what's wrong with the file.
+
 ## When the decider isn't set up
 
 If there's no settings file, or the file doesn't give both `program` and
@@ -119,10 +136,13 @@ These are the reasons the last message gives:
 |---|---|
 | not UTF-8 text | Save the file as UTF-8. |
 | not TOML: `<detail>` | The file isn't valid TOML. The detail names the line. Check the quotes around each value. |
-| nota has no setting `<key>` | The file has a table or key outside `[local_decider]`. Move a key such as `program` under the `[local_decider]` line, check the table's spelling, or remove it. |
+| nota has no setting `<key>` | The file has a table or key outside `[local_decider]` and `[clean_up]`. Move a key such as `program` under the `[local_decider]` line, check the table's spelling, or remove it. |
 | local_decider isn't a table | `local_decider` is written as a value. Write it as the table `[local_decider]`, with the keys on the lines below. |
 | nota has no setting local_decider.`<key>` | That key isn't one of `program`, `model`, `device` and `socket_dir`. Check its spelling, or remove it. |
 | local_decider.`<key>` isn't text | Put the value in quotes. |
+| clean_up isn't a table | `clean_up` is written as a value. Write it as the table `[clean_up]`, with its key on the line below. |
+| nota has no setting clean_up.`<key>` | That key isn't `similarity_precheck`. Check its spelling, or remove it. |
+| clean_up.similarity_precheck isn't true or false | Write `true` or `false`, with no quotes. |
 | local_decider.program is empty | Give the program's path or name, or remove the key. |
 | local_decider.`<key>` starts with ~/ but there's no home directory | nota found no home folder. Set `HOME`, or give an absolute path. |
 | local_decider.`<key>` must be an absolute path or start with ~/: `<text>` | Write the path in full from `/`, or from `~/` (see "Paths"). |

@@ -90,13 +90,13 @@ fn any_term() -> impl Strategy<Value = String> {
 
 /// One gate call's inputs.
 #[derive(Debug, Clone)]
-struct Case {
+pub(crate) struct Case {
     /// The chunk's text.
-    chunk: String,
+    pub(crate) chunk: String,
     /// The candidates offered for it.
-    offered: Vec<Offered>,
+    pub(crate) offered: Vec<Offered>,
     /// What the model proposed.
-    proposals: Vec<Proposal>,
+    pub(crate) proposals: Vec<Proposal>,
 }
 
 /// One to `max` words from [`VOCAB`], joined by spaces.
@@ -121,7 +121,7 @@ fn joined(parts: &[(&str, &str)]) -> String {
 /// A case built from [`VOCAB`]: a chunk of up to a dozen words,
 /// candidates mostly for runs of its words, and proposals whose spans are
 /// mostly runs of its words and whose replacements mostly fix them.
-fn any_case() -> impl Strategy<Value = Case> {
+pub(crate) fn any_case() -> impl Strategy<Value = Case> {
     let parts = prop::collection::vec(
         (
             prop::sample::select(VOCAB),
@@ -170,7 +170,7 @@ fn any_case() -> impl Strategy<Value = Case> {
 /// with any characters, spans cut from it or made up, candidates of any
 /// text, and some proposals that echo their span with a candidate offered
 /// for it, so fixes are applied in Unicode text too.
-fn any_text_case() -> impl Strategy<Value = Case> {
+pub(crate) fn any_text_case() -> impl Strategy<Value = Case> {
     let chunk = "([a-zA-Z]{1,6}|.{1,3}|[ ,'-]){0,10}";
     (chunk, any_offered_text()).prop_flat_map(|(chunk, offered)| {
         let len = chunk.chars().count();

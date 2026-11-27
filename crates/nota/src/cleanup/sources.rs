@@ -21,7 +21,7 @@ use nota_llm::local::LocalDecider;
 use nota_store::DecidedBy;
 use nota_store::Pack;
 
-use super::{Setup, Sources};
+use super::{Precheck, Setup, Sources};
 #[cfg(unix)]
 use crate::settings::{self, Environment};
 
@@ -70,6 +70,15 @@ impl Sources for Installed {
     fn packs(&self) -> Result<Vec<Pack>, String> {
         installed(&self.packs)
             .map_err(|e| format!("the packs in {} can't be read: {e}", self.packs.display()))
+    }
+
+    fn precheck(&self) -> Precheck {
+        #[cfg(unix)]
+        let precheck = settings::precheck(&Environment::current());
+        // The settings are read on unix only.
+        #[cfg(not(unix))]
+        let precheck = Precheck::Off;
+        precheck
     }
 }
 

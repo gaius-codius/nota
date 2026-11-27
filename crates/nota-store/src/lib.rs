@@ -68,7 +68,7 @@ pub use migrate::Adopted;
 pub use packs::{Pack, PackDigest, PackError, PackRef};
 pub use proposals::{
     Decided, DecidedBy, Found, NewProposal, Origin, Outcome, Placing, Proposal, ProposalId,
-    Proposed, Refusal, Reviewed,
+    Proposed, Refusal, Reviewed, SKIPPED,
 };
 pub use revisions::{Applied, Change, ChunkKey, FinalLine, RevisionNumber, Timed, WordSpan};
 pub use segments::{AudioDigest, Inserted, RowKey, SegmentRow, Sha256Digest};

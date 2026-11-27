@@ -140,6 +140,7 @@ fn every_decision(chunk: ChunkKey) -> Vec<NewProposal> {
             "amoxicillin",
             Decided::NoAnswer("cut short".to_owned()),
         ),
+        proposal(chunk, "amylo edema", Decided::Skipped { similarity: 0.42 }),
         learned,
     ]
 }
@@ -167,6 +168,7 @@ fn proposals_read_back_as_stored() {
             Outcome::Applied(None),
             Outcome::ToRank,
             Outcome::ToRank,
+            Outcome::Rejected,
             Outcome::Rejected,
             Outcome::Rejected,
             Outcome::Rejected,

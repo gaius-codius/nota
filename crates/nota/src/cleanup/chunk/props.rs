@@ -149,7 +149,8 @@ proptest! {
             let yes = matches!(said, Ok(Said { answer: Answer::Yes, .. }));
             match (&p.decided, said) {
                 (Decided::NoAnswer(_), Err(_)) => {}
-                (Decided::NoAnswer(_), Ok(_)) | (_, Err(_)) => {
+                // Settling never skips: only the pre-check, before it, does.
+                (Decided::NoAnswer(_) | Decided::Skipped { .. }, Ok(_)) | (_, Err(_)) => {
                     prop_assert!(false, "answer {:?} decided {:?}", said, p.decided);
                 }
                 (Decided::No { .. }, _) => prop_assert!(!yes),
