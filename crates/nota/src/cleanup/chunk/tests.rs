@@ -80,6 +80,7 @@ fn summary(proposals: &[NewProposal]) -> Vec<(WordSpan, &str, &'static str)> {
                 Decided::Refused { .. } => "refused",
                 Decided::No { .. } => "no",
                 Decided::NoAnswer(_) => "no answer",
+                Decided::GaveUp(_) => "given up",
             };
             (p.proposed.words, p.proposed.replacement.as_str(), kind)
         })
@@ -145,13 +146,32 @@ fn two_fixes_in_one_word_are_one_change() {
     );
 }
 
-/// The gate places a yes on the first free occurrence of its heard span,
-/// which can be earlier than the one the lookup offered: the outcome names
-/// where it landed, and the proposal keeps where it was offered.
+/// Acceptance: a yes is applied at the occurrence the lookup offered it,
+/// and never changes another occurrence of the same words. With a no on
+/// the first "dose" and a yes on the second, only the second changes.
 #[test]
-fn a_fix_can_land_before_where_it_was_offered() {
+fn a_yes_changes_only_the_occurrence_it_was_offered_at() {
     let c = chunk("dose then dose", &[]);
-    let offers = [offer(&c, "dose", 5, "doses")];
+    let offers = [offer(&c, "dose", 0, "doses"), offer(&c, "dose", 5, "doses")];
+    let answers = Answers::Given(vec![no(), yes()]);
+    let settled = settle(&c, &offers, &offers, &answers, &[], &context());
+    assert_eq!(
+        summary(&settled),
+        [
+            (span(0, 0), "doses", "no"),
+            (span(2, 2), "doses", "applied")
+        ]
+    );
+    // The applied change is the words it was offered at.
+    assert_eq!(settled[1].proposed.offered, span(2, 2));
+}
+
+/// A word the lookup reads as one, hyphen and all, holds no occurrence of
+/// its parts: a yes on a lone "dose" isn't placed inside "dose-response".
+#[test]
+fn a_yes_is_not_placed_inside_a_hyphenated_word() {
+    let c = chunk("dose-response then dose", &[]);
+    let offers = [offer(&c, "dose", 10, "doses")];
     let settled = settle(
         &c,
         &offers,
@@ -160,12 +180,36 @@ fn a_fix_can_land_before_where_it_was_offered() {
         &[],
         &context(),
     );
-    assert_eq!(summary(&settled), [(span(0, 0), "doses", "applied")]);
-    assert_eq!(settled[0].proposed.offered, span(2, 2));
+    assert_eq!(summary(&settled), [(span(2, 2), "doses", "applied")]);
 }
 
-/// A fix that lands on words a review or an earlier fix holds is
-/// rejected as covered, and changes nothing.
+/// Acceptance: words a review or an earlier fix holds don't stop another
+/// occurrence of the same words being fixed, before them or after.
+#[test]
+fn held_words_leave_another_occurrence_free_to_fix() {
+    let c = chunk("dose then dose", &[]);
+    let first = offer(&c, "dose", 0, "doses");
+    let second = offer(&c, "dose", 5, "doses");
+    for (held, asked, want) in [
+        (span(0, 0), &second, span(2, 2)),
+        (span(2, 2), &first, span(0, 0)),
+    ] {
+        let offers = [first.clone(), second.clone()];
+        let settled = settle(
+            &c,
+            &offers,
+            std::slice::from_ref(asked),
+            &Answers::Given(vec![yes()]),
+            &[held],
+            &context(),
+        );
+        // The yes lands on its own occurrence, which no review holds.
+        assert_eq!(summary(&settled), [(want, "doses", "applied")], "{held:?}");
+    }
+}
+
+/// A fix on words a review or an earlier fix holds is rejected as
+/// covered, and changes nothing.
 #[test]
 fn a_fix_on_held_words_is_covered() {
     let c = chunk("dose then dose", &[]);
@@ -175,7 +219,7 @@ fn a_fix_on_held_words_is_covered() {
         &offers,
         &offers,
         &Answers::Given(vec![yes()]),
-        &[span(0, 0)],
+        &[span(2, 2)],
         &context(),
     );
     assert_eq!(summary(&settled), [(span(2, 2), "doses", "covered")]);
@@ -237,6 +281,22 @@ fn refusals_noes_and_missing_answers_keep_why() {
         [
             &Decided::NoAnswer("cut short".to_owned()),
             &Decided::NoAnswer("cut short".to_owned())
+        ]
+    );
+    // Given up on, every candidate is, with the decider's last failure.
+    let given_up = settle(
+        &c,
+        &offers,
+        &offers,
+        &Answers::GaveUp("no server".to_owned()),
+        &[],
+        &context(),
+    );
+    assert_eq!(
+        given_up.iter().map(|p| &p.decided).collect::<Vec<_>>(),
+        [
+            &Decided::GaveUp("no server".to_owned()),
+            &Decided::GaveUp("no server".to_owned())
         ]
     );
     // A list of answers that doesn't match the candidates is no answer.

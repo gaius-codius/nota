@@ -19,12 +19,12 @@
 //! | `epoch` | each epoch's first sample, rate, session-time anchor and drift (V7) ([`Store::insert_epoch`](crate::Store::insert_epoch)) | the recorder's publish step, before each segment row |
 //! | `utterance`, `word` | the heard text, as the engine confirmed it, with word times and log-probabilities (V11; unknown before); never changed (V4's triggers) | `nota record`'s live text ([`crate::transcript`]) |
 //! | `revision`, `revision_text` | the displayed text: revision 0 is the final pass's text, each later one a new row holding only what it changes, as runs of a chunk's words; never changed (V8) | revision 0 with the first final-text row, later ones by term clean-up ([`crate::revisions`]) |
-//! | `proposal` | each candidate term clean-up offered for a run of a chunk's words (from the lookup, or the hotword pass's difference, V13): where its term came from, the decider's answer, the gate's rule and scores, its outcome and its review (V12; V8's table, which nothing wrote, is kept closed as `proposal_v8`); only its outcome's ranking, the revision that applied it and its review are ever changed, once each | term clean-up ([`crate::proposals`]) |
+//! | `proposal` | each candidate term clean-up offered for a run of a chunk's words (from the lookup, or the hotword pass's difference, V14): where its term came from, the decider's answer, the gate's rule and scores, its outcome and its review (V12; V8's table, which nothing wrote, is kept closed as `proposal_v8`), and whether clean-up gave up asking about its chunk (V13); only its outcome's ranking, the revision that applied it and its review are ever changed, once each | term clean-up ([`crate::proposals`]) |
 //! | `heard_revision`, `heard_revision_text`, `heard_proposal` | the heard text's revisions and proposals from before V8, kept as they were and never added to | nothing since V8 |
 //! | `mark`, `note` | marks and notes made while recording, in session time | `nota record`, as each is made ([`crate::annotations`]) |
 //! | `job` | work queued after a stop: its kind, state, progress and what it waits for (V5) | the job queue ([`crate::jobs`]) |
 //! | `final_text`, `final_word`, `final_progress` | the final pass's text, by track and sample, with its words' log-probabilities (V11; unknown before), beside the heard text and never in it, never changed (V8); how far it has got on each track (V5) | the final pass ([`crate::final_text`]) |
-//! | `hotword_text`, `hotword_progress` | what the hotword pass heard in each final-pass chunk, with its boost, never changed; how far it has got on each track (V13) | the hotword pass ([`crate::hotword_text`]) |
+//! | `hotword_text`, `hotword_progress` | what the hotword pass heard in each final-pass chunk, with its boost, never changed; how far it has got on each track (V14) | the hotword pass ([`crate::hotword_text`]) |
 //! | `event` | the timeline: warnings raised and cleared, device changes, the transcriber's state, gaps | `nota record`, as each is sent to the screen ([`crate::timeline`]) |
 //! | `finding` | an index of each session's findings file: rows whose file didn't prove them, and rows that don't parse (V6) | the app, from the findings files ([`Store::index_findings`](crate::Store::index_findings)) |
 //! | `session_pack`, `session_packs_chosen` | the term packs a session chose, by name, version and digest (V10; none before), in order, and that it chose; never changed (V9) | Setup, when the session starts ([`Store::record_session_packs`](crate::Store::record_session_packs)) |
@@ -808,7 +808,33 @@ WHEN OLD.review IS NOT NULL
 BEGIN SELECT RAISE(ABORT, 'a proposal is never reviewed twice'); END;
 ";
 
-/// Version 13: the hotword pass. `hotword_text` holds what a
+/// Version 13: whether clean-up gave up on a proposal's chunk,
+/// `proposal.gave_up`. A chunk whose question found the decider down
+/// several times, while the decider answered other questions, has its
+/// candidates stored with no answer and `gave_up` set
+/// ([`crate::Decided::GaveUp`]), so the Processing screen can say how many
+/// chunks were given up on without reading the reason's words.
+///
+/// Every row stored before this version is 0: nothing gave up before.
+/// Only a row with no answer can be 1. The value goes in with its row and
+/// is never changed, like the rest of what a proposal records: V12's
+/// trigger is made again with the new column in its list.
+pub(crate) const V13: &str = "
+ALTER TABLE proposal ADD COLUMN gave_up INTEGER NOT NULL DEFAULT 0
+    CHECK (gave_up IN (0, 1) AND (gave_up = 0 OR rule IS 'no-answer'));
+
+DROP TRIGGER proposal_record_never_changed;
+CREATE TRIGGER proposal_record_never_changed BEFORE UPDATE OF
+    id, session_id, revision, track, start_sample, first_word, last_word, offered_first,
+    offered_last, heard, term,
+    replacement, source, pack_name, pack_version, pack_digest, matched, score, sounds,
+    trigrams, jaro_winkler, bar, decider, decider_model, decider_place, answer, no_answer,
+    yes_probability, gate, similarity, log_prob, rule, thresholds, log_version, gave_up
+    ON proposal
+BEGIN SELECT RAISE(ABORT, 'what a proposal records is never changed'); END;
+";
+
+/// Version 14: the hotword pass. `hotword_text` holds what a
 /// hotword-boosted beam search heard in each final-pass chunk (one row per
 /// `final_text` row it decoded, null text if it heard nothing, with the
 /// boost it ran at), and `hotword_progress` how far the pass has got on
@@ -818,8 +844,9 @@ BEGIN SELECT RAISE(ABORT, 'a proposal is never reviewed twice'); END;
 /// passes, with no lookup scores.
 ///
 /// Sessions stopped before this version get no hotword pass from it, as
-/// V12 gave them no clean-up job.
-pub(crate) const V13: &str = "
+/// V12 gave them no clean-up job. V13's `gave_up` column is kept, last, as
+/// V13 added it, with its check, and in the never-changed trigger's list.
+pub(crate) const V14: &str = "
 CREATE TABLE hotword_text (
     session_id INTEGER NOT NULL,
     track INTEGER NOT NULL,
@@ -847,7 +874,7 @@ CREATE TABLE hotword_progress (
     PRIMARY KEY (session_id, track)
 ) STRICT;
 
-CREATE TABLE proposal_v13 (
+CREATE TABLE proposal_v14 (
     id INTEGER PRIMARY KEY,
     session_id INTEGER NOT NULL,
     revision INTEGER NOT NULL,
@@ -887,6 +914,8 @@ CREATE TABLE proposal_v13 (
     review TEXT CHECK (review IS NULL OR review IN ('accepted', 'rejected')),
     thresholds TEXT NOT NULL,
     log_version INTEGER NOT NULL CHECK (log_version >= 1),
+    gave_up INTEGER NOT NULL DEFAULT 0
+        CHECK (gave_up IN (0, 1) AND (gave_up = 0 OR rule IS 'no-answer')),
     CHECK ((pack_name IS NULL) = (pack_version IS NULL)
         AND (pack_name IS NULL) = (pack_digest IS NULL)),
     CHECK ((matched = 'scored') = (score IS NOT NULL) AND (score IS NULL) = (sounds IS NULL)
@@ -915,9 +944,9 @@ CREATE TABLE proposal_v13 (
         REFERENCES final_word(session_id, track, start_sample, position)
 ) STRICT;
 
-INSERT INTO proposal_v13 SELECT * FROM proposal;
+INSERT INTO proposal_v14 SELECT * FROM proposal;
 DROP TABLE proposal;
-ALTER TABLE proposal_v13 RENAME TO proposal;
+ALTER TABLE proposal_v14 RENAME TO proposal;
 
 CREATE INDEX proposal_by_session ON proposal (session_id);
 
@@ -931,7 +960,8 @@ CREATE TRIGGER proposal_record_never_changed BEFORE UPDATE OF
     offered_last, heard, term,
     replacement, source, pack_name, pack_version, pack_digest, matched, score, sounds,
     trigrams, jaro_winkler, bar, decider, decider_model, decider_place, answer, no_answer,
-    yes_probability, gate, similarity, log_prob, rule, thresholds, log_version ON proposal
+    yes_probability, gate, similarity, log_prob, rule, thresholds, log_version, gave_up
+    ON proposal
 BEGIN SELECT RAISE(ABORT, 'what a proposal records is never changed'); END;
 CREATE TRIGGER proposal_ranked_once BEFORE UPDATE OF outcome ON proposal
 WHEN NEW.outcome IS NOT OLD.outcome

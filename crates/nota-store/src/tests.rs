@@ -573,6 +573,7 @@ pub(crate) fn library_at(path: &Path, version: usize) -> Connection {
         schema::V10,
         schema::V11,
         schema::V12,
+        schema::V13,
     ];
     let conn = raw(path);
     for step in &steps[..version - 1] {

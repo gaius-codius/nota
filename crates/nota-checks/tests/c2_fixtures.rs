@@ -103,6 +103,8 @@ fn fix(f: &Value, want: Vec<Option<Rejection>>) -> Fix {
         proposal: Proposal {
             heard: text(f, "heard"),
             replacement: text(f, "repl"),
+            // The bench placed every fix at the first free match.
+            at: None,
         },
         want,
         sim: f["sim"].as_f64(),
