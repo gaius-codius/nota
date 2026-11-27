@@ -227,8 +227,8 @@ fn a_bad_verdict_line_is_refused_with_its_line_number() {
     );
 }
 
-/// A log that gives one candidate's verdict twice is refused at the
-/// second line: a log holds one verdict for each candidate.
+/// A log that gives one candidate's verdict twice is refused at the line
+/// that repeats it: a log holds one verdict for each candidate.
 #[test]
 fn a_candidate_given_twice_is_refused_at_its_second_line() {
     let dir = TestDir::new("twice");
