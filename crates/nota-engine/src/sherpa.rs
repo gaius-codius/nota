@@ -15,9 +15,12 @@ use sherpa_onnx::{
     VadModelConfig, VoiceActivityDetector,
 };
 
+use nota_core::messages::Hotword;
+
 use crate::EngineError;
 use crate::child::{Detector, Heard, Models, TimedWord, Transcriber};
 use crate::chunker::Labels;
+use crate::hotwords::{Tokens as HotwordTokens, prepare};
 
 /// The only rate the models take.
 const RATE_HZ: i32 = 16_000;
@@ -60,11 +63,39 @@ pub struct ModelPaths {
     pub threads: u16,
 }
 
+/// How the hotword pass boosts: the score each hotword's tokens add, and
+/// where the engine writes the vocabulary it splits them with.
+#[derive(Debug, Clone)]
+pub struct BoostSetup {
+    /// What each matched hotword token adds to a beam's score
+    /// (sherpa-onnx's `hotwords_score`, 0 by default, which boosts
+    /// nothing): the bench ran 1.5, 2.0 and 3.0.
+    pub score: f32,
+    /// The vocabulary file the engine writes for each list (sherpa-onnx
+    /// reads it by path when the recogniser is built). It's the engine's
+    /// own: rewritten for every list, never read by nota.
+    pub vocab: PathBuf,
+}
+
 /// Parakeet and Silero, loaded.
 #[derive(Debug)]
 pub struct SherpaModels {
     recognizer: Parakeet,
     vad: VadModelConfig,
+    /// How to rebuild the recogniser for a hotword list; `None` for the
+    /// greedy passes, which don't boost.
+    boost: Option<Booster>,
+}
+
+/// What the hotword pass keeps to rebuild its recogniser for a list.
+#[derive(Debug)]
+struct Booster {
+    /// The beam recogniser's config, without a vocabulary.
+    config: OfflineRecognizerConfig,
+    /// Parakeet's tokens, which the vocabulary is built from.
+    tokens: HotwordTokens,
+    /// The score and the vocabulary's path.
+    setup: BoostSetup,
 }
 
 impl SherpaModels {
@@ -75,43 +106,97 @@ impl SherpaModels {
     /// [`EngineError::Model`] if a file is missing or sherpa-onnx refuses
     /// it.
     pub fn load(paths: &ModelPaths) -> Result<Self, EngineError> {
-        let file = |name: &str| existing(&paths.parakeet_dir.join(name));
-        let mut config = OfflineRecognizerConfig::default();
-        config.model_config.transducer.encoder = Some(file("encoder.int8.onnx")?);
-        config.model_config.transducer.decoder = Some(file("decoder.int8.onnx")?);
-        config.model_config.transducer.joiner = Some(file("joiner.int8.onnx")?);
-        config.model_config.tokens = Some(file("tokens.txt")?);
-        config.model_config.model_type = Some("nemo_transducer".into());
-        config.model_config.num_threads = i32::from(paths.threads.max(1));
-        config.model_config.provider = Some("cpu".into());
-        config.decoding_method = Some("greedy_search".into());
-        let recognizer = OfflineRecognizer::create(&config)
-            .ok_or_else(|| EngineError::Model("sherpa-onnx refused the Parakeet model".into()))?;
-
-        let vad = VadModelConfig {
-            silero_vad: SileroVadModelConfig {
-                model: Some(existing(&paths.vad_model)?),
-                threshold: 0.5,
-                // The pause threshold: a pause this long ends a segment.
-                min_silence_duration: 0.15,
-                min_speech_duration: 0.25,
-                window_size: 512,
-                // A real value: a huge one silently disables
-                // `min_silence_duration` in 1.13.8.
-                max_speech_duration: 30.0,
-            },
-            sample_rate: RATE_HZ,
-            num_threads: 1,
-            provider: Some("cpu".into()),
-            ..VadModelConfig::default()
-        };
-        // Fail now rather than on the first audio.
-        create_vad(&vad)?;
+        let config = parakeet_config(paths)?;
+        let recognizer = create_recognizer(&config)?;
         Ok(Self {
-            recognizer: Parakeet { recognizer },
-            vad,
+            recognizer: Parakeet {
+                recognizer,
+                hotwords: None,
+            },
+            vad: vad_config(paths)?,
+            boost: None,
         })
     }
+
+    /// Loads the recogniser for the hotword pass: modified beam search,
+    /// boosting nothing until [`Models::boost`] gives it a list, which
+    /// rebuilds it with that list's vocabulary.
+    ///
+    /// # Errors
+    ///
+    /// As [`SherpaModels::load`], or [`EngineError::Model`] if
+    /// `tokens.txt` can't be read or parsed.
+    pub fn load_boosted(paths: &ModelPaths, setup: BoostSetup) -> Result<Self, EngineError> {
+        let mut config = parakeet_config(paths)?;
+        config.decoding_method = Some("modified_beam_search".into());
+        config.hotwords_score = setup.score;
+        let tokens = read_tokens(&paths.parakeet_dir.join("tokens.txt"))?;
+        let recognizer = create_recognizer(&config)?;
+        Ok(Self {
+            recognizer: Parakeet {
+                recognizer,
+                hotwords: None,
+            },
+            vad: vad_config(paths)?,
+            boost: Some(Booster {
+                config,
+                tokens,
+                setup,
+            }),
+        })
+    }
+}
+
+/// The greedy Parakeet config for the files in `paths`.
+fn parakeet_config(paths: &ModelPaths) -> Result<OfflineRecognizerConfig, EngineError> {
+    let file = |name: &str| existing(&paths.parakeet_dir.join(name));
+    let mut config = OfflineRecognizerConfig::default();
+    config.model_config.transducer.encoder = Some(file("encoder.int8.onnx")?);
+    config.model_config.transducer.decoder = Some(file("decoder.int8.onnx")?);
+    config.model_config.transducer.joiner = Some(file("joiner.int8.onnx")?);
+    config.model_config.tokens = Some(file("tokens.txt")?);
+    config.model_config.model_type = Some("nemo_transducer".into());
+    config.model_config.num_threads = i32::from(paths.threads.max(1));
+    config.model_config.provider = Some("cpu".into());
+    config.decoding_method = Some("greedy_search".into());
+    Ok(config)
+}
+
+/// The recogniser for `config`.
+fn create_recognizer(config: &OfflineRecognizerConfig) -> Result<OfflineRecognizer, EngineError> {
+    OfflineRecognizer::create(config)
+        .ok_or_else(|| EngineError::Model("sherpa-onnx refused the Parakeet model".into()))
+}
+
+/// Parakeet's tokens, read from `path`.
+fn read_tokens(path: &Path) -> Result<HotwordTokens, EngineError> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| EngineError::Model(format!("can't read {}: {e}", path.display())))?;
+    HotwordTokens::parse(&text).map_err(|e| EngineError::Model(e.to_string()))
+}
+
+/// The Silero config for the model in `paths`, checked to load.
+fn vad_config(paths: &ModelPaths) -> Result<VadModelConfig, EngineError> {
+    let vad = VadModelConfig {
+        silero_vad: SileroVadModelConfig {
+            model: Some(existing(&paths.vad_model)?),
+            threshold: 0.5,
+            // The pause threshold: a pause this long ends a segment.
+            min_silence_duration: 0.15,
+            min_speech_duration: 0.25,
+            window_size: 512,
+            // A real value: a huge one silently disables
+            // `min_silence_duration` in 1.13.8.
+            max_speech_duration: 30.0,
+        },
+        sample_rate: RATE_HZ,
+        num_threads: 1,
+        provider: Some("cpu".into()),
+        ..VadModelConfig::default()
+    };
+    // Fail now rather than on the first audio.
+    create_vad(&vad)?;
+    Ok(vad)
 }
 
 impl Models for SherpaModels {
@@ -136,6 +221,69 @@ impl Models for SherpaModels {
     fn transcriber(&mut self) -> &mut Parakeet {
         &mut self.recognizer
     }
+
+    /// Rebuilds the beam recogniser with `hotwords`' vocabulary and boosts
+    /// the terms it splits as the model does. The greedy passes ignore it.
+    fn boost(&mut self, hotwords: &[Hotword]) -> Result<(), EngineError> {
+        let Some(booster) = &self.boost else {
+            return Ok(());
+        };
+        let prepared = prepare(&booster.tokens, hotwords);
+        write_vocab(&booster.setup.vocab, &prepared.vocab)?;
+        let mut config = booster.config.clone();
+        config.model_config.modeling_unit = Some("bpe".into());
+        config.model_config.bpe_vocab = Some(path_text(&booster.setup.vocab)?);
+        let recognizer = OfflineRecognizer::create(&config).ok_or_else(|| {
+            EngineError::Model(
+                "sherpa-onnx refused the boosted recognizer: its vocabulary or bpe settings".into(),
+            )
+        })?;
+        self.recognizer = Parakeet {
+            recognizer,
+            hotwords: stream_hotwords(prepared.hotwords),
+        };
+        Ok(())
+    }
+}
+
+/// What each stream boosts for the admitted terms in `hotwords`
+/// (sherpa-onnx's per-stream format): `None` when no term was admitted,
+/// since an empty list isn't one. The text can't hold a NUL (every
+/// hotword was checked at the protocol), so the crate's C string can't
+/// fail on it.
+fn stream_hotwords(hotwords: String) -> Option<String> {
+    Some(hotwords).filter(|h| !h.is_empty())
+}
+
+/// Writes the vocabulary `text` to `path`, where sherpa-onnx reads it, as
+/// a new file: whatever is at `path` is removed first (a symlink itself,
+/// never what it points to), and the file is created only if nothing is
+/// there, so the write can't follow a link onto another file.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the engine's own scratch file, rewritten for every list: neither a recording nor the database"
+)]
+fn write_vocab(path: &Path, text: &str) -> Result<(), EngineError> {
+    let failed =
+        |e: std::io::Error| EngineError::Model(format!("can't write {}: {e}", path.display()));
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(failed(e)),
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(failed)?;
+    std::io::Write::write_all(&mut file, text.as_bytes()).map_err(failed)
+}
+
+/// `path` as the UTF-8 text sherpa-onnx's config takes.
+fn path_text(path: &Path) -> Result<String, EngineError> {
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| EngineError::Model(format!("path isn't UTF-8: {}", path.display())))
 }
 
 fn existing(path: &Path) -> Result<String, EngineError> {
@@ -156,9 +304,12 @@ fn create_vad(config: &VadModelConfig) -> Result<VoiceActivityDetector, EngineEr
         .ok_or_else(|| EngineError::Model("sherpa-onnx refused the Silero VAD model".into()))
 }
 
-/// Parakeet TDT 0.6B v3, greedy.
+/// Parakeet TDT 0.6B v3: greedy, or beam search with hotwords.
 pub struct Parakeet {
     recognizer: OfflineRecognizer,
+    /// The hotwords each chunk's stream boosts, in sherpa-onnx's
+    /// per-stream format; `None` boosts nothing.
+    hotwords: Option<String>,
 }
 
 impl std::fmt::Debug for Parakeet {
@@ -169,7 +320,10 @@ impl std::fmt::Debug for Parakeet {
 
 impl Transcriber for Parakeet {
     fn transcribe(&mut self, audio: &[f32]) -> Heard {
-        let stream = self.recognizer.create_stream();
+        let stream = match &self.hotwords {
+            Some(hotwords) => self.recognizer.create_stream_with_hotwords(hotwords),
+            None => self.recognizer.create_stream(),
+        };
         stream.accept_waveform(RATE_HZ, audio);
         self.recognizer.decode(&stream);
         stream.get_result().map_or_else(Heard::default, |result| {
@@ -520,9 +674,94 @@ mod tests {
 
     use super::*;
 
-    /// The models and the fixture's audio, or `None` (said on stderr) if
-    /// they're absent. Fails instead when `NOTA_REQUIRE_TEST_MODELS=1`.
-    fn models_and_fixture() -> Option<(SherpaModels, Vec<f32>)> {
+    /// The vocabulary is written as a new file: a symlink at its path is
+    /// replaced, never followed, so the file it points to (a recording,
+    /// say) is left as it was; a file there is replaced.
+    #[cfg(unix)]
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test scaffolding: a scratch directory, not a recording or the database"
+    )]
+    fn the_vocabulary_never_follows_a_link() {
+        let dir = std::env::temp_dir().join(format!("nota-vocab-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let other = dir.join("segment-000001.flac");
+        std::fs::write(&other, b"audio").unwrap();
+        let vocab = dir.join("hotword-vocab.txt");
+        std::os::unix::fs::symlink(&other, &vocab).unwrap();
+        write_vocab(&vocab, "a 0\n").unwrap();
+        assert_eq!(std::fs::read(&other).unwrap(), b"audio");
+        assert!(!std::fs::symlink_metadata(&vocab).unwrap().is_symlink());
+        assert_eq!(std::fs::read_to_string(&vocab).unwrap(), "a 0\n");
+        write_vocab(&vocab, "b 0\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&vocab).unwrap(), "b 0\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A vocabulary written where nothing is creates the file, holding
+    /// exactly the text.
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test scaffolding: a scratch directory, not a recording or the database"
+    )]
+    fn the_vocabulary_is_written_where_nothing_was() {
+        let dir = std::env::temp_dir().join(format!("nota-vocab-fresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let vocab = dir.join("hotword-vocab.txt");
+        write_vocab(&vocab, "a\t-1.0\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&vocab).unwrap(), "a\t-1.0\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Anything at the path that can't be removed, a directory here, stops
+    /// the write with the removal's own error, not a later one's.
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test scaffolding: a scratch directory, not a recording or the database"
+    )]
+    fn a_vocabulary_path_that_cannot_be_cleared_fails_with_why() {
+        let dir = std::env::temp_dir().join(format!("nota-vocab-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let vocab = dir.join("hotword-vocab.txt");
+        std::fs::create_dir_all(&vocab).unwrap();
+        // The error removing a directory gives on this system (EISDIR on
+        // Linux, EPERM on macOS); creating the file would fail differently.
+        let removing = std::fs::remove_file(&vocab).unwrap_err();
+        let Err(EngineError::Model(why)) = write_vocab(&vocab, "a\t-1.0\n") else {
+            panic!("a directory at the vocabulary's path was written over");
+        };
+        assert_eq!(why, format!("can't write {}: {removing}", vocab.display()));
+        assert!(vocab.is_dir());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The admitted terms are boosted as they are; with none admitted,
+    /// nothing is.
+    #[test]
+    fn only_admitted_terms_are_boosted() {
+        assert_eq!(
+            stream_hotwords("amlodipine/bisoprolol".to_owned()).as_deref(),
+            Some("amlodipine/bisoprolol")
+        );
+        assert_eq!(stream_hotwords(String::new()), None);
+    }
+
+    /// A UTF-8 path is given to sherpa-onnx as it is.
+    #[test]
+    fn a_utf8_path_is_its_text() {
+        let path = Path::new("/run/nota/hotword-vocab-é.txt");
+        assert_eq!(path_text(path).unwrap(), "/run/nota/hotword-vocab-é.txt");
+    }
+
+    /// The model files in the test models' folder, or `None` (said on
+    /// stderr) if they, or the `extra` files there, are absent. Fails
+    /// instead when `NOTA_REQUIRE_TEST_MODELS=1`.
+    fn test_models(extra: &[&str]) -> Option<(PathBuf, ModelPaths)> {
         let root = std::env::var_os("NOTA_TEST_MODELS")
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
@@ -531,13 +770,12 @@ mod tests {
                     .map(|h| PathBuf::from(h).join(".local/share/nota/test-models"))
             })
             .unwrap_or_default();
-        let wav = root.join("fixtures/invented-lecture.wav");
         let paths = ModelPaths {
             parakeet_dir: root.join("parakeet-tdt-0.6b-v3-int8"),
             vad_model: root.join("silero_vad_v6.onnx"),
             threads: 2,
         };
-        if !wav.is_file() || !paths.vad_model.is_file() {
+        if !paths.vad_model.is_file() || !extra.iter().all(|file| root.join(file).is_file()) {
             assert!(
                 std::env::var_os("NOTA_REQUIRE_TEST_MODELS").is_none_or(|v| v != "1"),
                 "NOTA_REQUIRE_TEST_MODELS=1 but no test models in {}",
@@ -550,9 +788,56 @@ mod tests {
             );
             return None;
         }
+        Some((root, paths))
+    }
+
+    /// The models and the fixture's audio, or `None` (said on stderr) if
+    /// they're absent. Fails instead when `NOTA_REQUIRE_TEST_MODELS=1`.
+    fn models_and_fixture() -> Option<(SherpaModels, Vec<f32>)> {
+        let wav = "fixtures/invented-lecture.wav";
+        let (root, paths) = test_models(&[wav])?;
         let models = SherpaModels::load(&paths).unwrap();
-        let wave = sherpa_onnx::Wave::read(wav.to_str().unwrap()).unwrap();
+        let wave = sherpa_onnx::Wave::read(root.join(wav).to_str().unwrap()).unwrap();
         Some((models, wave.samples().to_vec()))
+    }
+
+    /// Boosting writes the list's vocabulary where the setup says and
+    /// boosts the terms it admits in every stream; an empty list then
+    /// boosts nothing.
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test scaffolding: a scratch directory, not a recording or the database"
+    )]
+    fn boosting_writes_the_vocabulary_and_boosts_its_terms() {
+        let Some((_, paths)) = test_models(&[]) else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("nota-vocab-boost-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let setup = BoostSetup {
+            score: 2.0,
+            vocab: dir.join("hotword-vocab.txt"),
+        };
+        let mut models = SherpaModels::load_boosted(&paths, setup.clone()).unwrap();
+        let list = ["amlodipine", "Bisoprolol"].map(|t| Hotword::new(t).unwrap());
+        models.boost(&list).unwrap();
+        let tokens = read_tokens(&paths.parakeet_dir.join("tokens.txt")).unwrap();
+        let prepared = prepare(&tokens, &list);
+        assert_eq!(
+            std::fs::read_to_string(&setup.vocab).unwrap(),
+            prepared.vocab
+        );
+        assert_ne!(prepared.admitted, Vec::<String>::new());
+        assert_eq!(
+            models.recognizer.hotwords.as_deref(),
+            Some(prepared.hotwords.as_str())
+        );
+        // An empty list boosts nothing, rather than an empty term.
+        models.boost(&[]).unwrap();
+        assert_eq!(models.recognizer.hotwords, None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Runs a detector from `first` over `audio` in 100 ms pieces; returns

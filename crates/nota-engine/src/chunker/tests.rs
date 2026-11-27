@@ -319,6 +319,31 @@ fn final_pass_config_is_valid_at_any_rate() {
     assert_eq!(final_pass.frame().get(), 480);
 }
 
+/// The hotword pass's config is valid at any rate; at 16 kHz the pause,
+/// target and cap are all 26 s, the window 8 s and the frame 30 ms.
+#[test]
+fn hotword_pass_config_is_valid_at_any_rate() {
+    for hz in [1, 2, 7, 8_000, 16_000, 48_000, 1_000_000] {
+        let rate = nota_core::SampleRate::new(hz).unwrap();
+        let hotword_pass = ChunkerConfig::hotword_pass(rate);
+        let again = ChunkerConfig::new(
+            hotword_pass.min_pause(),
+            hotword_pass.target(),
+            hotword_pass.cap(),
+            hotword_pass.fallback_window(),
+            hotword_pass.frame(),
+        )
+        .unwrap();
+        assert_eq!(hotword_pass, again, "{hz} Hz");
+    }
+    let hotword_pass = ChunkerConfig::hotword_pass(nota_core::SampleRate::SPEECH);
+    assert_eq!(hotword_pass.min_pause().get(), 416_000);
+    assert_eq!(hotword_pass.target().get(), 416_000);
+    assert_eq!(hotword_pass.cap().get(), 416_000);
+    assert_eq!(hotword_pass.fallback_window().get(), 128_000);
+    assert_eq!(hotword_pass.frame().get(), 480);
+}
+
 #[test]
 fn config_refuses_out_of_range_values() {
     let c = |p, t, cap, w, f| {

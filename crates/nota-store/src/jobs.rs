@@ -43,17 +43,22 @@ use crate::{Store, StoreError, parse_session, session_key};
 pub enum JobKind {
     /// The final transcription pass over the session's published audio.
     FinalPass,
-    /// Term clean-up over the final pass's text, once that's done.
+    /// The hotword pass: the final pass's chunks decoded again by a beam
+    /// search boosting the session's terms, once the final pass is done.
+    HotwordPass,
+    /// Term clean-up over the final pass's text, once that's done and the
+    /// hotword pass has run or can't.
     CleanUp,
 }
 
 impl JobKind {
     /// Every kind, in the order a stopped session's jobs are queued.
-    pub const ALL: [Self; 2] = [Self::FinalPass, Self::CleanUp];
+    pub const ALL: [Self; 3] = [Self::FinalPass, Self::HotwordPass, Self::CleanUp];
 
     const fn as_str(self) -> &'static str {
         match self {
             Self::FinalPass => "final-pass",
+            Self::HotwordPass => "hotword-pass",
             Self::CleanUp => "clean-up",
         }
     }
@@ -61,6 +66,7 @@ impl JobKind {
     fn parse(text: &str) -> Result<Self, StoreError> {
         match text {
             "final-pass" => Ok(Self::FinalPass),
+            "hotword-pass" => Ok(Self::HotwordPass),
             "clean-up" => Ok(Self::CleanUp),
             other => Err(StoreError::Corrupt(format!("unknown job kind {other:?}"))),
         }
@@ -82,8 +88,12 @@ pub enum Wait {
     Audio,
     /// A decider to answer on the candidates: none is set up.
     Decider,
-    /// The session's final pass, whose text term clean-up works on.
+    /// The session's final pass, whose text term clean-up and the hotword
+    /// pass work on.
     FinalText,
+    /// The session's hotword pass, whose text term clean-up compares with
+    /// the final pass's.
+    HotwordText,
 }
 
 impl Wait {
@@ -94,6 +104,7 @@ impl Wait {
             Self::Audio => "audio",
             Self::Decider => "decider",
             Self::FinalText => "final-text",
+            Self::HotwordText => "hotword-text",
         }
     }
 
@@ -104,6 +115,7 @@ impl Wait {
             "audio" => Ok(Self::Audio),
             "decider" => Ok(Self::Decider),
             "final-text" => Ok(Self::FinalText),
+            "hotword-text" => Ok(Self::HotwordText),
             other => Err(StoreError::Corrupt(format!("unknown job wait {other:?}"))),
         }
     }

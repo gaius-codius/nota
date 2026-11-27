@@ -65,7 +65,14 @@ pub(crate) fn from_fixture(path: &Path, precheck: Precheck) -> Result<Candidates
         })
         .collect();
     let chunks = chunks(&fixture.chunks);
-    let offering = offering_in(&english, &vocab, &BTreeMap::new(), &|_, _| true, chunks);
+    let offering = offering_in(
+        &english,
+        &vocab,
+        &BTreeMap::new(),
+        &|_, _| true,
+        chunks,
+        None,
+    );
     Ok(Candidates {
         source: format!("fixture {}", path.display()),
         offering,

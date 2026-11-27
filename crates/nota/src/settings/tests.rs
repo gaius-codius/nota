@@ -776,3 +776,121 @@ fn the_guide_has_every_unavailable_message() {
         assert!(guide.contains(&message), "not in the guide: {message}");
     }
 }
+
+/// The boost in a settings file's `text`, or why it's refused.
+fn boost(text: &str) -> Result<f64, String> {
+    parse_boost(text).map(Boost::get)
+}
+
+/// The hotword pass's boost is read as written, a whole number as well as
+/// one with a point.
+#[test]
+fn the_boost_is_read_as_written() {
+    assert_eq!(boost("[hotword_pass]\nboost = 2.5\n"), Ok(2.5));
+    assert_eq!(boost("[hotword_pass]\nboost = 10\n"), Ok(10.0));
+}
+
+/// Without the key, the table or the file, the boost is 3.
+#[test]
+fn without_a_boost_it_is_three() {
+    assert_eq!(boost(""), Ok(3.0));
+    assert_eq!(boost("[hotword_pass]\n"), Ok(3.0));
+    assert_eq!(boost("[local_decider]\nmodel = '/m'\n"), Ok(3.0));
+    let dir = TestDir::new("no-boost-file");
+    assert_eq!(hotword_boost(&dir.env()).map(Boost::get).ok(), Some(3.0));
+    let none = Environment {
+        settings: None,
+        ..dir.env()
+    };
+    assert_eq!(hotword_boost(&none).map(Boost::get).ok(), Some(3.0));
+}
+
+/// A boost of 0 or less, over 10, or not a number at all is refused,
+/// naming the setting and the value.
+#[test]
+fn a_boost_out_of_range_or_not_a_number_is_refused() {
+    let out = |value: &str| {
+        Err(format!(
+            "hotword_pass.boost must be a number above 0 and at most 10: {value}"
+        ))
+    };
+    assert_eq!(boost("[hotword_pass]\nboost = 0\n"), out("0"));
+    assert_eq!(boost("[hotword_pass]\nboost = -1.5\n"), out("-1.5"));
+    assert_eq!(boost("[hotword_pass]\nboost = 10.5\n"), out("10.5"));
+    assert_eq!(boost("[hotword_pass]\nboost = nan\n"), out("NaN"));
+    assert_eq!(boost("[hotword_pass]\nboost = inf\n"), out("inf"));
+    assert_eq!(
+        boost("[hotword_pass]\nboost = 99999999999\n"),
+        out("99999999999")
+    );
+    assert_eq!(
+        boost("[hotword_pass]\nboost = \"3\"\n"),
+        Err("hotword_pass.boost isn't a number".to_owned())
+    );
+    assert_eq!(
+        boost("[hotword_pass]\nscore = 3\n"),
+        Err("nota has no setting hotword_pass.score".to_owned())
+    );
+    assert_eq!(
+        boost("hotword_pass = 3\n"),
+        Err("hotword_pass isn't a table".to_owned())
+    );
+    assert_eq!(
+        boost("[engines]\n"),
+        Err("nota has no setting engines".to_owned())
+    );
+}
+
+/// A bad boost in the file is reported naming the file.
+#[test]
+fn a_bad_boost_names_the_file() {
+    let dir = TestDir::new("bad-boost");
+    let file = dir.settings("[hotword_pass]\nboost = 12\n");
+    let why = hotword_boost(&dir.env()).unwrap_err();
+    assert!(
+        matches!(&why, Unavailable::Invalid(p, w) if *p == file
+            && w == "hotword_pass.boost must be a number above 0 and at most 10: 12"),
+        "{why:?}"
+    );
+}
+
+/// The hotword pass's table beside the decider's leaves the decider ready.
+#[test]
+fn a_hotword_table_leaves_the_decider_ready() {
+    let dir = TestDir::new("both-tables");
+    let program = dir.program("llama-server");
+    let model = dir.file("model.gguf", "");
+    dir.settings(&format!(
+        "[local_decider]\nprogram = {}\nmodel = {}\n\n[hotword_pass]\nboost = 2\n",
+        toml_path(&program),
+        toml_path(&model)
+    ));
+    let config = ready_config(local_decider(&dir.env()));
+    assert_eq!((config.program, config.model), (program, model));
+    assert_eq!(hotword_boost(&dir.env()).map(Boost::get).ok(), Some(2.0));
+}
+
+/// The guide's hotword section gives an example that parses, names every
+/// key of the table and no other, and has every reason a boost is refused.
+#[test]
+fn the_guide_describes_the_hotword_pass() {
+    assert_eq!(boost(guide_example("## The hotword pass")), Ok(3.0));
+    let (_, section) = GUIDE.split_once("## The hotword pass\n").unwrap();
+    let section = section.split("\n## ").next().unwrap();
+    let named: Vec<&str> = section
+        .lines()
+        .filter_map(|line| line.strip_prefix("### `")?.strip_suffix('`'))
+        .collect();
+    assert_eq!(named, HOTWORD_KEYS);
+    let reasons = [
+        "hotword_pass isn't a table".to_owned(),
+        "nota has no setting hotword_pass.<key>".to_owned(),
+        "hotword_pass.boost isn't a number".to_owned(),
+        "hotword_pass.boost must be a number above 0 and at most 10: <value>".to_owned(),
+    ];
+    let section = section.replace('`', "");
+    for reason in reasons {
+        let row = format!("| {reason} |");
+        assert!(section.contains(&row), "not in the guide: {row}");
+    }
+}

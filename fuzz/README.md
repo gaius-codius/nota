@@ -80,6 +80,10 @@ frame it accepts:
 - a transcript covers some samples, and each of its words has text, lies
   inside the transcript's range, and starts no earlier than the word before
   ends
+- a hotwords message holds at most `MAX_HOTWORDS`, each a hotword
+  `Hotword::new` accepts as it stands: none holds a `/`, a control
+  character or a word starting with `:`, which the engine's per-stream
+  hotwords format would misread
 - a word's log-probability, when it has one, is finite and at most zero,
   and never a negative zero (the one zero is positive). `LogProb`'s
   constructors already ensure that, so this guards against a change to
@@ -87,13 +91,15 @@ frame it accepts:
   log-probability field reads as a value or the one unknown encoding,
   never another NaN, or the frame is refused
 
-Seeds are any encoded frames: a handshake, and a transcript with two
-words, the first with the log-probability −0.5 and the second unknown, so
-a run reaches the word fields from the start:
+Seeds are any encoded frames: a handshake, a transcript with two words,
+the first with the log-probability −0.5 and the second unknown, so a run
+reaches the word fields from the start, and a hotwords message with two
+hotwords (`amlodipine`, `varicose veins`):
 
 ```sh
 mkdir -p in-protocol
-printf '\x07\x00\x00\x00\x00nota\x02\x00' > in-protocol/hello
+printf '\x07\x00\x00\x00\x00nota\x03\x00' > in-protocol/hello
+printf '\x21\x00\x00\x00\x03\x02\x00\x00\x00\x0a\x00amlodipine\x0e\x00varicose veins' > in-protocol/hotwords
 printf '\x52\x00\x00\x00\x81\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x10\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x08\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xbf\x02\x00\x00\x00\x68\x69\x08\x00\x00\x00\x00\x00\x00\x00\x10\x00\x00\x00\x00\x00\x00\x00\x00\x00\xc0\x7f\x02\x00\x00\x00\x79\x6f\x68\x69\x20\x79\x6f' > in-protocol/transcript
 cargo afl build --release
 AFL_SKIP_CPUFREQ=1 AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 \

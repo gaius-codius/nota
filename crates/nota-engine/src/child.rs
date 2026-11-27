@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 
 use nota_core::messages::{
-    AudioChunk, FromEngine, HeardWord, ProtocolVersion, ToEngine, Transcript,
+    AudioChunk, FromEngine, HeardWord, Hotword, ProtocolVersion, ToEngine, Transcript,
 };
 use nota_core::protocol::{Frame, FrameReader, write_frame};
 use nota_core::{LogProb, SampleCount, SampleIndex, SampleRange, SampleRate, TrackId};
@@ -73,6 +73,14 @@ pub trait Models {
 
     /// The recogniser.
     fn transcriber(&mut self) -> &mut Self::Transcriber;
+
+    /// Boosts `hotwords` in every chunk from now on, in place of any list
+    /// given before. Models that can't boost ignore them and return `Ok`.
+    ///
+    /// # Errors
+    ///
+    /// If the boosted recogniser can't be built.
+    fn boost(&mut self, hotwords: &[Hotword]) -> Result<(), EngineError>;
 }
 
 /// One track's state: its detector and chunker.
@@ -83,7 +91,7 @@ struct Track<D> {
 
 /// Runs the protocol on `input` and `output` until `input` ends, cutting
 /// each track's audio as `chunking` says (at 16 kHz): the live pass's
-/// config, or the final pass's.
+/// config, the final pass's or the hotword pass's.
 ///
 /// The recorder's `Hello` must come first; `load` is then called to load
 /// the models, and the engine's `Hello` tells the recorder it's ready.
@@ -131,6 +139,7 @@ pub fn run<M: Models>(
                     finish(&mut output, models.transcriber(), id, track)?;
                 }
             }
+            Frame::Message(ToEngine::Hotwords(hotwords)) => models.boost(&hotwords)?,
         }
     }
     for (id, track) in tracks {

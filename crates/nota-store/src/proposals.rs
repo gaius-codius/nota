@@ -64,11 +64,17 @@ pub enum Origin {
     Learned,
 }
 
-/// How the lookup found a proposal's term for its heard span.
+/// How clean-up found a proposal's term for its heard span: by the lookup
+/// (an alias, or a score), or by the hotword pass. It also says which
+/// source the proposal came from (`proposal.source`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Found {
     /// The span is one of the term's aliases.
     Alias,
+    /// The hotword pass's beam search, boosting the session's terms, heard
+    /// the term where the final pass heard the span: their difference
+    /// (`nota_checks::hotword_candidates`). No lookup score goes with it.
+    Hotword,
     /// The span sounds and looks like the term.
     Scored {
         /// The weighted score, from 0 to 1.
@@ -449,6 +455,7 @@ type FoundColumns = (
 fn found_columns(found: Found) -> FoundColumns {
     match found {
         Found::Alias => ("alias", None, None, None, None, None),
+        Found::Hotword => ("diff", None, None, None, None, None),
         Found::Scored {
             score,
             sounds,
@@ -471,6 +478,15 @@ const fn place_str(place: Place) -> &'static str {
     match place {
         Place::Local => "local",
         Place::Cloud => "cloud",
+    }
+}
+
+/// The source `found` means: the hotword pass for its difference, the
+/// lookup otherwise.
+const fn source_str(found: Found) -> &'static str {
+    match found {
+        Found::Hotword => "hotword",
+        Found::Alias | Found::Scored { .. } => "lookup",
     }
 }
 
@@ -498,7 +514,7 @@ fn insert(conn: &Connection, key: i64, new: &NewProposal) -> Result<(), StoreErr
          pack_version, pack_digest, matched, score, sounds, trigrams, jaro_winkler, bar, \
          decider, decider_model, decider_place, answer, no_answer, yes_probability, gate, \
          similarity, log_prob, outcome, rule, thresholds, log_version, gave_up) VALUES (?1, 0, \
-         ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'lookup', ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
+         ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?34, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
          ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33)",
         params![
             key,
@@ -534,6 +550,7 @@ fn insert(conn: &Connection, key: i64, new: &NewProposal) -> Result<(), StoreErr
             p.thresholds,
             LOG_VERSION,
             gave_up,
+            source_str(p.found),
         ],
     )?;
     Ok(())
@@ -576,6 +593,7 @@ fn parse_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Proposal, StoreEr
         r.get::<_, Option<String>>(16)?,
     ) {
         ("alias", None) => Found::Alias,
+        ("diff", None) => Found::Hotword,
         ("scored", Some(bar)) => Found::Scored {
             score: r.get(12)?,
             sounds: r.get(13)?,

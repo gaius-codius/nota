@@ -35,9 +35,10 @@ device = "Vulkan0"
 # similarity_precheck = true
 ```
 
-The file holds two tables. `[local_decider]` has the four keys below, all
-of them text, in quotes. `[clean_up]` has one key, described under "The
-clean-up table". You can leave out either table.
+The file holds the table `[local_decider]`, with the four keys below. All
+of them are text, in quotes. It may also hold `[hotword_pass]` (see "The
+hotword pass") and `[clean_up]` (see "The clean-up table"); any other
+table is a mistake. You can leave out any of them.
 
 ## The keys
 
@@ -79,6 +80,37 @@ never need to set it.
 nota creates the folder if it's missing, readable only by you. If the folder
 is already there, it must be readable only by you (no group or other
 permissions, as `chmod 700` leaves it), or the server won't start.
+
+## The hotword pass
+
+After the final transcript, nota listens to each part of the recording
+again with the terms from the session's packs boosted, and compares what
+it hears with the final transcript to find terms it misheard. The table
+`[hotword_pass]` says how strongly the terms are boosted:
+
+```toml
+[hotword_pass]
+boost = 3.0
+```
+
+### `boost`
+
+A number above 0 and at most 10, such as `3.0` or `2`. A higher boost
+makes the terms more likely to be heard, whether they were said or not.
+Without it (or without the table), nota uses 3.
+
+nota reads it each time the hotword pass runs. If it isn't a number in that
+range, the hotword pass for each session fails with a message naming the
+setting, as "the hotword pass's boost can't be used:" and then one of the
+messages in "When the decider is unavailable" (if the file can't be read)
+or "the settings `<file>` aren't usable:" with one of these reasons:
+
+| Reason | What to fix |
+|---|---|
+| hotword_pass isn't a table | Write it as the table `[hotword_pass]`, with `boost` on the line below. |
+| nota has no setting hotword_pass.`<key>` | The table holds only `boost`. Check the key's spelling, or remove it. |
+| hotword_pass.boost isn't a number | Write the number without quotes, such as `boost = 3.0`. |
+| hotword_pass.boost must be a number above 0 and at most 10: `<value>` | Give a number in that range. |
 
 ## Paths
 
@@ -138,7 +170,7 @@ These are the reasons the last message gives:
 |---|---|
 | not UTF-8 text | Save the file as UTF-8. |
 | not TOML: `<detail>` | The file isn't valid TOML. The detail names the line. Check the quotes around each value. |
-| nota has no setting `<key>` | The file has a table or key outside `[local_decider]` and `[clean_up]`. Move a key such as `program` under the `[local_decider]` line, check the table's spelling, or remove it. |
+| nota has no setting `<key>` | The file has a table or key outside `[local_decider]`, `[hotword_pass]` and `[clean_up]`. Move a key such as `program` under the `[local_decider]` line, check the table's spelling, or remove it. |
 | local_decider isn't a table | `local_decider` is written as a value. Write it as the table `[local_decider]`, with the keys on the lines below. |
 | nota has no setting local_decider.`<key>` | That key isn't one of `program`, `model`, `device` and `socket_dir`. Check its spelling, or remove it. |
 | local_decider.`<key>` isn't text | Put the value in quotes. |

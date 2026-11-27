@@ -238,6 +238,26 @@ fn a_step_waiting_for_a_decider_leaves_the_session_ready() {
     );
 }
 
+/// A step waiting for the hotword pass says so.
+#[test]
+fn a_step_waiting_for_the_hotword_pass_says_so() {
+    let mut screen = Processing::new("Test".into(), "engine".into(), Theme::no_color());
+    screen.set_jobs(vec![job(
+        "Fixing terms",
+        ProcessingState::Waiting {
+            reason: ProcessingWait::HotwordText,
+            progress: 0,
+        },
+    )]);
+    let output = draw(&mut screen, 100, 20);
+    assert!(
+        output.contains(
+            "○  Fixing terms · parakeet · waiting: waiting for the terms to be heard again"
+        ),
+        "{output}"
+    );
+}
+
 /// A failed step keeps its explanation.
 #[test]
 fn failure_is_visible_without_colour() {

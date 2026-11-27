@@ -39,8 +39,8 @@ fn states(store: &Store) -> Vec<(SessionId, JobState)> {
         .collect()
 }
 
-/// Stopping a recording marks it stopped and queues its final pass and
-/// its clean-up, in order of the stops; stopping again queues nothing
+/// Stopping a recording marks it stopped and queues its final pass, its
+/// hotword pass and its clean-up, in order of the stops; stopping again queues nothing
 /// more.
 #[test]
 fn a_stop_queues_the_sessions_jobs_once() {
@@ -64,6 +64,13 @@ fn a_stop_queues_the_sessions_jobs_once() {
             ),
             (
                 S2,
+                JobKind::HotwordPass,
+                JobState::Waiting(None),
+                0,
+                Progress::default()
+            ),
+            (
+                S2,
                 JobKind::CleanUp,
                 JobState::Waiting(None),
                 0,
@@ -72,6 +79,13 @@ fn a_stop_queues_the_sessions_jobs_once() {
             (
                 S1,
                 JobKind::FinalPass,
+                JobState::Waiting(Some(Wait::Space)),
+                0,
+                Progress::default()
+            ),
+            (
+                S1,
+                JobKind::HotwordPass,
                 JobState::Waiting(Some(Wait::Space)),
                 0,
                 Progress::default()
@@ -92,7 +106,7 @@ fn a_stop_queues_the_sessions_jobs_once() {
             SessionState::Stopped
         );
     }
-    assert_eq!(store.session_jobs(S1).unwrap(), jobs[2..]);
+    assert_eq!(store.session_jobs(S1).unwrap(), jobs[3..]);
     assert!(matches!(
         store.finish_recording(SessionId::new(9), None),
         Err(StoreError::NoSession(_))
@@ -446,10 +460,10 @@ fn an_adopted_session_gets_its_jobs() {
         crate::Adopted::Added
     );
     assert_eq!(states(&store), [(found, JobState::Waiting(None))]);
-    // Adopting it again changes nothing: it keeps its final pass and its
-    // clean-up.
+    // Adopting it again changes nothing: it keeps its final pass, its
+    // hotword pass and its clean-up.
     store
         .adopt_session(&crate::NewSession::bare(found), None)
         .unwrap();
-    assert_eq!(store.jobs().unwrap().len(), 2);
+    assert_eq!(store.jobs().unwrap().len(), 3);
 }

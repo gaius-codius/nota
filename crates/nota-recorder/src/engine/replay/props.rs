@@ -317,6 +317,7 @@ fn send(replay: &mut Replay, model: &mut Model) -> Result<(), TestCaseError> {
                 model.follows = None;
                 model.engine.push_back(Frame::Flush);
             }
+            ToEngine::Hotwords(_) => prop_assert!(false, "the replay sent hotwords"),
         }
     }
     // Everything still held has now been sent to this engine.

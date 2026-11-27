@@ -46,7 +46,7 @@ const CHUNK: u64 = 480_000;
 /// glossary pack of `terms` recorded as its pack.
 struct Fixture {
     /// Removed at the end.
-    _dir: TestDir,
+    dir: TestDir,
     /// The library.
     db: Writer,
     /// The session's pack.
@@ -89,12 +89,11 @@ impl Fixture {
             Ok(())
         })
         .unwrap();
-        let fixture = Self {
-            _dir: dir,
-            db,
-            pack,
-        };
+        let fixture = Self { dir, db, pack };
         fixture.end(JobKind::FinalPass, &JobEnd::Done);
+        // The hotword pass ran and heard nothing to compare: the tests
+        // that give it text store their own.
+        fixture.end(JobKind::HotwordPass, &JobEnd::Done);
         fixture
     }
 
@@ -152,6 +151,31 @@ impl Fixture {
     fn revisions(&self) -> Vec<RevisionNumber> {
         self.db.with(|db| db.revisions(SESSION)).unwrap()
     }
+
+    /// Stores what the hotword pass heard in each chunk, in order: `None`
+    /// for nothing.
+    fn boosted(&self, texts: &[Option<&str>]) {
+        let range =
+            |a: u64, b: u64| SampleRange::new(SampleIndex::new(a), SampleIndex::new(b)).unwrap();
+        let rows: Vec<nota_store::HotwordText> = (0_u64..)
+            .zip(texts)
+            .map(|(i, text)| nota_store::HotwordText {
+                track: MIC,
+                range: range(i * CHUNK, (i + 1) * CHUNK),
+                text: text.map(str::to_owned),
+                boost: 3.0,
+            })
+            .collect();
+        let up_to = SampleIndex::new(CHUNK * u64::try_from(texts.len()).unwrap());
+        self.db
+            .with(|db| db.add_hotword_text(SESSION, MIC, up_to, &rows))
+            .unwrap();
+    }
+}
+
+/// Each question's candidates `fake` was asked, as `heard -> term`.
+fn asked(fake: &Fake) -> Vec<Vec<String>> {
+    fake.log.candidates.lock().unwrap().clone()
 }
 
 /// The final text at sample `start`: `text`'s words spread evenly over
@@ -1020,6 +1044,273 @@ fn a_scored_candidate_keeps_its_scores_and_bar() {
     assert_eq!(found(Matched::Scored(score(Bar::Rare))), stored(true));
     assert_eq!(found(Matched::Scored(score(Bar::Usual))), stored(false));
     assert_eq!(found(Matched::Alias), nota_store::Found::Alias);
+}
+
+const STATINS: &str = "start the stat ins";
+
+/// Acceptance: a difference the hotword pass heard that brings in a term
+/// is asked about with the boosted words, gated with them as the
+/// replacement, and applied on a yes; its proposal is the diff's, naming
+/// the term and the rewritten words.
+#[test]
+fn a_hotword_offer_is_asked_gated_and_applied() {
+    let fixture = Fixture::new("hotword-applied", &[STATINS], &["statins"]);
+    fixture.boosted(&[Some("start the Statins")]);
+    let fake = Fake::saying_yes([("stat ins", "Statins")]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    // The lookup offers nothing here: the one question is the diff's.
+    assert_eq!(asked(&fake), [["stat ins -> Statins"]]);
+    assert_eq!(fixture.shown(), ["start the Statins"]);
+    let proposals = fixture.proposals();
+    let [p] = &proposals[..] else {
+        panic!("{proposals:?}")
+    };
+    assert_eq!(
+        (
+            p.proposed.heard.as_str(),
+            p.proposed.term.as_str(),
+            p.proposed.replacement.as_str(),
+            p.proposed.found,
+        ),
+        ("stat ins", "statins", "Statins", nota_store::Found::Hotword)
+    );
+    assert!(matches!(p.outcome, Outcome::Applied(Some(_))), "{p:?}");
+    assert!(matches!(
+        p.proposed.origin,
+        Origin::Pack { ref name, .. } if name == "terms"
+    ));
+}
+
+/// The gate looks for the term's listed word in a diff's replacement, not
+/// the whole term: a term of two words can come in by one.
+#[test]
+fn a_hotword_offer_of_one_word_of_a_term_passes_the_gate() {
+    let fixture = Fixture::new("hotword-word", &["the very coze legs"], &["varicose veins"]);
+    fixture.boosted(&[Some("the varicose legs")]);
+    let fake = Fake::saying_yes([("very coze", "varicose")]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake));
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(fixture.shown(), ["the varicose legs"]);
+    assert_eq!(fixture.proposals()[0].proposed.term, "varicose veins");
+}
+
+/// A yes on a diff's offer that the gate refuses changes nothing: here the
+/// lookup's fix on overlapping words is placed first, so the diff's is
+/// refused as already changed, and is a card.
+#[test]
+fn a_hotword_offer_the_gate_refuses_changes_nothing() {
+    let fixture = Fixture::new("hotword-refused", &["check the samples now"], &["sampler"]);
+    fixture.boosted(&[Some("check the sampler now")]);
+    let fake = Fake::saying_yes([("samples now", "sampler"), ("samples", "sampler")]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(
+        asked(&fake),
+        [["samples now -> sampler", "samples -> sampler"]]
+    );
+    let proposals = fixture.proposals();
+    let [lookup, diff] = &proposals[..] else {
+        panic!("{proposals:?}")
+    };
+    assert!(
+        matches!(lookup.outcome, Outcome::Applied(Some(_))),
+        "{lookup:?}"
+    );
+    assert_eq!(diff.proposed.found, nota_store::Found::Hotword);
+    assert!(
+        matches!(
+            diff.decided,
+            Decided::Refused {
+                rule: Refusal::AlreadyChanged,
+                ..
+            }
+        ),
+        "{diff:?}"
+    );
+    assert_eq!(fixture.shown(), ["check the sampler"]);
+}
+
+/// A yes on a diff's offer is placed at the words the diff named: here the
+/// beam changed the second "stat ins" of two, and the fix goes there, not
+/// at the first, which the lookup also offered and the decider said no to.
+#[test]
+fn a_hotword_offer_is_placed_at_its_own_words() {
+    let text = "stop the stat ins now and start the stat ins later";
+    let fixture = Fixture::new("hotword-repeated", &[text], &["statins"]);
+    fixture.boosted(&[Some("stop the stat ins now and start the statins later")]);
+    let fake = Fake::saying_yes([("stat ins", "statins")]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    // The lookup's own offer, on the first "stat ins now", is a no.
+    assert_eq!(
+        asked(&fake),
+        [["stat ins now -> statins", "stat ins -> statins (2 of 2)"]]
+    );
+    let proposals = fixture.proposals();
+    let [_, p] = &proposals[..] else {
+        panic!("{proposals:?}")
+    };
+    assert_eq!(p.proposed.found, nota_store::Found::Hotword);
+    assert_eq!(p.proposed.words, WordSpan::new(8, 9).unwrap());
+    assert!(matches!(p.outcome, Outcome::Applied(Some(_))), "{p:?}");
+    assert_eq!(
+        fixture.shown(),
+        ["stop the stat ins now and start the statins later"]
+    );
+}
+
+/// A chunk's question holds at most the decider's limit of candidates:
+/// the lookup's come first and the diff's fill what's left, so a chunk
+/// with more differences is still asked about.
+#[test]
+fn a_chunks_hotword_offers_fit_one_question() {
+    let max = nota_core::decide::MAX_CANDIDATES;
+    let heard: Vec<String> = (0..=max).map(|n| format!("w{n} stat ins")).collect();
+    let boosted: Vec<String> = (0..=max).map(|n| format!("w{n} statins")).collect();
+    let heard = heard.join(" ");
+    let fixture = Fixture::new("hotword-many", &[heard.as_str()], &["statins"]);
+    fixture.boosted(&[Some(boosted.join(" ").as_str())]);
+    let fake = Fake::saying_yes([]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    let questions = asked(&fake);
+    assert_eq!(questions.len(), 1, "{questions:?}");
+    assert_eq!(questions[0].len(), max);
+}
+
+/// A diff's offer too long for the decider's question is left out alone:
+/// the chunk's lookup offers are still asked about.
+#[test]
+fn a_hotword_offer_too_long_to_ask_leaves_the_lookups() {
+    let heard: Vec<String> = (0..45).map(|n| format!("k{n:03}")).collect();
+    let mut boosted: Vec<String> = (0..44).map(|n| format!("q{n:03}")).collect();
+    boosted.push("statins".to_owned());
+    let heard = format!("amylo diping {}", heard.join(" "));
+    let boosted = format!("amylo diping {}", boosted.join(" "));
+    let fixture = Fixture::new(
+        "hotword-too-long",
+        &[heard.as_str()],
+        &["amlodipine", "statins"],
+    );
+    fixture.boosted(&[Some(boosted.as_str())]);
+    let fake = Fake::saying_yes([]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(asked(&fake), [["amylo diping -> amlodipine"]]);
+}
+
+/// A difference the lookup offered already (the same words and term) is
+/// asked about once, as the lookup's.
+#[test]
+fn a_hotword_offer_the_lookup_made_is_asked_once() {
+    let text = "take the metro pro lol daily";
+    let fixture = Fixture::new("hotword-dedup", &[text], &["metoprolol"]);
+    fixture.boosted(&[Some("take the metoprolol daily")]);
+    let fake = Fake::saying_yes([]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(asked(&fake), [["metro pro lol -> metoprolol"]]);
+    let proposals = fixture.proposals();
+    let [p] = &proposals[..] else {
+        panic!("{proposals:?}")
+    };
+    assert_ne!(p.proposed.found, nota_store::Found::Hotword);
+}
+
+/// A term the user rejected for a span isn't offered there by the diff
+/// either.
+#[test]
+fn a_rejected_pair_isnt_offered_by_the_diff() {
+    let fixture = Fixture::new("hotword-rejected", &[STATINS], &["statins"]);
+    fixture.boosted(&[Some("start the statins")]);
+    let at = WallTime::from_unix_seconds(1_762_765_200).unwrap();
+    fixture
+        .db
+        .with(|db| db.learn(SESSION, "stat ins", "statins", Verdict::Rejected, at))
+        .unwrap();
+    let fake = Fake::saying_yes([("stat ins", "statins")]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(fake.questions(), 0);
+    assert_eq!(fixture.proposals(), []);
+}
+
+/// Clean-up waits while the session's hotword pass is still to finish,
+/// whatever holds it up.
+#[test]
+fn the_job_waits_for_the_hotword_pass() {
+    let fixture = Fixture::new("waits-hotword", &[STATINS], &["statins"]);
+    let fake = Fake::saying_yes([]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    let id = fixture.job(JobKind::HotwordPass);
+    let states = [
+        JobEnd::Waiting(Some(Wait::Engine)),
+        JobEnd::EngineDown("gone".to_owned()),
+    ];
+    for end in &states {
+        fixture.end(JobKind::HotwordPass, end);
+        assert_eq!(
+            clean_up.lacks(&fixture.db, SESSION),
+            Some(Wait::HotwordText)
+        );
+        assert_eq!(
+            run(&mut clean_up, &fixture),
+            JobEnd::Waiting(Some(Wait::HotwordText))
+        );
+    }
+    // Running, and retrying its engine while it runs.
+    fixture.end(JobKind::HotwordPass, &JobEnd::Waiting(None));
+    fixture.db.with(|db| db.start_job(id)).unwrap();
+    assert_eq!(
+        clean_up.lacks(&fixture.db, SESSION),
+        Some(Wait::HotwordText)
+    );
+    assert_eq!(
+        run(&mut clean_up, &fixture),
+        JobEnd::Waiting(Some(Wait::HotwordText))
+    );
+    fixture.db.with(|db| db.engine_down(id, "gone")).unwrap();
+    assert_eq!(
+        clean_up.lacks(&fixture.db, SESSION),
+        Some(Wait::HotwordText)
+    );
+    assert_eq!(fake.questions(), 0);
+}
+
+/// A failed hotword pass doesn't hold clean-up up: it goes on with the
+/// lookup alone, leaving out whatever text the pass stored.
+#[test]
+fn a_failed_hotword_pass_leaves_only_the_lookup() {
+    let fixture = Fixture::new("hotword-failed", &[STATINS], &["statins"]);
+    fixture.boosted(&[Some("start the Statins")]);
+    fixture.end(JobKind::HotwordPass, &JobEnd::Failed("it broke".to_owned()));
+    let fake = Fake::saying_yes([("stat ins", "Statins")]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    assert_eq!(clean_up.lacks(&fixture.db, SESSION), None);
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(fake.questions(), 0);
+    assert_eq!(fixture.shown(), [STATINS]);
+}
+
+/// A session stopped before nota had the hotword pass has no such job:
+/// clean-up runs with the lookup alone.
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test scaffolding: a session from before the hotword pass"
+)]
+fn a_session_without_a_hotword_pass_goes_on() {
+    let fixture = Fixture::new("hotword-absent", &[AMLODIPINE], &["amlodipine"]);
+    let conn = rusqlite::Connection::open(fixture.dir.0.join("library.db")).unwrap();
+    conn.execute("DELETE FROM job WHERE kind = 'hotword-pass'", [])
+        .unwrap();
+    drop(conn);
+    let fake = Fake::saying_yes([("amylo diping", "amlodipine")]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake));
+    assert_eq!(clean_up.lacks(&fixture.db, SESSION), None);
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(fixture.shown(), ["start amlodipine daily"]);
 }
 
 /// The chunk the poison-chunk tests' decider always fails on.

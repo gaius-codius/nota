@@ -389,6 +389,8 @@ fn an_offer_too_long_for_a_question_is_not_skipped() {
             window: window.to_owned(),
             words: chunk.words(&span).unwrap(),
             span,
+            replacement: term.clone(),
+            inside: term.clone(),
             term,
             found: nota_store::Found::Alias,
             origin: Origin::Learned,
@@ -447,4 +449,23 @@ fn the_room_a_skipped_yes_leaves_under_the_cap_goes_to_the_next() {
         outcomes("c3-cap-on", Precheck::On),
         [(marked, Outcome::Card), (likelier, Outcome::Rejected)]
     );
+}
+
+/// C3 scores a hotword offer as the gate scores a yes on it: the heard
+/// words against the boosted words a yes would put in, not the whole
+/// term. "very coze" is far from "varicose veins" but near "varicose",
+/// so it's asked, and a yes on it is applied. (The diff offers only
+/// changes C1 scores at least the minimum, so C3 never skips one of its
+/// offers; scored against the term, it would skip this one.)
+#[test]
+fn a_hotword_offer_is_scored_against_its_replacement() {
+    assert!(c1("very coze", "varicose veins") < SIMILARITY_MIN);
+    assert!(c1("very coze", "varicose") >= SIMILARITY_MIN);
+    let fixture = Fixture::new("c3-hotword", &["the very coze legs"], &["varicose veins"]);
+    fixture.boosted(&[Some("the varicose legs")]);
+    let fake = Fake::saying_yes([("very coze", "varicose")]);
+    let mut clean_up = fixture.clean_up_with(Gives::Fake(fake.clone()), Precheck::On);
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(fake.questions(), 1);
+    assert_eq!(fixture.shown(), ["the varicose legs"]);
 }

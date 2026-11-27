@@ -145,6 +145,7 @@ pub(crate) use summary::tests::cleanup_report;
 pub(crate) use summary::{Outcome, held_notes, kept_temp_notes};
 
 use crate::final_pass::Engine;
+use crate::hotword_pass::HotwordEngine;
 use crate::inhibit::Logind;
 #[cfg(target_os = "linux")]
 use crate::inhibit::SystemLogind;
@@ -182,8 +183,9 @@ pub(crate) struct RecordArgs {
     pub(crate) fake_engine: bool,
 }
 
-/// The engine the final pass runs: the stand-in if asked for, else the
-/// real one if there are models; `None` without either.
+/// The engine the final pass and the hotword pass run: the stand-in if
+/// asked for, else the real one if there are models; `None` without
+/// either.
 ///
 /// # Errors
 ///
@@ -191,38 +193,42 @@ pub(crate) struct RecordArgs {
 pub(crate) fn final_engine(args: &RecordArgs) -> std::io::Result<Option<Engine>> {
     let program = std::env::current_exe()?;
     if args.fake_engine {
+        let fake = |pass: &str| EngineCommand {
+            program: program.clone(),
+            args: ["engine", "fake", "--pass", pass].map(Into::into).to_vec(),
+        };
         return Ok(Some(Engine {
-            command: EngineCommand {
-                program,
-                args: ["engine", "fake", "--pass", "final"]
-                    .map(Into::into)
-                    .to_vec(),
-            },
+            command: fake("final"),
             heard_by: HeardBy {
                 engine: "fake".to_owned(),
                 model: "fake".to_owned(),
             },
+            hotword: HotwordEngine::Stand(fake("hotword")),
         }));
     }
     let Some(models) = &args.models else {
         return Ok(None);
     };
     let (engine, model) = start::heard_by(models);
+    // The two passes run the same models; only the pass differs (the
+    // hotword pass's run adds its boost and vocabulary file).
+    let asr = |pass: &str| EngineCommand {
+        program: program.clone(),
+        args: vec![
+            "engine".into(),
+            "asr".into(),
+            "--parakeet".into(),
+            models.0.as_os_str().to_owned(),
+            "--vad".into(),
+            models.1.as_os_str().to_owned(),
+            "--pass".into(),
+            pass.into(),
+        ],
+    };
     Ok(Some(Engine {
-        command: EngineCommand {
-            program,
-            args: vec![
-                "engine".into(),
-                "asr".into(),
-                "--parakeet".into(),
-                models.0.as_os_str().to_owned(),
-                "--vad".into(),
-                models.1.as_os_str().to_owned(),
-                "--pass".into(),
-                "final".into(),
-            ],
-        },
+        command: asr("final"),
         heard_by: HeardBy { engine, model },
+        hotword: HotwordEngine::Asr(asr("hotword")),
     }))
 }
 

@@ -88,7 +88,14 @@ fn candidates(chunks: &[&str], terms: &[&str], precheck: Precheck) -> Candidates
             Chunk::new(key, text.split(' ').map(|w| (w, None)))
         })
         .collect();
-    let offering = offering_in(&english, &vocab, &BTreeMap::new(), &|_, _| true, chunks);
+    let offering = offering_in(
+        &english,
+        &vocab,
+        &BTreeMap::new(),
+        &|_, _| true,
+        chunks,
+        None,
+    );
     Candidates {
         source: "a test".to_owned(),
         offering,

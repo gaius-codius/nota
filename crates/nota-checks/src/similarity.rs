@@ -127,23 +127,23 @@ fn ratio(matched: usize, total: usize) -> f64 {
 
 /// The part of `a` and `b` still to be matched.
 #[derive(Debug, Clone)]
-struct Region {
+pub(crate) struct Region {
     /// The positions in `a`.
-    a: Range<usize>,
+    pub(crate) a: Range<usize>,
     /// The positions in `b`.
-    b: Range<usize>,
+    pub(crate) b: Range<usize>,
 }
 
 /// A block of `len` equal elements at `a` in one string and `b` in the
 /// other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Block {
+pub(crate) struct Block {
     /// Where it starts in `a`.
-    a: usize,
+    pub(crate) a: usize,
     /// Where it starts in `b`.
-    b: usize,
+    pub(crate) b: usize,
     /// How long it is.
-    len: usize,
+    pub(crate) len: usize,
 }
 
 /// How many elements difflib's `get_matching_blocks` matches in `region`:
@@ -152,7 +152,7 @@ struct Block {
 /// difflib keeps a queue of regions; the blocks are the same in any order,
 /// and only their total is needed. The depth is at most the number of
 /// blocks, which [`MAX_LETTERS`] bounds.
-fn matched(a: &[u8], b: &[u8], region: &Region) -> usize {
+fn matched<T: Eq>(a: &[T], b: &[T], region: &Region) -> usize {
     let best = longest_match(a, b, region);
     if best.len == 0 {
         return 0;
@@ -173,9 +173,12 @@ fn matched(a: &[u8], b: &[u8], region: &Region) -> usize {
 /// earliest in `b`. A region with no match gives a block of length 0.
 ///
 /// Python then extends the block over junk and "popular" elements. With no
-/// junk function and autojunk unreachable (no side reaches 200), there are
-/// none, and the block found here is already as long as it can be.
-fn longest_match(a: &[u8], b: &[u8], region: &Region) -> Block {
+/// junk function there are none: C1's letters never reach autojunk's 200
+/// (it compares at most [`MAX_LETTERS`]), and the hotword diff's words,
+/// which may, are compared as `propose.py` compares them, with autojunk
+/// off. So the block found here is already as long as it can be. It
+/// compares any elements, so the hotword diff matches words with it.
+pub(crate) fn longest_match<T: Eq>(a: &[T], b: &[T], region: &Region) -> Block {
     let mut best = Block {
         a: region.a.start,
         b: region.b.start,

@@ -61,19 +61,22 @@ impl Library {
         })
         .unwrap();
         let library = Self { dir, db, pack };
-        library.end_final_pass();
+        library.end_passes();
         library
     }
 
-    /// Ends the session's final pass as done.
-    fn end_final_pass(&self) {
+    /// Ends the session's final pass and hotword pass as done, the
+    /// hotword pass having heard nothing.
+    fn end_passes(&self) {
         let jobs = self.db.with(|db| db.session_jobs(SESSION)).unwrap();
-        let id = jobs
+        for job in jobs
             .into_iter()
-            .find(|j| j.kind == JobKind::FinalPass)
-            .unwrap()
-            .id;
-        self.db.with(|db| db.end_job(id, &JobEnd::Done)).unwrap();
+            .filter(|j| matches!(j.kind, JobKind::FinalPass | JobKind::HotwordPass))
+        {
+            self.db
+                .with(|db| db.end_job(job.id, &JobEnd::Done))
+                .unwrap();
+        }
     }
 
     /// Runs a clean-up job of the session with `fake` as its decider.

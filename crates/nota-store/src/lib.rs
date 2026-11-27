@@ -45,6 +45,7 @@ pub mod annotations;
 mod epochs;
 pub mod final_text;
 mod findings;
+pub mod hotword_text;
 pub mod jobs;
 pub mod learned;
 pub mod migrate;
@@ -62,6 +63,7 @@ mod writer;
 pub use annotations::Annotation;
 pub use final_text::{FinalText, FinalWord, HeardBy};
 pub use findings::{IndexedFinding, Problem, ReadFailure, Status};
+pub use hotword_text::HotwordText;
 pub use jobs::{Job, JobEnd, JobId, JobKind, JobState, Progress, Wait};
 pub use learned::{Learned, LearnedPair, Verdict};
 pub use migrate::Adopted;
@@ -165,6 +167,15 @@ pub enum StoreError {
         /// Where the text that doesn't fit starts.
         start: SampleIndex,
     },
+    /// Hotword-pass text that isn't on its track, ends past the point it's
+    /// stored up to, doesn't cover exactly one final-pass chunk, has no
+    /// boost above 0, or differs from the text stored for its chunk.
+    HotwordMisplaced {
+        /// The track.
+        track: TrackId,
+        /// Where the text that doesn't fit starts.
+        start: SampleIndex,
+    },
     /// A stored row doesn't parse: a negative or inverted range, a
     /// wrong-length hash, a number out of its type's range, an unknown
     /// state or kind.
@@ -263,6 +274,14 @@ impl fmt::Display for StoreError {
                 f,
                 "final-pass text on track {} from sample {} overlaps text already stored, \
                  or ends past the point it was given up to",
+                track.get(),
+                start.get()
+            ),
+            Self::HotwordMisplaced { track, start } => write!(
+                f,
+                "hotword-pass text on track {} from sample {} isn't on that track, doesn't \
+                 cover exactly one final-pass chunk, ends past the point it was given up to, \
+                 has no boost above 0, or differs from the text stored for its chunk",
                 track.get(),
                 start.get()
             ),

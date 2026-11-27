@@ -31,45 +31,64 @@ use nota_store::{
 };
 
 use crate::cleanup::CleanUp;
+use crate::hotword_pass::{self, BoostSource, HotwordEngine};
 use crate::jobs::{Running, Worker};
 use crate::library::Library;
 use crate::record::RATE;
 
-/// The engine the final pass runs, and what to store as having heard its
-/// text.
+/// The engine the final pass runs, what to store as having heard its
+/// text, and how the hotword pass runs the same models.
 #[derive(Debug, Clone)]
 pub(crate) struct Engine {
     /// Starts the engine child cutting at the final pass's cap.
     pub(crate) command: EngineCommand,
     /// Its engine and model.
     pub(crate) heard_by: HeardBy,
+    /// Starts the hotword pass's engine, with the same models.
+    pub(crate) hotword: HotwordEngine,
 }
 
-/// Runs the jobs queued after a stop: the final pass, then term clean-up
-/// ([`crate::cleanup`]).
+/// Runs the jobs queued after a stop: the final pass, the hotword pass
+/// ([`crate::hotword_pass`]), then term clean-up ([`crate::cleanup`]).
 pub(crate) struct Jobs {
     library: Library,
     /// `None` without a speech engine: its jobs wait for one.
     engine: Option<Engine>,
     clock: Arc<dyn Clock>,
-    /// Runs term clean-up.
+    /// Runs term clean-up, and gives the hotword pass its hotwords.
     clean_up: CleanUp,
+    /// Gives the hotword pass its boost, at each run.
+    boost: BoostSource,
 }
 
 impl Jobs {
-    /// The jobs of `library`, the final pass run by `engine` (if there is
-    /// one) and timed by `clock`, and clean-up run by `clean_up`.
-    pub(crate) const fn new(
+    /// The jobs of `library`: the final pass and hotword pass run by
+    /// `engine` (if there is one) and timed by `clock`, the hotword pass
+    /// boosting by what `boost` gives, and clean-up run by `clean_up`.
+    pub(crate) fn new(
         library: Library,
         engine: Option<Engine>,
         clock: Arc<dyn Clock>,
         clean_up: CleanUp,
+        boost: BoostSource,
     ) -> Self {
         Self {
             library,
             engine,
             clock,
             clean_up,
+            boost,
+        }
+    }
+
+    /// What the hotword pass needs from these jobs.
+    fn hotword_pass(&self) -> hotword_pass::Pass<'_> {
+        hotword_pass::Pass {
+            library: &self.library,
+            engine: self.engine.as_ref().map(|engine| &engine.hotword),
+            clock: &self.clock,
+            clean_up: &self.clean_up,
+            boost: &*self.boost,
         }
     }
 }
@@ -83,6 +102,7 @@ impl Worker for Jobs {
                 }
                 None => JobEnd::Waiting(Some(Wait::Engine)),
             },
+            JobKind::HotwordPass => hotword_pass::run(&self.hotword_pass(), job.session, running),
             JobKind::CleanUp => self.clean_up.run(self.library.db(), job.session, running),
         }
     }
@@ -107,6 +127,7 @@ impl Worker for Jobs {
                     self.engine.is_none().then_some(Wait::Engine)
                 }
             }
+            JobKind::HotwordPass => hotword_pass::lacks(&self.hotword_pass(), job.session),
             JobKind::CleanUp => self.clean_up.lacks(self.library.db(), job.session),
         }
     }
@@ -153,7 +174,7 @@ fn final_pass(
 /// can't be started from a model that doesn't load. An engine that can't
 /// start ends the run as soon as the pass sees it, so the runner goes on to
 /// other sessions' jobs and tries this one again later.
-fn pass_end(ended: PassEnd<StoreError>) -> JobEnd {
+pub(crate) fn pass_end(ended: PassEnd<StoreError>) -> JobEnd {
     match ended {
         PassEnd::Done => JobEnd::Done,
         PassEnd::Stopped => JobEnd::Waiting(None),
@@ -188,6 +209,7 @@ fn tracks(rows: Vec<SegmentRow>, from: &BTreeMap<TrackId, SampleIndex>) -> Vec<T
                 track,
                 segments,
                 from: from.get(&track).copied().unwrap_or(SampleIndex::ZERO),
+                until: None,
             }
         })
         .collect()
