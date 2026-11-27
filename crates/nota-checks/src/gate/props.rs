@@ -171,7 +171,7 @@ fn cases(places: bool) -> impl Strategy<Value = Case> {
         let anywhere = (0..=len + 1, 0..=len + 1).prop_map(|(a, b)| Some(a.min(b)..a.max(b)));
         // Without places the proposals draw as they always have, so the
         // bench-like cases keep their seed's coverage.
-        let placed = if places {
+        let proposed_at = if places {
             prop_oneof![
                 3 => span.clone().prop_map(|heard| (heard, None)),
                 2 => own_at,
@@ -186,7 +186,7 @@ fn cases(places: bool) -> impl Strategy<Value = Case> {
             0..4,
         );
         let proposal = (
-            placed,
+            proposed_at,
             prop::collection::vec(any::<bool>(), 3),
             any_phrase(3),
             0..4_u8,

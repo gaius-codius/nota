@@ -380,8 +380,11 @@ fn a_fix_goes_where_its_proposal_says() {
         &[offer("Inhale", "inhaler")],
         &[propose_at("Inhale", "inhaler", 13..19)],
     );
-    let ranges: Vec<_> = gated.applied().map(AppliedFix::range).collect();
-    assert_eq!(ranges, [13..19]);
+    let applied: Vec<_> = gated.applied().collect();
+    let [fix] = applied[..] else {
+        panic!("{gated:?}")
+    };
+    assert_eq!(fix.range(), 13..19);
     assert_eq!(gated.text(), "Inhale, then inhaler");
 }
 
