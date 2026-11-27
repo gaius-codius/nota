@@ -31,6 +31,7 @@ fn job(name: &str, state: ProcessingState) -> ProcessingJob {
         name: name.into(),
         engine: "parakeet".into(),
         state,
+        note: None,
     }
 }
 
@@ -117,6 +118,23 @@ fn processing_retrying() {
                     .into(),
             },
         ),
+    ]);
+    insta::assert_snapshot!(draw(&mut screen, 62, 20));
+}
+
+/// A finished step with a note shows it under the step: here, the
+/// chunks term clean-up gave up on.
+#[test]
+fn processing_done_with_a_note() {
+    let mut screen = screen();
+    let mut fixing = job("Fixing terms", ProcessingState::Done);
+    fixing.engine = "llama-server · qwen".into();
+    // The words the app gives for chunks given up on.
+    fixing.note = Some("2 chunks left unfixed: the decider kept failing on them".into());
+    screen.set_jobs(vec![
+        job("Recording saved", ProcessingState::Done),
+        job("Final transcript", ProcessingState::Done),
+        fixing,
     ]);
     insta::assert_snapshot!(draw(&mut screen, 62, 20));
 }

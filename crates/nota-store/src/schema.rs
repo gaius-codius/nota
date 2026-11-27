@@ -19,7 +19,7 @@
 //! | `epoch` | each epoch's first sample, rate, session-time anchor and drift (V7) ([`Store::insert_epoch`](crate::Store::insert_epoch)) | the recorder's publish step, before each segment row |
 //! | `utterance`, `word` | the heard text, as the engine confirmed it, with word times and log-probabilities (V11; unknown before); never changed (V4's triggers) | `nota record`'s live text ([`crate::transcript`]) |
 //! | `revision`, `revision_text` | the displayed text: revision 0 is the final pass's text, each later one a new row holding only what it changes, as runs of a chunk's words; never changed (V8) | revision 0 with the first final-text row, later ones by term clean-up ([`crate::revisions`]) |
-//! | `proposal` | each candidate term clean-up offered for a run of a chunk's words: where its term came from, the decider's answer, the gate's rule and scores, its outcome and its review (V12; V8's table, which nothing wrote, is kept closed as `proposal_v8`); only its outcome's ranking, the revision that applied it and its review are ever changed, once each | term clean-up ([`crate::proposals`]) |
+//! | `proposal` | each candidate term clean-up offered for a run of a chunk's words: where its term came from, the decider's answer, the gate's rule and scores, its outcome and its review (V12; V8's table, which nothing wrote, is kept closed as `proposal_v8`), and whether clean-up gave up asking about its chunk (V13); only its outcome's ranking, the revision that applied it and its review are ever changed, once each | term clean-up ([`crate::proposals`]) |
 //! | `heard_revision`, `heard_revision_text`, `heard_proposal` | the heard text's revisions and proposals from before V8, kept as they were and never added to | nothing since V8 |
 //! | `mark`, `note` | marks and notes made while recording, in session time | `nota record`, as each is made ([`crate::annotations`]) |
 //! | `job` | work queued after a stop: its kind, state, progress and what it waits for (V5) | the job queue ([`crate::jobs`]) |
@@ -805,6 +805,32 @@ BEGIN SELECT RAISE(ABORT, 'the revision that applied a proposal is never changed
 CREATE TRIGGER proposal_reviewed_once BEFORE UPDATE OF review ON proposal
 WHEN OLD.review IS NOT NULL
 BEGIN SELECT RAISE(ABORT, 'a proposal is never reviewed twice'); END;
+";
+
+/// Version 13: whether clean-up gave up on a proposal's chunk,
+/// `proposal.gave_up`. A chunk whose question found the decider down
+/// several times, while the decider answered other questions, has its
+/// candidates stored with no answer and `gave_up` set
+/// ([`crate::Decided::GaveUp`]), so the Processing screen can say how many
+/// chunks were given up on without reading the reason's words.
+///
+/// Every row stored before this version is 0: nothing gave up before.
+/// Only a row with no answer can be 1. The value goes in with its row and
+/// is never changed, like the rest of what a proposal records: V12's
+/// trigger is made again with the new column in its list.
+pub(crate) const V13: &str = "
+ALTER TABLE proposal ADD COLUMN gave_up INTEGER NOT NULL DEFAULT 0
+    CHECK (gave_up IN (0, 1) AND (gave_up = 0 OR rule IS 'no-answer'));
+
+DROP TRIGGER proposal_record_never_changed;
+CREATE TRIGGER proposal_record_never_changed BEFORE UPDATE OF
+    id, session_id, revision, track, start_sample, first_word, last_word, offered_first,
+    offered_last, heard, term,
+    replacement, source, pack_name, pack_version, pack_digest, matched, score, sounds,
+    trigrams, jaro_winkler, bar, decider, decider_model, decider_place, answer, no_answer,
+    yes_probability, gate, similarity, log_prob, rule, thresholds, log_version, gave_up
+    ON proposal
+BEGIN SELECT RAISE(ABORT, 'what a proposal records is never changed'); END;
 ";
 
 #[cfg(test)]

@@ -79,8 +79,8 @@ fn any_offers(chunk: Chunk) -> impl Strategy<Value = Vec<Offer>> {
     )
 }
 
-/// A decider's answers on `n` candidates: none at all, or a yes or no
-/// each, with a probability or not.
+/// A decider's answers on `n` candidates: none at all, given up on, or a
+/// yes or no each, with a probability or not.
 fn any_answers(n: usize) -> impl Strategy<Value = Answers> {
     let said = (any::<bool>(), prop::option::of(0.0..=1.0_f64)).prop_map(|(yes, p)| Said {
         answer: if yes { Answer::Yes } else { Answer::No },
@@ -88,6 +88,7 @@ fn any_answers(n: usize) -> impl Strategy<Value = Answers> {
     });
     prop_oneof![
         1 => Just(Answers::None("no answer".to_owned())),
+        1 => Just(Answers::GaveUp("no server".to_owned())),
         6 => prop::collection::vec(said, n).prop_map(Answers::Given),
     ]
 }
@@ -148,8 +149,12 @@ proptest! {
             prop_assert_eq!(p.proposed.offered, offer.words);
             let yes = matches!(said, Ok(Said { answer: Answer::Yes, .. }));
             match (&p.decided, said) {
-                (Decided::NoAnswer(_), Err(_)) => {}
-                (Decided::NoAnswer(_), Ok(_)) | (_, Err(_)) => {
+                // With no answer, each candidate gets exactly the decision
+                // its kind of no answer makes.
+                (Decided::NoAnswer(_) | Decided::GaveUp(_), Err(none)) => {
+                    prop_assert_eq!(&p.decided, none);
+                }
+                (Decided::NoAnswer(_) | Decided::GaveUp(_), Ok(_)) | (_, Err(_)) => {
                     prop_assert!(false, "answer {:?} decided {:?}", said, p.decided);
                 }
                 (Decided::No { .. }, _) => prop_assert!(!yes),
