@@ -95,16 +95,12 @@ pub trait PassSink {
     /// The engine now running left out `terms` of the hotwords its
     /// greeting gave it ([`EngineEvent::LeftOut`]): told once by each
     /// engine that boosts, so again after a restart. It isn't a sign the
-    /// engine works. A pass that sends no hotwords is never told, so by
-    /// default it's ignored.
+    /// engine works. A pass that sends no hotwords is never told.
     ///
     /// # Errors
     ///
     /// If they couldn't be committed; the pass stops.
-    fn left_out(&mut self, terms: Vec<Hotword>) -> Result<(), Self::Error> {
-        let _ = terms;
-        Ok(())
-    }
+    fn left_out(&mut self, terms: Vec<Hotword>) -> Result<(), Self::Error>;
 }
 
 /// How a pass runs.

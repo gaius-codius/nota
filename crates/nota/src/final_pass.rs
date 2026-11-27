@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use nota_core::messages::Transcript;
+use nota_core::messages::{Hotword, Transcript};
 use nota_core::{Clock, SampleIndex, SampleRange, SessionId, TrackId};
 use nota_recorder::engine::EngineCommand;
 use nota_recorder::engine::pass::{PassConfig, PassEnd, PassSink, TrackAudio, transcribe};
@@ -327,6 +327,11 @@ impl PassSink for Stored<'_> {
 
     fn engine_down(&mut self, why: Option<&str>) {
         (self.engine_down)(why);
+    }
+
+    /// The final pass sends no hotwords, so it's never told.
+    fn left_out(&mut self, _: Vec<Hotword>) -> Result<(), StoreError> {
+        Ok(())
     }
 }
 
