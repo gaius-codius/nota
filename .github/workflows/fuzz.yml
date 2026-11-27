@@ -47,12 +47,11 @@ jobs:
       - run: cargo install cargo-afl --version 0.18.2 --locked --force
       - name: Build the targets and their seeds
         working-directory: fuzz
+        # make_seeds writes both targets' seeds: the journals in in/, and the
+        # engine-protocol frames in in-protocol/, through the protocol's own
+        # encoder, so they keep up with its version.
         run: |
           cargo run --locked --bin make_seeds
-          mkdir -p in-protocol
-          printf '\x07\x00\x00\x00\x00nota\x02\x00' > in-protocol/hello
-          # A transcript with a valued word and an unknown one (fuzz/README.md).
-          printf '\x52\x00\x00\x00\x81\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x10\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x08\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xbf\x02\x00\x00\x00\x68\x69\x08\x00\x00\x00\x00\x00\x00\x00\x10\x00\x00\x00\x00\x00\x00\x00\x00\x00\xc0\x7f\x02\x00\x00\x00\x79\x6f\x68\x69\x20\x79\x6f' > in-protocol/transcript
           cargo afl build --locked --release
       - name: Fuzz
         working-directory: fuzz

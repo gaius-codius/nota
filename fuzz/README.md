@@ -49,7 +49,7 @@ A violated assertion panics, which AFL saves as a crash.
 ```sh
 cargo install cargo-afl
 cd fuzz
-cargo run --bin make_seeds        # writes synthetic seed journals to in/
+cargo run --bin make_seeds        # writes seed journals to in/, frames to in-protocol/
 cargo afl build --release
 AFL_SKIP_CPUFREQ=1 AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 \
   cargo afl fuzz -i in -o out target/release/journal_reader
@@ -87,14 +87,15 @@ frame it accepts:
   log-probability field reads as a value or the one unknown encoding,
   never another NaN, or the frame is refused
 
-Seeds are any encoded frames: a handshake, and a transcript with two
-words, the first with the log-probability −0.5 and the second unknown, so
-a run reaches the word fields from the start:
+Seeds are any encoded frames. `make_seeds` writes two into `in-protocol/`
+with `nota_core::protocol::encode`: `hello`, the handshake at the current
+protocol version, and `transcript`, a transcript with two words, the first
+with the log-probability −0.5 and the second unknown, so a run reaches the
+word fields from the start. It writes them afresh on every run, so they
+never fall behind the protocol's version:
 
 ```sh
-mkdir -p in-protocol
-printf '\x07\x00\x00\x00\x00nota\x02\x00' > in-protocol/hello
-printf '\x52\x00\x00\x00\x81\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x10\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x08\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xbf\x02\x00\x00\x00\x68\x69\x08\x00\x00\x00\x00\x00\x00\x00\x10\x00\x00\x00\x00\x00\x00\x00\x00\x00\xc0\x7f\x02\x00\x00\x00\x79\x6f\x68\x69\x20\x79\x6f' > in-protocol/transcript
+cargo run --bin make_seeds
 cargo afl build --release
 AFL_SKIP_CPUFREQ=1 AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 \
   cargo afl fuzz -i in-protocol -o out-protocol target/release/engine_protocol
