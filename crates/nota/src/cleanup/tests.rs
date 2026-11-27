@@ -182,11 +182,10 @@ fn run_with(clean_up: &mut CleanUp, fixture: &Fixture, stop: &dyn Fn() -> bool) 
 fn run_noting_answers(clean_up: &mut CleanUp, fixture: &Fixture, fake: &Fake) -> Vec<usize> {
     let cleared = std::cell::RefCell::new(Vec::new());
     let progress = |_| {};
-    let answered = || {};
-    let engine_down = |reason: Option<&str>| {
-        assert_eq!(reason, None);
-        cleared.borrow_mut().push(fake.questions());
-    };
+    let answered = || cleared.borrow_mut().push(fake.questions());
+    // Clean-up says the decider works through `answered` alone, which the
+    // runner reads as clean-up's engine, not the speech engine.
+    let engine_down = |reason: Option<&str>| panic!("engine_down({reason:?})");
     let running = Running {
         stop: &|| false,
         progress: &progress,
@@ -877,4 +876,162 @@ fn a_scored_candidate_keeps_its_scores_and_bar() {
     assert_eq!(found(Matched::Scored(score(Bar::Rare))), stored(true));
     assert_eq!(found(Matched::Scored(score(Bar::Usual))), stored(false));
     assert_eq!(found(Matched::Alias), nota_store::Found::Alias);
+}
+
+/// The chunk the poison-chunk tests' decider always fails on.
+const POISON: &str = "the amylo diping that never answers";
+
+/// Runs `clean_up` on the fixture's session `times` times, giving how
+/// each run ended.
+fn runs(clean_up: &mut CleanUp, fixture: &Fixture, times: usize) -> Vec<JobEnd> {
+    (0..times).map(|_| run(clean_up, fixture)).collect()
+}
+
+/// The ends of runs that find the decider down.
+fn down(times: usize) -> Vec<JobEnd> {
+    vec![JobEnd::EngineDown("the decider isn't working: no server".to_owned()); times]
+}
+
+/// Each proposal's heard span and how it was decided, by chunk text.
+fn decisions(fixture: &Fixture, chunks: &[&str]) -> Vec<(String, &'static str)> {
+    let starts: Vec<SampleIndex> = (0_u64..)
+        .take(chunks.len())
+        .map(|i| SampleIndex::new(i * CHUNK))
+        .collect();
+    fixture
+        .proposals()
+        .iter()
+        .map(|p| {
+            let at = starts
+                .iter()
+                .position(|s| *s == p.proposed.chunk.start)
+                .unwrap();
+            let kind = match p.decided {
+                Decided::Applied { .. } => "applied",
+                Decided::GaveUp(_) => "given up",
+                _ => "other",
+            };
+            (chunks[at].to_owned(), kind)
+        })
+        .collect()
+}
+
+/// Acceptance (#278): a chunk whose question finds the decider down on
+/// every run, while it answers the others, is given up on at the third
+/// run: its candidates are logged as given up on, and the rest of the
+/// session is fixed and placed.
+#[test]
+fn a_chunk_the_decider_always_fails_on_is_given_up_on() {
+    let chunks = [AMLODIPINE, POISON, "then amylo diping again"];
+    let fixture = Fixture::new("poison", &chunks, &["amlodipine"]);
+    let fake = Fake::saying_yes([("amylo diping", "amlodipine")])
+        .with_trouble_in(POISON, Trouble::Unavailable);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    // The first run ends at the bad chunk; the second asks it after the
+    // last chunk, which answers; the third has only it left.
+    let mut ends = down(2);
+    ends.push(JobEnd::Done);
+    assert_eq!(runs(&mut clean_up, &fixture, 3), ends);
+    assert_eq!(
+        *fake.log.asked.lock().unwrap(),
+        [
+            AMLODIPINE,
+            POISON,
+            "then amylo diping again",
+            POISON,
+            POISON
+        ]
+    );
+    assert_eq!(
+        decisions(&fixture, &chunks),
+        [
+            (AMLODIPINE.to_owned(), "applied"),
+            ("then amylo diping again".to_owned(), "applied"),
+            (POISON.to_owned(), "given up"),
+        ]
+    );
+    let given_up = fixture.proposals()[2].decided.clone();
+    assert_eq!(
+        given_up,
+        Decided::GaveUp("the decider isn't working: no server".to_owned())
+    );
+    assert_eq!(
+        fixture.shown(),
+        ["start amlodipine daily", POISON, "then amlodipine again"]
+    );
+}
+
+/// A decider down for every question never costs a chunk its answer: run
+/// after run ends as an engine failure, storing nothing, and once it
+/// works again every chunk is decided.
+#[test]
+fn a_decider_down_for_every_chunk_gives_up_on_none() {
+    let chunks = [AMLODIPINE, "then amylo diping again"];
+    let fixture = Fixture::new("all-down", &chunks, &["amlodipine"]);
+    let fake = Fake::saying_yes([("amylo diping", "amlodipine")])
+        .with_trouble_in(AMLODIPINE, Trouble::Unavailable)
+        .with_trouble_in("then amylo diping again", Trouble::Unavailable);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake));
+    assert_eq!(runs(&mut clean_up, &fixture, 8), down(8));
+    assert_eq!(fixture.proposals(), []);
+    // The same clean-up, with a decider that works now.
+    clean_up.sources = Box::new(FakeSources {
+        gives: Gives::Fake(Fake::saying_yes([("amylo diping", "amlodipine")])),
+        packs: vec![fixture.pack.clone()],
+    });
+    // Both chunks failed once, so both are suspects, asked in session
+    // order.
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(
+        decisions(&fixture, &chunks),
+        [
+            (AMLODIPINE.to_owned(), "applied"),
+            ("then amylo diping again".to_owned(), "applied"),
+        ]
+    );
+}
+
+/// A session whose only chunk always fails, with nothing else answered,
+/// is never given up on: nothing shows the decider works.
+#[test]
+fn a_lone_failing_chunk_with_no_other_answer_is_kept() {
+    let fixture = Fixture::new("lone-poison", &[POISON], &["amlodipine"]);
+    let fake = Fake::saying_yes([]).with_trouble_in(POISON, Trouble::Unavailable);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake));
+    assert_eq!(runs(&mut clean_up, &fixture, 6), down(6));
+    assert_eq!(fixture.proposals(), []);
+}
+
+/// Acceptance (#278): a run cut off after giving up on a chunk leaves what
+/// it committed, the given-up candidates included, for the next run to
+/// place.
+#[test]
+fn a_run_cut_off_after_giving_up_leaves_the_placing_to_the_next() {
+    let chunks = [AMLODIPINE, POISON];
+    let fixture = Fixture::new("poison-cut", &chunks, &["amlodipine"]);
+    // Asked: the first chunk, the bad one (twice), then the bad one again
+    // is given up on: the stop comes once that fourth question is asked.
+    let fake = Fake::saying_yes([("amylo diping", "amlodipine")])
+        .with_trouble_in(POISON, Trouble::Unavailable)
+        .flagging_after(4);
+    let log = Arc::clone(&fake.log);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake));
+    let stop = || log.flag.load(Ordering::SeqCst);
+    let ends: Vec<JobEnd> = (0..3)
+        .map(|_| run_with(&mut clean_up, &fixture, &stop))
+        .collect();
+    let mut want = down(2);
+    want.push(JobEnd::Waiting(None));
+    assert_eq!(ends, want);
+    assert_eq!(fixture.revisions(), [RevisionNumber::FINAL]);
+    assert_eq!(
+        decisions(&fixture, &chunks),
+        [
+            (AMLODIPINE.to_owned(), "applied"),
+            (POISON.to_owned(), "given up"),
+        ]
+    );
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(log.asked.lock().unwrap().len(), 4);
+    assert_eq!(fixture.shown(), ["start amlodipine daily", POISON]);
 }

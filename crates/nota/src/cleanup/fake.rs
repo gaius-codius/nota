@@ -47,6 +47,8 @@ pub(crate) struct Fake {
     /// Trouble for the question with this number (from 0, across every
     /// decider made from this one).
     trouble: Arc<BTreeMap<usize, Trouble>>,
+    /// Trouble for every question about the chunk with this text.
+    trouble_in: Arc<BTreeMap<String, Trouble>>,
     /// After this many questions, `log.flag` is set.
     flag_after: Option<usize>,
     /// What it notes.
@@ -72,6 +74,7 @@ impl Fake {
             yes: Arc::new(yes),
             in_chunk: Arc::new(BTreeSet::new()),
             trouble: Arc::new(BTreeMap::new()),
+            trouble_in: Arc::new(BTreeMap::new()),
             flag_after: None,
             log: Arc::new(Log::default()),
         }
@@ -94,6 +97,13 @@ impl Fake {
     /// This decider, ending question `n` (from 0) with `trouble`.
     pub(crate) fn with_trouble(mut self, n: usize, trouble: Trouble) -> Self {
         Arc::make_mut(&mut self.trouble).insert(n, trouble);
+        self
+    }
+
+    /// This decider, ending every question about the chunk `text` with
+    /// `trouble`, however often it's asked.
+    pub(crate) fn with_trouble_in(mut self, text: &str, trouble: Trouble) -> Self {
+        Arc::make_mut(&mut self.trouble_in).insert(text.to_owned(), trouble);
         self
     }
 
@@ -162,7 +172,11 @@ impl Decider for Fake {
         if self.flag_after.is_some_and(|after| n + 1 >= after) {
             self.log.flag.store(true, Ordering::SeqCst);
         }
-        match self.trouble.get(&n) {
+        let trouble = self
+            .trouble
+            .get(&n)
+            .or_else(|| self.trouble_in.get(question.current()));
+        match trouble {
             Some(Trouble::Stopped) => return Err(DecideError::Stopped),
             Some(Trouble::Failed) => return Err(DecideError::Failed("garbled".into())),
             Some(Trouble::Unavailable) => {

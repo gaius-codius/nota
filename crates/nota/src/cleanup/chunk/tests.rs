@@ -78,6 +78,7 @@ fn summary(proposals: &[NewProposal]) -> Vec<(WordSpan, &str, &'static str)> {
                 Decided::Refused { .. } => "refused",
                 Decided::No { .. } => "no",
                 Decided::NoAnswer(_) => "no answer",
+                Decided::GaveUp(_) => "given up",
             };
             (p.proposed.words, p.proposed.replacement.as_str(), kind)
         })
@@ -235,6 +236,22 @@ fn refusals_noes_and_missing_answers_keep_why() {
         [
             &Decided::NoAnswer("cut short".to_owned()),
             &Decided::NoAnswer("cut short".to_owned())
+        ]
+    );
+    // Given up on, every candidate is, with the decider's last failure.
+    let given_up = settle(
+        &c,
+        &offers,
+        &offers,
+        &Answers::GaveUp("no server".to_owned()),
+        &[],
+        &context(),
+    );
+    assert_eq!(
+        given_up.iter().map(|p| &p.decided).collect::<Vec<_>>(),
+        [
+            &Decided::GaveUp("no server".to_owned()),
+            &Decided::GaveUp("no server".to_owned())
         ]
     );
     // A list of answers that doesn't match the candidates is no answer.

@@ -26,6 +26,13 @@
 //! readable answer to logs its candidates as rejected. Told to stop
 //! between questions, the job returns at once, which drops the decider
 //! and the server it keeps loaded.
+//!
+//! **A chunk the decider always fails on.** A chunk whose question found
+//! the decider down is asked after the rest on later runs, and once it has
+//! failed [`suspects::GIVE_UP`] runs in a row while the decider answered
+//! other questions, its candidates are logged as given up on and the run
+//! carries on ([`suspects`]). So one bad chunk doesn't keep a session
+//! from its revision and cards.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -49,8 +56,10 @@ pub(crate) mod chunk;
 #[cfg(test)]
 pub(crate) mod fake;
 pub(crate) mod sources;
+pub(crate) mod suspects;
 
 use chunk::{Answers, Chunk, Context, Offer};
+use suspects::{Failed, Suspects};
 
 #[cfg(test)]
 mod tests;
@@ -95,6 +104,8 @@ pub(crate) struct CleanUp {
     /// The English rules, built at the first run: unpacking the word list
     /// takes a while, and most nota sessions never need it.
     english: Option<Arc<English>>,
+    /// The chunks whose question found the decider down, across runs.
+    suspects: Suspects,
 }
 
 impl CleanUp {
@@ -105,6 +116,7 @@ impl CleanUp {
             sources,
             rate,
             english: None,
+            suspects: Suspects::default(),
         }
     }
 
@@ -150,7 +162,7 @@ impl CleanUp {
             Ok(read) => read,
             Err(e) => return stored(&e),
         };
-        let pass = Pass {
+        let mut pass = Pass {
             db,
             session,
             english: &english,
@@ -159,8 +171,14 @@ impl CleanUp {
                 thresholds: thresholds(),
             },
             running,
+            suspects: &mut self.suspects,
         };
-        pass.run(&read, decider, self.rate)
+        let end = pass.run(&read, decider, self.rate);
+        // A session whose clean-up has ended asks the decider nothing more.
+        if matches!(end, JobEnd::Done | JobEnd::Failed(_)) {
+            self.suspects.forget(session);
+        }
+        end
     }
 
     /// The English rules, built once.
@@ -346,6 +364,8 @@ struct Pass<'a> {
     context: Context,
     /// The runner's stop, progress and engine notes.
     running: &'a Running<'a>,
+    /// The chunks whose question found the decider down, across runs.
+    suspects: &'a mut Suspects,
 }
 
 /// How a chunk's question went.
@@ -363,7 +383,7 @@ enum Asked {
 impl Pass<'_> {
     /// Proposes, decides and gates each chunk, then places the run's
     /// proposals.
-    fn run(&self, read: &Read, decider: Box<dyn Decider + Send>, rate: SampleRate) -> JobEnd {
+    fn run(&mut self, read: &Read, decider: Box<dyn Decider + Send>, rate: SampleRate) -> JobEnd {
         if let Some(end) = self.ask_each(read, decider) {
             return end;
         }
@@ -375,10 +395,10 @@ impl Pass<'_> {
         self.place(&read.lines, rate)
     }
 
-    /// Proposes, decides and gates each chunk in turn, storing each one's
-    /// proposals, and drops the decider once done. Gives how the run ends
-    /// if it must end before placing.
-    fn ask_each(&self, read: &Read, mut decider: Box<dyn Decider + Send>) -> Option<JobEnd> {
+    /// Proposes, decides and gates each chunk in turn, the suspects last,
+    /// storing each one's proposals, and drops the decider once done.
+    /// Gives how the run ends if it must end before placing.
+    fn ask_each(&mut self, read: &Read, mut decider: Box<dyn Decider + Send>) -> Option<JobEnd> {
         let (terms, origins) = vocabulary(&read.terms, self.english.code());
         let lookup = Lookup::new(self.english, &terms);
         let allows = |heard: &str, term: &str| read.terms.allows(heard, term);
@@ -386,8 +406,11 @@ impl Pass<'_> {
         let chunks: Vec<Chunk> = read.lines.iter().filter_map(chunk_of).collect();
         let total = u64::try_from(chunks.len()).unwrap_or(u64::MAX);
         let mut answered = false;
-        for (i, chunk) in chunks.iter().enumerate() {
-            let done = u64::try_from(i).unwrap_or(u64::MAX);
+        for (n, i) in self.order(&chunks).into_iter().enumerate() {
+            let Some(chunk) = chunks.get(i) else {
+                continue;
+            };
+            let done = u64::try_from(n).unwrap_or(u64::MAX);
             (self.running.progress)(nota_store::Progress { done, total });
             let offered = offers(chunk, lookup.find(chunk.text(), &allows), &origins);
             let asked: Vec<Offer> = offered
@@ -411,14 +434,23 @@ impl Pass<'_> {
                 asked: &asked,
                 blocked: held.blocked(chunk.key()),
             };
-            match self.ask(&ask, &mut *decider) {
-                Asked::Settled { answered: true } if !answered => {
-                    // The decider works: any reason shown for an earlier
-                    // failure goes.
-                    (self.running.engine_down)(None);
-                    answered = true;
+            match self.ask(&ask, &mut *decider, answered) {
+                Asked::Settled { answered: true } => {
+                    self.suspects.settled(self.session, chunk.key());
+                    // Every suspect, in any session, now has a decider
+                    // that works on other questions.
+                    self.suspects.answered();
+                    if !answered {
+                        // The decider works: any reason shown for an
+                        // earlier failure goes, and the runner tries
+                        // clean-up jobs that wait on it again soon.
+                        (self.running.answered)();
+                        answered = true;
+                    }
                 }
-                Asked::Settled { .. } => {}
+                Asked::Settled { answered: false } => {
+                    self.suspects.settled(self.session, chunk.key());
+                }
                 Asked::Ended(end) => return Some(end),
             }
         }
@@ -427,15 +459,29 @@ impl Pass<'_> {
         None
     }
 
+    /// The chunks' positions in the order to ask them: session order,
+    /// with the suspects after the rest, so the rest are asked even while
+    /// a suspect keeps failing, and can show the decider works.
+    fn order(&self, chunks: &[Chunk]) -> Vec<usize> {
+        let (suspect, rest): (Vec<usize>, Vec<usize>) =
+            (0..chunks.len()).partition(|&i| self.suspects.has(self.session, chunks[i].key()));
+        rest.into_iter().chain(suspect).collect()
+    }
+
     /// Asks the decider about `ask`'s candidates and stores what it
-    /// makes of them.
-    fn ask(&self, ask: &Ask<'_>, decider: &mut dyn Decider) -> Asked {
+    /// makes of them. `answered_before` says whether the decider has
+    /// answered a question in this run already.
+    fn ask(&mut self, ask: &Ask<'_>, decider: &mut dyn Decider, answered_before: bool) -> Asked {
         let answers = match question(ask) {
             Ok(question) => match decider.decide(&question, self.running.stop) {
                 Ok(decisions) => Answers::Given(decisions.iter().map(|(_, d)| *d).collect()),
                 Err(DecideError::Stopped) => return Asked::Ended(JobEnd::Waiting(None)),
                 Err(e @ DecideError::Unavailable(_)) => {
-                    return Asked::Ended(JobEnd::EngineDown(e.to_string()));
+                    let key = ask.chunk.key();
+                    match self.suspects.failed(self.session, key, answered_before) {
+                        Failed::TryAgain => return Asked::Ended(JobEnd::EngineDown(e.to_string())),
+                        Failed::GiveUp => Answers::GaveUp(e.to_string()),
+                    }
                 }
                 Err(e @ DecideError::Failed(_)) => Answers::None(e.to_string()),
             },

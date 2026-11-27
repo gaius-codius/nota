@@ -913,3 +913,75 @@ fn a_spawned_runner_reads_the_supplied_clock() {
     // Join before closing the receiver, so later reads still have a home.
     drop(runner);
 }
+
+/// The runner's retries after one job of `kind`, in `S1`, ended with its
+/// engine answering, when every job of `S1` and `S2` (a final pass and a
+/// clean-up each) had backed off three times: how many times each
+/// session's job of each kind has backed off since.
+fn backed_off_after_answer(name: &str, kind: JobKind) -> Vec<(SessionId, JobKind, u32)> {
+    let (_dir, db) = library(name, &[]);
+    for session in [S1, S2] {
+        db.with(|db| {
+            db.create_session(&NewSession {
+                id: session,
+                title: None,
+                language: None,
+                started_at: None,
+                tracks: Vec::new(),
+            })?;
+            db.finish_recording(session, None)
+        })
+        .unwrap();
+    }
+    let clock = Arc::new(nota_core::FakeClock::new(SessionTime::ZERO));
+    let mut runner = loop_with_clock(&db, &Fake::default(), &clock);
+    let jobs = db.with(|db| db.jobs()).unwrap();
+    for job in &jobs {
+        let mut retry = Retry::first(job.kind, SessionTime::ZERO);
+        for _ in 0..3 {
+            retry = retry.failed_again(SessionTime::ZERO);
+        }
+        runner.retries.insert(job.id, retry);
+    }
+    let answering = jobs
+        .iter()
+        .find(|job| job.session == S1 && job.kind == kind)
+        .unwrap();
+    runner.note_retry(answering, &JobEnd::Done, true);
+    jobs.iter()
+        .filter_map(|job| {
+            let retry = runner.retries.get(&job.id)?;
+            Some((job.session, job.kind, retry.again))
+        })
+        .collect()
+}
+
+/// Acceptance (#280): the decider answering in a clean-up run puts every
+/// other clean-up job back to the shortest wait, and leaves the final
+/// passes' spacing as it was: the speech engine may still be down.
+#[test]
+fn a_decider_that_answers_resets_only_clean_up_retries() {
+    assert_eq!(
+        backed_off_after_answer("decider-reset", JobKind::CleanUp),
+        [
+            (S1, JobKind::FinalPass, 3),
+            (S2, JobKind::FinalPass, 3),
+            (S2, JobKind::CleanUp, 0),
+        ]
+    );
+}
+
+/// Acceptance (#280): the speech engine answering in a final pass puts
+/// every other final pass back to the shortest wait, and leaves clean-up's
+/// spacing as it was: the decider may still be down.
+#[test]
+fn a_speech_engine_that_answers_resets_only_final_pass_retries() {
+    assert_eq!(
+        backed_off_after_answer("speech-reset", JobKind::FinalPass),
+        [
+            (S1, JobKind::CleanUp, 3),
+            (S2, JobKind::FinalPass, 0),
+            (S2, JobKind::CleanUp, 3),
+        ]
+    );
+}
