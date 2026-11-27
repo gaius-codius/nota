@@ -12,7 +12,8 @@
 //! changes another occurrence of the same words.
 //!
 //! **Every candidate ends in exactly one outcome** ([`Decided`]): a no,
-//! or no answer, is rejected and logged; a yes the gate refuses is to be
+//! no answer, or a candidate the similarity pre-check skipped
+//! ([`skipped`]), is rejected and logged; a yes the gate refuses is to be
 //! ranked as a card; a yes the gate lets through is applied, unless the
 //! text wouldn't change or its words are already reviewed or changed,
 //! which are rejected and logged. Fixes the gate places in the same words
@@ -20,7 +21,7 @@
 
 use std::ops::Range;
 
-use nota_checks::{Decision as GateDecision, Offered, Proposal, Rejection, gate};
+use nota_checks::{Decision as GateDecision, Offered, Proposal, Rejection, Skipped, gate};
 use nota_core::LogProb;
 use nota_core::decide::{Answer, Decision as Said, Probability};
 use nota_store::{
@@ -109,7 +110,7 @@ impl Chunk {
     }
 
     /// The lowest known log-probability among `words`.
-    fn lowest_log_prob(&self, words: WordSpan) -> Option<LogProb> {
+    pub(crate) fn lowest_log_prob(&self, words: WordSpan) -> Option<LogProb> {
         let at = |n: u32| usize::try_from(n).unwrap_or(usize::MAX);
         self.log_probs
             .get(at(words.first())..=at(words.last()))
@@ -195,7 +196,8 @@ pub(crate) enum Answers {
 /// What a chunk's proposals record beyond each candidate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Context {
-    /// The decider that was asked.
+    /// The decider the run asks: the one that answered, or for a
+    /// candidate C3 skipped, the one it would have asked.
     pub(crate) decided_by: DecidedBy,
     /// The thresholds in force.
     pub(crate) thresholds: String,
@@ -308,6 +310,24 @@ pub(crate) fn settle(
             }
         })
         .collect()
+}
+
+/// The proposal for `offer` in `chunk`, which the similarity pre-check
+/// skipped: rejected and logged with C1's score, its words and text those
+/// a yes would have changed.
+pub(crate) fn skipped(
+    chunk: &Chunk,
+    offer: &Offer,
+    skip: Skipped,
+    context: &Context,
+) -> NewProposal {
+    let replacement = chunk.rewritten(offer.words, &[(offer.span.clone(), &offer.replacement)]);
+    NewProposal {
+        proposed: proposed(chunk, offer, offer.words, replacement, context),
+        decided: Decided::Skipped {
+            similarity: skip.similarity().value(),
+        },
+    }
 }
 
 /// The gate's verdict on each yes among `asked`, in order; `None` for a

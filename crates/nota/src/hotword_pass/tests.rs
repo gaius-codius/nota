@@ -155,6 +155,7 @@ impl Fixture {
         let sources = FakeSources {
             gives,
             packs: self.pack.iter().cloned().collect(),
+            precheck: crate::cleanup::Precheck::Off,
         };
         CleanUp::new(Box::new(sources), SampleRate::SPEECH)
     }

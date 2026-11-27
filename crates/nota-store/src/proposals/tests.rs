@@ -145,6 +145,7 @@ fn every_decision(chunk: ChunkKey) -> Vec<NewProposal> {
             "amiodarone",
             Decided::GaveUp("the decider isn't working: no server".to_owned()),
         ),
+        proposal(chunk, "amylo edema", Decided::Skipped { similarity: 0.42 }),
         learned,
     ]
 }
@@ -172,6 +173,7 @@ fn proposals_read_back_as_stored() {
             Outcome::Applied(None),
             Outcome::ToRank,
             Outcome::ToRank,
+            Outcome::Rejected,
             Outcome::Rejected,
             Outcome::Rejected,
             Outcome::Rejected,
@@ -514,6 +516,7 @@ fn only_a_given_up_decision_says_it_gave_up() {
             ("ampicillin".to_owned(), false),
             ("amoxicillin".to_owned(), false),
             ("amiodarone".to_owned(), true),
+            ("amylo edema".to_owned(), false),
             ("amlodipine".to_owned(), false),
         ]
     );

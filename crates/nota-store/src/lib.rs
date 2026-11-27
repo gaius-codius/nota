@@ -70,7 +70,7 @@ pub use migrate::Adopted;
 pub use packs::{Pack, PackDigest, PackError, PackRef};
 pub use proposals::{
     Decided, DecidedBy, Found, NewProposal, Origin, Outcome, Placing, Proposal, ProposalId,
-    Proposed, Refusal, Reviewed,
+    Proposed, Refusal, Reviewed, SKIPPED,
 };
 pub use revisions::{Applied, Change, ChunkKey, FinalLine, RevisionNumber, Timed, WordSpan};
 pub use segments::{AudioDigest, Inserted, RowKey, SegmentRow, Sha256Digest};
@@ -103,6 +103,9 @@ pub enum StoreError {
     /// The file is a per-session store from before the library database:
     /// [`Store::adopt_session`] imports those; it isn't opened as a library.
     PerSessionStore,
+    /// The library's schema is at this older version, and it was opened
+    /// as it is, so it wasn't upgraded ([`Store::open_as_is`]).
+    NotCurrent(i64),
     /// A number doesn't fit SQLite's signed 64-bit integer.
     OutOfRange,
     /// A different row already holds this track and start sample in the
@@ -203,6 +206,11 @@ impl fmt::Display for StoreError {
             Self::PerSessionStore => {
                 write!(f, "a per-session store, not the library database")
             }
+            Self::NotCurrent(v) => write!(
+                f,
+                "the database is at schema version {v}, not {}: open it in nota first",
+                migrate::VERSION
+            ),
             Self::OutOfRange => write!(f, "a number does not fit a 64-bit signed integer"),
             Self::Conflict { existing } => write!(
                 f,
@@ -432,6 +440,30 @@ impl Store {
         migrate::check(&conn)?;
         configure(&conn)?;
         migrate::upgrade(&mut conn)?;
+        Ok(Self { conn })
+    }
+
+    /// Opens the library database at `path` as it is, for a tool that only
+    /// reads it: never creating it and never changing its schema, so a
+    /// library a running app has open isn't upgraded under it. Opened
+    /// read-write all the same, so SQLite can recover a write-ahead log a
+    /// crash left. A symlink at `path` is refused.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::NotCurrent`] if its schema is older than this code's
+    /// (or it's an empty file), [`StoreError::UnknownSchema`] if its
+    /// version isn't known, [`StoreError::PerSessionStore`] for a
+    /// per-session store, [`StoreError::Pragma`] if a pragma didn't take,
+    /// and [`StoreError::Sqlite`] for any other SQLite failure, including
+    /// a missing file or a symlink.
+    pub fn open_as_is(path: &Path) -> Result<Self, StoreError> {
+        let conn = connect(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        match migrate::check(&conn)? {
+            migrate::VERSION => {}
+            older => return Err(StoreError::NotCurrent(older)),
+        }
+        configure(&conn)?;
         Ok(Self { conn })
     }
 
