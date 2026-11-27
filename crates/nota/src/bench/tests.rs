@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use nota_checks::{English, Term};
@@ -7,6 +8,47 @@ use nota_core::{FakeClock, SampleIndex, SessionTime, TrackId};
 use super::*;
 use crate::cleanup::fake::{Fake, Trouble, fake_by};
 use crate::cleanup::offering_in;
+
+mod command;
+mod fixture;
+mod log;
+mod session;
+
+/// A fresh directory under the system temp dir, removed when dropped.
+struct TestDir(PathBuf);
+
+impl TestDir {
+    /// The directory for the test `name`, empty.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test scaffolding outside the recorder's write path"
+    )]
+    fn new(name: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("nota-bench-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+}
+
+impl Drop for TestDir {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test scaffolding outside the recorder's write path"
+    )]
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Writes `text` to the file `path`, for a test to read back.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test scaffolding outside the recorder's write path"
+)]
+fn write_file(path: &Path, text: &str) {
+    std::fs::write(path, text).unwrap();
+}
 
 /// The track the invented chunks are on.
 const MIC: TrackId = TrackId::new(0);

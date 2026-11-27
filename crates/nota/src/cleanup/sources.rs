@@ -82,9 +82,10 @@ impl Sources for Installed {
     }
 }
 
-/// The local decider the settings in `env` describe, timed by `clock`.
+/// The local decider the settings in `env` describe, timed by `clock`:
+/// clean-up's, and the bench's `local` engine.
 #[cfg(unix)]
-fn local_decider(env: &Environment, clock: &Arc<dyn Clock>) -> Setup {
+pub(crate) fn local_decider(env: &Environment, clock: &Arc<dyn Clock>) -> Setup {
     match settings::local_decider(env) {
         settings::LocalDecider::NotSetUp => Setup::NotSetUp,
         settings::LocalDecider::Unavailable(why) => {

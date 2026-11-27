@@ -14,7 +14,8 @@
 //! refused, which in a run would be ranked for a card.
 //!
 //! **It never writes to the session.** No proposal, revision or job is
-//! stored; the library is only read.
+//! stored; the library is only read (nota-store brings an older schema up
+//! to date as it opens, as the app would).
 //!
 //! **The report** ([`report`]) states the diagnosis rule from the
 //! 2026-09-30 bench, then each engine's questions, time and cost (where
@@ -25,7 +26,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::io;
+use std::io::{self, Read as _};
+use std::path::Path;
 use std::time::Duration;
 
 use nota_checks::Skipped;
@@ -36,7 +38,13 @@ use nota_store::{ChunkKey, Decided, DecidedBy, JobEnd, Refusal, WordSpan};
 use crate::cleanup::chunk::{Chunk, Context, Offer};
 use crate::cleanup::{Ask, Offering, Precheck, Saved, Screen, Settled, settle_chunk, thresholds};
 
+mod command;
+pub(crate) mod fixture;
 pub(crate) mod log;
+mod session;
+
+pub(crate) use command::{BenchCommand, dispatch, parse};
+pub(crate) use session::from_session;
 
 #[cfg(test)]
 mod tests;
@@ -409,19 +417,19 @@ fn engine_line(run: &EngineRun) -> String {
         Place::Local => "local",
         Place::Cloud => "cloud",
     };
-    let mut line = format!(
-        "{}: {} {} ({place}), {} questions, {} skipped by C3, {:.1} s, cost not reported",
+    let stopped = run
+        .down
+        .as_ref()
+        .map_or_else(String::new, |why| format!("; stopped early: {why}"));
+    format!(
+        "{}: {} {} ({place}), {} questions, {} skipped by C3, {:.1} s, cost not reported{stopped}",
         run.name,
         run.by.name,
         run.by.model,
         run.questions,
         run.skipped,
         run.took.as_secs_f64()
-    );
-    if let Some(why) = &run.down {
-        line.push_str(&format!("; stopped early: {why}"));
-    }
-    line
+    )
 }
 
 /// A candidate's line: where it is, what was heard and offered, and each
@@ -451,4 +459,20 @@ fn place(chunk: ChunkKey) -> String {
         .unwrap_or_default()
         .as_secs();
     format!("track {} at {}:{:02}", chunk.track.get(), at / 60, at % 60)
+}
+
+/// The file at `path` as text, if it's UTF-8 and at most `max` bytes: a
+/// fixture or a log, read whole.
+fn read_text(path: &Path, max: u64) -> Result<String, String> {
+    let name = path.display();
+    let file = std::fs::File::open(path).map_err(|e| format!("{name} can't be read: {e}"))?;
+    let mut bytes = Vec::new();
+    file.take(max + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("{name} can't be read: {e}"))?;
+    // The size first: a cut at the limit may fall inside a character.
+    if bytes.len() as u64 > max {
+        return Err(format!("{name} is too big: over {max} bytes"));
+    }
+    String::from_utf8(bytes).map_err(|e| format!("{name} isn't UTF-8: {e}"))
 }

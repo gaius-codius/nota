@@ -15,6 +15,9 @@
 //! - `nota pack`: builds term packs, from the committed lists of a shipped
 //!   pack or from a user's glossary, and writes a pack's credits (see
 //!   `pack`).
+//! - `nota bench`: runs a session's or a fixture's term clean-up
+//!   candidates through several deciders and reports the differences side
+//!   by side, for development, and compares two runs' logs (see `bench`).
 //!
 //! The binary's `main` only calls [`main`]; the code is here so its tests
 //! can turn on the `fake-capture` feature.
@@ -63,7 +66,10 @@ usage: nota [--data DIR] [--parakeet DIR --vad FILE]
        nota pack build DIR --out FILE
        nota pack glossary FILE --out FILE --author NAME [--name NAME]
                           [--version TEXT] [--language CODE]
-       nota pack notice FILE";
+       nota pack notice FILE
+       nota bench --engines NAMES (--session N [--data DIR] | --fixture FILE)
+                  [--precheck on|off] [--log DIR]
+       nota bench compare OLD NEW";
 
 /// What was asked for.
 #[derive(Debug)]
@@ -76,6 +82,9 @@ enum Command {
     EngineLlama(Vec<OsString>),
     /// `nota pack`: builds a pack, or writes its credits.
     Pack(pack::PackCommand),
+    /// `nota bench`: runs deciders side by side, or compares two runs'
+    /// logs.
+    Bench(bench::BenchCommand),
     /// `nota engine fake`: the engine child with stand-in models (tests
     /// only).
     #[cfg(feature = "fake-capture")]
@@ -121,6 +130,11 @@ pub fn main(args: &[OsString]) -> ExitCode {
         Command::Pack(command) => match pack::run(&command, &mut io::stdout()) {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => fail(&format!("nota pack: {err}"), 1),
+        },
+        // No screen is open: the report goes to stdout.
+        Command::Bench(command) => match bench::dispatch(&command, &mut io::stdout()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => fail(&format!("nota bench: {err}"), 1),
         },
         Command::Record(args) => match record::record(&args) {
             Ok(outcome) => {
@@ -175,6 +189,7 @@ fn parse(args: &[OsString]) -> Result<Command, String> {
         }
         Some("record") => parse_record(words.as_slice()).map(Command::Record),
         Some("pack") => pack::parse(words.as_slice()).map(Command::Pack),
+        Some("bench") => bench::parse(words.as_slice()).map(Command::Bench),
         // No command, or options only: Home.
         None => parse_app(args).map(Command::App),
         Some(word) if word.starts_with("--") => parse_app(args).map(Command::App),
@@ -304,24 +319,29 @@ fn parse_record(args: &[OsString]) -> Result<RecordArgs, String> {
         (None, None) => None,
         _ => return Err("--parakeet and --vad go together".into()),
     };
-    let data = match data {
-        // Absolute, so every directory in it has a parent to make it in.
-        Some(dir) => {
-            std::path::absolute(&dir).map_err(|e| format!("--data {}: {e}", dir.display()))?
-        }
-        None => directories::ProjectDirs::from("", "", "nota")
-            .ok_or("no home directory to keep sessions in; pass --data")?
-            .data_dir()
-            .to_path_buf(),
-    };
     Ok(RecordArgs {
-        data,
+        data: data_dir(data)?,
         start: recorder::Command::Start(setup),
         models,
         tone,
         latency_log,
         fake_engine,
     })
+}
+
+/// The data directory `--data` gives, made absolute, or without it the
+/// platform's (`~/.local/share/nota` on Linux).
+fn data_dir(given: Option<PathBuf>) -> Result<PathBuf, String> {
+    match given {
+        // Absolute, so every directory in it has a parent to make it in.
+        Some(dir) => {
+            std::path::absolute(&dir).map_err(|e| format!("--data {}: {e}", dir.display()))
+        }
+        None => Ok(directories::ProjectDirs::from("", "", "nota")
+            .ok_or("no home directory to keep sessions in; pass --data")?
+            .data_dir()
+            .to_path_buf()),
+    }
 }
 
 #[cfg(test)]

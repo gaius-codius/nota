@@ -15,7 +15,8 @@ fn engine_cutting(list: &[&str]) -> Result<(ModelPaths, ChunkerConfig), String> 
         | Command::App(_)
         | Command::EngineFake(_)
         | Command::EngineLlama(_)
-        | Command::Pack(_) => Err("record".into()),
+        | Command::Pack(_)
+        | Command::Bench(_) => Err("record".into()),
     }
 }
 
@@ -26,7 +27,8 @@ fn record(list: &[&str]) -> Result<RecordArgs, String> {
         | Command::App(_)
         | Command::EngineFake(_)
         | Command::EngineLlama(_)
-        | Command::Pack(_) => Err("engine".into()),
+        | Command::Pack(_)
+        | Command::Bench(_) => Err("engine".into()),
     }
 }
 
@@ -37,7 +39,8 @@ fn app(list: &[&str]) -> Result<RecordArgs, String> {
         | Command::Record(_)
         | Command::EngineFake(_)
         | Command::EngineLlama(_)
-        | Command::Pack(_) => Err("not the app".into()),
+        | Command::Pack(_)
+        | Command::Bench(_) => Err("not the app".into()),
     }
 }
 
@@ -242,4 +245,19 @@ fn parses_engine_llama_server() {
     assert_eq!(server, args(&list[2..]));
     let bare = parse(&args(&["engine", "llama-server"])).unwrap_err();
     assert_eq!(bare, "nota engine llama-server needs the server's program");
+}
+
+/// `nota bench` is handed to the bench's own parser.
+#[test]
+fn parses_bench() {
+    let Ok(Command::Bench(command)) = parse(&args(&["bench", "compare", "a", "b"])) else {
+        panic!("not the bench");
+    };
+    assert_eq!(
+        command,
+        bench::BenchCommand::Compare {
+            old: PathBuf::from("a"),
+            new: PathBuf::from("b"),
+        }
+    );
 }
