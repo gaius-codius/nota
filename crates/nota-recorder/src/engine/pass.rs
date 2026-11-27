@@ -31,10 +31,18 @@
 //! isn't read into memory at once and the engine never falls behind. A
 //! pass resumed from a confirmed point sends the same frames from there as
 //! one that never stopped.
+//!
+//! The last segment read is kept until the next one is read, so a
+//! [`TrackAudio`] that starts in the segment the one before it ended in
+//! (the hotword pass feeds a segment's chunks one after the other) doesn't
+//! read, prove and decode it again: a segment is read once for a run of
+//! feeds over it, and one that couldn't be read is tried once. Audio is
+//! only used for a row equal to the one it was read and proven for.
 
 use std::collections::VecDeque;
 use std::fmt;
 use std::io;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
@@ -227,10 +235,11 @@ impl Starts {
 /// every track is confirmed to its last published sample, `stop` returns
 /// true, or it fails. Committed results go to `sink` as they come. A
 /// segment `read` can't give is skipped: its samples go to the sink as
-/// skipped once everything before them is confirmed.
+/// skipped once everything before them is confirmed. A segment that one
+/// track ends in and the next starts in is read once for both.
 pub fn transcribe<K: PassSink>(
     tracks: &[TrackAudio],
-    mut read: impl FnMut(&SegmentRow) -> Result<Vec<i16>, ReadSegmentError>,
+    read: impl FnMut(&SegmentRow) -> Result<Vec<i16>, ReadSegmentError>,
     config: &PassConfig,
     clock: &Arc<dyn Clock>,
     sink: &mut K,
@@ -249,12 +258,13 @@ pub fn transcribe<K: PassSink>(
     let mut offline: Option<String> = None;
     let mut starts = Starts::default();
     let mut texts: Vec<Transcript> = Vec::new();
+    let mut reader = Reader::new(read);
     work.reverse();
     while let Some(feed) = work.last_mut() {
         if stop() {
             return PassEnd::Stopped;
         }
-        feed.send(&mut engine, &mut read, config);
+        feed.send(&mut engine, &mut reader, config);
         while let Some(range) = feed.unread_due() {
             if let Err(e) = sink.confirmed(feed.track, range.end(), Vec::new(), vec![range]) {
                 return PassEnd::Sink(e);
@@ -332,6 +342,38 @@ pub fn transcribe<K: PassSink>(
     PassEnd::Done
 }
 
+/// Reads segments for the pass, keeping the last one read, so feeds that
+/// follow on in one segment share its read.
+struct Reader<R> {
+    /// Reads, proves and decodes a segment.
+    read: R,
+    /// The row last read, and its audio, or `None` if it couldn't be read.
+    last: Option<(SegmentRow, Option<Rc<Vec<i16>>>)>,
+}
+
+impl<R: FnMut(&SegmentRow) -> Result<Vec<i16>, ReadSegmentError>> Reader<R> {
+    /// A reader that reads with `read`, having read nothing yet.
+    const fn new(read: R) -> Self {
+        Self { read, last: None }
+    }
+
+    /// The audio of `row`, or `None` if it can't be read: what was read
+    /// last if that was for an equal row (the same samples and digest, so
+    /// proven against this row), and otherwise what `read` gives now.
+    fn audio(&mut self, row: &SegmentRow) -> Option<Rc<Vec<i16>>> {
+        if let Some((last, audio)) = &self.last
+            && last == row
+        {
+            return audio.as_ref().map(Rc::clone);
+        }
+        // Let the last segment go first, so the pass never holds two.
+        self.last = None;
+        let audio = (self.read)(row).ok().map(Rc::new);
+        self.last = Some((*row, audio.as_ref().map(Rc::clone)));
+        audio
+    }
+}
+
 /// One track's audio on its way to the engine.
 #[derive(Debug)]
 struct Feed {
@@ -339,7 +381,7 @@ struct Feed {
     /// The segments still to send, the one being sent first.
     segments: VecDeque<SegmentRow>,
     /// The audio of the segment being sent, once read.
-    audio: Option<Vec<i16>>,
+    audio: Option<Rc<Vec<i16>>>,
     /// The next sample to send.
     next: SampleIndex,
     /// The segment last sent from, to tell where a run ends.
@@ -421,7 +463,7 @@ impl Feed {
     fn send(
         &mut self,
         engine: &mut EngineSupervisor,
-        read: &mut impl FnMut(&SegmentRow) -> Result<Vec<i16>, ReadSegmentError>,
+        reader: &mut Reader<impl FnMut(&SegmentRow) -> Result<Vec<i16>, ReadSegmentError>>,
         config: &PassConfig,
     ) {
         while self.in_flight() < config.in_flight {
@@ -437,7 +479,7 @@ impl Feed {
                 engine.flush(self.track);
             }
             if self.audio.is_none() {
-                let Ok(read) = read(&row) else {
+                let Some(read) = reader.audio(&row) else {
                     self.skip_unread(engine, row);
                     continue;
                 };

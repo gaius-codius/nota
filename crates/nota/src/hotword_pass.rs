@@ -13,7 +13,9 @@
 //! [`TrackAudio::until`]), so the beam decodes exactly that chunk and its
 //! text is stored against it ([`nota_store::HotwordText`]). A chunk the
 //! final pass heard nothing in isn't fed: it's stored as text-less once
-//! the pass has got past it.
+//! the pass has got past it. The chunks of one segment share its read:
+//! the pass reads, proves and decodes a segment once for all of them
+//! ([`nota_recorder::engine::pass`]), not once a chunk.
 //!
 //! **Safe to stop.** Texts are committed a whole chunk at a time, with how
 //! far the pass has got on the track, never a sample mid-chunk. A run
