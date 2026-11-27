@@ -41,7 +41,7 @@ fn a_new_file_gets_the_current_schema() {
     let dir = TestDir::new("fresh");
     let store = Store::open(&dir.db()).unwrap();
     assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
-    assert_eq!(STEPS.len(), 11);
+    assert_eq!(STEPS.len(), 12);
     assert_eq!(STEPS.len(), usize::try_from(VERSION - FIRST + 1).unwrap());
     // Opening again changes nothing.
     drop(store);
@@ -972,5 +972,98 @@ fn version_11_upgrades_to_12_with_clean_up_proposals() {
         "DELETE FROM proposal_v8",
     ] {
         assert!(refused(&conn, sql), "{sql}");
+    }
+}
+
+/// Acceptance (#278): a version 12 library's proposals read back as they
+/// were, none given up on, and the new column is as closed as the rest of
+/// the row; a proposal stored after the upgrade can be given up on.
+#[test]
+fn version_12_upgrades_to_13_with_nothing_given_up() {
+    let dir = TestDir::new("v12");
+    {
+        let conn = crate::tests::library_at(&dir.db(), 12);
+        conn.execute_batch(
+            "INSERT INTO session (id, state, language) VALUES (1, 'stopped', 'en');
+             INSERT INTO final_text VALUES (1, 0, 0, 100, 'amylo diping', 'e', 'm');
+             INSERT INTO revision VALUES (1, 0, NULL);
+             INSERT INTO final_word VALUES (1, 0, 0, 0, 'amylo', 0, 50, NULL), \
+                 (1, 0, 0, 1, 'diping', 50, 100, NULL);
+             INSERT INTO proposal (session_id, revision, track, start_sample, first_word,
+                 last_word, offered_first, offered_last, heard, term, replacement, source,
+                 matched, decider, decider_model, decider_place, answer, no_answer, outcome,
+                 rule, thresholds, log_version)
+             VALUES (1, 0, 0, 0, 0, 1, 0, 1, 'amylo diping', 'amlodipine', 'amylo diping',
+                 'lookup', 'alias', 'llama-server', 'qwen', 'local', 'none', 'cut short',
+                 'rejected', 'no-answer', 'similarity=0.6', 1);",
+        )
+        .unwrap();
+    }
+    let mut store = Store::open(&dir.db()).unwrap();
+    assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
+    let one = SessionId::new(1);
+    let decided = |store: &Store| -> Vec<crate::Decided> {
+        store
+            .proposals(one)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.decided)
+            .collect()
+    };
+    assert_eq!(
+        decided(&store),
+        [crate::Decided::NoAnswer("cut short".to_owned())]
+    );
+    // A proposal stored now records that clean-up gave up on it.
+    let words = crate::WordSpan::new(0, 0).unwrap();
+    let new = crate::NewProposal {
+        proposed: crate::Proposed {
+            chunk: crate::ChunkKey {
+                track: TrackId::new(0),
+                start: SampleIndex::new(0),
+            },
+            words,
+            offered: words,
+            heard: "amylo".to_owned(),
+            term: "amylase".to_owned(),
+            replacement: "amylase".to_owned(),
+            origin: crate::Origin::Learned,
+            found: crate::Found::Alias,
+            decided_by: crate::DecidedBy {
+                name: "llama-server".to_owned(),
+                model: "qwen".to_owned(),
+                place: nota_core::decide::Place::Local,
+            },
+            log_prob: None,
+            thresholds: "similarity=0.6".to_owned(),
+        },
+        decided: crate::Decided::GaveUp("no server".to_owned()),
+    };
+    store
+        .add_proposals(one, std::slice::from_ref(&new))
+        .unwrap();
+    assert_eq!(
+        decided(&store),
+        [
+            crate::Decided::NoAnswer("cut short".to_owned()),
+            crate::Decided::GaveUp("no server".to_owned())
+        ]
+    );
+    drop(store);
+    // The old row holds 0, and neither row's value can be changed.
+    let conn = raw(&dir.db());
+    let given_up: Vec<i64> = conn
+        .prepare("SELECT gave_up FROM proposal ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(given_up, [0, 1]);
+    for sql in [
+        "UPDATE proposal SET gave_up = 1 WHERE gave_up = 0",
+        "UPDATE proposal SET gave_up = 0 WHERE gave_up = 1",
+    ] {
+        assert!(refused(&conn, sql), "{sql} was allowed");
     }
 }

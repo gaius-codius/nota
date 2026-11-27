@@ -206,7 +206,8 @@ impl Verdict {
             Decided::Unchanged { .. } | Decided::Covered { .. } => (Said::Yes, Ending::Rejected),
             Decided::Refused { rule, .. } => (Said::Yes, Ending::Refused(*rule)),
             Decided::No { .. } => (Said::No, Ending::Rejected),
-            Decided::NoAnswer(_) => (Said::NoAnswer, Ending::Rejected),
+            // The bench asks once and never gives up, but a stored decision may.
+            Decided::NoAnswer(_) | Decided::GaveUp(_) => (Said::NoAnswer, Ending::Rejected),
             Decided::Skipped { .. } => (Said::Skipped, Ending::Rejected),
         };
         Self { said, ending }

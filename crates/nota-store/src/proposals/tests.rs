@@ -140,6 +140,11 @@ fn every_decision(chunk: ChunkKey) -> Vec<NewProposal> {
             "amoxicillin",
             Decided::NoAnswer("cut short".to_owned()),
         ),
+        proposal(
+            chunk,
+            "amiodarone",
+            Decided::GaveUp("the decider isn't working: no server".to_owned()),
+        ),
         proposal(chunk, "amylo edema", Decided::Skipped { similarity: 0.42 }),
         learned,
     ]
@@ -168,6 +173,7 @@ fn proposals_read_back_as_stored() {
             Outcome::Applied(None),
             Outcome::ToRank,
             Outcome::ToRank,
+            Outcome::Rejected,
             Outcome::Rejected,
             Outcome::Rejected,
             Outcome::Rejected,
@@ -366,6 +372,9 @@ fn the_schema_keeps_proposals_as_recorded() {
         format!("UPDATE proposal SET offered_first = 0 WHERE id = {applied}"),
         format!("UPDATE proposal SET similarity = 0.1 WHERE id = {applied}"),
         format!("UPDATE proposal SET outcome = 'card' WHERE id = {applied}"),
+        // Whether clean-up gave up is recorded with the row, never after.
+        "UPDATE proposal SET gave_up = 1 WHERE rule = 'no-answer'".to_owned(),
+        "UPDATE proposal SET gave_up = 0 WHERE gave_up = 1".to_owned(),
         format!("INSERT OR REPLACE INTO proposal SELECT * FROM proposal WHERE id = {applied}"),
     ] {
         assert!(refused(&conn, &sql), "{sql}");
@@ -436,6 +445,9 @@ fn the_schema_ties_each_outcome_to_its_decision() {
         ("to-rank", ", gate = 'applied'"),
         ("to-rank", ", answer = 'no', gate = NULL"),
         ("rejected", ", rule = 'no-answer'"),
+        // Only a candidate with no answer can be given up on.
+        ("applied", ", gave_up = 1"),
+        ("rejected", ", gave_up = 2"),
     ] {
         assert!(copy(outcome, change), "{outcome}{change}");
     }
@@ -482,4 +494,30 @@ fn every_refusal_and_place_reads_back() {
         })
         .collect();
     assert_eq!(read, added);
+}
+
+/// Only a decision clean-up gave up on says so: not a no answer of
+/// another kind, nor any decision the decider made.
+#[test]
+fn only_a_given_up_decision_says_it_gave_up() {
+    let (_dir, _store, chunk) = store("proposals-gave-up");
+    let gave_up: Vec<(String, bool)> = every_decision(chunk)
+        .into_iter()
+        .map(|p| (p.proposed.term, p.decided.gave_up()))
+        .collect();
+    assert_eq!(
+        gave_up,
+        [
+            ("amlodipine".to_owned(), false),
+            ("amiloride".to_owned(), false),
+            ("amlodipin".to_owned(), false),
+            ("amylo diping".to_owned(), false),
+            ("amylase".to_owned(), false),
+            ("ampicillin".to_owned(), false),
+            ("amoxicillin".to_owned(), false),
+            ("amiodarone".to_owned(), true),
+            ("amylo edema".to_owned(), false),
+            ("amlodipine".to_owned(), false),
+        ]
+    );
 }

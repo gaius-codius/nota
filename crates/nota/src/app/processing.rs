@@ -8,11 +8,13 @@ use nota_recorder::fs::StdFs;
 use nota_recorder::segment::needs_salvage;
 use nota_recorder::session::SessionDir;
 use nota_store::{
-    FinalLine, Job, JobKind, JobState, RevisionNumber, SessionState, StoreError, TrackKind, Wait,
+    ChunkKey, FinalLine, Job, JobKind, JobState, RevisionNumber, SessionState, StoreError,
+    TrackKind, Wait,
 };
 use nota_tui::{
     Processing, ProcessingAction, ProcessingFailure, ProcessingJob, ProcessingState, ProcessingWait,
 };
+use std::collections::BTreeSet;
 use std::io;
 
 /// How often Processing reads the session again.
@@ -167,7 +169,7 @@ impl Data<'_> {
                     session.state,
                     db.session_jobs(self.id)?,
                     &final_text,
-                    &decider(db.proposals(self.id)),
+                    &CleanUpView::of(db.proposals(self.id)),
                 ),
                 transcript: transcript(heard, &final_text, &db.tracks(self.id)?),
             })
@@ -195,40 +197,71 @@ impl Data<'_> {
         state: SessionState,
         jobs: Vec<Job>,
         final_text: &[FinalLine],
-        decider: &str,
+        clean_up: &CleanUpView,
     ) -> Vec<ProcessingJob> {
         let mut steps = vec![ProcessingJob {
             name: "Recording saved".into(),
             engine: "nota".into(),
             state: self.saved(state),
+            note: None,
         }];
         let engine = final_text
             .first()
             .map(|line| &line.heard.heard_by)
             .map(|by| format!("{} · {}", by.engine, by.model));
         let engine = engine.as_deref().unwrap_or_else(|| self.engines.label());
-        steps.extend(jobs.into_iter().map(|job| {
-            let by = match job.kind {
-                JobKind::FinalPass => engine,
-                JobKind::CleanUp => decider,
-            };
-            step(job, by)
+        steps.extend(jobs.into_iter().map(|job| match job.kind {
+            JobKind::FinalPass => step(job, engine, None),
+            JobKind::CleanUp => step(job, &clean_up.decider, clean_up.note.clone()),
         }));
         steps
     }
 }
 
-/// The decider named on the clean-up step: the one the session's
-/// `proposals` were decided by, or just "decider" before there are any
-/// (or if they can't be read).
-fn decider(proposals: Result<Vec<nota_store::Proposal>, StoreError>) -> String {
-    proposals
-        .ok()
-        .and_then(|proposals| {
-            let by = &proposals.first()?.proposed.decided_by;
-            Some(format!("{} · {}", by.name, by.model))
-        })
-        .unwrap_or_else(|| "decider".to_owned())
+/// What the clean-up step shows from the session's proposals.
+struct CleanUpView {
+    /// The decider named on the step: the one the proposals were decided
+    /// by, or just "decider" before there are any (or if they can't be
+    /// read).
+    decider: String,
+    /// How many chunks clean-up gave up on, in words, if any.
+    note: Option<String>,
+}
+
+impl CleanUpView {
+    /// The view of the session's `proposals`.
+    fn of(proposals: Result<Vec<nota_store::Proposal>, StoreError>) -> Self {
+        let proposals = proposals.unwrap_or_default();
+        let decider = proposals.first().map_or_else(
+            || "decider".to_owned(),
+            |p| {
+                let by = &p.proposed.decided_by;
+                format!("{} · {}", by.name, by.model)
+            },
+        );
+        // A chunk's candidates are given up on together, so count chunks,
+        // not candidates.
+        let given_up: BTreeSet<ChunkKey> = proposals
+            .iter()
+            .filter(|p| p.decided.gave_up())
+            .map(|p| p.proposed.chunk)
+            .collect();
+        Self {
+            decider,
+            note: given_up_note(given_up.len()),
+        }
+    }
+}
+
+/// What the clean-up step says of `chunks` given up on, if any.
+fn given_up_note(chunks: usize) -> Option<String> {
+    match chunks {
+        0 => None,
+        1 => Some("1 chunk left unfixed: the decider kept failing on it".to_owned()),
+        n => Some(format!(
+            "{n} chunks left unfixed: the decider kept failing on them"
+        )),
+    }
 }
 
 /// A step that cannot run yet, with no progress to show.
@@ -279,8 +312,8 @@ fn track_name(id: nota_core::TrackId, tracks: &[nota_store::Track]) -> String {
     )
 }
 
-/// A stored job as one Processing step.
-fn step(job: Job, engine: &str) -> ProcessingJob {
+/// A stored job as one Processing step, by `engine`, with `note` under it.
+fn step(job: Job, engine: &str, note: Option<String>) -> ProcessingJob {
     let progress = progress(job.progress);
     let state = match job.state {
         JobState::Waiting(wait) => ProcessingState::Waiting {
@@ -314,6 +347,7 @@ fn step(job: Job, engine: &str) -> ProcessingJob {
         .into(),
         engine: engine.into(),
         state,
+        note,
     }
 }
 
@@ -335,7 +369,8 @@ mod tests {
     };
     use nota_recorder::fs::Fs as _;
     use nota_store::{
-        FinalText, Heard, HeardBy, JobEnd, NewSession, Progress, SegmentRow, Sha256Digest, Track,
+        FinalText, Heard, HeardBy, JobEnd, NewProposal, NewSession, Progress, SegmentRow,
+        Sha256Digest, Track,
     };
 
     const MIC: TrackId = TrackId::new(0);
@@ -563,9 +598,9 @@ mod tests {
         assert_eq!(clean_up(&fixture).name, "Fixing terms");
         assert_eq!(clean_up(&fixture).engine, "decider");
         let words = nota_store::WordSpan::new(0, 0).unwrap();
-        let proposal = nota_store::NewProposal {
+        let proposal = NewProposal {
             proposed: nota_store::Proposed {
-                chunk: nota_store::ChunkKey {
+                chunk: ChunkKey {
                     track: TrackId::new(0),
                     start: SampleIndex::ZERO,
                 },
@@ -589,6 +624,95 @@ mod tests {
         db.with(|db| db.add_proposals(fixture.id, &[proposal]))
             .unwrap();
         assert_eq!(clean_up(&fixture).engine, "llama-server · qwen.gguf");
+        // A decision the decider made leaves no note.
+        assert_eq!(clean_up(&fixture).note, None);
+    }
+
+    /// A proposal on the word at `position` of the chunk at `start`,
+    /// decided as `decided`.
+    fn proposal_at(start: u64, position: u32, decided: nota_store::Decided) -> NewProposal {
+        let words = nota_store::WordSpan::new(position, position).unwrap();
+        NewProposal {
+            proposed: nota_store::Proposed {
+                chunk: ChunkKey {
+                    track: TrackId::new(0),
+                    start: SampleIndex::new(start),
+                },
+                words,
+                offered: words,
+                heard: "dose".into(),
+                term: "doses".into(),
+                replacement: "doses".into(),
+                origin: nota_store::Origin::Learned,
+                found: nota_store::Found::Alias,
+                decided_by: nota_store::DecidedBy {
+                    name: "llama-server".into(),
+                    model: "qwen.gguf".into(),
+                    place: nota_core::decide::Place::Local,
+                },
+                log_prob: None,
+                thresholds: String::new(),
+            },
+            decided,
+        }
+    }
+
+    /// Acceptance (#278): the clean-up step says how many chunks it gave
+    /// up on, counting each chunk once however many candidates it had.
+    #[test]
+    fn the_clean_up_step_counts_the_chunks_given_up_on() {
+        let fixture = Fixture::new("the_clean_up_step_counts_the_chunks_given_up_on");
+        fixture.finish();
+        let range = |a, b| SampleRange::new(SampleIndex::new(a), SampleIndex::new(b)).unwrap();
+        // Two chunks of two words each.
+        let lines: Vec<FinalText> = [0, 100]
+            .into_iter()
+            .map(|start| {
+                let mut line = text(TrackId::new(0), SampleIndex::new(start), "dose dose");
+                line.words = [(start, start + 50), (start + 50, start + 100)]
+                    .into_iter()
+                    .map(|(a, b)| nota_store::FinalWord {
+                        text: "dose".into(),
+                        range: range(a, b),
+                        log_prob: None,
+                    })
+                    .collect();
+                line
+            })
+            .collect();
+        let db = fixture.library.db();
+        db.with(|db| db.add_final_text(fixture.id, TrackId::new(0), SampleIndex::new(200), &lines))
+            .unwrap();
+        let note = |fixture: &Fixture| fixture.read().jobs[2].note.clone();
+        let gave_up = || nota_store::Decided::GaveUp("no server".into());
+        // One chunk given up on, with both its candidates.
+        db.with(|db| {
+            db.add_proposals(
+                fixture.id,
+                &[proposal_at(0, 0, gave_up()), proposal_at(0, 1, gave_up())],
+            )
+        })
+        .unwrap();
+        assert_eq!(
+            note(&fixture).as_deref(),
+            Some("1 chunk left unfixed: the decider kept failing on it")
+        );
+        // A second, beside a candidate with an unreadable answer, which
+        // isn't given up on.
+        db.with(|db| {
+            db.add_proposals(
+                fixture.id,
+                &[
+                    proposal_at(100, 0, nota_store::Decided::NoAnswer("garbled".into())),
+                    proposal_at(100, 1, gave_up()),
+                ],
+            )
+        })
+        .unwrap();
+        assert_eq!(
+            note(&fixture).as_deref(),
+            Some("2 chunks left unfixed: the decider kept failing on them")
+        );
     }
 
     /// Final rows do not replace the chronological heard text.

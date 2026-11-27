@@ -17,7 +17,7 @@
 //! the cap, and writes the applied ones' changes as one new revision, all
 //! in one transaction, so a run killed before it leaves its proposals to
 //! be placed by the next. A review, by the user, is set once
-//! ([`Store::review_proposal`]). The schema's triggers (version 12) refuse
+//! ([`Store::review_proposal`]). The schema's triggers (versions 12 and 13) refuse
 //! anything else.
 
 use nota_core::decide::{Place, Probability};
@@ -164,9 +164,11 @@ pub enum Decided {
         similarity: f64,
     },
     /// A yes the gate let through, but for words that are already
-    /// reviewed or changed (it found an earlier occurrence than the
-    /// lookup offered): rejected and logged, so a reviewed span is never
-    /// changed.
+    /// reviewed or changed: rejected and logged, so a reviewed span is
+    /// never changed. Clean-up doesn't ask about offers on held words, so
+    /// this is a guard; proposals from before #279 may hold it for a
+    /// later occurrence than the one held, where the gate placed the fix
+    /// on the first.
     Covered {
         /// How likely the decider thought a yes was, if it said.
         yes: Option<Probability>,
@@ -202,6 +204,20 @@ pub enum Decided {
         /// C1's score, below the gate's minimum.
         similarity: f64,
     },
+    /// Clean-up gave up asking: the decider was unavailable several times
+    /// this candidate's chunk was asked, while it answered other
+    /// questions. Rejected and logged, never applied, for
+    /// the reason given (the decider's last failure). Stored as a no
+    /// answer with `gave_up` set (schema version 13).
+    GaveUp(String),
+}
+
+impl Decided {
+    /// Whether clean-up gave up asking about it ([`Decided::GaveUp`]).
+    #[must_use]
+    pub const fn gave_up(&self) -> bool {
+        matches!(self, Self::GaveUp(_))
+    }
 }
 
 /// The reason a [`Decided::Skipped`] row gives for having no answer.
@@ -213,10 +229,9 @@ pub const SKIPPED: &str = "not asked: the similarity pre-check (C3) found C1 bel
 pub struct Proposed {
     /// The chunk of the final text.
     pub chunk: ChunkKey,
-    /// Its words the outcome is for: where an applied fix landed (which
-    /// can be an earlier occurrence of the heard span than the one
-    /// offered), with any other fix in the same words; otherwise where the
-    /// lookup offered it.
+    /// Its words the outcome is for: an applied fix's change, which is the
+    /// words the lookup offered it at, widened to any other fix sharing a
+    /// word; otherwise where the lookup offered it.
     pub words: WordSpan,
     /// Its words where the lookup offered the term, which tell a
     /// candidate proposed already from a new one.
@@ -318,7 +333,8 @@ pub struct Placing {
 }
 
 /// The columns [`Decided`] is stored in: answer, why there's no answer,
-/// yes probability, gate, similarity, outcome and rule.
+/// yes probability, gate, similarity, outcome, rule, and whether clean-up
+/// gave up.
 type DecidedColumns = (
     &'static str,
     Option<String>,
@@ -327,6 +343,7 @@ type DecidedColumns = (
     Option<f64>,
     &'static str,
     Option<&'static str>,
+    bool,
 );
 
 /// How `decided` is stored.
@@ -341,6 +358,7 @@ fn decided_columns(decided: &Decided) -> DecidedColumns {
             Some(*similarity),
             "applied",
             None,
+            false,
         ),
         Decided::Unchanged { yes, similarity } => (
             "yes",
@@ -350,6 +368,7 @@ fn decided_columns(decided: &Decided) -> DecidedColumns {
             Some(*similarity),
             "rejected",
             Some("no-change"),
+            false,
         ),
         Decided::Covered { yes, similarity } => (
             "yes",
@@ -359,6 +378,7 @@ fn decided_columns(decided: &Decided) -> DecidedColumns {
             Some(*similarity),
             "rejected",
             Some("covered"),
+            false,
         ),
         Decided::Refused {
             yes,
@@ -372,17 +392,20 @@ fn decided_columns(decided: &Decided) -> DecidedColumns {
             *similarity,
             "to-rank",
             None,
+            false,
         ),
-        Decided::No { yes } => ("no", None, p(yes), None, None, "rejected", Some("no")),
-        Decided::NoAnswer(why) => (
-            "none",
-            Some(why.clone()),
+        Decided::No { yes } => (
+            "no",
             None,
+            p(yes),
             None,
             None,
             "rejected",
-            Some("no-answer"),
+            Some("no"),
+            false,
         ),
+        Decided::NoAnswer(why) => no_answer(why, false),
+        Decided::GaveUp(why) => no_answer(why, true),
         Decided::Skipped { similarity } => (
             "none",
             Some(SKIPPED.to_owned()),
@@ -391,8 +414,24 @@ fn decided_columns(decided: &Decided) -> DecidedColumns {
             Some(*similarity),
             "rejected",
             Some("no-answer"),
+            false,
         ),
     }
+}
+
+/// How a candidate with no answer, for the reason `why`, is stored, and
+/// whether clean-up `gave_up` on it.
+fn no_answer(why: &str, gave_up: bool) -> DecidedColumns {
+    (
+        "none",
+        Some(why.to_owned()),
+        None,
+        None,
+        None,
+        "rejected",
+        Some("no-answer"),
+        gave_up,
+    )
 }
 
 /// The columns [`Found`] is stored in: how, score, sounds, trigrams,
@@ -438,7 +477,8 @@ const fn place_str(place: Place) -> &'static str {
 /// Stores one proposal for session `key`.
 fn insert(conn: &Connection, key: i64, new: &NewProposal) -> Result<(), StoreError> {
     let p = &new.proposed;
-    let (answer, no_answer, yes, gate, similarity, outcome, rule) = decided_columns(&new.decided);
+    let (answer, no_answer, yes, gate, similarity, outcome, rule, gave_up) =
+        decided_columns(&new.decided);
     let (matched, score, sounds, trigrams, jaro_winkler, bar) = found_columns(p.found);
     let (pack_name, pack_version, pack_digest) = match &p.origin {
         Origin::Pack {
@@ -457,9 +497,9 @@ fn insert(conn: &Connection, key: i64, new: &NewProposal) -> Result<(), StoreErr
          offered_first, offered_last, heard, term, replacement, source, pack_name, \
          pack_version, pack_digest, matched, score, sounds, trigrams, jaro_winkler, bar, \
          decider, decider_model, decider_place, answer, no_answer, yes_probability, gate, \
-         similarity, log_prob, outcome, rule, thresholds, log_version) VALUES (?1, 0, ?2, ?3, \
-         ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'lookup', ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, \
-         ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32)",
+         similarity, log_prob, outcome, rule, thresholds, log_version, gave_up) VALUES (?1, 0, \
+         ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'lookup', ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
+         ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33)",
         params![
             key,
             i64::from(p.chunk.track.get()),
@@ -493,6 +533,7 @@ fn insert(conn: &Connection, key: i64, new: &NewProposal) -> Result<(), StoreErr
             rule,
             p.thresholds,
             LOG_VERSION,
+            gave_up,
         ],
     )?;
     Ok(())
@@ -503,7 +544,7 @@ const COLUMNS: &str = "id, track, start_sample, first_word, last_word, heard, te
     replacement, pack_name, pack_version, pack_digest, matched, score, sounds, trigrams, \
     jaro_winkler, bar, decider, decider_model, decider_place, answer, no_answer, \
     yes_probability, gate, similarity, log_prob, outcome, rule, applied_in, review, thresholds, \
-    offered_first, offered_last";
+    offered_first, offered_last, gave_up";
 
 /// A stored proposal's row, read column by column as [`COLUMNS`] lists
 /// them, and parsed.
@@ -558,6 +599,7 @@ fn parse_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Proposal, StoreEr
         outcome: r.get(26)?,
         rule: r.get(27)?,
         applied_in: r.get(28)?,
+        gave_up: r.get(33)?,
     };
     let review = match r.get::<_, Option<String>>(29)?.as_deref() {
         None => None,
@@ -625,6 +667,8 @@ struct RawDecision {
     rule: Option<String>,
     /// The revision that applied it.
     applied_in: Option<i64>,
+    /// Whether clean-up gave up asking about it.
+    gave_up: bool,
 }
 
 impl RawDecision {
@@ -658,6 +702,7 @@ impl RawDecision {
                 similarity: self.similarity,
             },
             ("no", None, Some("no")) => Decided::No { yes },
+            ("none", None, Some("no-answer")) if self.gave_up => Decided::GaveUp(self.no_answer?),
             // Only a skipped candidate's row has a score without an answer.
             ("none", None, Some("no-answer")) => match self.similarity {
                 Some(similarity) => Decided::Skipped { similarity },

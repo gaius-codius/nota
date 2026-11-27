@@ -12,6 +12,8 @@
 //! - only a yes is applied, refused or covered;
 //! - an applied fix changes the text, names words no review holds, and
 //!   reads with its term in place;
+//! - an applied fix's change holds the words it was offered at, never
+//!   another occurrence of them;
 //! - the changes of one chunk never share a word, so they go in one
 //!   revision.
 
@@ -79,8 +81,8 @@ fn any_offers(chunk: Chunk) -> impl Strategy<Value = Vec<Offer>> {
     )
 }
 
-/// A decider's answers on `n` candidates: none at all, or a yes or no
-/// each, with a probability or not.
+/// A decider's answers on `n` candidates: none at all, given up on, or a
+/// yes or no each, with a probability or not.
 fn any_answers(n: usize) -> impl Strategy<Value = Answers> {
     let said = (any::<bool>(), prop::option::of(0.0..=1.0_f64)).prop_map(|(yes, p)| Said {
         answer: if yes { Answer::Yes } else { Answer::No },
@@ -88,6 +90,7 @@ fn any_answers(n: usize) -> impl Strategy<Value = Answers> {
     });
     prop_oneof![
         1 => Just(Answers::None("no answer".to_owned())),
+        1 => Just(Answers::GaveUp("no server".to_owned())),
         6 => prop::collection::vec(said, n).prop_map(Answers::Given),
     ]
 }
@@ -148,9 +151,14 @@ proptest! {
             prop_assert_eq!(p.proposed.offered, offer.words);
             let yes = matches!(said, Ok(Said { answer: Answer::Yes, .. }));
             match (&p.decided, said) {
-                (Decided::NoAnswer(_), Err(_)) => {}
+                // With no answer, each candidate gets exactly the decision
+                // its kind of no answer makes.
+                (Decided::NoAnswer(_) | Decided::GaveUp(_), Err(none)) => {
+                    prop_assert_eq!(&p.decided, none);
+                }
                 // Settling never skips: only the pre-check, before it, does.
-                (Decided::NoAnswer(_) | Decided::Skipped { .. }, Ok(_)) | (_, Err(_)) => {
+                (Decided::NoAnswer(_) | Decided::GaveUp(_) | Decided::Skipped { .. }, Ok(_))
+                | (_, Err(_)) => {
                     prop_assert!(false, "answer {:?} decided {:?}", said, p.decided);
                 }
                 (Decided::No { .. }, _) => prop_assert!(!yes),
@@ -165,6 +173,10 @@ proptest! {
             if matches!(p.decided, Decided::Applied { .. }) {
                 let words = p.proposed.words;
                 prop_assert!(blocked.iter().all(|b| !b.overlaps(words)));
+                // A change may be wider than its offer, where fixes share
+                // a word, but always holds it.
+                let at = offer.words;
+                prop_assert!(words.first() <= at.first() && at.last() <= words.last(), "{:?} offered at {:?}", words, at);
                 let was = &chunk.text()[chunk.bytes(words)];
                 prop_assert_ne!(was, p.proposed.replacement.as_str());
                 prop_assert!(p.proposed.replacement.contains(offer.term.as_str()));

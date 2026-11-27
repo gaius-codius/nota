@@ -4,9 +4,11 @@
 //! **The chunk is its words.** The lookup and the gate read the chunk's
 //! words joined by single spaces, which is how every later revision shows
 //! a changed chunk, so a byte range in that text names words by position.
-//! A range is widened to the whole words it touches: the gate's
-//! boundaries are the bench's, so a span can sit inside a hyphenated word
-//! ("up" in "follow-up"), and the change keeps the rest of the word.
+//! A range is widened to the whole words it touches: the lookup splits
+//! words at punctuation the chunk's words keep, so a span can sit inside a
+//! word ("dose" in "dose."), and the change keeps the rest of the word.
+//! Each yes is gated at the place the lookup offered it, so it never
+//! changes another occurrence of the same words.
 //!
 //! **Every candidate ends in exactly one outcome** ([`Decided`]): a no,
 //! no answer, or a candidate the similarity pre-check skipped
@@ -169,6 +171,10 @@ pub(crate) enum Answers {
     /// No answer, for the reason given: a reply that couldn't be read, or
     /// a question that couldn't be asked.
     None(String),
+    /// No answer because clean-up gave up asking: the decider was down
+    /// for this chunk's question on several runs, for the reason given
+    /// (its last failure).
+    GaveUp(String),
 }
 
 /// What a chunk's proposals record beyond each candidate.
@@ -237,15 +243,19 @@ const fn refusal(rule: Rejection) -> Refusal {
     }
 }
 
-/// Each asked candidate's answer: `Some` yes or no with its probability,
-/// `None` (with the reason) when the decider gave none.
-fn per_candidate(answers: &Answers, n: usize) -> Vec<Result<Said, String>> {
+/// Each asked candidate's answer: yes or no with its probability, or the
+/// decision it gets when the decider gave none.
+fn per_candidate(answers: &Answers, n: usize) -> Vec<Result<Said, Decided>> {
     match answers {
         // A list of the wrong length is no answer: the decider's types
         // never give one, so this is only a guard.
         Answers::Given(said) if said.len() == n => said.iter().copied().map(Ok).collect(),
-        Answers::Given(said) => vec![Err(format!("{} answers for {n} candidates", said.len())); n],
-        Answers::None(why) => vec![Err(why.clone()); n],
+        Answers::Given(said) => {
+            let why = format!("{} answers for {n} candidates", said.len());
+            vec![Err(Decided::NoAnswer(why)); n]
+        }
+        Answers::None(why) => vec![Err(Decided::NoAnswer(why.clone())); n],
+        Answers::GaveUp(why) => vec![Err(Decided::GaveUp(why.clone())); n],
     }
 }
 
@@ -308,7 +318,7 @@ fn gate_yeses(
     chunk: &Chunk,
     offered: &[Offer],
     asked: &[Offer],
-    said: &[Result<Said, String>],
+    said: &[Result<Said, Decided>],
 ) -> Vec<Option<Verdict>> {
     let yes: Vec<usize> = said
         .iter()
@@ -329,6 +339,9 @@ fn gate_yeses(
         .map(|&i| Proposal {
             heard: asked[i].window.clone(),
             replacement: asked[i].term.clone(),
+            // Where the lookup offered it: a yes on one occurrence of
+            // words that occur twice never changes the other.
+            at: Some(asked[i].span.clone()),
         })
         .collect();
     let offered: Vec<Offered> = offered.iter().map(Offer::offered).collect();
@@ -433,12 +446,12 @@ fn group(
     out
 }
 
-/// The decision on a candidate: its answer (or why there's none), the
-/// gate's verdict on a yes, and what a placed fix comes to.
-fn decided(said: &Result<Said, String>, verdict: Option<&Verdict>, kept: Option<Kept>) -> Decided {
+/// The decision on a candidate: its answer (or the decision for having
+/// none), the gate's verdict on a yes, and what a placed fix comes to.
+fn decided(said: &Result<Said, Decided>, verdict: Option<&Verdict>, kept: Option<Kept>) -> Decided {
     let said = match said {
         Ok(said) => said,
-        Err(why) => return Decided::NoAnswer(why.clone()),
+        Err(none) => return none.clone(),
     };
     let yes: Option<Probability> = said.yes;
     match (said.answer, verdict, kept) {
