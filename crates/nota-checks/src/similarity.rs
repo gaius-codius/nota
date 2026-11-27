@@ -173,8 +173,10 @@ fn matched<T: Eq>(a: &[T], b: &[T], region: &Region) -> usize {
 /// earliest in `b`. A region with no match gives a block of length 0.
 ///
 /// Python then extends the block over junk and "popular" elements. With no
-/// junk function and autojunk unreachable (no side reaches 200), there are
-/// none, and the block found here is already as long as it can be. It
+/// junk function there are none: C1's letters never reach autojunk's 200
+/// (it compares at most [`MAX_LETTERS`]), and the hotword diff's words,
+/// which may, are compared as `propose.py` compares them, with autojunk
+/// off. So the block found here is already as long as it can be. It
 /// compares any elements, so the hotword diff matches words with it.
 pub(crate) fn longest_match<T: Eq>(a: &[T], b: &[T], region: &Region) -> Block {
     let mut best = Block {

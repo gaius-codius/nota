@@ -160,7 +160,7 @@ pub(crate) struct Offer {
     /// inside a yes's replacement: the term, for the lookup's; the listed
     /// word the boosted words hold, for the diff's.
     pub(crate) inside: String,
-    /// How the lookup found it.
+    /// How it was found: by the lookup, or by the hotword diff.
     pub(crate) found: Found,
     /// Where the term came from.
     pub(crate) origin: Origin,

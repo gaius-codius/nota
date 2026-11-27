@@ -95,7 +95,7 @@ struct Track<D> {
 
 /// Runs the protocol on `input` and `output` until `input` ends, cutting
 /// each track's audio as `chunking` says (at 16 kHz): the live pass's
-/// config, or the final pass's.
+/// config, the final pass's or the hotword pass's.
 ///
 /// The recorder's `Hello` must come first; `load` is then called to load
 /// the models, and the engine's `Hello` tells the recorder it's ready.

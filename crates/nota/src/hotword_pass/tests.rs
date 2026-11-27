@@ -420,16 +420,15 @@ fn skipped_or_silent_chunks_store_no_text() {
     );
 }
 
-/// A run whose engines skipped audio and never confirmed any themselves
-/// (an engine that can't be boosted dies at every chunk) fails rather than
-/// reading as done; one that skipped some but heard the rest is done.
+/// A run whose engines skip audio before any engine has confirmed audio
+/// itself (one that says hello but can't be boosted dies at every chunk)
+/// gives up there, failing with the engine's reason, rather than skipping
+/// every chunk and reading as done; one that heard audio first and then
+/// skipped some is done.
 #[test]
-fn a_run_that_heard_nothing_but_skips_fails() {
-    let fixture = Fixture::new(
-        "all-skipped",
-        &[(0, 100, Some("a")), (100, 200, Some("c"))],
-        &[],
-    );
+fn a_run_that_skips_before_hearing_anything_gives_up() {
+    let lines = [(0, 100, Some("a")), (100, 200, Some("c"))];
+    let fixture = Fixture::new("gives-up", &lines, &[]);
     let work = fixture.work();
     let running = quiet();
     let mut sink = Heard::new(
@@ -439,23 +438,22 @@ fn a_run_that_heard_nothing_but_skips_fails() {
         &work,
         &running,
     );
+    let gave_up = sink.gave_up();
+    sink.engine_down(Some("exited: can't write the vocabulary"));
     sink.confirmed(MIC, s(100), vec![], vec![range(0, 100)])
         .unwrap();
-    sink.confirmed(MIC, s(200), vec![], vec![range(100, 200)])
-        .unwrap();
-    assert!(
-        matches!(finished(&mut sink), JobEnd::Failed(ref why) if why.contains("none of the audio")),
-    );
-    // What it skipped is stored, so a later run doesn't feed it again.
+    assert!(gave_up.get());
     assert_eq!(
-        fixture.texts(),
-        [(MIC, 0, 100, None), (MIC, 100, 200, None)]
+        end_of(&mut sink, PassEnd::Stopped),
+        JobEnd::Failed(
+            "the boosted engine failed on the first audio it was given: \
+             exited: can't write the vocabulary"
+                .to_owned()
+        )
     );
-    let fixture = Fixture::new(
-        "some-skipped",
-        &[(0, 100, Some("a")), (100, 200, Some("c"))],
-        &[],
-    );
+    // What it skipped is stored, so it isn't fed again.
+    assert_eq!(fixture.texts(), [(MIC, 0, 100, None)]);
+    let fixture = Fixture::new("skips-later", &lines, &[]);
     let work = fixture.work();
     let mut sink = Heard::new(
         fixture.db().clone(),
@@ -464,11 +462,35 @@ fn a_run_that_heard_nothing_but_skips_fails() {
         &work,
         &running,
     );
-    sink.confirmed(MIC, s(100), vec![], vec![range(0, 100)])
+    sink.confirmed(MIC, s(100), vec![heard(0, 90, "a")], vec![])
         .unwrap();
-    sink.confirmed(MIC, s(200), vec![heard(100, 190, "c")], vec![])
+    sink.confirmed(MIC, s(200), vec![], vec![range(100, 200)])
         .unwrap();
-    assert_eq!(finished(&mut sink), JobEnd::Done);
+    assert!(!sink.gave_up().get());
+    assert_eq!(end_of(&mut sink, PassEnd::Done), JobEnd::Done);
+}
+
+/// A boosted engine that can't start fails the job, with the reason, so
+/// clean-up goes on with the lookup alone instead of waiting for it.
+#[test]
+fn a_boosted_engine_that_cant_start_fails_the_job() {
+    let fixture = Fixture::new("cant-start", &[(0, 100, Some("a"))], &[]);
+    let work = fixture.work();
+    let running = quiet();
+    let mut sink = Heard::new(
+        fixture.db().clone(),
+        SESSION,
+        Boost::DEFAULT,
+        &work,
+        &running,
+    );
+    assert_eq!(
+        end_of(
+            &mut sink,
+            PassEnd::CantStart("exited: no beam search".to_owned())
+        ),
+        JobEnd::Failed("the boosted engine can't start: exited: no beam search".to_owned())
+    );
 }
 
 /// Chunks the final pass heard nothing in aren't fed: one before a fed

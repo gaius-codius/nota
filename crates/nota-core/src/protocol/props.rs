@@ -337,7 +337,15 @@ proptest! {
             prop_assert_eq!(hotwords.len(), texts.len());
             for (hotword, text) in hotwords.iter().zip(&texts) {
                 prop_assert_eq!(hotword.as_str().as_bytes(), text.as_slice());
-                prop_assert_eq!(Hotword::new(hotword.as_str()), Ok(hotword.clone()));
+                // The engine's hotword format, read as sherpa-onnx reads it:
+                // phrases split at `/` and line ends, words at whitespace, a
+                // word starting with `:` a score. None of that may be in a
+                // hotword that got through.
+                let text = hotword.as_str();
+                prop_assert!((1..=crate::messages::MAX_HOTWORD_LEN).contains(&text.len()), "{text:?}");
+                prop_assert!(!text.chars().any(|c| c == '/' || c.is_control()), "{text:?}");
+                prop_assert!(!text.chars().any(|c| c.is_whitespace() && c != ' '), "{text:?}");
+                prop_assert!(text.split(' ').all(|w| !w.is_empty() && !w.starts_with(':')), "{text:?}");
             }
             let frame = encode(&Frame::Message(ToEngine::Hotwords(hotwords))).unwrap();
             prop_assert_eq!(&frame[4..], body.as_slice());

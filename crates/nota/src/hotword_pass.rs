@@ -26,14 +26,16 @@
 //! there's nothing to boost and the job is done without an engine. The
 //! boost is the setting `[hotword_pass] boost`, read at each run.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use nota_core::messages::{ToEngine, Transcript};
 use nota_core::{Clock, SampleIndex, SampleRange, SessionId, TrackId};
 use nota_recorder::engine::EngineCommand;
-use nota_recorder::engine::pass::{PassConfig, PassSink, TrackAudio, transcribe};
+use nota_recorder::engine::pass::{PassConfig, PassEnd, PassSink, TrackAudio, transcribe};
 use nota_recorder::fs::StdFs;
 use nota_recorder::segment::read_segment;
 use nota_store::{
@@ -249,36 +251,57 @@ pub(crate) fn run(pass: &Pass<'_>, session: SessionId, running: &Running<'_>) ->
     // again before it hears anything.
     config.engine.greeting = vec![ToEngine::Hotwords(hotwords)];
     let audio = paths.audio();
+    let gave_up = sink.gave_up();
+    let stop = || (running.stop)() || gave_up.get();
     let ended = transcribe(
         &work.feeds,
         |row| read_segment(&StdFs, &audio, row, RATE),
         &config,
         pass.clock,
         &mut sink,
-        running.stop,
+        &stop,
     );
-    match pass_end(ended) {
-        JobEnd::Done => finished(&mut sink),
-        end => end,
+    end_of(&mut sink, ended)
+}
+
+/// How a run ends, given how its pass `ended`.
+///
+/// **The boosted engine is the pass's own, and optional,** so where the
+/// final pass would wait for a working engine, this one fails, and clean-up
+/// goes on with the lookup alone:
+/// - an engine that can't start fails the job, with the reason;
+/// - so does one whose audio was skipped (the engines kept dying on it)
+///   before any engine confirmed audio itself in this run. That's an engine
+///   that says hello but can't be boosted (its vocabulary can't be written,
+///   or its beam recognizer can't be built), which would die at every chunk
+///   in turn: the run stops at the first, rather than skipping them all and
+///   reading as done.
+fn end_of(sink: &mut Heard<'_>, ended: PassEnd<StoreError>) -> JobEnd {
+    if sink.gave_up.get() {
+        let why = sink
+            .last_down
+            .as_deref()
+            .map_or_else(String::new, |why| format!(": {why}"));
+        return JobEnd::Failed(format!(
+            "the boosted engine failed on the first audio it was given{why}"
+        ));
+    }
+    match ended {
+        PassEnd::CantStart(why) => JobEnd::Failed(format!("the boosted engine can't start: {why}")),
+        ended => match pass_end(ended) {
+            JobEnd::Done => finished(sink),
+            end => end,
+        },
     }
 }
 
 /// How a run ends once the engine has done every chunk: done, once the
-/// chunks left (those it wasn't fed) are stored; but failed if the engines
-/// skipped audio and never once confirmed any themselves. That's an engine
-/// that can't be boosted at all (its vocabulary can't be written, or its
-/// beam recognizer can't be built), which dies at every chunk until each
-/// is skipped: a pass that heard nothing mustn't read as done.
+/// chunks left (those it wasn't fed) are stored.
 fn finished(sink: &mut Heard<'_>) -> JobEnd {
-    if let Err(e) = sink.finish() {
-        return stored(&e);
+    match sink.finish() {
+        Ok(()) => JobEnd::Done,
+        Err(e) => stored(&e),
     }
-    if sink.lost && !sink.told {
-        return JobEnd::Failed(
-            "the boosted engine heard none of the audio: it kept failing on every chunk".to_owned(),
-        );
-    }
-    JobEnd::Done
 }
 
 /// One final-pass chunk the pass has still to store.
@@ -410,11 +433,13 @@ struct Heard<'a> {
     /// Tells the runner why the engine is down now, or that it's back.
     engine_down: &'a dyn Fn(Option<&str>),
     /// Whether it has been told yet: once is enough. Also whether the
-    /// engine itself confirmed any audio this run.
+    /// engine itself has confirmed any audio this run.
     told: bool,
-    /// Whether any audio was skipped, the engines having kept failing on
-    /// it.
-    lost: bool,
+    /// Set once audio is skipped (the engines kept dying on it) before any
+    /// engine confirmed audio itself: the run stops then ([`end_of`]).
+    gave_up: Rc<Cell<bool>>,
+    /// Why the engine was last down, for the job's reason if it gives up.
+    last_down: Option<String>,
 }
 
 impl<'a> Heard<'a> {
@@ -456,8 +481,14 @@ impl<'a> Heard<'a> {
             answered: running.answered,
             engine_down: running.engine_down,
             told: false,
-            lost: false,
+            gave_up: Rc::new(Cell::new(false)),
+            last_down: None,
         }
+    }
+
+    /// The flag the run's stop reads: set once the run must give up.
+    fn gave_up(&self) -> Rc<Cell<bool>> {
+        Rc::clone(&self.gave_up)
     }
 
     /// The samples of the chunks with text done, of all of them.
@@ -545,7 +576,9 @@ impl PassSink for Heard<'_> {
         // With nothing skipped, the engine itself confirmed this audio:
         // it works, whatever stopped an earlier run.
         let engine_answered = skipped.is_empty();
-        self.lost |= !engine_answered;
+        if !engine_answered && !self.told {
+            self.gave_up.set(true);
+        }
         self.note(track, texts, &skipped);
         // Only chunks wholly confirmed are stored, so the progress stored
         // is always a chunk's end: a run that stops mid-chunk decodes that
@@ -569,6 +602,9 @@ impl PassSink for Heard<'_> {
     }
 
     fn engine_down(&mut self, why: Option<&str>) {
+        if let Some(why) = why {
+            self.last_down = Some(why.to_owned());
+        }
         (self.engine_down)(why);
     }
 }

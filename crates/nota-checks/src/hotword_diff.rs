@@ -30,6 +30,9 @@
 //! - **A chunk with more than [`MAX_WORDS`] words on either side gives no
 //!   candidates** ([`TooManyWords`]), which bounds the work; a final-pass
 //!   chunk is at most 25 s of speech, far shorter.
+//! - **A side C1 refuses gives nothing:** a difference with more than
+//!   [`crate::MAX_LETTERS`] letters and digits on a side. `propose.py`
+//!   scored any length; no bench difference comes near.
 //! - **A beam text that only lost words gives nothing,** as above.
 //!   `propose.py` compared the alignment alone; no bench chunk is affected.
 

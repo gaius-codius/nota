@@ -1042,6 +1042,27 @@ fn a_chunks_hotword_offers_fit_one_question() {
     assert_eq!(questions[0].len(), max);
 }
 
+/// A diff's offer too long for the decider's question is left out alone:
+/// the chunk's lookup offers are still asked about.
+#[test]
+fn a_hotword_offer_too_long_to_ask_leaves_the_lookups() {
+    let heard: Vec<String> = (0..45).map(|n| format!("k{n:03}")).collect();
+    let mut boosted: Vec<String> = (0..44).map(|n| format!("q{n:03}")).collect();
+    boosted.push("statins".to_owned());
+    let heard = format!("amylo diping {}", heard.join(" "));
+    let boosted = format!("amylo diping {}", boosted.join(" "));
+    let fixture = Fixture::new(
+        "hotword-too-long",
+        &[heard.as_str()],
+        &["amlodipine", "statins"],
+    );
+    fixture.boosted(&[Some(boosted.as_str())]);
+    let fake = Fake::saying_yes([]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(asked(&fake), [["amylo diping -> amlodipine"]]);
+}
+
 /// A difference the lookup offered already (the same words and term) is
 /// asked about once, as the lookup's.
 #[test]

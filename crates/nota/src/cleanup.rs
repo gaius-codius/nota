@@ -393,6 +393,10 @@ fn hotword_offers(chunk: &Chunk, boosted: &str, lookup: &[Offer], diff: &Diff<'_
     candidates
         .into_iter()
         .filter(|c| (diff.allows)(&c.heard_text, &c.term))
+        // One the decider's question can't hold (a span or replacement too
+        // long) would make the whole chunk's question fail, its lookup
+        // offers with it: it's left out alone.
+        .filter(|c| Candidate::new(c.heard_text.clone(), c.replacement.clone(), None).is_ok())
         .filter_map(|c| {
             let last = c.heard.end.checked_sub(1)?;
             let words = WordSpan::new(
@@ -622,7 +626,7 @@ struct Ask<'a> {
     chunk: &'a Chunk,
     /// The chunk before it, for context.
     previous: Option<&'a Chunk>,
-    /// Every candidate the lookup offered in it.
+    /// Every candidate offered in it, the lookup's and the diff's.
     offered: &'a [Offer],
     /// The new ones, which are asked about.
     asked: &'a [Offer],

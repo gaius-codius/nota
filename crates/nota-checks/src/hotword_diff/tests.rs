@@ -198,3 +198,16 @@ fn a_beam_text_that_only_lost_words_gives_nothing_however_it_aligns() {
     let boosted = ["Care.", "Care.", "Care."];
     assert_eq!(propose(&heard, &boosted, &list).unwrap(), Vec::new());
 }
+
+/// Another alignment of a beam text that only lost words: difflib lines
+/// "take it" up with its first occurrence, setting the kept "amlodipine"
+/// opposite the heard "amlodipin". It gives nothing.
+#[test]
+fn a_lost_repeat_isnt_read_as_a_replacement() {
+    let list = HotwordList::new(["amlodipine"]);
+    let heard: Vec<&str> = "amlodipin take it daily amlodipine now take it"
+        .split(' ')
+        .collect();
+    let boosted = ["amlodipine", "take", "it"];
+    assert_eq!(propose(&heard, &boosted, &list).unwrap(), Vec::new());
+}

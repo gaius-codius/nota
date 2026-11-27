@@ -233,7 +233,11 @@ impl Models for SherpaModels {
         let mut config = booster.config.clone();
         config.model_config.modeling_unit = Some("bpe".into());
         config.model_config.bpe_vocab = Some(path_text(&booster.setup.vocab)?);
-        let recognizer = create_recognizer(&config)?;
+        let recognizer = OfflineRecognizer::create(&config).ok_or_else(|| {
+            EngineError::Model(
+                "sherpa-onnx refused the boosted recognizer: its vocabulary or bpe settings".into(),
+            )
+        })?;
         // The format's text can't hold a NUL (every hotword was checked at
         // the protocol), so the crate's C string can't fail on it.
         let hotwords = Some(prepared.hotwords).filter(|h| !h.is_empty());

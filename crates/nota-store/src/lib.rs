@@ -271,8 +271,9 @@ impl fmt::Display for StoreError {
             ),
             Self::HotwordMisplaced { track, start } => write!(
                 f,
-                "hotword-pass text on track {} from sample {} doesn't match a final-pass \
-                 chunk, or ends past the point it was given up to",
+                "hotword-pass text on track {} from sample {} isn't on that track, doesn't \
+                 cover exactly one final-pass chunk, ends past the point it was given up to, \
+                 has no boost above 0, or differs from the text stored for its chunk",
                 track.get(),
                 start.get()
             ),
