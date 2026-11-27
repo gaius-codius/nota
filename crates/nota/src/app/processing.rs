@@ -795,6 +795,27 @@ mod tests {
         assert_eq!(note(&fixture), None);
     }
 
+    /// Acceptance (#306): a clean-up that went on while the hotword pass
+    /// waits for an engine this nota hasn't got says the pass's candidates
+    /// are missing and may still come.
+    #[test]
+    fn the_clean_up_step_says_the_hotword_candidates_are_missing_without_an_engine() {
+        let fixture = Fixture::new(
+            "the_clean_up_step_says_the_hotword_candidates_are_missing_without_an_engine",
+        );
+        fixture.finish();
+        end(
+            &fixture,
+            JobKind::HotwordPass,
+            &JobEnd::Waiting(Some(Wait::Engine)),
+        );
+        end(&fixture, JobKind::CleanUp, &JobEnd::Done);
+        assert_eq!(
+            fixture.read().jobs[3].note.as_deref(),
+            Some("terms not heard again yet: added if that step ends")
+        );
+    }
+
     /// A clean-up that ran after the hotword pass failed says that pass's
     /// candidates are missing, beside the chunks it gave up on.
     #[test]
