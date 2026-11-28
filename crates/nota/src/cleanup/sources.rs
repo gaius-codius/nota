@@ -2,8 +2,10 @@
 //! the settings describe ([`crate::settings`]), and the packs installed in
 //! the data directory's `packs/` folder.
 //!
-//! The settings are read again at each run (and each look at the queue),
-//! so a decider set up while nota is open is used from the next run on.
+//! The settings file is read again at each run (and each look at the
+//! queue), so a decider set up while nota is open is used from the next run
+//! on. Where it is, and the `PATH` a decider is found on, are taken once,
+//! when the app starts.
 //! Until Setup picks a session's decider (#163), every session uses the
 //! local one. The settings are read on unix only; elsewhere no decider is
 //! set up, and clean-up jobs wait for one.
@@ -40,6 +42,10 @@ pub(crate) struct Installed {
     /// place a decider is set up).
     #[cfg(unix)]
     clock: Arc<dyn Clock>,
+    /// Where the settings are, and what else finding a decider reads: the
+    /// user's own, but a test's in the tests.
+    #[cfg(unix)]
+    env: Environment,
 }
 
 impl Installed {
@@ -53,6 +59,18 @@ impl Installed {
             packs: data.join(PACKS),
             #[cfg(unix)]
             clock,
+            #[cfg(unix)]
+            env: Environment::current(),
+        }
+    }
+
+    /// The same, with the settings and the rest read from `env`.
+    #[cfg(all(test, unix))]
+    pub(crate) fn in_env(data: &Path, clock: Arc<dyn Clock>, env: Environment) -> Self {
+        Self {
+            packs: data.join(PACKS),
+            clock,
+            env,
         }
     }
 }
@@ -60,7 +78,7 @@ impl Installed {
 impl Sources for Installed {
     fn decider(&self) -> Setup {
         #[cfg(unix)]
-        let decider = local_decider(&Environment::current(), &self.clock);
+        let decider = local_decider(&self.env, &self.clock);
         // The settings that describe a decider are read on unix only.
         #[cfg(not(unix))]
         let decider = Setup::NotSetUp;
@@ -74,7 +92,7 @@ impl Sources for Installed {
 
     fn precheck(&self) -> Precheck {
         #[cfg(unix)]
-        let precheck = settings::precheck(&Environment::current());
+        let precheck = settings::precheck(&self.env);
         // The settings are read on unix only.
         #[cfg(not(unix))]
         let precheck = Precheck::Off;

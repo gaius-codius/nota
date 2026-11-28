@@ -182,3 +182,13 @@ fn the_app_reads_packs_from_the_data_directory() {
         Err(why) if why.starts_with(&format!("the packs in {} can't be read: ", blocked.0.join(PACKS).display()))
     ));
 }
+
+/// The app's sources take the pre-check from the settings: on when they
+/// turn it on, which is not its default.
+#[test]
+fn the_app_takes_the_pre_check_from_the_settings() {
+    let dir = TestDir::new("app-precheck");
+    dir.file("settings.toml", "[clean_up]\nsimilarity_precheck = true\n");
+    let app = Installed::in_env(&dir.0, clock(), dir.env());
+    assert_eq!(app.precheck(), Precheck::On);
+}

@@ -113,3 +113,18 @@ fn too_many_terms_are_refused() {
     let text = serde_json::json!({ "terms": terms, "chunks": [] }).to_string();
     assert_eq!(parse(&text), Err("terms has over 10000 items".to_owned()));
 }
+
+/// A fixture may hold as many terms as the limit allows: the limit is the
+/// most a list may hold, not the first count refused.
+#[test]
+fn terms_up_to_the_limit_are_read() {
+    let terms = vec!["amlodipine"; 10_000];
+    let text = serde_json::json!({ "terms": terms, "chunks": [] }).to_string();
+    assert_eq!(
+        parse(&text),
+        Ok(Fixture {
+            terms: vec!["amlodipine".to_owned(); 10_000],
+            chunks: vec![],
+        })
+    );
+}

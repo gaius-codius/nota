@@ -141,8 +141,11 @@ jobs:
 
   mutants-shard:
     # Every mutant of the lines this PR changes in the core, recorder, checks,
-    # LLM, store and engine crates must be caught by a test. A missed or
-    # timed-out mutant fails.
+    # LLM, store and engine crates, and in the nota crate's clean-up,
+    # settings and bench files, must be caught by a test. A missed or timed-out mutant
+    # fails. The rest of the nota crate (recording, the screens, the final
+    # and hotword passes) isn't mutated here yet, and neither is any of it
+    # in the weekly run.
     # The mutants are dealt out round-robin to five shards that run side by
     # side; the job below gathers the results. Round-robin, not cargo-mutants'
     # default consecutive slices: a file's mutants tend to share slow tests,
@@ -193,6 +196,16 @@ jobs:
           else
             echo engine=true >>"$GITHUB_OUTPUT"
           fi
+          # The nota crate's mutated files, as in the step that mutates them.
+          # A pathspec's * matches / too, so the folders' files count.
+          if git diff --quiet "$PR_BASE...HEAD" -- \
+            'crates/nota/src/cleanup.rs' 'crates/nota/src/cleanup/*.rs' \
+            'crates/nota/src/settings.rs' \
+            'crates/nota/src/bench.rs' 'crates/nota/src/bench/*.rs'; then
+            echo nota=false >>"$GITHUB_OUTPUT"
+          else
+            echo nota=true >>"$GITHUB_OUTPUT"
+          fi
       - if: steps.rust.outputs.changed == 'true'
         run: rustup toolchain install
       - if: steps.rust.outputs.changed == 'true'
@@ -228,14 +241,20 @@ jobs:
             --test-tool nextest --jobs 2 --output "$RUNNER_TEMP/crates"
       # The engine's setup and run, as in mutants.yml. They run even when the
       # step above found a missed mutant, so a run reports every one at once.
+      # The nota crate links the engine, and its tests start it, so it needs
+      # the same setup.
       - name: Fetch the pinned sherpa-onnx libraries
-        if: ${{ !cancelled() && steps.rust.outputs.engine == 'true' }}
+        if: >-
+          ${{ !cancelled()
+          && (steps.rust.outputs.engine == 'true' || steps.rust.outputs.nota == 'true') }}
         # An absolute path: cargo-mutants copies the tree without target/,
         # where .cargo/config.toml's relative one points.
         run: |
           lib=$(scripts/sherpa-onnx.sh)
           echo "SHERPA_ONNX_LIB_DIR=$lib" >>"$GITHUB_ENV"
-      - if: ${{ !cancelled() && steps.rust.outputs.engine == 'true' }}
+      - if: >-
+          ${{ !cancelled()
+          && (steps.rust.outputs.engine == 'true' || steps.rust.outputs.nota == 'true') }}
         # zizmor's self-repository form ($/) fails actionlint 1.7.12, CI's.
         uses: ./.github/actions/pre-test # zizmor: ignore[self-repository]
       - name: Mutate the engine
@@ -252,6 +271,24 @@ jobs:
             -p nota-engine \
             --shard "$SHARD/$SHARDS" --sharding round-robin \
             --test-tool nextest --jobs 2 --output "$RUNNER_TEMP/engine"
+      # The nota crate's clean-up, settings and bench files only. Its tests start the
+      # engine and load the test models, so each gets the engine's cap.
+      - name: Mutate the nota crate's clean-up, settings and bench
+        if: ${{ !cancelled() && steps.rust.outputs.nota == 'true' }}
+        env:
+          SHARD: ${{ strategy.job-index }}
+          SHARDS: ${{ strategy.job-total }}
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: prlimit --as=3221225472 --
+          NEXTEST_TEST_THREADS: "2"
+        run: |
+          mkdir -p "$RUNNER_TEMP/nota"
+          cargo mutants --in-diff "$RUNNER_TEMP/pr.diff" \
+            -p nota \
+            --file 'crates/nota/src/cleanup.rs' --file 'crates/nota/src/cleanup/**' \
+            --file 'crates/nota/src/settings.rs' \
+            --file 'crates/nota/src/bench.rs' --file 'crates/nota/src/bench/**' \
+            --shard "$SHARD/$SHARDS" --sharding round-robin \
+            --test-tool nextest --jobs 2 --output "$RUNNER_TEMP/nota"
       - if: failure() && steps.rust.outputs.changed == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

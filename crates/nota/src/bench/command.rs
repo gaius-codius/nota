@@ -252,7 +252,7 @@ pub(crate) fn stamp(at: WallTime) -> Option<String> {
 
 /// The engines `names` name, in order, each timed by `clock`.
 #[cfg(unix)]
-fn engines(names: &[EngineName], clock: &Arc<dyn Clock>) -> Result<Vec<Engine>, String> {
+pub(super) fn engines(names: &[EngineName], clock: &Arc<dyn Clock>) -> Result<Vec<Engine>, String> {
     names
         .iter()
         .map(|name| real::engine(*name, clock))
@@ -262,7 +262,10 @@ fn engines(names: &[EngineName], clock: &Arc<dyn Clock>) -> Result<Vec<Engine>, 
 /// Off unix no decider can be built: the settings and CLIs are read on
 /// unix only.
 #[cfg(not(unix))]
-fn engines(_names: &[EngineName], _clock: &Arc<dyn Clock>) -> Result<Vec<Engine>, String> {
+pub(super) fn engines(
+    _names: &[EngineName],
+    _clock: &Arc<dyn Clock>,
+) -> Result<Vec<Engine>, String> {
     Err("the bench needs unix: its deciders are set up there only".to_owned())
 }
 

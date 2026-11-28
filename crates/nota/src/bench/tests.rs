@@ -321,3 +321,25 @@ fn control_characters_are_shown_escaped() {
         "hyper profen → ibuprofen"
     );
 }
+
+/// A file of exactly the size limit is read whole: the limit is the most a
+/// file may hold.
+#[test]
+fn a_file_at_the_size_limit_is_read_whole() {
+    let dir = TestDir::new("at-limit");
+    let path = dir.0.join("text");
+    write_file(&path, "abcd");
+    assert_eq!(read_text(&path, 4), Ok("abcd".to_owned()));
+}
+
+/// A file one byte over the size limit is refused, not cut to fit.
+#[test]
+fn a_file_one_byte_over_the_size_limit_is_refused() {
+    let dir = TestDir::new("over-limit");
+    let path = dir.0.join("text");
+    write_file(&path, "abcde");
+    assert_eq!(
+        read_text(&path, 4),
+        Err(format!("{} is too big: over 4 bytes", path.display()))
+    );
+}

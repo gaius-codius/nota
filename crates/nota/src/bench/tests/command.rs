@@ -5,6 +5,8 @@ use std::ffi::OsString;
 use nota_core::{SessionId, WallTime};
 
 use super::*;
+#[cfg(unix)]
+use crate::bench::command::engines;
 use crate::bench::command::{RunArgs, Source, stamp};
 use crate::bench::{BenchCommand, parse};
 
@@ -64,6 +66,46 @@ fn a_run_defaults_to_no_pre_check_and_logs_in_the_data_directory() {
             log: PathBuf::from("/data/bench"),
         }))
     );
+}
+
+/// `--precheck off` turns C3 off by name, as its default leaves it.
+#[test]
+fn the_pre_check_can_be_turned_off_by_name() {
+    let given = args(&[
+        "--engines",
+        "local",
+        "--fixture",
+        "f.json",
+        "--precheck",
+        "off",
+        "--log",
+        "/logs",
+    ]);
+    assert_eq!(
+        parse(&given),
+        Ok(BenchCommand::Run(RunArgs {
+            engines: vec![EngineName::Local],
+            source: Source::Fixture(PathBuf::from("f.json")),
+            precheck: Precheck::Off,
+            log: PathBuf::from("/logs"),
+        }))
+    );
+}
+
+/// The CLI engines `--engines` names are built in the order given, each
+/// recorded as the program that answers. Building one starts nothing: the
+/// CLI runs only when it's asked.
+#[cfg(unix)]
+#[test]
+fn the_cli_engines_are_built_in_the_order_given() {
+    let clock: Arc<dyn Clock> = Arc::new(clock());
+    // The local engine is left out: it reads the user's real settings.
+    let built = engines(&[EngineName::Codex, EngineName::Claude], &clock).unwrap();
+    let names: Vec<_> = built
+        .iter()
+        .map(|engine| (engine.name.as_str(), engine.by.name.as_str()))
+        .collect();
+    assert_eq!(names, [("codex", "codex exec"), ("claude", "claude -p")]);
 }
 
 /// `compare` takes the old log, then the new.
