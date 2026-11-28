@@ -5,10 +5,10 @@ use std::ffi::OsString;
 use nota_core::{SessionId, WallTime};
 
 use super::*;
-#[cfg(unix)]
-use crate::bench::command::engines;
 use crate::bench::command::{RunArgs, Source, stamp};
-use crate::bench::{BenchCommand, parse};
+#[cfg(unix)]
+use crate::bench::command::{engines, real::work_dir};
+use crate::bench::{BenchCommand, dispatch, parse};
 
 /// `list` as arguments.
 fn args(list: &[&str]) -> Vec<OsString> {
@@ -106,6 +106,77 @@ fn the_cli_engines_are_built_in_the_order_given() {
         .map(|engine| (engine.name.as_str(), engine.by.name.as_str()))
         .collect();
     assert_eq!(names, [("codex", "codex exec"), ("claude", "claude -p")]);
+}
+
+/// The CLIs run in nota's own `bench-cli` folder, not wherever the bench
+/// was started.
+#[cfg(unix)]
+#[test]
+fn the_clis_run_in_nota_s_bench_cli_folder() {
+    let dir = work_dir().unwrap();
+    assert!(
+        dir.is_absolute() && dir.ends_with("nota/bench-cli"),
+        "{}",
+        dir.display()
+    );
+}
+
+/// A bench run over `fixture`'s candidates with the codex engine, logging
+/// in `log`: what it printed, or why it failed.
+#[cfg(unix)]
+fn bench_run(fixture: &Path, log: &Path) -> Result<String, String> {
+    let run = BenchCommand::Run(RunArgs {
+        engines: vec![EngineName::Codex],
+        source: Source::Fixture(fixture.to_path_buf()),
+        precheck: Precheck::Off,
+        log: log.to_path_buf(),
+    });
+    let mut out = Vec::new();
+    dispatch(&run, &mut out)?;
+    Ok(String::from_utf8(out).unwrap())
+}
+
+/// A bench run that gets through writes each engine's log, prints where,
+/// and succeeds. The fixture offers nothing, so the CLI is never started.
+#[cfg(unix)]
+#[test]
+fn a_bench_run_that_gets_through_logs_each_engine_and_succeeds() {
+    let dir = TestDir::new("bench-run");
+    let fixture = dir.0.join("fixture.json");
+    write_file(&fixture, "{\"terms\": [], \"chunks\": []}");
+    let log = dir.0.join("logs");
+
+    let out = bench_run(&fixture, &log).unwrap();
+
+    let logs: Vec<PathBuf> = std::fs::read_dir(&log)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(logs.len(), 1, "{logs:?}");
+    assert!(
+        out.ends_with(&format!("Logged codex: {}\n", logs[0].display())),
+        "{out}"
+    );
+}
+
+/// A bench run whose log folder can't be made fails, saying why.
+#[cfg(unix)]
+#[test]
+fn a_bench_run_whose_log_folder_cant_be_made_fails() {
+    let dir = TestDir::new("bench-no-logs");
+    let fixture = dir.0.join("fixture.json");
+    write_file(&fixture, "{\"terms\": [], \"chunks\": []}");
+    // A file stands where the log folder's parent should be.
+    let plain = dir.0.join("plain");
+    write_file(&plain, "");
+    let log = plain.join("logs");
+
+    let why = bench_run(&fixture, &log).unwrap_err();
+
+    assert!(
+        why.starts_with(&format!("the log folder {} can't be made: ", log.display())),
+        "{why}"
+    );
 }
 
 /// `compare` takes the old log, then the new.

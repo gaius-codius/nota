@@ -32,10 +32,10 @@ use crate::cleanup::Precheck;
 /// The log format's number, in each header's `nota_bench_log`.
 const FORMAT: u64 = 1;
 
-/// The largest log read, in bytes: a session offers a few thousand
-/// candidates at most, each a line of well under 1 KiB, so this is far
-/// more than any run writes.
-const MAX_LOG: u64 = 64 * 1024 * 1024;
+/// The largest log read, in bytes (64 MiB): a session offers a few
+/// thousand candidates at most, each a line of well under 1 KiB, so this
+/// is far more than any run writes.
+const MAX_LOG: u64 = 64 << 20;
 
 /// A log read back: the run's header and its verdicts.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,21 +217,16 @@ pub(super) const REFUSALS: [Refusal; 7] = [
 ];
 
 /// A rule nota-store adds is a build error here until [`REFUSALS`] lists
-/// it, so a log never holds a rule it can't read back.
-const _: () = {
-    /// Names every rule, as [`REFUSALS`] must.
-    const fn listed(rule: Refusal) {
-        match rule {
-            Refusal::EmptySpan
-            | Refusal::SpanNotFound
-            | Refusal::TooLong
-            | Refusal::Dissimilar
-            | Refusal::NotOffered
-            | Refusal::WindowElsewhere
-            | Refusal::AlreadyChanged => {}
-        }
-    }
-    listed(Refusal::EmptySpan);
+/// it, so a log never holds a rule it can't read back: the match must
+/// name every rule, whichever one it's given.
+const _: () = match Refusal::EmptySpan {
+    Refusal::EmptySpan
+    | Refusal::SpanNotFound
+    | Refusal::TooLong
+    | Refusal::Dissimilar
+    | Refusal::NotOffered
+    | Refusal::WindowElsewhere
+    | Refusal::AlreadyChanged => {}
 };
 
 /// The log at `path`.

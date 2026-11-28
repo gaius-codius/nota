@@ -271,7 +271,7 @@ pub(super) fn engines(
 
 /// The real deciders, as the user has them set up.
 #[cfg(unix)]
-mod real {
+pub(super) mod real {
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -338,7 +338,7 @@ mod real {
 
     /// The empty folder the CLIs run in: `bench-cli` in nota's runtime
     /// folder, or its cache folder where there's no runtime one.
-    fn work_dir() -> Result<PathBuf, String> {
+    pub(in crate::bench) fn work_dir() -> Result<PathBuf, String> {
         let dirs = directories::ProjectDirs::from("", "", "nota")
             .ok_or("no home directory to run the CLI in")?;
         let base = dirs.runtime_dir().unwrap_or_else(|| dirs.cache_dir());

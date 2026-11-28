@@ -371,6 +371,9 @@ fn no_launcher_is_unavailable() {
         matches!(&why, Unavailable::NoLauncher(e) if e.kind() == io::ErrorKind::NotFound),
         "{why:?}"
     );
+    // The cause is kept, so a log can say why the program wasn't found.
+    let cause = why.source().and_then(|e| e.downcast_ref::<io::Error>());
+    assert_eq!(cause.map(io::Error::kind), Some(io::ErrorKind::NotFound));
 }
 
 /// A key nota doesn't know is an error naming it, not a silent "not set
@@ -651,6 +654,24 @@ fn an_unreadable_settings_file_is_reported() {
         "{why:?}"
     );
     assert!(why.source().is_some());
+}
+
+/// A settings path that can't be opened for a reason other than its
+/// absence (here a file stands where a folder should be) is reported, not
+/// taken as no settings file.
+#[test]
+fn a_settings_path_that_cant_be_opened_is_reported() {
+    let dir = TestDir::new("not-a-folder");
+    let file = dir.file("plain", "");
+    let mut env = dir.env();
+    env.settings = Some(file.join(FILE));
+
+    let why = unavailable(local_decider(&env));
+
+    assert!(
+        matches!(&why, Unavailable::Unreadable(p, _) if *p == file.join(FILE)),
+        "{why:?}"
+    );
 }
 
 /// With no home directory there's no settings file to read.

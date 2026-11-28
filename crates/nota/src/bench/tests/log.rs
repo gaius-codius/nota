@@ -274,6 +274,33 @@ fn a_refused_ending_without_its_rule_is_refused() {
     );
 }
 
+/// An applied or rejected ending that gives a rule is refused: only a
+/// refused ending has one.
+#[test]
+fn a_rule_on_an_ending_that_isnt_refused_is_refused() {
+    let dir = TestDir::new("stray-rule");
+    let (candidates, runs) = two_runs();
+    let written = write(&dir.0, STAMP, &runs[0], &candidates, None).unwrap();
+    let text = read_text(&written, 1 << 20).unwrap();
+    let header = text.lines().next().unwrap();
+    for ending in ["applied", "rejected"] {
+        let line = format!(
+            "{{\"track\":0,\"start\":0,\"first\":2,\"last\":3,\"window\":\"amylo diping\",\
+             \"term\":\"amlodipine\",\"said\":\"yes\",\"ending\":\"{ending}\",\"rule\":\"too_long\"}}"
+        );
+        let path = dir.0.join(format!("{ending}.jsonl"));
+        write_file(&path, &format!("{header}\n{line}\n"));
+        assert_eq!(
+            read(&path).unwrap_err(),
+            format!(
+                "{}: line 2: not a bench log line: a rule is given for an ending that isn't refused",
+                path.display()
+            ),
+            "{ending}"
+        );
+    }
+}
+
 /// Any said.
 fn any_said() -> impl Strategy<Value = Said> {
     prop_oneof![
@@ -314,7 +341,7 @@ fn any_key() -> impl Strategy<Value = Key> {
         })
 }
 
-/// Any run's verdicts, and its counts.
+/// Any run's decider's place, verdicts and counts.
 fn any_run() -> impl Strategy<Value = EngineRun> {
     (
         proptest::collection::btree_map(
@@ -326,22 +353,25 @@ fn any_run() -> impl Strategy<Value = EngineRun> {
         any::<u32>(),
         any::<u32>(),
         proptest::option::of(any::<String>()),
+        prop_oneof![Just(Place::Local), Just(Place::Cloud)],
     )
-        .prop_map(|(verdicts, questions, skipped, ms, down)| EngineRun {
-            name: "any".to_owned(),
-            by: fake_by(),
-            verdicts,
-            questions: usize::try_from(questions).unwrap(),
-            skipped: usize::try_from(skipped).unwrap(),
-            took: Duration::from_millis(u64::from(ms)),
-            down,
-        })
+        .prop_map(
+            |(verdicts, questions, skipped, ms, down, place)| EngineRun {
+                name: "any".to_owned(),
+                by: DecidedBy { place, ..fake_by() },
+                verdicts,
+                questions: usize::try_from(questions).unwrap(),
+                skipped: usize::try_from(skipped).unwrap(),
+                took: Duration::from_millis(u64::from(ms)),
+                down,
+            },
+        )
 }
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
 
-    /// Any run's log reads back with the same verdicts and counts.
+    /// Any run's log reads back with the same decider, verdicts and counts.
     #[test]
     fn any_run_reads_back_with_its_verdicts_and_counts(run in any_run()) {
         let dir = TestDir::new("props");
@@ -355,8 +385,8 @@ proptest! {
         let path = write(&dir.0, STAMP, &run, &candidates, None).unwrap();
         let log = read(&path).unwrap();
         prop_assert_eq!(
-            (&log.verdicts, log.questions, log.skipped, log.took, &log.down),
-            (&run.verdicts, run.questions, run.skipped, run.took, &run.down)
+            (&log.by, &log.verdicts, log.questions, log.skipped, log.took, &log.down),
+            (&run.by, &run.verdicts, run.questions, run.skipped, run.took, &run.down)
         );
         prop_assert_eq!(log.source, candidates.source);
     }

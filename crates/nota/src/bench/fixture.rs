@@ -20,9 +20,9 @@ use super::{Candidates, read_text};
 use crate::cleanup::chunk::Chunk;
 use crate::cleanup::{Precheck, Screen, offering_in};
 
-/// The largest fixture read, in bytes: 10 000 chunks of a few hundred
-/// words each fit well inside it.
-const MAX_FIXTURE: u64 = 32 * 1024 * 1024;
+/// The largest fixture read, in bytes (32 MiB): 10 000 chunks of a few
+/// hundred words each fit well inside it.
+const MAX_FIXTURE: u64 = 32 << 20;
 
 /// The most terms, and the most chunks, a fixture may hold: more than any
 /// recording's final text, and a bound on what one run asks.

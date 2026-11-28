@@ -8,6 +8,7 @@ use nota_store::{
 
 use super::*;
 use crate::bench::from_session;
+use crate::bench::session::hotword_done;
 use crate::cleanup::fake::{FakeSources, Gives};
 use crate::cleanup::sources::PACKS;
 use crate::cleanup::{CleanUp, Saved};
@@ -34,8 +35,14 @@ struct Library {
 
 impl Library {
     /// The library, its session with `chunks` of final text (one per
-    /// 30 s, words split at spaces) and its final pass done.
+    /// 30 s, words split at spaces) and its final and hotword passes done.
     fn new(name: &str, chunks: &[&str]) -> Self {
+        Self::ending(name, chunks, &[JobKind::FinalPass, JobKind::HotwordPass])
+    }
+
+    /// The library as [`Library::new`] makes it, with only the passes of
+    /// the kinds `ended` done, having heard nothing.
+    fn ending(name: &str, chunks: &[&str], ended: &[JobKind]) -> Self {
         let dir = TestDir::new(name);
         let db = Writer::new(&dir.0.join(LIBRARY_DB));
         let pack = glossary(
@@ -61,18 +68,14 @@ impl Library {
         })
         .unwrap();
         let library = Self { dir, db, pack };
-        library.end_passes();
+        library.end_passes(ended);
         library
     }
 
-    /// Ends the session's final pass and hotword pass as done, the
-    /// hotword pass having heard nothing.
-    fn end_passes(&self) {
+    /// Ends the session's passes of the kinds `ended` as done.
+    fn end_passes(&self, ended: &[JobKind]) {
         let jobs = self.db.with(|db| db.session_jobs(SESSION)).unwrap();
-        for job in jobs
-            .into_iter()
-            .filter(|j| matches!(j.kind, JobKind::FinalPass | JobKind::HotwordPass))
-        {
+        for job in jobs.into_iter().filter(|j| ended.contains(&j.kind)) {
             self.db
                 .with(|db| db.end_job(job.id, &JobEnd::Done))
                 .unwrap();
@@ -211,6 +214,17 @@ fn a_sessions_candidates_include_those_already_decided() {
             })
         )
     );
+}
+
+/// The hotword pass counts as done only once its own job is: a final pass
+/// done doesn't make it so, nor does the final pass still running undo it.
+#[test]
+fn only_a_done_hotword_pass_counts_as_done() {
+    for (ended, done) in [(JobKind::HotwordPass, true), (JobKind::FinalPass, false)] {
+        let library = Library::ending(&format!("{ended:?}-ended"), &CHUNKS, &[ended]);
+        let got = library.db.with(|db| hotword_done(db, SESSION)).unwrap();
+        assert_eq!(got, done, "with only the {ended:?} done");
+    }
 }
 
 /// With no library in the data directory the bench says so, and doesn't
