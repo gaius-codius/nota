@@ -521,7 +521,7 @@ fn same_letter(a: char, b: char) -> bool {
 /// `c`'s lowercase as one character, as Python's `re.IGNORECASE` takes it:
 /// the first of a longer lowercase, which is Unicode's simple mapping for
 /// the one letter that has one (`İ` lowercases to `i` and a dot).
-fn fold(c: char) -> char {
+pub(crate) fn fold(c: char) -> char {
     c.to_lowercase().next().unwrap_or(c)
 }
 

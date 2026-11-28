@@ -5,6 +5,7 @@
 //!   term's listed words, found among the boosted words;
 //! - no candidate's heard words hold a listed word;
 //! - every candidate's similarity is at least [`SIMILARITY_MIN`];
+//! - no candidate's replacement repeats the heard words just before it;
 //! - a beam pass that only drops words (a dropped sentence, or several)
 //!   gives no candidate;
 //! - the same heard and boosted words give no candidate;
@@ -13,6 +14,8 @@
 //!   do.
 
 use proptest::prelude::*;
+use proptest::strategy::ValueTree;
+use proptest::test_runner::TestRunner;
 
 use super::*;
 
@@ -66,7 +69,8 @@ fn kept(words: &[String], drop: &[bool]) -> Vec<String> {
 
 proptest! {
     /// Every candidate keeps the rules: its term listed, its word among the
-    /// boosted words, no listed word in what it replaces, C1 high enough.
+    /// boosted words, no listed word in what it replaces, C1 high enough,
+    /// and no repeat of the heard words just before it.
     #[test]
     fn every_candidate_keeps_the_rules(heard in any_words(), boosted in any_words(), terms in any_terms()) {
         let list = HotwordList::new(terms.iter().map(String::as_str));
@@ -79,6 +83,8 @@ proptest! {
             prop_assert!(!list.holds_any(&old), "{c:?}");
             prop_assert_eq!(c.heard_text.clone(), heard[c.heard.clone()].join(" "));
             prop_assert!(c.similarity >= SIMILARITY_MIN, "{c:?}");
+            let before = heard[..c.heard.start].join(" ");
+            prop_assert!(!crate::lookup::props::repeats(&before, &c.replacement), "{before:?} {c:?}");
         }
     }
 
@@ -120,4 +126,72 @@ proptest! {
         let list = HotwordList::new(terms.iter().map(String::as_str));
         prop_assert_eq!(propose(&refs(&heard), &refs(&heard), &list).unwrap(), Vec::new());
     }
+}
+
+/// The hotword list the planted cases use.
+const PLANTED_TERM: &str = "type 2 diabetes";
+
+/// Heard and boosted words around a planted difference: the beam heard
+/// "type 2 diabetes" for "to diabeetus", after "type" or after "the", and
+/// after "type" may itself repeat it.
+fn any_planted() -> impl Strategy<Value = (Vec<String>, Vec<String>)> {
+    (any_words(), any_words(), any::<bool>(), any::<bool>()).prop_map(
+        |(before, after, after_type, beam_repeats)| {
+            let first = if after_type { "type" } else { "the" };
+            let mut heard = before.clone();
+            heard.extend([first, "to", "diabeetus"].map(str::to_owned));
+            heard.extend(after.iter().cloned());
+            let mut boosted = before;
+            boosted.push(first.to_owned());
+            if beam_repeats {
+                boosted.push("type".to_owned());
+            }
+            boosted.extend(["2", "diabetes"].map(str::to_owned));
+            boosted.extend(after);
+            (heard, boosted)
+        },
+    )
+}
+
+proptest! {
+    /// No candidate of the planted cases repeats the heard words before it.
+    #[test]
+    fn no_planted_candidate_repeats_the_words_before((heard, boosted) in any_planted()) {
+        let list = HotwordList::new([PLANTED_TERM]);
+        for c in propose(&refs(&heard), &refs(&boosted), &list).unwrap() {
+            let before = heard[..c.heard.start].join(" ");
+            prop_assert!(!crate::lookup::props::repeats(&before, &c.replacement), "{before:?} {c:?}");
+        }
+    }
+}
+
+/// The planted cases reach rule 4: many differences pass rules 1 to 3 with
+/// boosted words that repeat the heard words before them, so the property
+/// above meets differences rule 4 refuses.
+#[test]
+fn the_planted_cases_reach_rule_4() {
+    let mut runner = TestRunner::deterministic();
+    let list = HotwordList::new([PLANTED_TERM]);
+    let mut reached = 0;
+    for _ in 0..256 {
+        let (heard, boosted) = any_planted().new_tree(&mut runner).unwrap().current();
+        let (heard, boosted) = (refs(&heard), refs(&boosted));
+        let a: Vec<String> = heard.iter().map(|w| normalise(w)).collect();
+        let b: Vec<String> = boosted.iter().map(|w| normalise(w)).collect();
+        for (old, new) in differences(&a, &b) {
+            let kept = candidate(
+                &heard,
+                &boosted,
+                &a[old.clone()],
+                &b[new.clone()],
+                old,
+                new,
+                &list,
+            );
+            reached += usize::from(kept.is_some_and(|c| {
+                crate::lookup::props::repeats(&heard[..c.heard.start].join(" "), &c.replacement)
+            }));
+        }
+    }
+    assert!(reached >= 20, "{reached} differences reach rule 4"); // check-bound
 }

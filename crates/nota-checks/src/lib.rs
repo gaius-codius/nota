@@ -17,6 +17,8 @@
 //!   ([`English`]).
 //! - The hotword diff, the second source of candidates:
 //!   [`hotword_candidates`] with a [`HotwordList`].
+//! - Neither source offers a replacement that repeats the words just before
+//!   its span: [`repeats_before`].
 //!
 //! ```
 //! use nota_checks::letter_similarity;
@@ -48,6 +50,7 @@ mod language;
 mod lookup;
 mod phonetic;
 mod precheck;
+mod repeat;
 mod similarity;
 mod words;
 
@@ -66,5 +69,6 @@ pub use lookup::{
 };
 pub use phonetic::Sounds;
 pub use precheck::{Asked, LOW_LOG_PROB_PERCENT, LowLogProb, PreCheck, Signal, Skipped, precheck};
+pub use repeat::repeats_before;
 pub use similarity::{MAX_LETTERS, Similarity, TooLong, letter_similarity};
 pub use words::{WordListError, Zipf};
