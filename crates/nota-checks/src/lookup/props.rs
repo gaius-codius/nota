@@ -4,12 +4,17 @@
 //! - no candidate's window has a word that is a term, or is a term;
 //! - the term list's order, and terms listed twice, don't change the
 //!   result;
-//! - no two candidates share a word, and each one's span holds its window.
+//! - no two candidates share a word, and each one's span holds its window;
+//! - no candidate's term repeats the words just before its window, and so
+//!   no fix the gate applies on a yes to each candidate does.
 
 use proptest::prelude::*;
+use proptest::strategy::ValueTree;
+use proptest::test_runner::TestRunner;
 
 use super::*;
 use crate::language::english;
+use crate::{Offered, Proposal, gate};
 
 /// Terms the lists are drawn from: one and several words, a digit.
 const TERMS: [&str; 12] = [
@@ -107,6 +112,30 @@ fn any_text() -> impl Strategy<Value = String> {
     .prop_map(|words| words.join(" "))
 }
 
+/// Phrases planted in a chunk so a term's first words come just before
+/// words it may be offered for: the term heard right, or its last words
+/// misheard.
+const PLANTED: [&str; 8] = [
+    "type 2 diabetes",
+    "type 1 diabetes",
+    "type 2 diabetis",
+    "type two diabetes",
+    "beta blocker",
+    "beta bluk",
+    "heart failure",
+    "heart failyer",
+];
+
+/// A chunk with one of [`PLANTED`] among words from [`any_text`].
+fn any_planted_text() -> impl Strategy<Value = String> {
+    (
+        any_text(),
+        proptest::sample::select(&PLANTED[..]),
+        any_text(),
+    )
+        .prop_map(|(before, planted, after)| format!("{before} {planted} {after}"))
+}
+
 /// The candidates `terms` offer in `text`, in English, with nothing
 /// rejected.
 fn find(terms: &[Term], text: &str) -> Vec<Candidate> {
@@ -168,4 +197,100 @@ proptest! {
             }
         }
     }
+
+    /// No candidate's term starts with the words just before its window and
+    /// goes on past them, and no fix the gate applies on a yes to every
+    /// candidate does: no revision reads them twice.
+    #[test]
+    fn no_candidate_or_fix_repeats_the_words_before(terms in any_terms(), text in any_planted_text()) {
+        let found = find(&terms, &text);
+        for c in &found {
+            prop_assert!(!repeats(&text[..c.span().start], c.term()), "{:?}", c);
+        }
+        let gated = gate(&text, &offered(&found), &yeses(&found));
+        for fix in gated.applied() {
+            prop_assert!(!repeats(&text[..fix.range().start], fix.replacement()), "{:?}", fix);
+        }
+    }
+}
+
+/// Whether `replacement` starts with the last words of `before` and goes
+/// on past them, written apart from [`crate::repeats_before`] so the
+/// properties don't check it with itself: words are runs of ASCII letters
+/// and digits, lowercased (the chunks here have no other letters).
+pub(crate) fn repeats(before: &str, replacement: &str) -> bool {
+    let words = |s: &str| -> Vec<String> {
+        s.to_ascii_lowercase()
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    let (before, replacement) = (words(before), words(replacement));
+    (1..replacement.len()).any(|k| before.ends_with(&replacement[..k]))
+}
+
+/// `found` as the gate's offered list.
+fn offered(found: &[Candidate]) -> Vec<Offered> {
+    found
+        .iter()
+        .map(|c| Offered {
+            window: c.window().to_owned(),
+            term: c.term().to_owned(),
+        })
+        .collect()
+}
+
+/// A yes to each of `found`, as clean-up proposes it: the window at its
+/// place, and the term in its stead.
+fn yeses(found: &[Candidate]) -> Vec<Proposal> {
+    found
+        .iter()
+        .map(|c| Proposal {
+            heard: c.window().to_owned(),
+            replacement: c.term().to_owned(),
+            at: Some(c.span()),
+        })
+        .collect()
+}
+
+/// The planted chunks reach the repeat: in many, a term is offered for
+/// the words after a planted phrase's first word once another word stands
+/// before them, and with that first word there, nothing covers them. So
+/// the property above meets terms the lookup passed over for repeating.
+#[test]
+fn the_planted_chunks_reach_the_repeat() {
+    let mut runner = TestRunner::deterministic();
+    let terms: Vec<Term> = TERMS
+        .iter()
+        .map(|&t| Term {
+            term: t.to_owned(),
+            aliases: Vec::new(),
+            language: "en".to_owned(),
+        })
+        .collect();
+    let mut reached = 0;
+    for _ in 0..256 {
+        let text = any_planted_text().new_tree(&mut runner).unwrap().current();
+        // The planted phrase's first word, and where the words after it start.
+        let Some((first, rest)) = PLANTED.iter().find_map(|p| {
+            let at = text.find(p)?;
+            let space = p.find(' ')?;
+            Some((at..at + space, at + space + 1))
+        }) else {
+            continue;
+        };
+        let mut swapped = text.clone();
+        swapped.replace_range(first.clone(), "the");
+        let moved = rest - first.len() + "the".len();
+        let word = &text[first];
+        let offered_there = find(&terms, &swapped)
+            .iter()
+            .any(|c| c.span().start == moved && c.term().starts_with(word));
+        let covered = find(&terms, &text)
+            .iter()
+            .any(|c| c.span().start <= rest && rest < c.span().end);
+        reached += usize::from(offered_there && !covered);
+    }
+    assert!(reached >= 20, "{reached} planted chunks reach the repeat"); // check-bound
 }

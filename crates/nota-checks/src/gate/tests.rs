@@ -471,10 +471,7 @@ fn ranges_overlap_only_when_they_share_a_byte() {
 /// The words of a text are its runs of letters and digits, lowercased.
 #[test]
 fn words_are_runs_of_letters_and_digits() {
-    let got: Vec<_> = words("Type-2 DIABETES, 500mg!")
-        .into_iter()
-        .map(|w| String::from_utf8(w).unwrap())
-        .collect();
+    let got: Vec<_> = words("Type-2 DIABETES, 500mg!").into_iter().collect();
     assert_eq!(got, ["2", "500mg", "diabetes", "type"]);
 }
 

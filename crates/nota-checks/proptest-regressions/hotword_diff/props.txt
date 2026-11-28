@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 76338f092f912e80f4e00b7621a9c28e89d89efb84f1a5ba1073a5dd4a4e457d # shrinks to heard = ["care", "Amlodipine.", "self-care", "Amlodipine."], boosted = ["care", "amlodipine", "care", "Amlodipine."], terms = ["self-care"]
+cc 8c273443417c4251851faaf98ce9727a0e8a9890b377e662cf84ce876da2bb9c # shrinks to (heard, boosted) = (["type", "to", "diabeetus"], ["type", "type", "2", "diabetes"])

@@ -8,7 +8,8 @@
 //! offered, and each chunk as the run revised it) and `c4_lookup.json`
 //! (the terms). The bench applied each yes whose C1 score was at least
 //! 0.6 (`pick.py`'s F output); nota's gate applies a yes on the same
-//! score, and every chunk reads the same, with C3 on as without.
+//! score, and every chunk reads the same, with C3 on as without, but for
+//! [`REPEATS`].
 
 use std::path::{Path, PathBuf};
 
@@ -30,6 +31,26 @@ fn bench_fixtures() -> PathBuf {
 fn read(path: &Path) -> Value {
     let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     serde_json::from_str(&text).expect("fixture is JSON")
+}
+
+/// The bench chunks where the bench applied a fix that repeats the words
+/// just before it, which nota's lookup doesn't offer (the code checks
+/// spec, C4, "New here"): excerpt, chunk, the bench's text there and
+/// nota's.
+const REPEATS: &[(u64, u64, &str, &str)] = &[(8400, 16, "type type 2 diabetes", "type 2 diabetes")];
+
+/// `want`, the bench's text for the chunk at `at`, with [`REPEATS`]'
+/// text there in nota's place. Each listed repeat must be in the text, so
+/// the list can't go stale unseen.
+fn without_repeats(at: (u64, u64), want: &str) -> String {
+    let mut want = want.to_owned();
+    for &(excerpt, chunk, bench, nota) in REPEATS {
+        if (excerpt, chunk) == at {
+            assert!(want.contains(bench), "{at:?} doesn't read {bench:?}");
+            want = want.replacen(bench, nota, 1);
+        }
+    }
+    want
 }
 
 /// Runs the job over pick run `tag`'s chunks with a decider saying yes
@@ -77,8 +98,8 @@ fn agrees_with(tag: &str, precheck: Precheck) -> Vec<Proposal> {
             chunk["excerpt"].as_u64().expect("an excerpt"),
             chunk["chunk"].as_u64().expect("a chunk"),
         );
-        let want = chunk["result"].as_str().expect("a result");
-        if got != want {
+        let want = without_repeats(at, chunk["result"].as_str().expect("a result"));
+        if *got != want {
             wrong.push(format!("{at:?}\n  nota  {got}\n  bench {want}"));
         }
     }

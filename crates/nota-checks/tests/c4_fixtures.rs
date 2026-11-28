@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-use nota_checks::{English, Lookup, Matched, Term};
+use nota_checks::{English, Lookup, Matched, Offered, Proposal, Term, gate, repeats_before};
 use serde_json::Value;
 
 /// English's rules, unpacked once per test process.
@@ -78,8 +78,52 @@ fn same(got: &[Found], want: &[Found], tolerance: f64) -> bool {
             .all(|(g, w)| g.0 == w.0 && g.1 == w.1 && (g.2 - w.2).abs() <= tolerance)
 }
 
+/// Where `window`, words joined by one space, first is in `text`: the byte
+/// its first word starts at. Words are the lookup's, runs of ASCII letters,
+/// digits, apostrophes and hyphens.
+fn window_start(text: &str, window: &str) -> Option<usize> {
+    let in_word = |c: char| c.is_ascii_alphanumeric() || c == '\'' || c == '-';
+    let mut words: Vec<(usize, &str)> = Vec::new();
+    let mut start = None;
+    for (i, c) in text.char_indices().chain([(text.len(), ' ')]) {
+        match (start, in_word(c)) {
+            (None, true) => start = Some(i),
+            (Some(s), false) => {
+                words.push((s, &text[s..i]));
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    let n = window.split(' ').count();
+    words.windows(n).find_map(|run| {
+        let joined: Vec<&str> = run.iter().map(|&(_, w)| w).collect();
+        (joined.join(" ") == window).then_some(run[0].0)
+    })
+}
+
+/// `want`, the bench's candidates for `text`, without those nota passes
+/// over deliberately: a term that starts with the words just before its
+/// window and goes on past them ("beta blocker" for "blocker" after
+/// "beta"), which a yes would make read twice (the spec, C4, "New here").
+/// The bench offered them; the count left out is returned too.
+fn without_repeats(text: &str, want: Vec<Found>) -> (Vec<Found>, usize) {
+    let before = want.len();
+    let kept: Vec<Found> = want
+        .into_iter()
+        .filter(|(window, term, _)| {
+            let start = window_start(text, window)
+                .unwrap_or_else(|| panic!("{window:?} isn't in {text:?}"));
+            !repeats_before(&text[..start], term)
+        })
+        .collect();
+    let left_out = before - kept.len();
+    (kept, left_out)
+}
+
 /// Every invented chunk gets the bench's candidates, in its order, with its
-/// scores to the last bits.
+/// scores to the last bits, but for those that repeat the words before
+/// their window.
 #[test]
 fn every_invented_chunk_gets_the_bench_candidates() {
     let fixture =
@@ -94,10 +138,13 @@ fn every_invented_chunk_gets_the_bench_candidates() {
     let chunks = fixture["chunks"].as_array().expect("a chunk list");
     let mut wrong = Vec::new();
     let mut full = 0;
+    let mut repeats = 0;
     for chunk in chunks {
         let text = chunk["text"].as_str().expect("a text");
-        let (got, want) = (found(&lookup, text), listed(chunk));
-        full += usize::from(want.len() == nota_checks::MAX_CANDIDATES);
+        full += usize::from(listed(chunk).len() == nota_checks::MAX_CANDIDATES);
+        let (want, left_out) = without_repeats(text, listed(chunk));
+        repeats += left_out;
+        let got = found(&lookup, text);
         if !same(&got, &want, 1e-12) {
             wrong.push(format!("{text:?}\n  got   {got:?}\n  bench {want:?}"));
         }
@@ -106,6 +153,10 @@ fn every_invented_chunk_gets_the_bench_candidates() {
     // that never reached it couldn't show the cap holds.
     let count = chunks.len();
     assert!(count >= 250 && full >= 20, "{count} chunks, {full} full"); // check-bound
+    // The bench offered 9 terms that repeat the words before their window
+    // ("beta blocker" for "blocker" after "beta"); a fixture with none
+    // couldn't show they're passed over.
+    assert_eq!(repeats, 9, "{repeats} repeats left out"); // check-bound
     assert_eq!(wrong, Vec::<String>::new());
 }
 
@@ -142,7 +193,8 @@ fn with_differences(at: (u64, u64), mut want: Vec<Found>) -> Vec<Found> {
 }
 
 /// Every chunk of the bench gets the candidates the bench offered, but for
-/// the differences the spec explains.
+/// the differences the spec explains and those that repeat the words
+/// before their window.
 #[test]
 #[ignore = "needs the local bench fixtures"]
 fn every_bench_chunk_gets_the_bench_candidates() {
@@ -157,6 +209,7 @@ fn every_bench_chunk_gets_the_bench_candidates() {
     let chunks = fixture["chunks"].as_array().expect("a chunk list");
     let mut wrong = Vec::new();
     let mut offered = 0;
+    let mut repeats = 0;
     for chunk in chunks {
         let text = chunk["text"].as_str().expect("a text");
         let at = (
@@ -165,7 +218,9 @@ fn every_bench_chunk_gets_the_bench_candidates() {
         );
         let want = listed(chunk);
         offered += want.len();
-        let (got, want) = (found(&lookup, text), with_differences(at, want));
+        let (want, left_out) = without_repeats(text, with_differences(at, want));
+        repeats += left_out;
+        let got = found(&lookup, text);
         // The bench's scores are rounded to three places.
         if !same(&got, &want, 0.000_5 + 1e-9) {
             wrong.push(format!("{at:?}\n  got   {got:?}\n  bench {want:?}"));
@@ -174,5 +229,54 @@ fn every_bench_chunk_gets_the_bench_candidates() {
     // The export holds 74 candidates in 60 chunks (laya/cands.json).
     let count = chunks.len();
     assert!(count == 60 && offered == 74, "{count} chunks, {offered}"); // check-bound
+    // The T3 bench's one wrong fix: "type 2 diabetes" for "2 diabetes"
+    // after "type" (excerpt 8400, chunk 16).
+    assert_eq!(repeats, 1, "{repeats} repeats left out"); // check-bound
     assert_eq!(wrong, Vec::<String>::new());
+}
+
+/// The chunk as clean-up revises it from `lookup`'s candidates in `text`,
+/// with a yes to each: the window at its place, the term in its stead, and
+/// the gate deciding.
+fn revised_on_yes(lookup: &Lookup<'_>, text: &str) -> String {
+    let found = lookup.find(text, &|_, _| true);
+    let offered: Vec<Offered> = found
+        .iter()
+        .map(|c| Offered {
+            window: c.window().to_owned(),
+            term: c.term().to_owned(),
+        })
+        .collect();
+    let yeses: Vec<Proposal> = found
+        .iter()
+        .map(|c| Proposal {
+            heard: c.window().to_owned(),
+            replacement: c.term().to_owned(),
+            at: Some(c.span()),
+        })
+        .collect();
+    gate(text, &offered, &yeses).text().to_owned()
+}
+
+/// The T3 bench's one wrong fix, on invented text: where the chunk already
+/// reads "type 2 diabetes", a yes to every candidate leaves it as it was,
+/// since "type 2 diabetes" isn't offered for "2 diabetes" after "type".
+#[test]
+fn type_2_diabetes_heard_right_is_not_made_to_read_type_twice() {
+    let terms = [term("type 2 diabetes")];
+    let lookup = Lookup::new(&*ENGLISH, &terms);
+    let text = "She was told she has type 2 diabetes last year.";
+    assert_eq!(revised_on_yes(&lookup, text), text);
+}
+
+/// The same term for words with another word before them is offered, and
+/// applied on a yes.
+#[test]
+fn two_diabetes_is_still_fixed_on_a_yes() {
+    let terms = [term("type 2 diabetes")];
+    let lookup = Lookup::new(&*ENGLISH, &terms);
+    assert_eq!(
+        revised_on_yes(&lookup, "She was told she has two diabetes last year."),
+        "She was told she has type 2 diabetes last year."
+    );
 }
