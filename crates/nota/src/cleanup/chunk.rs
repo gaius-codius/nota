@@ -1,15 +1,19 @@
-//! One chunk of clean-up: the candidates the lookup offered in it, the
-//! decider's answers, the gate on each yes, and the outcome each ends in.
+//! One chunk of clean-up: the candidates offered in it (by the lookup, and
+//! by the hotword diff), the decider's answers, the gate on each yes, and
+//! the outcome each ends in.
 //!
 //! **The chunk is its words.** The lookup and the gate read the chunk's
 //! words joined by single spaces, which is how every later revision shows
 //! a changed chunk, so a byte range in that text names words by position.
-//! A range is widened to the whole words it touches: the gate's
-//! boundaries are the bench's, so a span can sit inside a hyphenated word
-//! ("up" in "follow-up"), and the change keeps the rest of the word.
+//! A range is widened to the whole words it touches: the lookup splits
+//! words at punctuation the chunk's words keep, so a span can sit inside a
+//! word ("dose" in "dose."), and the change keeps the rest of the word.
+//! Each yes is gated at the place the lookup offered it, so it never
+//! changes another occurrence of the same words.
 //!
 //! **Every candidate ends in exactly one outcome** ([`Decided`]): a no,
-//! or no answer, is rejected and logged; a yes the gate refuses is to be
+//! no answer, or a candidate the similarity pre-check skipped
+//! ([`skipped`]), is rejected and logged; a yes the gate refuses is to be
 //! ranked as a card; a yes the gate lets through is applied, unless the
 //! text wouldn't change or its words are already reviewed or changed,
 //! which are rejected and logged. Fixes the gate places in the same words
@@ -17,7 +21,7 @@
 
 use std::ops::Range;
 
-use nota_checks::{Decision as GateDecision, Offered, Proposal, Rejection, gate};
+use nota_checks::{Decision as GateDecision, Offered, Proposal, Rejection, Skipped, gate};
 use nota_core::LogProb;
 use nota_core::decide::{Answer, Decision as Said, Probability};
 use nota_store::{
@@ -86,8 +90,16 @@ impl Chunk {
         WordSpan::new(position(first), position(last))
     }
 
+    /// Its words, by position.
+    pub(crate) fn word_texts(&self) -> Vec<&str> {
+        self.spans
+            .iter()
+            .filter_map(|span| self.text.get(span.clone()))
+            .collect()
+    }
+
     /// Where `words` are in [`Chunk::text`], in bytes.
-    fn bytes(&self, words: WordSpan) -> Range<usize> {
+    pub(crate) fn bytes(&self, words: WordSpan) -> Range<usize> {
         let at = |n: u32| usize::try_from(n).unwrap_or(usize::MAX);
         let start = self.spans.get(at(words.first())).map_or(0, |s| s.start);
         let end = self
@@ -98,7 +110,7 @@ impl Chunk {
     }
 
     /// The lowest known log-probability among `words`.
-    fn lowest_log_prob(&self, words: WordSpan) -> Option<LogProb> {
+    pub(crate) fn lowest_log_prob(&self, words: WordSpan) -> Option<LogProb> {
         let at = |n: u32| usize::try_from(n).unwrap_or(usize::MAX);
         self.log_probs
             .get(at(words.first())..=at(words.last()))
@@ -132,11 +144,11 @@ fn position(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
 
-/// A candidate the lookup offered in a chunk, with where its term came
-/// from.
+/// A candidate offered in a chunk, by the lookup or the hotword diff, with
+/// where its term came from.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Offer {
-    /// The heard words, as the lookup gave them.
+    /// The heard words, as the lookup or the diff gave them.
     pub(crate) window: String,
     /// Where they are in the chunk's text, in bytes.
     pub(crate) span: Range<usize>,
@@ -144,7 +156,14 @@ pub(crate) struct Offer {
     pub(crate) words: WordSpan,
     /// The term offered.
     pub(crate) term: String,
-    /// How the lookup found it.
+    /// The text a yes puts in place of the heard words: the term, for the
+    /// lookup's; the boosted words, for the diff's.
+    pub(crate) replacement: String,
+    /// What the gate's offered list holds as the term, which it looks for
+    /// inside a yes's replacement: the term, for the lookup's; the listed
+    /// word the boosted words hold, for the diff's.
+    pub(crate) inside: String,
+    /// How it was found: by the lookup, or by the hotword diff.
     pub(crate) found: Found,
     /// Where the term came from.
     pub(crate) origin: Origin,
@@ -155,7 +174,7 @@ impl Offer {
     fn offered(&self) -> Offered {
         Offered {
             window: self.window.clone(),
-            term: self.term.clone(),
+            term: self.inside.clone(),
         }
     }
 }
@@ -168,12 +187,17 @@ pub(crate) enum Answers {
     /// No answer, for the reason given: a reply that couldn't be read, or
     /// a question that couldn't be asked.
     None(String),
+    /// No answer because clean-up gave up asking: the decider was down
+    /// for this chunk's question on several runs, for the reason given
+    /// (its last failure).
+    GaveUp(String),
 }
 
 /// What a chunk's proposals record beyond each candidate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Context {
-    /// The decider that was asked.
+    /// The decider the run asks: the one that answered, or for a
+    /// candidate C3 skipped, the one it would have asked.
     pub(crate) decided_by: DecidedBy,
     /// The thresholds in force.
     pub(crate) thresholds: String,
@@ -236,15 +260,19 @@ const fn refusal(rule: Rejection) -> Refusal {
     }
 }
 
-/// Each asked candidate's answer: `Some` yes or no with its probability,
-/// `None` (with the reason) when the decider gave none.
-fn per_candidate(answers: &Answers, n: usize) -> Vec<Result<Said, String>> {
+/// Each asked candidate's answer: yes or no with its probability, or the
+/// decision it gets when the decider gave none.
+fn per_candidate(answers: &Answers, n: usize) -> Vec<Result<Said, Decided>> {
     match answers {
         // A list of the wrong length is no answer: the decider's types
         // never give one, so this is only a guard.
         Answers::Given(said) if said.len() == n => said.iter().copied().map(Ok).collect(),
-        Answers::Given(said) => vec![Err(format!("{} answers for {n} candidates", said.len())); n],
-        Answers::None(why) => vec![Err(why.clone()); n],
+        Answers::Given(said) => {
+            let why = format!("{} answers for {n} candidates", said.len());
+            vec![Err(Decided::NoAnswer(why)); n]
+        }
+        Answers::None(why) => vec![Err(Decided::NoAnswer(why.clone())); n],
+        Answers::GaveUp(why) => vec![Err(Decided::GaveUp(why.clone())); n],
     }
 }
 
@@ -272,7 +300,8 @@ pub(crate) fn settle(
         .map(|(i, ((offer, said), verdict))| {
             let decided = decided(said, verdict.as_ref(), fixes.kept(i));
             let (words, replacement) = fixes.words_of(i).unwrap_or_else(|| {
-                let text = chunk.rewritten(offer.words, &[(offer.span.clone(), &offer.term)]);
+                let text =
+                    chunk.rewritten(offer.words, &[(offer.span.clone(), &offer.replacement)]);
                 (offer.words, text)
             });
             NewProposal {
@@ -283,13 +312,31 @@ pub(crate) fn settle(
         .collect()
 }
 
+/// The proposal for `offer` in `chunk`, which the similarity pre-check
+/// skipped: rejected and logged with C1's score, its words and text those
+/// a yes would have changed.
+pub(crate) fn skipped(
+    chunk: &Chunk,
+    offer: &Offer,
+    skip: Skipped,
+    context: &Context,
+) -> NewProposal {
+    let replacement = chunk.rewritten(offer.words, &[(offer.span.clone(), &offer.replacement)]);
+    NewProposal {
+        proposed: proposed(chunk, offer, offer.words, replacement, context),
+        decided: Decided::Skipped {
+            similarity: skip.similarity().value(),
+        },
+    }
+}
+
 /// The gate's verdict on each yes among `asked`, in order; `None` for a
 /// candidate that isn't a yes.
 fn gate_yeses(
     chunk: &Chunk,
     offered: &[Offer],
     asked: &[Offer],
-    said: &[Result<Said, String>],
+    said: &[Result<Said, Decided>],
 ) -> Vec<Option<Verdict>> {
     let yes: Vec<usize> = said
         .iter()
@@ -309,7 +356,11 @@ fn gate_yeses(
         .iter()
         .map(|&i| Proposal {
             heard: asked[i].window.clone(),
-            replacement: asked[i].term.clone(),
+            replacement: asked[i].replacement.clone(),
+            // Where it was offered: a yes on one occurrence of words that
+            // occur twice never changes the other. For the hotword diff,
+            // that's the occurrence the beam changed.
+            at: Some(asked[i].span.clone()),
         })
         .collect();
     let offered: Vec<Offered> = offered.iter().map(Offer::offered).collect();
@@ -414,12 +465,12 @@ fn group(
     out
 }
 
-/// The decision on a candidate: its answer (or why there's none), the
-/// gate's verdict on a yes, and what a placed fix comes to.
-fn decided(said: &Result<Said, String>, verdict: Option<&Verdict>, kept: Option<Kept>) -> Decided {
+/// The decision on a candidate: its answer (or the decision for having
+/// none), the gate's verdict on a yes, and what a placed fix comes to.
+fn decided(said: &Result<Said, Decided>, verdict: Option<&Verdict>, kept: Option<Kept>) -> Decided {
     let said = match said {
         Ok(said) => said,
-        Err(why) => return Decided::NoAnswer(why.clone()),
+        Err(none) => return none.clone(),
     };
     let yes: Option<Probability> = said.yes;
     match (said.answer, verdict, kept) {

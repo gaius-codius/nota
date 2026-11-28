@@ -41,7 +41,7 @@ fn a_new_file_gets_the_current_schema() {
     let dir = TestDir::new("fresh");
     let store = Store::open(&dir.db()).unwrap();
     assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
-    assert_eq!(STEPS.len(), 11);
+    assert_eq!(STEPS.len(), 13);
     assert_eq!(STEPS.len(), usize::try_from(VERSION - FIRST + 1).unwrap());
     // Opening again changes nothing.
     drop(store);
@@ -289,6 +289,31 @@ fn version_2(path: &Path) {
     .unwrap();
 }
 
+/// Opened as it is, an older library is refused and left at its version,
+/// a missing one isn't made, and a current one opens.
+#[test]
+fn a_library_opened_as_it_is_is_never_made_or_upgraded() {
+    let dir = TestDir::new("as-is");
+    assert!(
+        matches!(Store::open_as_is(&dir.db()), Err(StoreError::Sqlite(_))),
+        "a missing library opened"
+    );
+    assert!(!dir.db().exists());
+    version_2(&dir.db());
+    assert!(matches!(
+        Store::open_as_is(&dir.db()),
+        Err(StoreError::NotCurrent(2))
+    ));
+    let found: i64 = raw(&dir.db())
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(found, 2);
+    drop(Store::open(&dir.db()).unwrap());
+    let store = Store::open_as_is(&dir.db()).unwrap();
+    assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
+    assert_eq!(store.pragma_text("foreign_keys"), "1");
+}
+
 /// A version 2 library gains `started_at`, null on the sessions it had,
 /// and keeps them; new sessions get their start time.
 #[test]
@@ -429,11 +454,14 @@ fn version_4_upgrades_to_5_keeping_its_jobs() {
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].state, JobState::Waiting(None));
     assert_eq!(jobs[0].progress, crate::Progress::default());
-    // Stopped again, it keeps its final pass and gains only the clean-up
-    // it lacked.
+    // Stopped again, it keeps its final pass and gains only the hotword
+    // pass and the clean-up it lacked.
     store.finish_recording(SessionId::new(1), None).unwrap();
     let kinds: Vec<JobKind> = store.jobs().unwrap().iter().map(|j| j.kind).collect();
-    assert_eq!(kinds, [JobKind::FinalPass, JobKind::CleanUp]);
+    assert_eq!(
+        kinds,
+        [JobKind::FinalPass, JobKind::HotwordPass, JobKind::CleanUp]
+    );
     assert!(store.final_texts(SessionId::new(1)).unwrap().is_empty());
 }
 
@@ -916,6 +944,7 @@ fn version_11_upgrades_to_12_with_clean_up_proposals() {
         kinds(&store, two),
         [
             (JobKind::FinalPass, JobState::Waiting(None)),
+            (JobKind::HotwordPass, JobState::Waiting(None)),
             (JobKind::CleanUp, JobState::Waiting(None))
         ]
     );
@@ -970,6 +999,225 @@ fn version_11_upgrades_to_12_with_clean_up_proposals() {
         "INSERT INTO proposal_v8 SELECT * FROM proposal_v8",
         "UPDATE proposal_v8 SET replacement = 'other'",
         "DELETE FROM proposal_v8",
+    ] {
+        assert!(refused(&conn, sql), "{sql}");
+    }
+}
+
+/// Acceptance (#278): a version 12 library's proposals read back as they
+/// were, none given up on, and the new column is as closed as the rest of
+/// the row; a proposal stored after the upgrade can be given up on.
+#[test]
+fn version_12_upgrades_to_13_with_nothing_given_up() {
+    let dir = TestDir::new("v12");
+    {
+        let conn = crate::tests::library_at(&dir.db(), 12);
+        conn.execute_batch(
+            "INSERT INTO session (id, state, language) VALUES (1, 'stopped', 'en');
+             INSERT INTO final_text VALUES (1, 0, 0, 100, 'amylo diping', 'e', 'm');
+             INSERT INTO revision VALUES (1, 0, NULL);
+             INSERT INTO final_word VALUES (1, 0, 0, 0, 'amylo', 0, 50, NULL), \
+                 (1, 0, 0, 1, 'diping', 50, 100, NULL);
+             INSERT INTO proposal (session_id, revision, track, start_sample, first_word,
+                 last_word, offered_first, offered_last, heard, term, replacement, source,
+                 matched, decider, decider_model, decider_place, answer, no_answer, outcome,
+                 rule, thresholds, log_version)
+             VALUES (1, 0, 0, 0, 0, 1, 0, 1, 'amylo diping', 'amlodipine', 'amylo diping',
+                 'lookup', 'alias', 'llama-server', 'qwen', 'local', 'none', 'cut short',
+                 'rejected', 'no-answer', 'similarity=0.6', 1);",
+        )
+        .unwrap();
+    }
+    let mut store = Store::open(&dir.db()).unwrap();
+    assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
+    let one = SessionId::new(1);
+    let decided = |store: &Store| -> Vec<crate::Decided> {
+        store
+            .proposals(one)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.decided)
+            .collect()
+    };
+    assert_eq!(
+        decided(&store),
+        [crate::Decided::NoAnswer("cut short".to_owned())]
+    );
+    // A proposal stored now records that clean-up gave up on it.
+    let words = crate::WordSpan::new(0, 0).unwrap();
+    let new = crate::NewProposal {
+        proposed: crate::Proposed {
+            chunk: crate::ChunkKey {
+                track: TrackId::new(0),
+                start: SampleIndex::new(0),
+            },
+            words,
+            offered: words,
+            heard: "amylo".to_owned(),
+            term: "amylase".to_owned(),
+            replacement: "amylase".to_owned(),
+            origin: crate::Origin::Learned,
+            found: crate::Found::Alias,
+            decided_by: crate::DecidedBy {
+                name: "llama-server".to_owned(),
+                model: "qwen".to_owned(),
+                place: nota_core::decide::Place::Local,
+            },
+            log_prob: None,
+            thresholds: "similarity=0.6".to_owned(),
+        },
+        decided: crate::Decided::GaveUp("no server".to_owned()),
+    };
+    store
+        .add_proposals(one, std::slice::from_ref(&new))
+        .unwrap();
+    assert_eq!(
+        decided(&store),
+        [
+            crate::Decided::NoAnswer("cut short".to_owned()),
+            crate::Decided::GaveUp("no server".to_owned())
+        ]
+    );
+    drop(store);
+    // The old row holds 0, and neither row's value can be changed.
+    let conn = raw(&dir.db());
+    let given_up: Vec<i64> = conn
+        .prepare("SELECT gave_up FROM proposal ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(given_up, [0, 1]);
+    for sql in [
+        "UPDATE proposal SET gave_up = 1 WHERE gave_up = 0",
+        "UPDATE proposal SET gave_up = 0 WHERE gave_up = 1",
+    ] {
+        assert!(refused(&conn, sql), "{sql} was allowed");
+    }
+}
+
+/// A proposal from the hotword pass on session 1's chunk at 0, over its
+/// first two words.
+fn hotword_proposal() -> crate::NewProposal {
+    let words = crate::WordSpan::new(0, 1).unwrap();
+    crate::NewProposal {
+        proposed: crate::Proposed {
+            chunk: crate::ChunkKey {
+                track: TrackId::new(0),
+                start: SampleIndex::new(0),
+            },
+            words,
+            offered: words,
+            heard: "amylo diping".to_owned(),
+            term: "amlodipine".to_owned(),
+            replacement: "Amlodipine".to_owned(),
+            origin: crate::Origin::Learned,
+            found: crate::Found::Hotword,
+            decided_by: crate::DecidedBy {
+                name: "llama-server".to_owned(),
+                model: "qwen".to_owned(),
+                place: nota_core::decide::Place::Local,
+            },
+            log_prob: nota_core::LogProb::new(-0.5),
+            thresholds: "similarity=0.6".to_owned(),
+        },
+        decided: crate::Decided::No { yes: None },
+    }
+}
+
+/// A version 13 library keeps its clean-up proposals, what each records
+/// and whether clean-up gave up on it, when the proposal table is rebuilt
+/// to take the hotword pass's, and the rebuilt table's keys and guards
+/// hold.
+#[test]
+fn version_13_upgrades_to_14_keeping_its_proposals() {
+    let dir = TestDir::new("v13");
+    {
+        let conn = crate::tests::library_at(&dir.db(), 13);
+        conn.execute_batch(
+            "INSERT INTO session (id, state, language) VALUES (1, 'stopped', 'en');
+             INSERT INTO job (session_id, kind, state) VALUES (1, 'final-pass', 'done'), \
+                 (1, 'clean-up', 'done');
+             INSERT INTO final_text VALUES (1, 0, 0, 100, 'amylo diping', 'e', 'm');
+             INSERT INTO revision VALUES (1, 0, NULL);
+             INSERT INTO final_word VALUES (1, 0, 0, 0, 'amylo', 0, 50, -0.5), \
+                 (1, 0, 0, 1, 'diping', 50, 100, NULL);
+             INSERT INTO final_progress VALUES (1, 0, 100);
+             INSERT INTO proposal (session_id, revision, track, start_sample, first_word,
+                                   last_word, offered_first, offered_last, heard, term,
+                                   replacement, source, matched, decider, decider_model,
+                                   decider_place, answer, outcome, rule, thresholds,
+                                   log_version)
+             VALUES (1, 0, 0, 0, 0, 1, 0, 1, 'amylo diping', 'amlodipine', 'amlodipine',
+                     'lookup', 'alias', 'llama-server', 'qwen', 'local', 'no', 'rejected',
+                     'no', 'similarity=0.6', 1);
+             INSERT INTO proposal (session_id, revision, track, start_sample, first_word,
+                                   last_word, offered_first, offered_last, heard, term,
+                                   replacement, source, matched, decider, decider_model,
+                                   decider_place, answer, no_answer, outcome, rule,
+                                   thresholds, log_version, gave_up)
+             VALUES (1, 0, 0, 0, 0, 0, 0, 0, 'amylo', 'amylase', 'amylase', 'lookup',
+                     'alias', 'llama-server', 'qwen', 'local', 'none', 'no server',
+                     'rejected', 'no-answer', 'similarity=0.6', 1, 1);",
+        )
+        .unwrap();
+    }
+    let mut store = Store::open(&dir.db()).unwrap();
+    assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
+    let one = SessionId::new(1);
+    // The old session gets no hotword pass: its clean-up is done.
+    let kinds: Vec<JobKind> = store
+        .session_jobs(one)
+        .unwrap()
+        .iter()
+        .map(|j| j.kind)
+        .collect();
+    assert_eq!(kinds, [JobKind::FinalPass, JobKind::CleanUp]);
+    let kept = store.proposals(one).unwrap();
+    assert_eq!(kept.len(), 2);
+    assert_eq!(kept[0].proposed.found, crate::Found::Alias);
+    assert_eq!(kept[0].proposed.term, "amlodipine");
+    assert_eq!(
+        kept[1].decided,
+        crate::Decided::GaveUp("no server".to_owned())
+    );
+    // A hotword proposal goes in beside it and reads back as one.
+    let new = hotword_proposal();
+    store
+        .add_proposals(one, std::slice::from_ref(&new))
+        .unwrap();
+    let read = store.proposals(one).unwrap();
+    assert_eq!(read.len(), 3);
+    assert_eq!(read[2].proposed, new.proposed);
+    drop(store);
+    let conn = raw(&dir.db());
+    let sources: Vec<(String, String, i64)> = conn
+        .prepare("SELECT source, matched, gave_up FROM proposal ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        sources,
+        [
+            ("lookup".to_owned(), "alias".to_owned(), 0),
+            ("lookup".to_owned(), "alias".to_owned(), 1),
+            ("hotword".to_owned(), "diff".to_owned(), 0)
+        ]
+    );
+    let broken: i64 = conn
+        .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(broken, 0);
+    for sql in [
+        "DELETE FROM proposal",
+        "UPDATE proposal SET source = 'hotword' WHERE source = 'lookup'",
+        "UPDATE proposal SET matched = 'diff' WHERE matched = 'alias'",
+        "UPDATE proposal SET gave_up = 0 WHERE gave_up = 1",
     ] {
         assert!(refused(&conn, sql), "{sql}");
     }

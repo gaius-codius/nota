@@ -30,10 +30,15 @@ program = "~/llama.cpp/build/bin/llama-server"
 model = "~/models/decider.gguf"
 device = "Vulkan0"
 # socket_dir = "/run/user/1000/nota"
+
+[clean_up]
+# similarity_precheck = true
 ```
 
-The file holds one table, `[local_decider]`, with the four keys below. All
-of them are text, in quotes.
+The file holds the table `[local_decider]`, with the four keys below. All
+of them are text, in quotes. It may also hold `[hotword_pass]` (see "The
+hotword pass") and `[clean_up]` (see "The clean-up table"); any other
+table is a mistake. You can leave out any of them.
 
 ## The keys
 
@@ -76,6 +81,37 @@ nota creates the folder if it's missing, readable only by you. If the folder
 is already there, it must be readable only by you (no group or other
 permissions, as `chmod 700` leaves it), or the server won't start.
 
+## The hotword pass
+
+After the final transcript, nota listens to each part of the recording
+again with the terms from the session's packs boosted, and compares what
+it hears with the final transcript to find terms it misheard. The table
+`[hotword_pass]` says how strongly the terms are boosted:
+
+```toml
+[hotword_pass]
+boost = 3.0
+```
+
+### `boost`
+
+A number above 0 and at most 10, such as `3.0` or `2`. A higher boost
+makes the terms more likely to be heard, whether they were said or not.
+Without it (or without the table), nota uses 3.
+
+nota reads it each time the hotword pass runs. If it isn't a number in that
+range, the hotword pass for each session fails with a message naming the
+setting, as "the hotword pass's boost can't be used:" and then one of the
+messages in "When the decider is unavailable" (if the file can't be read)
+or "the settings `<file>` aren't usable:" with one of these reasons:
+
+| Reason | What to fix |
+|---|---|
+| hotword_pass isn't a table | Write it as the table `[hotword_pass]`, with `boost` on the line below. |
+| nota has no setting hotword_pass.`<key>` | The table holds only `boost`. Check the key's spelling, or remove it. |
+| hotword_pass.boost isn't a number | Write the number without quotes, such as `boost = 3.0`. |
+| hotword_pass.boost must be a number above 0 and at most 10: `<value>` | Give a number in that range. |
+
 ## Paths
 
 `program` (when it has a `/`), `model` and `socket_dir` are paths. Each must
@@ -87,6 +123,21 @@ be either:
 Other relative paths (`"models/decider.gguf"`, `"./llama-server"`) aren't
 accepted, and nor is `~user/`. Environment variables such as `$HOME` aren't
 expanded.
+
+## The clean-up table
+
+### `similarity_precheck`
+
+`true` or `false`, with no quotes. Before asking the decider about a
+candidate, nota compares its letters with the term's. When they're too far
+apart for the fix ever to be applied, it doesn't ask, unless the recogniser
+was unsure of those words. A session transcribed before nota kept how sure
+the recogniser was has nothing to say that, so there nota never asks about
+such a candidate.
+
+Off by default while it's being measured. Without the key, or without the
+`[clean_up]` table, it's off. If the settings file can't be used, it's off
+too, and the engines screen says what's wrong with the file.
 
 ## When the decider isn't set up
 
@@ -119,10 +170,13 @@ These are the reasons the last message gives:
 |---|---|
 | not UTF-8 text | Save the file as UTF-8. |
 | not TOML: `<detail>` | The file isn't valid TOML. The detail names the line. Check the quotes around each value. |
-| nota has no setting `<key>` | The file has a table or key outside `[local_decider]`. Move a key such as `program` under the `[local_decider]` line, check the table's spelling, or remove it. |
+| nota has no setting `<key>` | The file has a table or key outside `[local_decider]`, `[hotword_pass]` and `[clean_up]`. Move a key such as `program` under the `[local_decider]` line, check the table's spelling, or remove it. |
 | local_decider isn't a table | `local_decider` is written as a value. Write it as the table `[local_decider]`, with the keys on the lines below. |
 | nota has no setting local_decider.`<key>` | That key isn't one of `program`, `model`, `device` and `socket_dir`. Check its spelling, or remove it. |
 | local_decider.`<key>` isn't text | Put the value in quotes. |
+| clean_up isn't a table | `clean_up` is written as a value. Write it as the table `[clean_up]`, with its key on the line below. |
+| nota has no setting clean_up.`<key>` | That key isn't `similarity_precheck`. Check its spelling, or remove it. |
+| clean_up.similarity_precheck isn't true or false | Write `true` or `false`, with no quotes. |
 | local_decider.program is empty | Give the program's path or name, or remove the key. |
 | local_decider.`<key>` starts with ~/ but there's no home directory | nota found no home folder. Set `HOME`, or give an absolute path. |
 | local_decider.`<key>` must be an absolute path or start with ~/: `<text>` | Write the path in full from `/`, or from `~/` (see "Paths"). |

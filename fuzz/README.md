@@ -80,6 +80,10 @@ frame it accepts:
 - a transcript covers some samples, and each of its words has text, lies
   inside the transcript's range, and starts no earlier than the word before
   ends
+- a hotwords message holds at most `MAX_HOTWORDS`, each a hotword
+  `Hotword::new` accepts as it stands: none holds a `/`, a control
+  character or a word starting with `:`, which the engine's per-stream
+  hotwords format would misread
 - a word's log-probability, when it has one, is finite and at most zero,
   and never a negative zero (the one zero is positive). `LogProb`'s
   constructors already ensure that, so this guards against a change to
@@ -87,12 +91,13 @@ frame it accepts:
   log-probability field reads as a value or the one unknown encoding,
   never another NaN, or the frame is refused
 
-Seeds are any encoded frames. `make_seeds` writes two into `in-protocol/`
-with `nota_core::protocol::encode`: `hello`, the handshake at the current
-protocol version, and `transcript`, a transcript with two words, the first
-with the log-probability −0.5 and the second unknown, so a run reaches the
-word fields from the start. It writes them afresh on every run, so they
-never fall behind the protocol's version:
+Seeds are any encoded frames. `make_seeds` writes three into
+`in-protocol/` with `nota_core::protocol::encode`: `hello`, the handshake
+at the current protocol version; `hotwords`, a hotwords message with two
+hotwords (`amlodipine`, `varicose veins`); and `transcript`, a transcript
+with two words, the first with the log-probability −0.5 and the second
+unknown, so a run reaches the word fields from the start. It writes them
+afresh on every run, so they never fall behind the protocol's version:
 
 ```sh
 cargo run --bin make_seeds

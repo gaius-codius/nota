@@ -59,8 +59,9 @@ exclude_globs = [
 # cargo-mutants edits the source whatever its cfg, so a mutant in a function
 # built only off Linux changes nothing CI's Linux runners build, and no test
 # there can catch it: the other platforms' monotonic_now in nota-core's
-# clock.rs, sync_dir in fs/real.rs, exec in nota-llm's lifeline.rs, and
-# protocol_output in nota-engine's lib.rs.
+# clock.rs, sync_dir in fs/real.rs, exec in nota-llm's lifeline.rs,
+# protocol_output in nota-engine's lib.rs, and the bench's engines in the
+# nota crate's bench/command.rs.
 # Each is named by its line, since its Linux twin has the same name and the
 # same mutants; if the function moves, move the line here too.
 #
@@ -110,6 +111,7 @@ exclude_re = [
   "replace Question::is_empty -> bool with false$",
   "nota-llm/src/lifeline\\.rs:46:5: replace exec -> ",
   "nota-engine/src/lib\\.rs:138:5: replace protocol_output -> ",
+  "nota/src/bench/command\\.rs:269:5: replace engines -> ",
   "nota-engine/src/lib\\.rs:.* (replace run_asr -> |in run_asr$)",
   "replace <impl Drop for Spawner>::drop with \\(\\)$",
   "replace <impl Visitor<'de> for StrictVisitor>::expecting -> fmt::Result with Ok\\(Default::default\\(\\)\\)$",

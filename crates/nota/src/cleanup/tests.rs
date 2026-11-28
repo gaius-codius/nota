@@ -46,7 +46,7 @@ const CHUNK: u64 = 480_000;
 /// glossary pack of `terms` recorded as its pack.
 struct Fixture {
     /// Removed at the end.
-    _dir: TestDir,
+    dir: TestDir,
     /// The library.
     db: Writer,
     /// The session's pack.
@@ -55,6 +55,17 @@ struct Fixture {
 
 impl Fixture {
     fn new(name: &str, chunks: &[&str], terms: &[&str]) -> Self {
+        Self::heard(name, chunks, terms, &|_| None)
+    }
+
+    /// The fixture, each word of its chunks heard with the log-probability
+    /// `log_prob` gives it.
+    fn heard(
+        name: &str,
+        chunks: &[&str],
+        terms: &[&str],
+        log_prob: &dyn Fn(&str) -> Option<LogProb>,
+    ) -> Self {
         let dir = TestDir::new(name);
         let db = Writer::new(&dir.0.join("library.db"));
         let pack = glossary(
@@ -72,18 +83,17 @@ impl Fixture {
             db.record_session_packs(SESSION, &[pack.pack_ref()])?;
             db.finish_recording(SESSION, None)?;
             for (i, text) in (0_u64..).zip(chunks) {
-                let line = final_text(i * CHUNK, text);
+                let line = final_text_heard(i * CHUNK, text, log_prob);
                 db.add_final_text(SESSION, MIC, line.range.end(), &[line])?;
             }
             Ok(())
         })
         .unwrap();
-        let fixture = Self {
-            _dir: dir,
-            db,
-            pack,
-        };
+        let fixture = Self { dir, db, pack };
         fixture.end(JobKind::FinalPass, &JobEnd::Done);
+        // The hotword pass ran and heard nothing to compare: the tests
+        // that give it text store their own.
+        fixture.end(JobKind::HotwordPass, &JobEnd::Done);
         fixture
     }
 
@@ -102,9 +112,16 @@ impl Fixture {
     /// Clean-up with `gives` as its decider and this session's pack
     /// installed.
     fn clean_up(&self, gives: Gives) -> CleanUp {
+        self.clean_up_with(gives, Precheck::Off)
+    }
+
+    /// Clean-up with `gives` as its decider, this session's pack
+    /// installed, and the pre-check as `precheck` says.
+    fn clean_up_with(&self, gives: Gives, precheck: Precheck) -> CleanUp {
         let sources = FakeSources {
             gives,
             packs: vec![self.pack.clone()],
+            precheck,
         };
         CleanUp::new(Box::new(sources), SampleRate::SPEECH)
     }
@@ -134,11 +151,40 @@ impl Fixture {
     fn revisions(&self) -> Vec<RevisionNumber> {
         self.db.with(|db| db.revisions(SESSION)).unwrap()
     }
+
+    /// Stores what the hotword pass heard in each chunk, in order: `None`
+    /// for nothing.
+    fn boosted(&self, texts: &[Option<&str>]) {
+        let range =
+            |a: u64, b: u64| SampleRange::new(SampleIndex::new(a), SampleIndex::new(b)).unwrap();
+        let rows: Vec<nota_store::HotwordText> = (0_u64..)
+            .zip(texts)
+            .map(|(i, text)| nota_store::HotwordText {
+                track: MIC,
+                range: range(i * CHUNK, (i + 1) * CHUNK),
+                text: text.map(str::to_owned),
+                boost: 3.0,
+            })
+            .collect();
+        let up_to = SampleIndex::new(CHUNK * u64::try_from(texts.len()).unwrap());
+        self.db
+            .with(|db| db.add_hotword_text(SESSION, MIC, up_to, &rows))
+            .unwrap();
+    }
+}
+
+/// Each question's candidates `fake` was asked, as `heard -> term`.
+fn asked(fake: &Fake) -> Vec<Vec<String>> {
+    fake.log.candidates.lock().unwrap().clone()
 }
 
 /// The final text at sample `start`: `text`'s words spread evenly over
-/// [`CHUNK`].
-fn final_text(start: u64, text: &str) -> FinalText {
+/// [`CHUNK`], each with the log-probability `log_prob` gives it.
+fn final_text_heard(
+    start: u64,
+    text: &str,
+    log_prob: &dyn Fn(&str) -> Option<LogProb>,
+) -> FinalText {
     let words: Vec<&str> = text.split(' ').collect();
     let step = CHUNK / u64::try_from(words.len()).unwrap();
     let range =
@@ -152,7 +198,7 @@ fn final_text(start: u64, text: &str) -> FinalText {
             .map(|(i, w)| FinalWord {
                 text: (*w).to_owned(),
                 range: range(start + i * step, start + (i + 1) * step),
-                log_prob: None,
+                log_prob: log_prob(w),
             })
             .collect(),
         heard_by: HeardBy {
@@ -182,11 +228,10 @@ fn run_with(clean_up: &mut CleanUp, fixture: &Fixture, stop: &dyn Fn() -> bool) 
 fn run_noting_answers(clean_up: &mut CleanUp, fixture: &Fixture, fake: &Fake) -> Vec<usize> {
     let cleared = std::cell::RefCell::new(Vec::new());
     let progress = |_| {};
-    let answered = || {};
-    let engine_down = |reason: Option<&str>| {
-        assert_eq!(reason, None);
-        cleared.borrow_mut().push(fake.questions());
-    };
+    let answered = || cleared.borrow_mut().push(fake.questions());
+    // Clean-up says the decider works through `answered` alone, which the
+    // runner reads as clean-up's engine, not the speech engine.
+    let engine_down = |reason: Option<&str>| panic!("engine_down({reason:?})");
     let running = Running {
         stop: &|| false,
         progress: &progress,
@@ -247,7 +292,7 @@ fn a_yes_the_gate_passes_is_applied_in_a_new_revision() {
             digest: fixture.pack.pack_ref().digest(),
         }
     );
-    assert_eq!(p.proposed.thresholds, thresholds());
+    assert_eq!(p.proposed.thresholds, thresholds(Precheck::Off));
 }
 
 /// A no is rejected and logged: nothing changes, and no revision is made.
@@ -381,8 +426,9 @@ fn a_decider_that_stops_working_ends_the_run_keeping_what_it_did() {
     );
     assert_eq!(fixture.revisions(), [RevisionNumber::FINAL]);
     assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
-    // Only the second chunk was asked again.
-    assert_eq!(fake.questions(), 3);
+    // Only the second chunk was asked again, after the first, its failed
+    // try and the probe that followed it.
+    assert_eq!(fake.questions(), 4);
     assert_eq!(
         fixture.shown(),
         ["start amlodipine daily", "then amlodipine again"]
@@ -652,6 +698,122 @@ fn a_reviewed_card_holds_its_words() {
     );
 }
 
+/// Acceptance: words a review holds don't stop the same words elsewhere in
+/// the chunk being fixed. One chunk says "chronic conditions" twice; both
+/// yeses are refused, the first as a card the user reviews, the second over
+/// the cap. A pair learned since offers a new term on both: the reviewed
+/// occurrence isn't asked, and the yes on the other is applied there.
+#[test]
+fn a_review_leaves_the_same_words_elsewhere_free_to_fix() {
+    let chunks = ["chronic conditions here and chronic conditions there"];
+    let fixture = Fixture::new("held-once", &chunks, &["chronic kidney disease"]);
+    let fake = Fake::saying_yes([
+        ("chronic conditions", "chronic kidney disease"),
+        ("chronic conditions", "chronic condition"),
+    ]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake));
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    let first = fixture.proposals();
+    let outcomes: Vec<Outcome> = first.iter().map(|p| p.outcome).collect();
+    assert_eq!(outcomes, [Outcome::Card, Outcome::OverCap]);
+    fixture
+        .db
+        .with(|db| db.review_proposal(first[0].id, Reviewed::Rejected))
+        .unwrap();
+    let at = WallTime::from_unix_seconds(1_762_765_200).unwrap();
+    fixture
+        .db
+        .with(|db| {
+            db.learn(
+                SESSION,
+                "chronic conditions",
+                "chronic condition",
+                Verdict::Accepted,
+                at,
+            )
+        })
+        .unwrap();
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    // Placed at the free occurrence, the yes is applied rather than taken
+    // for the reviewed one and stored as covered.
+    let written = fixture.revisions()[1];
+    let added: Vec<(WordSpan, Outcome)> = fixture.proposals()[2..]
+        .iter()
+        .map(|p| (p.proposed.words, p.outcome))
+        .collect();
+    assert_eq!(
+        added,
+        [(
+            WordSpan::new(4, 5).unwrap(),
+            Outcome::Applied(Some(written))
+        )]
+    );
+    assert_eq!(
+        fixture.shown(),
+        ["chronic conditions here and chronic condition there"]
+    );
+}
+
+/// The candidates the fake decider was asked about, question by question.
+fn asked_candidates(fake: &Fake) -> Vec<Vec<String>> {
+    fake.log.candidates.lock().unwrap().clone()
+}
+
+/// Acceptance: where a chunk says the same words twice and both are
+/// asked, each candidate names which time it's about, so the two read
+/// differently.
+#[test]
+fn the_same_words_twice_are_asked_as_two_times() {
+    let chunks = ["chronic conditions here and chronic conditions there"];
+    let fixture = Fixture::new("asked-twice", &chunks, &["chronic kidney disease"]);
+    let fake = Fake::saying_yes([]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(
+        asked_candidates(&fake),
+        [[
+            "chronic conditions -> chronic kidney disease (1 of 2)",
+            "chronic conditions -> chronic kidney disease (2 of 2)",
+        ]]
+    );
+}
+
+/// Acceptance: where a review holds one time the words occur, the one
+/// asked about still says it's the second of two, since the decider reads
+/// both in the chunk.
+#[test]
+fn a_time_asked_beside_a_held_one_names_its_place() {
+    let chunks = ["chronic conditions here and chronic conditions there"];
+    let fixture = Fixture::new("asked-beside-held", &chunks, &["chronic kidney disease"]);
+    let fake = Fake::saying_yes([("chronic conditions", "chronic kidney disease")]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    let first = fixture.proposals();
+    fixture
+        .db
+        .with(|db| db.review_proposal(first[0].id, Reviewed::Rejected))
+        .unwrap();
+    let at = WallTime::from_unix_seconds(1_762_765_200).unwrap();
+    fixture
+        .db
+        .with(|db| {
+            db.learn(
+                SESSION,
+                "chronic conditions",
+                "chronic condition",
+                Verdict::Accepted,
+                at,
+            )
+        })
+        .unwrap();
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    // The second run asks only about the time no review holds.
+    assert_eq!(
+        asked_candidates(&fake).last().unwrap(),
+        &["chronic conditions -> chronic condition (2 of 2)"]
+    );
+}
+
 /// A run cut off before placing leaves its fixes applied but not yet
 /// written; they hold their words all the same, so a term learned since
 /// that overlaps one isn't asked, and the next run writes the fix.
@@ -743,6 +905,7 @@ fn a_missing_pack_fails_the_job() {
     let sources = FakeSources {
         gives: Gives::Fake(Fake::saying_yes([])),
         packs: Vec::new(),
+        precheck: Precheck::Off,
     };
     let mut clean_up = CleanUp::new(Box::new(sources), SampleRate::SPEECH);
     let end = run(&mut clean_up, &fixture);
@@ -828,6 +991,9 @@ fn a_decider_stopped_mid_question_stores_nothing_for_it() {
 #[path = "bench.rs"]
 mod bench;
 
+#[path = "precheck_tests.rs"]
+mod precheck;
+
 /// A decider's earlier failure is cleared once, after its first real
 /// answer: not after an answer that couldn't be read, and not again.
 #[test]
@@ -852,7 +1018,8 @@ fn proposals_record_their_thresholds() {
     assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
     assert_eq!(
         fixture.proposals()[0].proposed.thresholds,
-        "similarity_min=0.6;keep=0.58;keep_rare=0.42;max_candidates=6;card_every_s=600"
+        "similarity_min=0.6;keep=0.58;keep_rare=0.42;max_candidates=6;card_every_s=600;\
+         precheck=off"
     );
 }
 
@@ -877,4 +1044,540 @@ fn a_scored_candidate_keeps_its_scores_and_bar() {
     assert_eq!(found(Matched::Scored(score(Bar::Rare))), stored(true));
     assert_eq!(found(Matched::Scored(score(Bar::Usual))), stored(false));
     assert_eq!(found(Matched::Alias), nota_store::Found::Alias);
+}
+
+const STATINS: &str = "start the stat ins";
+
+/// Acceptance: a difference the hotword pass heard that brings in a term
+/// is asked about with the boosted words, gated with them as the
+/// replacement, and applied on a yes; its proposal is the diff's, naming
+/// the term and the rewritten words.
+#[test]
+fn a_hotword_offer_is_asked_gated_and_applied() {
+    let fixture = Fixture::new("hotword-applied", &[STATINS], &["statins"]);
+    fixture.boosted(&[Some("start the Statins")]);
+    let fake = Fake::saying_yes([("stat ins", "Statins")]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    // The lookup offers nothing here: the one question is the diff's.
+    assert_eq!(asked(&fake), [["stat ins -> Statins"]]);
+    assert_eq!(fixture.shown(), ["start the Statins"]);
+    let proposals = fixture.proposals();
+    let [p] = &proposals[..] else {
+        panic!("{proposals:?}")
+    };
+    assert_eq!(
+        (
+            p.proposed.heard.as_str(),
+            p.proposed.term.as_str(),
+            p.proposed.replacement.as_str(),
+            p.proposed.found,
+        ),
+        ("stat ins", "statins", "Statins", nota_store::Found::Hotword)
+    );
+    assert!(matches!(p.outcome, Outcome::Applied(Some(_))), "{p:?}");
+    assert!(matches!(
+        p.proposed.origin,
+        Origin::Pack { ref name, .. } if name == "terms"
+    ));
+}
+
+/// The gate looks for the term's listed word in a diff's replacement, not
+/// the whole term: a term of two words can come in by one.
+#[test]
+fn a_hotword_offer_of_one_word_of_a_term_passes_the_gate() {
+    let fixture = Fixture::new("hotword-word", &["the very coze legs"], &["varicose veins"]);
+    fixture.boosted(&[Some("the varicose legs")]);
+    let fake = Fake::saying_yes([("very coze", "varicose")]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake));
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(fixture.shown(), ["the varicose legs"]);
+    assert_eq!(fixture.proposals()[0].proposed.term, "varicose veins");
+}
+
+/// A yes on a diff's offer that the gate refuses changes nothing: here the
+/// lookup's fix on overlapping words is placed first, so the diff's is
+/// refused as already changed, and is a card.
+#[test]
+fn a_hotword_offer_the_gate_refuses_changes_nothing() {
+    let fixture = Fixture::new("hotword-refused", &["check the samples now"], &["sampler"]);
+    fixture.boosted(&[Some("check the sampler now")]);
+    let fake = Fake::saying_yes([("samples now", "sampler"), ("samples", "sampler")]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(
+        asked(&fake),
+        [["samples now -> sampler", "samples -> sampler"]]
+    );
+    let proposals = fixture.proposals();
+    let [lookup, diff] = &proposals[..] else {
+        panic!("{proposals:?}")
+    };
+    assert!(
+        matches!(lookup.outcome, Outcome::Applied(Some(_))),
+        "{lookup:?}"
+    );
+    assert_eq!(diff.proposed.found, nota_store::Found::Hotword);
+    assert!(
+        matches!(
+            diff.decided,
+            Decided::Refused {
+                rule: Refusal::AlreadyChanged,
+                ..
+            }
+        ),
+        "{diff:?}"
+    );
+    assert_eq!(fixture.shown(), ["check the sampler"]);
+}
+
+/// A yes on a diff's offer is placed at the words the diff named: here the
+/// beam changed the second "stat ins" of two, and the fix goes there, not
+/// at the first, which the lookup also offered and the decider said no to.
+#[test]
+fn a_hotword_offer_is_placed_at_its_own_words() {
+    let text = "stop the stat ins now and start the stat ins later";
+    let fixture = Fixture::new("hotword-repeated", &[text], &["statins"]);
+    fixture.boosted(&[Some("stop the stat ins now and start the statins later")]);
+    let fake = Fake::saying_yes([("stat ins", "statins")]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    // The lookup's own offer, on the first "stat ins now", is a no.
+    assert_eq!(
+        asked(&fake),
+        [["stat ins now -> statins", "stat ins -> statins (2 of 2)"]]
+    );
+    let proposals = fixture.proposals();
+    let [_, p] = &proposals[..] else {
+        panic!("{proposals:?}")
+    };
+    assert_eq!(p.proposed.found, nota_store::Found::Hotword);
+    assert_eq!(p.proposed.words, WordSpan::new(8, 9).unwrap());
+    assert!(matches!(p.outcome, Outcome::Applied(Some(_))), "{p:?}");
+    assert_eq!(
+        fixture.shown(),
+        ["stop the stat ins now and start the statins later"]
+    );
+}
+
+/// A chunk's question holds at most the decider's limit of candidates:
+/// the lookup's come first and the diff's fill what's left, so a chunk
+/// with more differences is still asked about.
+#[test]
+fn a_chunks_hotword_offers_fit_one_question() {
+    let max = nota_core::decide::MAX_CANDIDATES;
+    let heard: Vec<String> = (0..=max).map(|n| format!("w{n} stat ins")).collect();
+    let boosted: Vec<String> = (0..=max).map(|n| format!("w{n} statins")).collect();
+    let heard = heard.join(" ");
+    let fixture = Fixture::new("hotword-many", &[heard.as_str()], &["statins"]);
+    fixture.boosted(&[Some(boosted.join(" ").as_str())]);
+    let fake = Fake::saying_yes([]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    let questions = asked(&fake);
+    assert_eq!(questions.len(), 1, "{questions:?}");
+    assert_eq!(questions[0].len(), max);
+}
+
+/// A diff's offer too long for the decider's question is left out alone:
+/// the chunk's lookup offers are still asked about.
+#[test]
+fn a_hotword_offer_too_long_to_ask_leaves_the_lookups() {
+    let heard: Vec<String> = (0..45).map(|n| format!("k{n:03}")).collect();
+    let mut boosted: Vec<String> = (0..44).map(|n| format!("q{n:03}")).collect();
+    boosted.push("statins".to_owned());
+    let heard = format!("amylo diping {}", heard.join(" "));
+    let boosted = format!("amylo diping {}", boosted.join(" "));
+    let fixture = Fixture::new(
+        "hotword-too-long",
+        &[heard.as_str()],
+        &["amlodipine", "statins"],
+    );
+    fixture.boosted(&[Some(boosted.as_str())]);
+    let fake = Fake::saying_yes([]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(asked(&fake), [["amylo diping -> amlodipine"]]);
+}
+
+/// A difference the lookup offered already (the same words and term) is
+/// asked about once, as the lookup's.
+#[test]
+fn a_hotword_offer_the_lookup_made_is_asked_once() {
+    let text = "take the metro pro lol daily";
+    let fixture = Fixture::new("hotword-dedup", &[text], &["metoprolol"]);
+    fixture.boosted(&[Some("take the metoprolol daily")]);
+    let fake = Fake::saying_yes([]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(asked(&fake), [["metro pro lol -> metoprolol"]]);
+    let proposals = fixture.proposals();
+    let [p] = &proposals[..] else {
+        panic!("{proposals:?}")
+    };
+    assert_ne!(p.proposed.found, nota_store::Found::Hotword);
+}
+
+/// A term the user rejected for a span isn't offered there by the diff
+/// either.
+#[test]
+fn a_rejected_pair_isnt_offered_by_the_diff() {
+    let fixture = Fixture::new("hotword-rejected", &[STATINS], &["statins"]);
+    fixture.boosted(&[Some("start the statins")]);
+    let at = WallTime::from_unix_seconds(1_762_765_200).unwrap();
+    fixture
+        .db
+        .with(|db| db.learn(SESSION, "stat ins", "statins", Verdict::Rejected, at))
+        .unwrap();
+    let fake = Fake::saying_yes([("stat ins", "statins")]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(fake.questions(), 0);
+    assert_eq!(fixture.proposals(), []);
+}
+
+/// Clean-up waits while the session's hotword pass is still to finish,
+/// whatever holds it up.
+#[test]
+fn the_job_waits_for_the_hotword_pass() {
+    let fixture = Fixture::new("waits-hotword", &[STATINS], &["statins"]);
+    let fake = Fake::saying_yes([]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    let id = fixture.job(JobKind::HotwordPass);
+    let states = [
+        JobEnd::Waiting(Some(Wait::Engine)),
+        JobEnd::EngineDown("gone".to_owned()),
+    ];
+    for end in &states {
+        fixture.end(JobKind::HotwordPass, end);
+        assert_eq!(
+            clean_up.lacks(&fixture.db, SESSION),
+            Some(Wait::HotwordText)
+        );
+        assert_eq!(
+            run(&mut clean_up, &fixture),
+            JobEnd::Waiting(Some(Wait::HotwordText))
+        );
+    }
+    // Running, and retrying its engine while it runs.
+    fixture.end(JobKind::HotwordPass, &JobEnd::Waiting(None));
+    fixture.db.with(|db| db.start_job(id)).unwrap();
+    assert_eq!(
+        clean_up.lacks(&fixture.db, SESSION),
+        Some(Wait::HotwordText)
+    );
+    assert_eq!(
+        run(&mut clean_up, &fixture),
+        JobEnd::Waiting(Some(Wait::HotwordText))
+    );
+    fixture.db.with(|db| db.engine_down(id, "gone")).unwrap();
+    assert_eq!(
+        clean_up.lacks(&fixture.db, SESSION),
+        Some(Wait::HotwordText)
+    );
+    assert_eq!(fake.questions(), 0);
+}
+
+/// A failed hotword pass doesn't hold clean-up up: it goes on with the
+/// lookup alone, leaving out whatever text the pass stored.
+#[test]
+fn a_failed_hotword_pass_leaves_only_the_lookup() {
+    let fixture = Fixture::new("hotword-failed", &[STATINS], &["statins"]);
+    fixture.boosted(&[Some("start the Statins")]);
+    fixture.end(JobKind::HotwordPass, &JobEnd::Failed("it broke".to_owned()));
+    let fake = Fake::saying_yes([("stat ins", "Statins")]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    assert_eq!(clean_up.lacks(&fixture.db, SESSION), None);
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(fake.questions(), 0);
+    assert_eq!(fixture.shown(), [STATINS]);
+}
+
+/// A session stopped before nota had the hotword pass has no such job:
+/// clean-up runs with the lookup alone.
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test scaffolding: a session from before the hotword pass"
+)]
+fn a_session_without_a_hotword_pass_goes_on() {
+    let fixture = Fixture::new("hotword-absent", &[AMLODIPINE], &["amlodipine"]);
+    let conn = rusqlite::Connection::open(fixture.dir.0.join("library.db")).unwrap();
+    conn.execute("DELETE FROM job WHERE kind = 'hotword-pass'", [])
+        .unwrap();
+    drop(conn);
+    let fake = Fake::saying_yes([("amylo diping", "amlodipine")]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake));
+    assert_eq!(clean_up.lacks(&fixture.db, SESSION), None);
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(fixture.shown(), ["start amlodipine daily"]);
+}
+
+/// The chunk the poison-chunk tests' decider always fails on.
+const POISON: &str = "the amylo diping that never answers";
+
+/// The probe question's words, as clean-up asks them.
+fn probe_text() -> String {
+    probe().unwrap().current().to_owned()
+}
+
+/// Runs `clean_up` on the fixture's session `times` times, giving how
+/// each run ended.
+fn runs(clean_up: &mut CleanUp, fixture: &Fixture, times: usize) -> Vec<JobEnd> {
+    (0..times).map(|_| run(clean_up, fixture)).collect()
+}
+
+/// The ends of runs that find the decider down.
+fn down(times: usize) -> Vec<JobEnd> {
+    vec![JobEnd::EngineDown("the decider isn't working: no server".to_owned()); times]
+}
+
+/// Each proposal's chunk text and how it was decided.
+fn decisions(fixture: &Fixture, chunks: &[&str]) -> Vec<(String, &'static str)> {
+    let starts: Vec<SampleIndex> = (0_u64..)
+        .take(chunks.len())
+        .map(|i| SampleIndex::new(i * CHUNK))
+        .collect();
+    fixture
+        .proposals()
+        .iter()
+        .map(|p| {
+            let at = starts
+                .iter()
+                .position(|s| *s == p.proposed.chunk.start)
+                .unwrap();
+            let kind = match p.decided {
+                Decided::Applied { .. } => "applied",
+                Decided::GaveUp(_) => "given up",
+                _ => "other",
+            };
+            (chunks[at].to_owned(), kind)
+        })
+        .collect()
+}
+
+/// Acceptance (#278): a chunk whose question finds the decider down on
+/// every run, while the decider answers the probe after it, is given up
+/// on at the third run: its candidates are logged as given up on, and the
+/// rest of the session is fixed and placed.
+#[test]
+fn a_chunk_the_decider_always_fails_on_is_given_up_on() {
+    let chunks = [AMLODIPINE, POISON, "then amylo diping again"];
+    let fixture = Fixture::new("poison", &chunks, &["amlodipine"]);
+    let fake = Fake::saying_yes([("amylo diping", "amlodipine")])
+        .with_trouble_in(POISON, Trouble::Unavailable);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    let mut ends = down(2);
+    ends.push(JobEnd::Done);
+    assert_eq!(runs(&mut clean_up, &fixture, 3), ends);
+    // The bad chunk is asked after the last on later runs, each failure
+    // followed by the probe.
+    let probe = probe_text();
+    assert_eq!(
+        *fake.log.asked.lock().unwrap(),
+        [
+            AMLODIPINE,
+            POISON,
+            &probe,
+            "then amylo diping again",
+            POISON,
+            &probe,
+            POISON,
+            &probe
+        ]
+    );
+    assert_eq!(
+        decisions(&fixture, &chunks),
+        [
+            (AMLODIPINE.to_owned(), "applied"),
+            ("then amylo diping again".to_owned(), "applied"),
+            (POISON.to_owned(), "given up"),
+        ]
+    );
+    assert_eq!(
+        fixture.proposals()[2].decided,
+        Decided::GaveUp("the decider isn't working: no server".to_owned())
+    );
+    assert_eq!(
+        fixture.shown(),
+        ["start amlodipine daily", POISON, "then amlodipine again"]
+    );
+}
+
+/// Acceptance (#278): a session whose only chunk always fails is given up
+/// on too: the probe shows the decider works.
+#[test]
+fn a_lone_chunk_the_decider_always_fails_on_is_given_up_on() {
+    let fixture = Fixture::new("lone-poison", &[POISON], &["amylo dipine"]);
+    let fake = Fake::saying_yes([]).with_trouble_in(POISON, Trouble::Unavailable);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake));
+    let mut ends = down(2);
+    ends.push(JobEnd::Done);
+    assert_eq!(runs(&mut clean_up, &fixture, 3), ends);
+    assert_eq!(
+        decisions(&fixture, &[POISON]),
+        [(POISON.to_owned(), "given up")]
+    );
+}
+
+/// Two bad chunks are each given up on in turn, and the session is
+/// placed.
+#[test]
+fn two_chunks_the_decider_always_fails_on_are_both_given_up_on() {
+    let second = "amylo diping fails here too";
+    let chunks = [AMLODIPINE, POISON, second];
+    let fixture = Fixture::new("two-poison", &chunks, &["amlodipine"]);
+    let fake = Fake::saying_yes([("amylo diping", "amlodipine")])
+        .with_trouble_in(POISON, Trouble::Unavailable)
+        .with_trouble_in(second, Trouble::Unavailable);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake));
+    let ends = runs(&mut clean_up, &fixture, 8);
+    // Each bad chunk fails three times, the second first tried in the
+    // second run; the run that gives up on the first carries on to the
+    // second, and the fifth gives up on it and places the session.
+    let mut want = down(4);
+    want.extend(vec![JobEnd::Done; 4]);
+    assert_eq!(ends, want);
+    assert_eq!(
+        decisions(&fixture, &chunks),
+        [
+            (AMLODIPINE.to_owned(), "applied"),
+            (POISON.to_owned(), "given up"),
+            (second.to_owned(), "given up"),
+        ]
+    );
+}
+
+/// A decider down for every question, the probe included, never costs a
+/// chunk its answer: run after run ends as an engine failure, storing
+/// nothing, and once it works again every chunk is decided.
+#[test]
+fn a_decider_down_for_every_question_gives_up_on_none() {
+    let chunks = [AMLODIPINE, "then amylo diping again"];
+    let fixture = Fixture::new("all-down", &chunks, &["amlodipine"]);
+    let fake = Fake::saying_yes([("amylo diping", "amlodipine")]);
+    fake.set_down(true);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    assert_eq!(runs(&mut clean_up, &fixture, 8), down(8));
+    assert_eq!(fixture.proposals(), []);
+    fake.set_down(false);
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(
+        decisions(&fixture, &chunks),
+        [
+            (AMLODIPINE.to_owned(), "applied"),
+            ("then amylo diping again".to_owned(), "applied"),
+        ]
+    );
+}
+
+/// A decider that goes down while the last chunk is asked, after earlier
+/// chunks were answered in the same run, costs that chunk nothing: its
+/// failures don't count while the probe fails too.
+#[test]
+fn an_outage_after_answers_costs_the_next_chunk_nothing() {
+    let chunks = [AMLODIPINE, "then amylo diping again"];
+    let fixture = Fixture::new("outage-mid-run", &chunks, &["amlodipine"]);
+    let fake = Fake::saying_yes([("amylo diping", "amlodipine")]).flagging_after(1);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    // The decider goes down once the first question is answered.
+    let log = Arc::clone(&fake.log);
+    let progress = |_| {};
+    let answered = || fake.set_down(log.flag.load(Ordering::SeqCst));
+    let running = Running {
+        stop: &|| false,
+        progress: &progress,
+        answered: &answered,
+        engine_down: &|_| {},
+    };
+    let ends: Vec<JobEnd> = (0..6)
+        .map(|_| clean_up.run(&fixture.db, SESSION, &running))
+        .collect();
+    assert_eq!(ends, down(6));
+    fake.set_down(false);
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(
+        decisions(&fixture, &chunks),
+        [
+            (AMLODIPINE.to_owned(), "applied"),
+            ("then amylo diping again".to_owned(), "applied"),
+        ]
+    );
+}
+
+/// Acceptance (#278): a run cut off after giving up on a chunk leaves what
+/// it committed, the given-up candidates included, for the next run to
+/// place.
+#[test]
+fn a_run_cut_off_after_giving_up_leaves_the_placing_to_the_next() {
+    let chunks = [AMLODIPINE, POISON];
+    let fixture = Fixture::new("poison-cut", &chunks, &["amlodipine"]);
+    // Asked: the first chunk, then the bad one and the probe three times:
+    // the stop comes once the last probe is asked.
+    let fake = Fake::saying_yes([("amylo diping", "amlodipine")])
+        .with_trouble_in(POISON, Trouble::Unavailable)
+        .flagging_after(7);
+    let log = Arc::clone(&fake.log);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake));
+    let stop = || log.flag.load(Ordering::SeqCst);
+    let ends: Vec<JobEnd> = (0..3)
+        .map(|_| run_with(&mut clean_up, &fixture, &stop))
+        .collect();
+    let mut want = down(2);
+    want.push(JobEnd::Waiting(None));
+    assert_eq!(ends, want);
+    assert_eq!(fixture.revisions(), [RevisionNumber::FINAL]);
+    assert_eq!(
+        decisions(&fixture, &chunks),
+        [
+            (AMLODIPINE.to_owned(), "applied"),
+            (POISON.to_owned(), "given up"),
+        ]
+    );
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(log.asked.lock().unwrap().len(), 7);
+    assert_eq!(fixture.shown(), ["start amlodipine daily", POISON]);
+}
+
+/// A decider set up in place of one whose failures were counted starts
+/// from nothing: its own failures are counted again from the first.
+#[test]
+fn another_decider_counts_failures_from_nothing() {
+    let fixture = Fixture::new("poison-new-decider", &[POISON], &["amylo dipine"]);
+    let fake = Fake::saying_yes([]).with_trouble_in(POISON, Trouble::Unavailable);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    assert_eq!(runs(&mut clean_up, &fixture, 2), down(2));
+    // The same fake, recorded as another model.
+    clean_up.sources = Box::new(Renamed(FakeSources {
+        gives: Gives::Fake(fake),
+        packs: vec![fixture.pack.clone()],
+        precheck: Precheck::Off,
+    }));
+    assert_eq!(runs(&mut clean_up, &fixture, 2), down(2));
+    assert_eq!(fixture.proposals(), []);
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+}
+
+/// Sources giving the decider another source gives, recorded as another
+/// model.
+struct Renamed(FakeSources);
+
+impl Sources for Renamed {
+    fn decider(&self) -> Setup {
+        match self.0.decider() {
+            Setup::Ready(decider, mut by) => {
+                by.model = "another.gguf".to_owned();
+                Setup::Ready(decider, by)
+            }
+            other => other,
+        }
+    }
+
+    fn packs(&self) -> Result<Vec<Pack>, String> {
+        self.0.packs()
+    }
+
+    fn precheck(&self) -> Precheck {
+        self.0.precheck()
+    }
 }

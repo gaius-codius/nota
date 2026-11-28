@@ -29,7 +29,9 @@ pub(crate) enum Trouble {
 pub(crate) struct Log {
     /// Each question's chunk, in order.
     pub(crate) asked: Mutex<Vec<String>>,
-    /// Each question's candidates as `heard -> term`, in order.
+    /// Each question's candidates as `heard -> term`, in order, with
+    /// `(nth of n)` after where the candidate names which time its words
+    /// occur.
     pub(crate) candidates: Mutex<Vec<Vec<String>>>,
     /// How many deciders were dropped.
     pub(crate) dropped: AtomicUsize,
@@ -47,6 +49,10 @@ pub(crate) struct Fake {
     /// Trouble for the question with this number (from 0, across every
     /// decider made from this one).
     trouble: Arc<BTreeMap<usize, Trouble>>,
+    /// Trouble for every question about the chunk with this text.
+    trouble_in: Arc<BTreeMap<String, Trouble>>,
+    /// Trouble for every question, while set: a decider that is down.
+    down: Arc<AtomicBool>,
     /// After this many questions, `log.flag` is set.
     flag_after: Option<usize>,
     /// What it notes.
@@ -72,6 +78,8 @@ impl Fake {
             yes: Arc::new(yes),
             in_chunk: Arc::new(BTreeSet::new()),
             trouble: Arc::new(BTreeMap::new()),
+            trouble_in: Arc::new(BTreeMap::new()),
+            down: Arc::new(AtomicBool::new(false)),
             flag_after: None,
             log: Arc::new(Log::default()),
         }
@@ -95,6 +103,19 @@ impl Fake {
     pub(crate) fn with_trouble(mut self, n: usize, trouble: Trouble) -> Self {
         Arc::make_mut(&mut self.trouble).insert(n, trouble);
         self
+    }
+
+    /// This decider, ending every question about the chunk `text` with
+    /// `trouble`, however often it's asked.
+    pub(crate) fn with_trouble_in(mut self, text: &str, trouble: Trouble) -> Self {
+        Arc::make_mut(&mut self.trouble_in).insert(text.to_owned(), trouble);
+        self
+    }
+
+    /// Makes this decider, and every copy of it, unavailable for every
+    /// question while `down` is set.
+    pub(crate) fn set_down(&self, down: bool) {
+        self.down.store(down, Ordering::SeqCst);
     }
 
     /// This decider, setting its log's flag once it has answered `n`
@@ -156,13 +177,27 @@ impl Decider for Fake {
         self.log.candidates.lock().unwrap().push(
             question
                 .candidates()
-                .map(|(_, c)| format!("{} -> {}", c.heard(), c.term()))
+                .map(|(_, c)| {
+                    let line = format!("{} -> {}", c.heard(), c.term());
+                    match c.occurrence() {
+                        Some(o) => format!("{line} ({} of {})", o.nth(), o.of()),
+                        None => line,
+                    }
+                })
                 .collect(),
         );
         if self.flag_after.is_some_and(|after| n + 1 >= after) {
             self.log.flag.store(true, Ordering::SeqCst);
         }
-        match self.trouble.get(&n) {
+        let trouble = self
+            .trouble
+            .get(&n)
+            .or_else(|| self.trouble_in.get(question.current()))
+            .or(self
+                .down
+                .load(Ordering::SeqCst)
+                .then_some(&Trouble::Unavailable));
+        match trouble {
             Some(Trouble::Stopped) => return Err(DecideError::Stopped),
             Some(Trouble::Failed) => return Err(DecideError::Failed("garbled".into())),
             Some(Trouble::Unavailable) => {
@@ -196,6 +231,8 @@ pub(crate) struct FakeSources {
     pub(crate) gives: Gives,
     /// The installed packs.
     pub(crate) packs: Vec<Pack>,
+    /// Whether the pre-check runs.
+    pub(crate) precheck: super::Precheck,
 }
 
 /// What the fake decider is recorded as.
@@ -219,6 +256,10 @@ impl Sources for FakeSources {
     fn packs(&self) -> Result<Vec<Pack>, String> {
         Ok(self.packs.clone())
     }
+
+    fn precheck(&self) -> super::Precheck {
+        self.precheck
+    }
 }
 
 /// Clean-up with no decider set up and no packs: its jobs wait.
@@ -226,6 +267,7 @@ pub(crate) fn idle() -> super::CleanUp {
     let sources = FakeSources {
         gives: Gives::NotSetUp,
         packs: Vec::new(),
+        precheck: super::Precheck::Off,
     };
     super::CleanUp::new(Box::new(sources), nota_core::SampleRate::SPEECH)
 }

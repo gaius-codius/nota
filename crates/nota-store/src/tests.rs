@@ -458,7 +458,7 @@ fn checks_stop_bad_rows() {
 fn error_display_is_specific() {
     use std::error::Error as _;
     let existing = row(3, 0, 42, 50, 1);
-    let cases: [(StoreError, &str); 13] = [
+    let cases: [(StoreError, &str); 14] = [
         (StoreError::Sqlite(rusqlite::Error::InvalidQuery), "sqlite"),
         (
             StoreError::Create(std::io::Error::other("disk on fire")),
@@ -473,6 +473,7 @@ fn error_display_is_specific() {
         ),
         (StoreError::UnknownSchema(7), "7"),
         (StoreError::PerSessionStore, "per-session"),
+        (StoreError::NotCurrent(12), "schema version 12, not"),
         (StoreError::OutOfRange, "64-bit"),
         (StoreError::Conflict { existing }, "42"),
         (
@@ -572,6 +573,8 @@ pub(crate) fn library_at(path: &Path, version: usize) -> Connection {
         schema::V9,
         schema::V10,
         schema::V11,
+        schema::V12,
+        schema::V13,
     ];
     let conn = raw(path);
     for step in &steps[..version - 1] {

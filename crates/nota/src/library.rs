@@ -46,7 +46,8 @@ use nota_store::{NewSession, SegmentRow, SessionState, StoreError, Track, Writer
 
 /// Names under the data directory, and in a session's directory.
 const SESSIONS: &str = "sessions";
-const LIBRARY_DB: &str = "library.db";
+/// The library database's file name, which the bench also reads.
+pub(crate) const LIBRARY_DB: &str = "library.db";
 const AUDIO: &str = "audio";
 /// M1's per-session store.
 const PER_SESSION_STORE: &str = "nota.db";

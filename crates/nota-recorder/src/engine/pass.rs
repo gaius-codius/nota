@@ -31,10 +31,21 @@
 //! isn't read into memory at once and the engine never falls behind. A
 //! pass resumed from a confirmed point sends the same frames from there as
 //! one that never stopped.
+//!
+//! The last segment read is kept until the next one is read, so a
+//! [`TrackAudio`] that starts in the segment the one before it ended in
+//! (the hotword pass feeds a segment's chunks one after the other) doesn't
+//! read, prove and decode it again: a segment is read once for a run of
+//! feeds over it. One that failed its proof or its decode is tried once,
+//! since its file will fail the same way again; one that couldn't be read
+//! from the disk is tried again by the next feed, since that may pass.
+//! Audio is only used for a row equal to the one it was read and proven
+//! for.
 
 use std::collections::VecDeque;
 use std::fmt;
 use std::io;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
@@ -57,6 +68,10 @@ pub struct TrackAudio {
     pub segments: Vec<SegmentRow>,
     /// Every sample before this is done already.
     pub from: SampleIndex,
+    /// Where the pass stops on it, flushing there: `None` for the end of
+    /// the last segment. The hotword pass feeds one final-pass chunk at a
+    /// time this way, so the engine decodes exactly that chunk.
+    pub until: Option<SampleIndex>,
 }
 
 /// Where a pass's results go.
@@ -223,10 +238,11 @@ impl Starts {
 /// every track is confirmed to its last published sample, `stop` returns
 /// true, or it fails. Committed results go to `sink` as they come. A
 /// segment `read` can't give is skipped: its samples go to the sink as
-/// skipped once everything before them is confirmed.
+/// skipped once everything before them is confirmed. A segment that one
+/// track ends in and the next starts in is read once for both.
 pub fn transcribe<K: PassSink>(
     tracks: &[TrackAudio],
-    mut read: impl FnMut(&SegmentRow) -> Result<Vec<i16>, ReadSegmentError>,
+    read: impl FnMut(&SegmentRow) -> Result<Vec<i16>, ReadSegmentError>,
     config: &PassConfig,
     clock: &Arc<dyn Clock>,
     sink: &mut K,
@@ -245,12 +261,13 @@ pub fn transcribe<K: PassSink>(
     let mut offline: Option<String> = None;
     let mut starts = Starts::default();
     let mut texts: Vec<Transcript> = Vec::new();
+    let mut reader = Reader::new(read);
     work.reverse();
     while let Some(feed) = work.last_mut() {
         if stop() {
             return PassEnd::Stopped;
         }
-        feed.send(&mut engine, &mut read, config);
+        feed.send(&mut engine, &mut reader, config);
         while let Some(range) = feed.unread_due() {
             if let Err(e) = sink.confirmed(feed.track, range.end(), Vec::new(), vec![range]) {
                 return PassEnd::Sink(e);
@@ -328,6 +345,45 @@ pub fn transcribe<K: PassSink>(
     PassEnd::Done
 }
 
+/// Reads segments for the pass, keeping the last one read, so feeds that
+/// follow on in one segment share its read.
+struct Reader<R> {
+    /// Reads, proves and decodes a segment.
+    read: R,
+    /// The row last read, and its audio, or `None` if its file isn't its
+    /// row's audio (it failed its proof or its decode).
+    last: Option<(SegmentRow, Option<Rc<Vec<i16>>>)>,
+}
+
+impl<R: FnMut(&SegmentRow) -> Result<Vec<i16>, ReadSegmentError>> Reader<R> {
+    /// A reader that reads with `read`, having read nothing yet.
+    const fn new(read: R) -> Self {
+        Self { read, last: None }
+    }
+
+    /// The audio of `row`, or `None` if it can't be read: what was read
+    /// last if that was for an equal row (the same samples and digests, so
+    /// proven against this row), and otherwise what `read` gives now.
+    fn audio(&mut self, row: &SegmentRow) -> Option<Rc<Vec<i16>>> {
+        if let Some((last, audio)) = &self.last
+            && last == row
+        {
+            return audio.as_ref().map(Rc::clone);
+        }
+        // Let the last segment go first, so the pass never holds two.
+        self.last = None;
+        let audio = match (self.read)(row) {
+            Ok(samples) => Some(Rc::new(samples)),
+            // The disk may give it next time: nothing is kept, so the next
+            // feed over it reads it again.
+            Err(ReadSegmentError::Io(_)) => return None,
+            Err(_) => None,
+        };
+        self.last = Some((*row, audio.as_ref().map(Rc::clone)));
+        audio
+    }
+}
+
 /// One track's audio on its way to the engine.
 #[derive(Debug)]
 struct Feed {
@@ -335,7 +391,7 @@ struct Feed {
     /// The segments still to send, the one being sent first.
     segments: VecDeque<SegmentRow>,
     /// The audio of the segment being sent, once read.
-    audio: Option<Vec<i16>>,
+    audio: Option<Rc<Vec<i16>>>,
     /// The next sample to send.
     next: SampleIndex,
     /// The segment last sent from, to tell where a run ends.
@@ -347,20 +403,22 @@ struct Feed {
     unread: VecDeque<SampleRange>,
     /// Everything before this is confirmed.
     confirmed: SampleIndex,
-    /// The last published sample's end.
+    /// Where sending stops: the last published sample's end, or the
+    /// track's `until` if that comes first.
     end: SampleIndex,
 }
 
 impl Feed {
     /// The audio of `track` left to do, if any.
     fn new(track: &TrackAudio) -> Option<Self> {
+        let until = track.until.unwrap_or(SampleIndex::new(u64::MAX));
         let segments: VecDeque<SegmentRow> = track
             .segments
             .iter()
-            .filter(|row| row.range().end() > track.from)
+            .filter(|row| row.range().end() > track.from && row.range().start() < until)
             .copied()
             .collect();
-        let end = segments.back()?.range().end();
+        let end = segments.back()?.range().end().min(until);
         Some(Self {
             track: track.track,
             next: track.from.max(segments.front()?.range().start()),
@@ -415,7 +473,7 @@ impl Feed {
     fn send(
         &mut self,
         engine: &mut EngineSupervisor,
-        read: &mut impl FnMut(&SegmentRow) -> Result<Vec<i16>, ReadSegmentError>,
+        reader: &mut Reader<impl FnMut(&SegmentRow) -> Result<Vec<i16>, ReadSegmentError>>,
         config: &PassConfig,
     ) {
         while self.in_flight() < config.in_flight {
@@ -431,7 +489,7 @@ impl Feed {
                 engine.flush(self.track);
             }
             if self.audio.is_none() {
-                let Ok(read) = read(&row) else {
+                let Some(read) = reader.audio(&row) else {
                     self.skip_unread(engine, row);
                     continue;
                 };
@@ -441,13 +499,15 @@ impl Feed {
                 continue;
             };
             let start = self.next.max(row.range().start());
+            // A segment past the feed's end is sent only up to it.
+            let row_end = row.range().end().min(self.end);
             let frame = config.frame.get().max(1);
             let boundary = (start.get() / frame)
                 .saturating_add(1)
                 .saturating_mul(frame);
             // Never before `start`: a row overlapping the one before it
             // (the store refuses those) is passed over, not looped on.
-            let end = SampleIndex::new(boundary).min(row.range().end()).max(start);
+            let end = SampleIndex::new(boundary).min(row_end).max(start);
             let at = |sample: SampleIndex| {
                 usize::try_from(sample.saturating_count_since(row.range().start()).get())
                     .unwrap_or(usize::MAX)
@@ -464,7 +524,7 @@ impl Feed {
                 self.sent.push_back(range);
             }
             self.next = end;
-            if end >= row.range().end() {
+            if end >= row_end {
                 self.segments.pop_front();
                 self.audio = None;
                 self.previous = Some(row);
@@ -480,7 +540,8 @@ impl Feed {
     /// everything before them is confirmed.
     fn skip_unread(&mut self, engine: &EngineSupervisor, row: SegmentRow) {
         engine.flush(self.track);
-        if let Some(range) = SampleRange::new(self.next.max(row.range().start()), row.range().end())
+        let row_end = row.range().end().min(self.end);
+        if let Some(range) = SampleRange::new(self.next.max(row.range().start()), row_end)
             .filter(|range| !range.is_empty())
         {
             self.unread.push_back(range);

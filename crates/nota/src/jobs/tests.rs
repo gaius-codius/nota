@@ -216,7 +216,7 @@ fn states(db: &Writer) -> Vec<(SessionId, JobState)> {
     db.with(|db| db.jobs())
         .unwrap()
         .into_iter()
-        .filter(|job| job.kind == nota_store::JobKind::FinalPass)
+        .filter(|job| job.kind == JobKind::FinalPass)
         .map(|job| (job.session, job.state))
         .collect()
 }
@@ -313,6 +313,52 @@ fn no_job_starts_while_a_recording_runs() {
     recording.set(false);
     runner.wake();
     until_states(&db, &[(S1, JobState::Done)]);
+}
+
+/// No hotword pass starts while a recording runs either: a session whose
+/// only job left is its hotword pass runs it once the recording stops.
+#[test]
+fn no_hotword_pass_starts_while_a_recording_runs() {
+    let dir = TestDir::new("capture-hotword");
+    let db = Writer::new(&dir.0.join("library.db"));
+    db.with(|db| {
+        db.create_session(&NewSession::bare(S1))?;
+        db.finish_recording(S1, None)?;
+        for job in db.session_jobs(S1)? {
+            if job.kind != JobKind::HotwordPass {
+                db.end_job(job.id, &JobEnd::Done)?;
+            }
+        }
+        Ok(())
+    })
+    .unwrap();
+    let hotword = || {
+        db.with(|db| db.jobs())
+            .unwrap()
+            .into_iter()
+            .find(|job| job.kind == JobKind::HotwordPass)
+            .map(|job| job.state)
+    };
+    let worker = Fake::default();
+    let recording = Switch::on();
+    let runner = spawn(&dir, &db, &worker, &recording, &Switch::on());
+    // Nothing shows when the runner looks, so this waits a while for a
+    // run that mustn't start.
+    pause(Duration::from_millis(1_500));
+    assert!(worker.ran().is_empty());
+    assert_eq!(hotword(), Some(JobState::Waiting(None)));
+    recording.set(false);
+    runner.wake();
+    let clock = SystemClock::start().unwrap();
+    while hotword() != Some(JobState::Done) {
+        assert!(
+            clock.now().elapsed() < Duration::from_secs(10),
+            "{:?}",
+            hotword()
+        );
+        pause(Duration::from_millis(20));
+    }
+    assert_eq!(worker.ran(), [S1]);
 }
 
 /// A job running when a recording starts stops at once and waits, keeping
@@ -835,10 +881,10 @@ fn queue(db: &Writer, session: SessionId, waits: Option<Wait>) {
         })?;
         db.finish_recording(session, waits)?;
         // These tests are about the queue, which treats every kind alike:
-        // each session's clean-up is marked done, so the final pass is the
-        // one job each session has to run.
+        // each session's hotword pass and clean-up are marked done, so the
+        // final pass is the one job each session has to run.
         for job in db.session_jobs(session)? {
-            if job.kind == nota_store::JobKind::CleanUp {
+            if job.kind != JobKind::FinalPass {
                 db.end_job(job.id, &JobEnd::Done)?;
             }
         }
@@ -912,4 +958,146 @@ fn a_spawned_runner_reads_the_supplied_clock() {
     assert_eq!(states(&db), [(S1, JobState::Waiting(Some(Wait::Engine)))]);
     // Join before closing the receiver, so later reads still have a home.
     drop(runner);
+}
+
+/// The runner's retries after one job of `kind`, in `S1`, ended with its
+/// engine answering, when every job of `S1` and `S2` (a final pass, a
+/// hotword pass and a clean-up each) had backed off three times: how many times each
+/// session's job of each kind has backed off since.
+fn backed_off_after_answer(name: &str, kind: JobKind) -> Vec<(SessionId, JobKind, u32)> {
+    let (_dir, db) = library(name, &[]);
+    for session in [S1, S2] {
+        db.with(|db| {
+            db.create_session(&NewSession {
+                id: session,
+                title: None,
+                language: None,
+                started_at: None,
+                tracks: Vec::new(),
+            })?;
+            db.finish_recording(session, None)
+        })
+        .unwrap();
+    }
+    let clock = Arc::new(nota_core::FakeClock::new(SessionTime::ZERO));
+    let mut runner = loop_with_clock(&db, &Fake::default(), &clock);
+    let jobs = db.with(|db| db.jobs()).unwrap();
+    for job in &jobs {
+        let mut retry = Retry::first(job.kind, SessionTime::ZERO);
+        for _ in 0..3 {
+            retry = retry.failed_again(SessionTime::ZERO);
+        }
+        runner.retries.insert(job.id, retry);
+    }
+    let answering = jobs
+        .iter()
+        .find(|job| job.session == S1 && job.kind == kind)
+        .unwrap();
+    runner.note_retry(answering, &JobEnd::Done, true);
+    jobs.iter()
+        .filter_map(|job| {
+            let retry = runner.retries.get(&job.id)?;
+            Some((job.session, job.kind, retry.again))
+        })
+        .collect()
+}
+
+/// Acceptance (#280): the decider answering in a clean-up run puts every
+/// other clean-up job back to the shortest wait, and leaves the final
+/// passes' spacing as it was: the speech engine may still be down.
+#[test]
+fn a_decider_that_answers_resets_only_clean_up_retries() {
+    assert_eq!(
+        backed_off_after_answer("decider-reset", JobKind::CleanUp),
+        [
+            (S1, JobKind::FinalPass, 3),
+            (S1, JobKind::HotwordPass, 3),
+            (S2, JobKind::FinalPass, 3),
+            (S2, JobKind::HotwordPass, 3),
+            (S2, JobKind::CleanUp, 0),
+        ]
+    );
+}
+
+/// Acceptance (#280): the speech engine answering in a final pass puts
+/// every other final pass back to the shortest wait, and leaves clean-up's
+/// spacing as it was: the decider may still be down.
+#[test]
+fn a_speech_engine_that_answers_resets_only_final_pass_retries() {
+    assert_eq!(
+        backed_off_after_answer("speech-reset", JobKind::FinalPass),
+        [
+            (S1, JobKind::HotwordPass, 3),
+            (S1, JobKind::CleanUp, 3),
+            (S2, JobKind::FinalPass, 0),
+            (S2, JobKind::HotwordPass, 3),
+            (S2, JobKind::CleanUp, 3),
+        ]
+    );
+}
+
+/// The boosted engine answering in a hotword pass puts every other hotword
+/// pass back to the shortest wait, and leaves the final passes' and
+/// clean-up's spacing as it was: the boosted engine is its own, and the
+/// plain one may still be down.
+#[test]
+fn a_boosted_engine_that_answers_resets_only_hotword_retries() {
+    assert_eq!(
+        backed_off_after_answer("boosted-reset", JobKind::HotwordPass),
+        [
+            (S1, JobKind::FinalPass, 3),
+            (S1, JobKind::CleanUp, 3),
+            (S2, JobKind::FinalPass, 3),
+            (S2, JobKind::HotwordPass, 0),
+            (S2, JobKind::CleanUp, 3),
+        ]
+    );
+}
+
+/// A final pass still waiting out a long spacing doesn't hold up a
+/// clean-up retry that is due: each kind's retries take turns among
+/// themselves.
+#[test]
+fn a_final_pass_backed_off_doesnt_hold_up_a_clean_up_retry() {
+    let (_dir, db) = library("turns-per-kind", &[]);
+    for session in [S1, S2] {
+        db.with(|db| {
+            db.create_session(&NewSession::bare(session))?;
+            db.finish_recording(session, None)
+        })
+        .unwrap();
+    }
+    let jobs = db.with(|db| db.jobs()).unwrap();
+    let find = |session, kind| {
+        jobs.iter()
+            .find(|job| job.session == session && job.kind == kind)
+            .unwrap()
+            .clone()
+    };
+    let (pass, clean_up) = (find(S1, JobKind::FinalPass), find(S2, JobKind::CleanUp));
+    // Only these two wait to run: the other jobs are done.
+    for job in &jobs {
+        if job.id != pass.id && job.id != clean_up.id {
+            db.with(|db| db.end_job(job.id, &JobEnd::Done)).unwrap();
+        }
+    }
+    for job in [&pass, &clean_up] {
+        db.with(|db| db.end_job(job.id, &JobEnd::EngineDown("down".into())))
+            .unwrap();
+    }
+    let clock = Arc::new(nota_core::FakeClock::new(SessionTime::ZERO));
+    let mut runner = loop_with_clock(&db, &Fake::default(), &clock);
+    // The final pass ended first and has backed off to 40 s; the clean-up
+    // job ended a second later at the shortest spacing.
+    let mut backed_off = Retry::first(JobKind::FinalPass, SessionTime::ZERO);
+    for _ in 0..3 {
+        backed_off = backed_off.failed_again(SessionTime::ZERO);
+    }
+    runner.retries.insert(pass.id, backed_off);
+    let one = SessionTime::from_nanos(1_000_000_000);
+    runner
+        .retries
+        .insert(clean_up.id, Retry::first(JobKind::CleanUp, one));
+    let next = due_after(&runner, &clock, Duration::from_secs(6));
+    assert_eq!((next.session, next.kind), (S2, JobKind::CleanUp));
 }

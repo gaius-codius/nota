@@ -22,6 +22,8 @@
 //! | 10 | each session pack's digest, `session_pack.digest` |
 //! | 11 | each word's log-probability, `word.log_prob` and `final_word.log_prob` |
 //! | 12 | term clean-up's proposals, `proposal` (replacing V8's unused table), and its job |
+//! | 13 | whether clean-up gave up on a proposal's chunk, `proposal.gave_up` |
+//! | 14 | the hotword pass's text and progress, `hotword_text` and `hotword_progress`, and proposals from it (`proposal.source` `hotword`) |
 //!
 //! # The per-session stores
 //!
@@ -43,7 +45,7 @@ use crate::sessions::{NewSession, SessionState, insert_session, insert_tracks};
 use crate::{Store, StoreError, session_key};
 
 /// The schema version this code writes and understands.
-pub const VERSION: i64 = 12;
+pub const VERSION: i64 = 14;
 
 /// The first library version: what [`STEPS`]' first step makes.
 const FIRST: i64 = 2;
@@ -52,7 +54,7 @@ const FIRST: i64 = 2;
 const PER_SESSION: i64 = 1;
 
 /// The SQL that makes each version from the one before, in order: version
-/// 2 (from an empty file), then 3 to 11. There's no step from 1, which is
+/// 2 (from an empty file), then 3 to 14. There's no step from 1, which is
 /// never a library. [`upgrade`] runs the steps above the file's version.
 const STEPS: &[&str] = &[
     schema::V2,
@@ -66,6 +68,8 @@ const STEPS: &[&str] = &[
     schema::V10,
     schema::V11,
     schema::V12,
+    schema::V13,
+    schema::V14,
 ];
 
 fn version(conn: &Connection) -> Result<i64, StoreError> {

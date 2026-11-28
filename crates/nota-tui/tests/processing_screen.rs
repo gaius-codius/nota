@@ -31,6 +31,7 @@ fn job(name: &str, state: ProcessingState) -> ProcessingJob {
         name: name.into(),
         engine: "parakeet".into(),
         state,
+        note: None,
     }
 }
 
@@ -117,6 +118,23 @@ fn processing_retrying() {
                     .into(),
             },
         ),
+    ]);
+    insta::assert_snapshot!(draw(&mut screen, 62, 20));
+}
+
+/// A finished step with a note shows it under the step: here, the
+/// chunks term clean-up gave up on.
+#[test]
+fn processing_done_with_a_note() {
+    let mut screen = screen();
+    let mut fixing = job("Fixing terms", ProcessingState::Done);
+    fixing.engine = "llama-server · qwen".into();
+    // The words the app gives for chunks given up on.
+    fixing.note = Some("2 chunks left unfixed: the decider kept failing on them".into());
+    screen.set_jobs(vec![
+        job("Recording saved", ProcessingState::Done),
+        job("Final transcript", ProcessingState::Done),
+        fixing,
     ]);
     insta::assert_snapshot!(draw(&mut screen, 62, 20));
 }
@@ -216,6 +234,26 @@ fn a_step_waiting_for_a_decider_leaves_the_session_ready() {
     assert!(output.contains("◐ processing"), "{output}");
     assert!(
         output.contains("waiting: waiting for the final transcript"),
+        "{output}"
+    );
+}
+
+/// A step waiting for the hotword pass says so.
+#[test]
+fn a_step_waiting_for_the_hotword_pass_says_so() {
+    let mut screen = Processing::new("Test".into(), "engine".into(), Theme::no_color());
+    screen.set_jobs(vec![job(
+        "Fixing terms",
+        ProcessingState::Waiting {
+            reason: ProcessingWait::HotwordText,
+            progress: 0,
+        },
+    )]);
+    let output = draw(&mut screen, 100, 20);
+    assert!(
+        output.contains(
+            "○  Fixing terms · parakeet · waiting: waiting for the terms to be heard again"
+        ),
         "{output}"
     );
 }

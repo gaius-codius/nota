@@ -27,12 +27,15 @@
 //! **Engine retries take turns and slow down.** A job whose engine
 //! couldn't start or stopped working is tried again [`IDLE`] after its run
 //! ended, then twice as long after each further failure, up to
-//! [`RETRY_CAP`]. Once any job's engine confirms audio, every waiting job
-//! goes back to the shortest spacing. Jobs not waiting on an engine retry
+//! [`RETRY_CAP`]. Once an engine answers, every waiting job of the same
+//! kind goes back to the shortest spacing: the speech engine for final
+//! passes, the decider for clean-up. One engine working says nothing
+//! about the other. Jobs not waiting on an engine retry
 //! go first, in queue order; then the retries take turns, the one whose
-//! last run ended longest ago first, and none runs before an older one that
-//! isn't due yet. So each waiting session is tried before any is tried
-//! again, however long the runs take and however far each has backed off.
+//! last run ended longest ago first, and none runs before an older one of
+//! its kind that isn't due yet. So each waiting session is tried before
+//! any is tried again, however long the runs take and however far each
+//! has backed off.
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -45,7 +48,7 @@ use std::time::Duration;
 
 use nota_core::{Clock, SessionTime};
 use nota_recorder::fs::{Fs, StdFs};
-use nota_store::{Job, JobEnd, JobId, JobState, Progress, StoreError, Wait, Writer};
+use nota_store::{Job, JobEnd, JobId, JobKind, JobState, Progress, StoreError, Wait, Writer};
 
 /// A job that nota has died while running this many times fails.
 pub(crate) const MAX_ATTEMPTS: u32 = 3;
@@ -66,6 +69,8 @@ const HELD: Duration = Duration::from_secs(1);
 /// When a job whose engine failed may be tried again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Retry {
+    /// The job's kind, which says whose engine it waits on.
+    kind: JobKind,
     /// When its last run ended.
     ended: SessionTime,
     /// The failures since its engine last answered, past the first: each
@@ -74,10 +79,11 @@ struct Retry {
 }
 
 impl Retry {
-    /// A job's first failure, or its first since an engine answered,
-    /// ended `now`: it waits [`IDLE`].
-    fn first(now: SessionTime) -> Self {
+    /// A `kind` job's first failure, or its first since its engine
+    /// answered, ended `now`: it waits [`IDLE`].
+    fn first(kind: JobKind, now: SessionTime) -> Self {
         Self {
+            kind,
             ended: now,
             again: 0,
         }
@@ -87,6 +93,7 @@ impl Retry {
     /// as last time, up to [`RETRY_CAP`].
     fn failed_again(self, now: SessionTime) -> Self {
         Self {
+            kind: self.kind,
             ended: now,
             again: self.again.saturating_add(1),
         }
@@ -103,7 +110,7 @@ impl Retry {
         now.checked_duration_since(self.ended).unwrap_or_default() >= self.spacing()
     }
 
-    /// An engine has answered: it waits the shortest spacing again, from
+    /// Its engine has answered: it waits the shortest spacing again, from
     /// when its run ended.
     fn reset(&mut self) {
         self.again = 0;
@@ -124,7 +131,8 @@ enum Turn {
 struct Ran {
     /// How it ended.
     end: JobEnd,
-    /// Whether its engine confirmed audio at some point.
+    /// Whether its engine answered at some point: the speech engine
+    /// confirmed audio, or the decider answered a question.
     answered: bool,
 }
 
@@ -135,8 +143,10 @@ pub(crate) struct Running<'a> {
     pub(crate) stop: &'a dyn Fn() -> bool,
     /// Notes how far it has got, for the Processing screen.
     pub(crate) progress: &'a dyn Fn(Progress),
-    /// Notes that its engine has answered, so the reason an earlier run's
-    /// engine failed no longer shows.
+    /// Notes that its engine has answered (the speech engine for a final
+    /// pass, the decider for clean-up), so the reason an earlier run's
+    /// engine failed no longer shows, and the jobs of its kind waiting on
+    /// that engine are tried again soon.
     pub(crate) answered: &'a dyn Fn(),
     /// Notes why its engine is down now (`Some`), for the Processing
     /// screen to show while the run goes on, or that it's back (`None`),
@@ -362,8 +372,8 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
 
     /// The first job that can run now: those not waiting on an engine
     /// retry in queue order, then the retries, the one that last ran
-    /// longest ago first, as long as no older one is still waiting out its
-    /// spacing. A waiting job that lacks what it needs is marked as waiting
+    /// longest ago first, as long as no older one of its kind is still
+    /// waiting out its spacing. A waiting job that lacks what it needs is marked as waiting
     /// for it, so the Processing screen can say why.
     fn next(&self) -> Result<Option<Job>, StoreError> {
         let mut jobs = self.db.with(|db| db.jobs())?;
@@ -372,14 +382,16 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
         // Taking the oldest retry first means a session tried a while ago
         // isn't passed over by one whose runs keep ending sooner.
         jobs.sort_by_key(|job| self.retries.get(&job.id).map(|retry| retry.ended));
-        let mut turn = Turn::Open;
+        // Each kind's retries take turns among themselves: one engine's
+        // long spacing doesn't hold up the other's retries.
+        let mut turns: BTreeMap<JobKind, Turn> = BTreeMap::new();
         for job in jobs {
             let waits = match &job.state {
                 JobState::Waiting(waits) => *waits,
                 JobState::EngineDown(_) => Some(Wait::Engine),
                 _ => continue,
             };
-            if !self.has_turn(job.id, &mut turn) {
+            if !self.has_turn(job.id, turns.entry(job.kind).or_insert(Turn::Open)) {
                 continue;
             }
             // A job waiting for space keeps waiting for it until there's
@@ -403,8 +415,8 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
     }
 
     /// Whether job `id` may run now as far as engine retries go, given the
-    /// retries before it in turn order; a retry not due yet closes `turn`
-    /// to every retry after it.
+    /// retries of its kind before it in turn order; a retry not due yet
+    /// closes `turn` to every retry of its kind after it.
     fn has_turn(&self, id: JobId, turn: &mut Turn) -> bool {
         let Some(retry) = self.retries.get(&id) else {
             return true;
@@ -429,7 +441,7 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
         if !self.note_end(job.id, &end) {
             return;
         }
-        self.note_retry(job.id, &end, answered);
+        self.note_retry(job, &end, answered);
         // Out of space by SQLite's count though the disk check finds room
         // (a quota, a full temp store): don't start it again at once.
         if end == JobEnd::Waiting(Some(Wait::Space)) {
@@ -437,13 +449,19 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
         }
     }
 
-    /// Notes when job `id`, whose run ended with `end`, may be tried
-    /// again, and resets every retry's spacing if its engine `answered`.
-    fn note_retry(&mut self, id: JobId, end: &JobEnd, answered: bool) {
-        // The engine is the same for every session: one that answers for
-        // this job is worth trying again soon for the others too.
+    /// Notes when `job`, whose run ended with `end`, may be tried again,
+    /// and resets the spacing of every retry of its kind if its engine
+    /// `answered`.
+    fn note_retry(&mut self, job: &Job, end: &JobEnd, answered: bool) {
+        let id = job.id;
+        // A kind's engine is the same for every session: one that answers
+        // for this job is worth trying again soon for the others too. The
+        // other kind's engine may still be down.
         if answered {
-            self.retries.values_mut().for_each(Retry::reset);
+            self.retries
+                .values_mut()
+                .filter(|retry| retry.kind == job.kind)
+                .for_each(Retry::reset);
         }
         match end {
             JobEnd::EngineDown(_) | JobEnd::Waiting(Some(Wait::Engine)) => {}
@@ -460,7 +478,7 @@ impl<W: Worker, C: Capture, R: Room> Loop<W, C, R> {
             // An engine that answered in this run and then went down
             // starts the spacing again.
             Some(retry) if !answered => retry.failed_again(now),
-            _ => Retry::first(now),
+            _ => Retry::first(job.kind, now),
         };
         self.retries.insert(id, retry);
     }

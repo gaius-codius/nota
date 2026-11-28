@@ -41,6 +41,9 @@ pub enum ProcessingWait {
     Decider,
     /// The final transcript, which the step reads.
     FinalText,
+    /// The hotword pass's transcript, which the step compares with the
+    /// final one.
+    HotwordText,
 }
 
 impl ProcessingWait {
@@ -59,6 +62,7 @@ impl ProcessingWait {
             Self::Queued => "queued or paused for a recording".into(),
             Self::Decider => "waiting for a decider to be set up".into(),
             Self::FinalText => "waiting for the final transcript".into(),
+            Self::HotwordText => "waiting for the terms to be heard again".into(),
         }
     }
 }
@@ -214,6 +218,9 @@ pub struct ProcessingJob {
     pub engine: String,
     /// Where the step is.
     pub state: ProcessingState,
+    /// A note shown under the step whatever its state, such as the chunks
+    /// term clean-up gave up on, or `None`.
+    pub note: Option<String>,
 }
 
 /// Navigation requested by the processing page.
@@ -568,6 +575,7 @@ impl Processing {
         for job in &self.jobs {
             lines.push(self.job_line(job, width));
             lines.extend(self.reason_lines(&job.state, width));
+            lines.extend(self.note_lines(job.note.as_deref(), width));
         }
         lines.push(Line::raw(""));
         lines.push(Line::styled(
@@ -634,6 +642,19 @@ impl Processing {
         .take(MAX_REASON_LINES)
         .map(|text| Line::styled(format!("{REASON_INDENT}{text}"), self.theme.text_hint))
         .collect()
+    }
+
+    /// A step's note under it, wrapped and cut to [`MAX_REASON_LINES`]
+    /// like a reason; none without a note.
+    fn note_lines(&self, note: Option<&str>, width: usize) -> Vec<Line<'static>> {
+        let Some(note) = note else {
+            return Vec::new();
+        };
+        wrap(&drawn(note), width.saturating_sub(REASON_INDENT.len()))
+            .into_iter()
+            .take(MAX_REASON_LINES)
+            .map(|text| Line::styled(format!("{REASON_INDENT}{text}"), self.theme.text_hint))
+            .collect()
     }
 }
 

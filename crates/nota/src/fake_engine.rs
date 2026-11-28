@@ -8,10 +8,15 @@
 //! with a word over the whole chunk and one at its end. The first word has
 //! the log-probability [`COUNT_LOG_PROB`] and the second none, so a test
 //! can see both reach the stored text.
+//!
+//! Boosted (`--pass hotword`, sent hotwords), its second word is the first
+//! hotword it was given instead of "samples", so a session whose pack has a
+//! term close to "samples" gets a hotword candidate.
 
 use std::io;
 
 use nota_core::lifeline::{self, Tie};
+use nota_core::messages::Hotword;
 use nota_core::{LogProb, SampleCount, SampleIndex, SampleRange};
 use nota_engine::EngineError;
 use nota_engine::child::{Detector, Heard, Models, TimedWord, Transcriber, run as run_child};
@@ -35,11 +40,20 @@ pub(crate) fn run(chunking: ChunkerConfig) -> Result<(), EngineError> {
         return Ok(());
     }
     let input = io::BufReader::new(io::stdin().lock());
-    run_child(input, io::stdout().lock(), chunking, || Ok(Stand))
+    run_child(
+        input,
+        io::stdout().lock(),
+        chunking,
+        || Ok(Stand::default()),
+    )
 }
 
 /// The stand-in models.
-struct Stand;
+#[derive(Debug, Default)]
+struct Stand {
+    /// The first hotword it was given, if it was boosted.
+    boosted: Option<String>,
+}
 
 /// Loud samples are speech; a run of them is reported once a quiet sample
 /// follows it.
@@ -79,7 +93,7 @@ impl Detector for Loudness {
 impl Transcriber for Stand {
     /// "N samples", N the chunk's length, as two words: "N" over the whole
     /// chunk, with [`COUNT_LOG_PROB`], and "samples" at its end, with
-    /// none.
+    /// none. Boosted, the second word is its hotword.
     fn transcribe(&mut self, audio: &[f32]) -> Heard {
         let len = SampleCount::new(audio.len() as u64);
         let word = |text: String, from, log_prob| TimedWord {
@@ -88,15 +102,16 @@ impl Transcriber for Stand {
             to: len,
             log_prob,
         };
+        let second = self.boosted.as_deref().unwrap_or("samples");
         Heard {
-            text: format!("{} samples", audio.len()),
+            text: format!("{} {second}", audio.len()),
             words: vec![
                 word(
                     audio.len().to_string(),
                     SampleCount::ZERO,
                     LogProb::new(COUNT_LOG_PROB),
                 ),
-                word("samples".to_owned(), len, None),
+                word(second.to_owned(), len, None),
             ],
         }
     }
@@ -115,5 +130,51 @@ impl Models for Stand {
 
     fn transcriber(&mut self) -> &mut Self {
         self
+    }
+
+    /// Keeps the first of `hotwords` (none clears the boost), as a beam
+    /// search would favour it.
+    fn boost(&mut self, hotwords: &[Hotword]) -> Result<(), EngineError> {
+        self.boosted = hotwords.first().map(|hotword| hotword.as_str().to_owned());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The text of `stand` for a chunk of three samples.
+    fn heard(stand: &mut Stand) -> (String, Vec<String>) {
+        let heard = stand.transcribe(&[0.5; 3]);
+        (
+            heard.text,
+            heard.words.into_iter().map(|w| w.text).collect(),
+        )
+    }
+
+    /// Unboosted, the second word is "samples"; boosted, it's the first
+    /// hotword given, until a boost with none clears it.
+    #[test]
+    fn a_boosted_stand_in_hears_its_first_hotword() {
+        let mut stand = Stand::default();
+        assert_eq!(
+            heard(&mut stand),
+            (
+                "3 samples".to_owned(),
+                vec!["3".to_owned(), "samples".to_owned()]
+            )
+        );
+        let hotwords = ["sampler", "amlodipine"].map(|t| Hotword::new(t).unwrap());
+        stand.boost(&hotwords).unwrap();
+        assert_eq!(
+            heard(&mut stand),
+            (
+                "3 sampler".to_owned(),
+                vec!["3".to_owned(), "sampler".to_owned()]
+            )
+        );
+        stand.boost(&[]).unwrap();
+        assert_eq!(heard(&mut stand).0, "3 samples");
     }
 }

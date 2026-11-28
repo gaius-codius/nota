@@ -48,6 +48,7 @@ use ratatui::backend::Backend;
 use crate::cleanup::CleanUp;
 use crate::cleanup::sources::Installed;
 use crate::final_pass::Jobs;
+use crate::hotword_pass::settings_boost;
 use crate::jobs::{Capture, FreeSpace, Room as _, Runner};
 use crate::library::{Library, Listed, Needs, Salvaged};
 use crate::record::{
@@ -354,6 +355,7 @@ fn start_jobs(
                 Box::new(Installed::new(&args.data, Arc::clone(clock))),
                 RATE,
             ),
+            Box::new(settings_boost),
         ),
         capture,
         FreeSpace(args.data.clone()),
@@ -785,6 +787,7 @@ fn job_status(
         shown.status = Status::Processing;
         let doing = match job.kind {
             JobKind::FinalPass => "final transcript queued or running",
+            JobKind::HotwordPass => "terms heard again queued or running",
             JobKind::CleanUp => "term fixes queued or running",
         };
         shown.detail.insert(0, doing.into());

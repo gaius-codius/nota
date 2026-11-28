@@ -7,6 +7,7 @@ use nota_recorder::fs::Fs as _;
 use nota_store::{JobState, NewSession, Sha256Digest};
 
 use super::*;
+use crate::hotword_pass::Boost;
 
 /// A fresh directory under the system temp dir, removed when dropped.
 struct TestDir(PathBuf);
@@ -98,11 +99,13 @@ fn the_pass_starts_each_track_where_it_got_to() {
                 track: MIC,
                 segments: vec![row(MIC, 0, 50), row(MIC, 50, 60)],
                 from: s(30),
+                until: None,
             },
             TrackAudio {
                 track: SYSTEM,
                 segments: vec![row(SYSTEM, 0, 10), row(SYSTEM, 10, 20)],
                 from: s(0),
+                until: None,
             },
         ]
     );
@@ -294,7 +297,13 @@ fn without_an_engine_the_final_pass_waits_for_one() {
         (JobKind::FinalPass, JobState::Waiting(None))
     );
     let clock: Arc<dyn Clock> = Arc::new(SystemClock::start().unwrap());
-    let mut jobs = Jobs::new(library, None, clock, crate::cleanup::fake::idle());
+    let mut jobs = Jobs::new(
+        library,
+        None,
+        clock,
+        crate::cleanup::fake::idle(),
+        Box::new(|| Ok(Boost::DEFAULT)),
+    );
     assert_eq!(jobs.lacks(&job), Some(Wait::Engine));
     let stop = || false;
     let progress = |_| {};
@@ -347,14 +356,22 @@ fn the_final_pass_waits_for_journals_to_be_published() {
     let audio = paths.audio();
     StdFs.create_dir(&paths.dir).unwrap();
     StdFs.create_dir(&audio).unwrap();
-    let engine = Engine {
-        command: EngineCommand {
-            program: PathBuf::from("nota"),
-            args: Vec::new(),
-        },
-        heard_by: heard_by(),
+    let command = EngineCommand {
+        program: PathBuf::from("nota"),
+        args: Vec::new(),
     };
-    let jobs = Jobs::new(library, Some(engine), clock, crate::cleanup::fake::idle());
+    let engine = Engine {
+        command: command.clone(),
+        heard_by: heard_by(),
+        hotword: HotwordEngine::Stand(command),
+    };
+    let jobs = Jobs::new(
+        library,
+        Some(engine),
+        clock,
+        crate::cleanup::fake::idle(),
+        Box::new(|| Ok(Boost::DEFAULT)),
+    );
     assert_eq!(jobs.lacks(&job), None);
     drop(StdFs.create(&audio.join("journal-000003")).unwrap());
     assert_eq!(jobs.lacks(&job), Some(Wait::Audio));

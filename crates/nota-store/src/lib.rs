@@ -45,6 +45,7 @@ pub mod annotations;
 mod epochs;
 pub mod final_text;
 mod findings;
+pub mod hotword_text;
 pub mod jobs;
 pub mod learned;
 pub mod migrate;
@@ -62,13 +63,14 @@ mod writer;
 pub use annotations::Annotation;
 pub use final_text::{FinalText, FinalWord, HeardBy};
 pub use findings::{IndexedFinding, Problem, ReadFailure, Status};
+pub use hotword_text::HotwordText;
 pub use jobs::{Job, JobEnd, JobId, JobKind, JobState, Progress, Wait};
 pub use learned::{Learned, LearnedPair, Verdict};
 pub use migrate::Adopted;
 pub use packs::{Pack, PackDigest, PackError, PackRef};
 pub use proposals::{
     Decided, DecidedBy, Found, NewProposal, Origin, Outcome, Placing, Proposal, ProposalId,
-    Proposed, Refusal, Reviewed,
+    Proposed, Refusal, Reviewed, SKIPPED,
 };
 pub use revisions::{Applied, Change, ChunkKey, FinalLine, RevisionNumber, Timed, WordSpan};
 pub use segments::{AudioDigest, Inserted, RowKey, SegmentRow, Sha256Digest};
@@ -101,6 +103,9 @@ pub enum StoreError {
     /// The file is a per-session store from before the library database:
     /// [`Store::adopt_session`] imports those; it isn't opened as a library.
     PerSessionStore,
+    /// The library's schema is at this older version, and it was opened
+    /// as it is, so it wasn't upgraded ([`Store::open_as_is`]).
+    NotCurrent(i64),
     /// A number doesn't fit SQLite's signed 64-bit integer.
     OutOfRange,
     /// A different row already holds this track and start sample in the
@@ -162,6 +167,15 @@ pub enum StoreError {
         /// Where the text that doesn't fit starts.
         start: SampleIndex,
     },
+    /// Hotword-pass text that isn't on its track, ends past the point it's
+    /// stored up to, doesn't cover exactly one final-pass chunk, has no
+    /// boost above 0, or differs from the text stored for its chunk.
+    HotwordMisplaced {
+        /// The track.
+        track: TrackId,
+        /// Where the text that doesn't fit starts.
+        start: SampleIndex,
+    },
     /// A stored row doesn't parse: a negative or inverted range, a
     /// wrong-length hash, a number out of its type's range, an unknown
     /// state or kind.
@@ -192,6 +206,11 @@ impl fmt::Display for StoreError {
             Self::PerSessionStore => {
                 write!(f, "a per-session store, not the library database")
             }
+            Self::NotCurrent(v) => write!(
+                f,
+                "the database is at schema version {v}, not {}: open it in nota first",
+                migrate::VERSION
+            ),
             Self::OutOfRange => write!(f, "a number does not fit a 64-bit signed integer"),
             Self::Conflict { existing } => write!(
                 f,
@@ -255,6 +274,14 @@ impl fmt::Display for StoreError {
                 f,
                 "final-pass text on track {} from sample {} overlaps text already stored, \
                  or ends past the point it was given up to",
+                track.get(),
+                start.get()
+            ),
+            Self::HotwordMisplaced { track, start } => write!(
+                f,
+                "hotword-pass text on track {} from sample {} isn't on that track, doesn't \
+                 cover exactly one final-pass chunk, ends past the point it was given up to, \
+                 has no boost above 0, or differs from the text stored for its chunk",
                 track.get(),
                 start.get()
             ),
@@ -413,6 +440,30 @@ impl Store {
         migrate::check(&conn)?;
         configure(&conn)?;
         migrate::upgrade(&mut conn)?;
+        Ok(Self { conn })
+    }
+
+    /// Opens the library database at `path` as it is, for a tool that only
+    /// reads it: never creating it and never changing its schema, so a
+    /// library a running app has open isn't upgraded under it. Opened
+    /// read-write all the same, so SQLite can recover a write-ahead log a
+    /// crash left. A symlink at `path` is refused.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::NotCurrent`] if its schema is older than this code's
+    /// (or it's an empty file), [`StoreError::UnknownSchema`] if its
+    /// version isn't known, [`StoreError::PerSessionStore`] for a
+    /// per-session store, [`StoreError::Pragma`] if a pragma didn't take,
+    /// and [`StoreError::Sqlite`] for any other SQLite failure, including
+    /// a missing file or a symlink.
+    pub fn open_as_is(path: &Path) -> Result<Self, StoreError> {
+        let conn = connect(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        match migrate::check(&conn)? {
+            migrate::VERSION => {}
+            older => return Err(StoreError::NotCurrent(older)),
+        }
+        configure(&conn)?;
         Ok(Self { conn })
     }
 

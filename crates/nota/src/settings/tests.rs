@@ -475,13 +475,105 @@ fn a_tilde_without_home_is_refused() {
 fn an_empty_file_sets_nothing() {
     assert_eq!(
         parse("", None),
-        Ok(Written {
-            program: None,
-            model: None,
-            device: Device::Cpu,
-            socket_dir: None,
+        Ok(Settings {
+            decider: Written {
+                program: None,
+                model: None,
+                device: Device::Cpu,
+                socket_dir: None,
+            },
+            precheck: Precheck::Off,
         })
     );
+}
+
+/// A settings file with no clean-up table leaves the pre-check off.
+#[test]
+fn no_clean_up_table_leaves_the_precheck_off() {
+    let dir = TestDir::new("precheck-absent");
+    dir.settings("[local_decider]\nprogram = \"llama-server\"\n");
+
+    assert_eq!(precheck(&dir.env()), Precheck::Off);
+}
+
+/// `similarity_precheck = true` turns the pre-check on.
+#[test]
+fn a_true_similarity_precheck_turns_it_on() {
+    let dir = TestDir::new("precheck-true");
+    dir.settings("[clean_up]\nsimilarity_precheck = true\n");
+
+    assert_eq!(precheck(&dir.env()), Precheck::On);
+}
+
+/// `similarity_precheck = false` leaves the pre-check off.
+#[test]
+fn a_false_similarity_precheck_leaves_it_off() {
+    let dir = TestDir::new("precheck-false");
+    dir.settings("[clean_up]\nsimilarity_precheck = false\n");
+
+    assert_eq!(precheck(&dir.env()), Precheck::Off);
+}
+
+/// With no settings file the pre-check is off, as it is with no key.
+#[test]
+fn no_settings_file_leaves_the_precheck_off() {
+    let dir = TestDir::new("precheck-no-file");
+
+    assert_eq!(precheck(&dir.env()), Precheck::Off);
+}
+
+/// A key the clean-up table doesn't know makes the whole file unusable,
+/// so the engines screen names it.
+#[test]
+fn an_unknown_clean_up_key_is_refused() {
+    let dir = TestDir::new("clean-up-unknown-key");
+    let file = dir.settings("[clean_up]\nprecheck = true\n");
+
+    let why = unavailable(local_decider(&dir.env()));
+
+    assert!(
+        matches!(&why, Unavailable::Invalid(p, w) if *p == file && w == "nota has no setting clean_up.precheck"),
+        "{why:?}"
+    );
+}
+
+/// A pre-check written as anything but `true` or `false` is refused, not
+/// read as on or off.
+#[test]
+fn a_similarity_precheck_that_isnt_a_boolean_is_refused() {
+    assert_eq!(
+        parse("[clean_up]\nsimilarity_precheck = \"true\"\n", None),
+        Err("clean_up.similarity_precheck isn't true or false".to_owned())
+    );
+}
+
+/// `clean_up` that isn't a table is refused.
+#[test]
+fn a_clean_up_that_isnt_a_table_is_refused() {
+    assert_eq!(
+        parse("clean_up = true\n", None),
+        Err("clean_up isn't a table".to_owned())
+    );
+}
+
+/// An unusable clean-up table leaves the pre-check off, even with the
+/// pre-check turned on beside the mistake.
+#[test]
+fn an_invalid_clean_up_table_leaves_the_precheck_off() {
+    let dir = TestDir::new("precheck-invalid");
+    // On, so only the refusal can turn it off.
+    dir.settings("[clean_up]\nsimilarity_precheck = true\nspeed = 1\n");
+
+    assert_eq!(precheck(&dir.env()), Precheck::Off);
+}
+
+/// A file that only turns the pre-check on sets no decider up.
+#[test]
+fn a_file_with_only_a_clean_up_table_leaves_the_decider_not_set_up() {
+    let dir = TestDir::new("only-clean-up");
+    dir.settings("[clean_up]\nsimilarity_precheck = true\n");
+
+    assert!(matches!(local_decider(&dir.env()), LocalDecider::NotSetUp));
 }
 
 /// A settings file over the size limit isn't read.
@@ -626,21 +718,37 @@ fn the_guide_s_example_makes_a_ready_decider() {
     assert_eq!(config.socket_dir, dir.0.join("run"));
 }
 
-/// The guide describes, under "The keys", every key the table may hold and
-/// no other.
-#[test]
-fn the_guide_names_every_key_and_no_other() {
-    let (_, keys) = GUIDE.split_once("## The keys\n").unwrap();
+/// The keys the guide describes in its section `heading`, sorted: each
+/// level-three heading in backticks, up to the next section.
+fn guide_keys(heading: &str) -> Vec<&'static str> {
+    let (_, keys) = GUIDE.split_once(heading).unwrap();
     let keys = keys.split("\n## ").next().unwrap();
     let mut named: Vec<&str> = keys
         .lines()
         .filter_map(|line| line.strip_prefix("### `")?.strip_suffix('`'))
         .collect();
     named.sort_unstable();
+    named
+}
+
+/// The guide describes, under "The keys", every key the table may hold and
+/// no other.
+#[test]
+fn the_guide_names_every_key_and_no_other() {
     let mut accepted = KEYS.to_vec();
     accepted.sort_unstable();
 
-    assert_eq!(named, accepted);
+    assert_eq!(guide_keys("## The keys\n"), accepted);
+}
+
+/// The guide describes, under "The clean-up table", every key that table
+/// may hold and no other.
+#[test]
+fn the_guide_names_every_clean_up_key_and_no_other() {
+    let mut accepted = CLEAN_UP_KEYS.to_vec();
+    accepted.sort_unstable();
+
+    assert_eq!(guide_keys("## The clean-up table\n"), accepted);
 }
 
 /// Each reason the decider can be unavailable has its message in the
@@ -666,5 +774,123 @@ fn the_guide_has_every_unavailable_message() {
     for why in every {
         let message = format!("| {why} |");
         assert!(guide.contains(&message), "not in the guide: {message}");
+    }
+}
+
+/// The boost in a settings file's `text`, or why it's refused.
+fn boost(text: &str) -> Result<f64, String> {
+    parse_boost(text).map(Boost::get)
+}
+
+/// The hotword pass's boost is read as written, a whole number as well as
+/// one with a point.
+#[test]
+fn the_boost_is_read_as_written() {
+    assert_eq!(boost("[hotword_pass]\nboost = 2.5\n"), Ok(2.5));
+    assert_eq!(boost("[hotword_pass]\nboost = 10\n"), Ok(10.0));
+}
+
+/// Without the key, the table or the file, the boost is 3.
+#[test]
+fn without_a_boost_it_is_three() {
+    assert_eq!(boost(""), Ok(3.0));
+    assert_eq!(boost("[hotword_pass]\n"), Ok(3.0));
+    assert_eq!(boost("[local_decider]\nmodel = '/m'\n"), Ok(3.0));
+    let dir = TestDir::new("no-boost-file");
+    assert_eq!(hotword_boost(&dir.env()).map(Boost::get).ok(), Some(3.0));
+    let none = Environment {
+        settings: None,
+        ..dir.env()
+    };
+    assert_eq!(hotword_boost(&none).map(Boost::get).ok(), Some(3.0));
+}
+
+/// A boost of 0 or less, over 10, or not a number at all is refused,
+/// naming the setting and the value.
+#[test]
+fn a_boost_out_of_range_or_not_a_number_is_refused() {
+    let out = |value: &str| {
+        Err(format!(
+            "hotword_pass.boost must be a number above 0 and at most 10: {value}"
+        ))
+    };
+    assert_eq!(boost("[hotword_pass]\nboost = 0\n"), out("0"));
+    assert_eq!(boost("[hotword_pass]\nboost = -1.5\n"), out("-1.5"));
+    assert_eq!(boost("[hotword_pass]\nboost = 10.5\n"), out("10.5"));
+    assert_eq!(boost("[hotword_pass]\nboost = nan\n"), out("NaN"));
+    assert_eq!(boost("[hotword_pass]\nboost = inf\n"), out("inf"));
+    assert_eq!(
+        boost("[hotword_pass]\nboost = 99999999999\n"),
+        out("99999999999")
+    );
+    assert_eq!(
+        boost("[hotword_pass]\nboost = \"3\"\n"),
+        Err("hotword_pass.boost isn't a number".to_owned())
+    );
+    assert_eq!(
+        boost("[hotword_pass]\nscore = 3\n"),
+        Err("nota has no setting hotword_pass.score".to_owned())
+    );
+    assert_eq!(
+        boost("hotword_pass = 3\n"),
+        Err("hotword_pass isn't a table".to_owned())
+    );
+    assert_eq!(
+        boost("[engines]\n"),
+        Err("nota has no setting engines".to_owned())
+    );
+}
+
+/// A bad boost in the file is reported naming the file.
+#[test]
+fn a_bad_boost_names_the_file() {
+    let dir = TestDir::new("bad-boost");
+    let file = dir.settings("[hotword_pass]\nboost = 12\n");
+    let why = hotword_boost(&dir.env()).unwrap_err();
+    assert!(
+        matches!(&why, Unavailable::Invalid(p, w) if *p == file
+            && w == "hotword_pass.boost must be a number above 0 and at most 10: 12"),
+        "{why:?}"
+    );
+}
+
+/// The hotword pass's table beside the decider's leaves the decider ready.
+#[test]
+fn a_hotword_table_leaves_the_decider_ready() {
+    let dir = TestDir::new("both-tables");
+    let program = dir.program("llama-server");
+    let model = dir.file("model.gguf", "");
+    dir.settings(&format!(
+        "[local_decider]\nprogram = {}\nmodel = {}\n\n[hotword_pass]\nboost = 2\n",
+        toml_path(&program),
+        toml_path(&model)
+    ));
+    let config = ready_config(local_decider(&dir.env()));
+    assert_eq!((config.program, config.model), (program, model));
+    assert_eq!(hotword_boost(&dir.env()).map(Boost::get).ok(), Some(2.0));
+}
+
+/// The guide's hotword section gives an example that parses, names every
+/// key of the table and no other, and has every reason a boost is refused.
+#[test]
+fn the_guide_describes_the_hotword_pass() {
+    assert_eq!(boost(guide_example("## The hotword pass")), Ok(3.0));
+    let (_, section) = GUIDE.split_once("## The hotword pass\n").unwrap();
+    let section = section.split("\n## ").next().unwrap();
+    let named: Vec<&str> = section
+        .lines()
+        .filter_map(|line| line.strip_prefix("### `")?.strip_suffix('`'))
+        .collect();
+    assert_eq!(named, HOTWORD_KEYS);
+    let reasons = [
+        "hotword_pass isn't a table".to_owned(),
+        "nota has no setting hotword_pass.<key>".to_owned(),
+        "hotword_pass.boost isn't a number".to_owned(),
+        "hotword_pass.boost must be a number above 0 and at most 10: <value>".to_owned(),
+    ];
+    let section = section.replace('`', "");
+    for reason in reasons {
+        let row = format!("| {reason} |");
+        assert!(section.contains(&row), "not in the guide: {row}");
     }
 }

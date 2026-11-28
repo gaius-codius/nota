@@ -6,8 +6,9 @@
 //! - no applied fix holds a term that wasn't offered for its words: some
 //!   offered term with letters is inside the replacement's letters, and
 //!   that candidate's window shares a word with the replaced text;
-//! - an applied fix replaces its own span, on word boundaries, and scores
-//!   at least [`SIMILARITY_MIN`];
+//! - an applied fix replaces its own span, on word boundaries, at the
+//!   proposal's place if it names one, and scores at least
+//!   [`SIMILARITY_MIN`];
 //! - the text given is never changed: the revised text is that text with
 //!   the fixes' ranges, which don't overlap, replaced, and nothing else;
 //! - with nothing offered, nothing is applied.
@@ -90,13 +91,13 @@ fn any_term() -> impl Strategy<Value = String> {
 
 /// One gate call's inputs.
 #[derive(Debug, Clone)]
-struct Case {
+pub(crate) struct Case {
     /// The chunk's text.
-    chunk: String,
+    pub(crate) chunk: String,
     /// The candidates offered for it.
-    offered: Vec<Offered>,
+    pub(crate) offered: Vec<Offered>,
     /// What the model proposed.
-    proposals: Vec<Proposal>,
+    pub(crate) proposals: Vec<Proposal>,
 }
 
 /// One to `max` words from [`VOCAB`], joined by spaces.
@@ -118,10 +119,30 @@ fn joined(parts: &[(&str, &str)]) -> String {
     out
 }
 
+/// Where the words `i` to `end` (exclusive) of `parts` are in their
+/// [`joined`] text, in bytes.
+fn run_bytes(parts: &[(&str, &str)], i: usize, end: usize) -> Range<usize> {
+    let start = parts[..i].iter().map(|(w, sep)| w.len() + sep.len()).sum();
+    start..start + joined(&parts[i..end]).len()
+}
+
 /// A case built from [`VOCAB`]: a chunk of up to a dozen words,
 /// candidates mostly for runs of its words, and proposals whose spans are
-/// mostly runs of its words and whose replacements mostly fix them.
-fn any_case() -> impl Strategy<Value = Case> {
+/// mostly runs of its words and whose replacements mostly fix them. No
+/// proposal names a place, as on the bench.
+pub(crate) fn any_case() -> impl Strategy<Value = Case> {
+    cases(false)
+}
+
+/// Cases as [`any_case`]'s, but some proposals name a place: their own
+/// run's, or any range, which may be off the span, off a character or past
+/// the end.
+fn any_placed_case() -> impl Strategy<Value = Case> {
+    cases(true)
+}
+
+/// The cases of [`any_case`], with places named if `places`.
+fn cases(places: bool) -> impl Strategy<Value = Case> {
     let parts = prop::collection::vec(
         (
             prop::sample::select(VOCAB),
@@ -129,32 +150,59 @@ fn any_case() -> impl Strategy<Value = Case> {
         ),
         1..12,
     );
-    parts.prop_flat_map(|parts| {
+    parts.prop_flat_map(move |parts| {
         let n = parts.len();
         let chunk = joined(&parts);
+        let len = chunk.len();
+        let at_parts = parts.clone();
+        // A run of the chunk's words, with where it is.
+        let own_at = (0..n, 1..=3_usize).prop_map(move |(i, words)| {
+            let end = (i + words).min(n);
+            (
+                joined(&at_parts[i..end]),
+                Some(run_bytes(&at_parts, i, end)),
+            )
+        });
         // A run of the chunk's own words is usually found; a phrase from
         // the vocabulary may not be.
         let own = (0..n, 1..=3_usize).prop_map(move |(i, len)| joined(&parts[i..(i + len).min(n)]));
         let span = prop_oneof![3 => own, 1 => any_phrase(3)];
         let window = span.clone();
+        let anywhere = (0..=len + 1, 0..=len + 1).prop_map(|(a, b)| Some(a.min(b)..a.max(b)));
+        // Without places the proposals draw as they always have, so the
+        // bench-like cases keep their seed's coverage.
+        let proposed_at = if places {
+            prop_oneof![
+                3 => span.clone().prop_map(|heard| (heard, None)),
+                2 => own_at,
+                1 => (span.clone(), anywhere),
+            ]
+            .boxed()
+        } else {
+            span.clone().prop_map(|heard| (heard, None)).boxed()
+        };
         let offered = prop::collection::vec(
             (window, any_term()).prop_map(|(window, term)| Offered { window, term }),
             0..4,
         );
         let proposal = (
-            span,
+            proposed_at,
             prop::collection::vec(any::<bool>(), 3),
             any_phrase(3),
             0..4_u8,
         )
-            .prop_map(|(heard, swap, other, pick)| {
+            .prop_map(|((heard, at), swap, other, pick)| {
                 // Mostly the span with its words fixed; sometimes a phrase.
                 let replacement = if pick == 0 {
                     other
                 } else {
                     fixed(&heard, &swap)
                 };
-                Proposal { heard, replacement }
+                Proposal {
+                    heard,
+                    replacement,
+                    at,
+                }
             });
         (Just(chunk), offered, prop::collection::vec(proposal, 0..5)).prop_map(
             |(chunk, offered, proposals)| Case {
@@ -170,7 +218,7 @@ fn any_case() -> impl Strategy<Value = Case> {
 /// with any characters, spans cut from it or made up, candidates of any
 /// text, and some proposals that echo their span with a candidate offered
 /// for it, so fixes are applied in Unicode text too.
-fn any_text_case() -> impl Strategy<Value = Case> {
+pub(crate) fn any_text_case() -> impl Strategy<Value = Case> {
     let chunk = "([a-zA-Z]{1,6}|.{1,3}|[ ,'-]){0,10}";
     (chunk, any_offered_text()).prop_flat_map(|(chunk, offered)| {
         let len = chunk.chars().count();
@@ -181,11 +229,26 @@ fn any_text_case() -> impl Strategy<Value = Case> {
             cut.chars().skip(a).take(b - a).collect::<String>()
         });
         let heard = prop_oneof![own.clone(), ".{0,10}"];
-        let made_up = (heard, ".{0,20}")
-            .prop_map(|(heard, replacement)| (Proposal { heard, replacement }, false));
+        let made_up = (heard, ".{0,20}").prop_map(|(heard, replacement)| {
+            (
+                Proposal {
+                    heard,
+                    replacement,
+                    at: None,
+                },
+                false,
+            )
+        });
         let echo = own.prop_map(|heard| {
             let replacement = heard.clone();
-            (Proposal { heard, replacement }, true)
+            (
+                Proposal {
+                    heard,
+                    replacement,
+                    at: None,
+                },
+                true,
+            )
         });
         let proposal = prop_oneof![made_up, echo];
         (
@@ -309,7 +372,8 @@ fn simple_lower(s: &str) -> String {
 }
 
 /// The problems with each applied fix's place: its text must match the
-/// proposal's span, case aside, with no word character either side.
+/// proposal's span, case aside, with no word character either side, and
+/// be at the proposal's place if it names one.
 fn placement_problems(case: &Case, gated: &Gated) -> Vec<String> {
     let mut bad = Vec::new();
     for (proposal, decision) in case.proposals.iter().zip(gated.decisions()) {
@@ -320,6 +384,9 @@ fn placement_problems(case: &Case, gated: &Gated) -> Vec<String> {
             bad.push(format!("{proposal:?} placed at {fix:?}"));
         }
         let r = fix.range();
+        if proposal.at.as_ref().is_some_and(|at| *at != r) {
+            bad.push(format!("{proposal:?} placed elsewhere, at {fix:?}"));
+        }
         let before = case.chunk[..r.start].chars().next_back();
         let after = case.chunk[r.end..].chars().next();
         if before.is_some_and(word_char) || after.is_some_and(word_char) {
@@ -344,6 +411,21 @@ proptest! {
         prop_assert_eq!(problems(&case, &gated), Vec::<String>::new());
     }
 
+    /// On cases that name places, every answer keeps the contract.
+    #[test]
+    fn the_gate_keeps_its_contract_at_named_places(case in any_placed_case()) {
+        let gated = gate(&case.chunk, &case.offered, &case.proposals);
+        prop_assert_eq!(problems(&case, &gated), Vec::<String>::new());
+    }
+
+    /// Each fix whose proposal names a place is applied there, and only
+    /// there.
+    #[test]
+    fn a_fix_goes_only_where_its_proposal_says(case in any_placed_case()) {
+        let gated = gate(&case.chunk, &case.offered, &case.proposals);
+        prop_assert_eq!(placement_problems(&case, &gated), Vec::<String>::new());
+    }
+
     /// On cases of any text, no input panics and the contract holds.
     #[test]
     fn the_gate_keeps_its_contract_on_any_text(case in any_text_case()) {
@@ -352,7 +434,8 @@ proptest! {
     }
 
     /// Each applied fix replaces its own span, on word boundaries, with the
-    /// score C1 gives the proposal.
+    /// score C1 gives the proposal, and at its place if the proposal names
+    /// one.
     #[test]
     fn an_applied_fix_replaces_its_own_span(case in any_case()) {
         let gated = gate(&case.chunk, &case.offered, &case.proposals);
@@ -426,4 +509,26 @@ fn the_text_cases_apply_fixes_in_unicode_text() {
     // 43 applied, 17 of them after a multibyte character, with this seed.
     assert!(applied >= 30, "{applied} applied"); // check-bound
     assert!(multibyte >= 10, "{multibyte} after a multibyte character"); // check-bound
+}
+
+/// The vocabulary's cases name places that are found and places that
+/// aren't, so the place rule is tested both ways: of the proposals that
+/// name one, some are applied and some refused as not found.
+#[test]
+fn the_cases_reach_named_places_both_ways() {
+    let mut runner = TestRunner::deterministic();
+    let (mut applied, mut not_found) = (0, 0);
+    for _ in 0..512 {
+        let case = any_placed_case().new_tree(&mut runner).unwrap().current();
+        let gated = gate(&case.chunk, &case.offered, &case.proposals);
+        for (proposal, decision) in case.proposals.iter().zip(gated.decisions()) {
+            if proposal.at.is_none() {
+                continue;
+            }
+            applied += usize::from(decision.applied().is_some());
+            not_found += usize::from(decision.rejection() == Some(Rejection::SpanNotFound));
+        }
+    }
+    assert!(applied >= 10, "{applied} applied at their place"); // check-bound
+    assert!(not_found >= 10, "{not_found} not found at their place"); // check-bound
 }

@@ -14,8 +14,8 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
-use nota_core::messages::{FromEngine, HeardWord, ProtocolVersion, Transcript};
-use nota_core::protocol::{Frame, FrameReader, encode};
+use nota_core::messages::{FromEngine, HeardWord, Hotword, ProtocolVersion, ToEngine, Transcript};
+use nota_core::protocol::{Frame, FrameReader, WireMessage, encode};
 use nota_core::{
     Clock, Drift, EpochAnchor, EpochId, LogProb, SampleIndex, SampleRange, SampleRate, SessionTime,
     SystemClock, TrackId,
@@ -150,12 +150,20 @@ fn main() -> Result<()> {
 }
 
 /// Writes the engine-protocol seeds in `dir`: the current version's
-/// handshake, and a transcript of "hi yo" over samples 0..16 whose first
-/// word has the log-probability −0.5 and whose second has none, so a run
-/// reaches the word fields from the start.
+/// handshake; a hotwords message with two hotwords, `amlodipine` and
+/// `varicose veins`; and a transcript of "hi yo" over samples 0..16 whose
+/// first word has the log-probability −0.5 and whose second has none, so a
+/// run reaches the word fields from the start.
 fn protocol_seeds(dir: &Path) -> Result<()> {
     ensure_dir(dir)?;
-    frame_seed(dir, "hello", &Frame::Hello(ProtocolVersion::CURRENT))?;
+    frame_seed::<FromEngine>(dir, "hello", &Frame::Hello(ProtocolVersion::CURRENT))?;
+
+    let hotwords = vec![Hotword::new("amlodipine")?, Hotword::new("varicose veins")?];
+    frame_seed(
+        dir,
+        "hotwords",
+        &Frame::Message(ToEngine::Hotwords(hotwords)),
+    )?;
 
     let range = |start, end| {
         SampleRange::new(SampleIndex::new(start), SampleIndex::new(end)).ok_or("a reversed range")
@@ -179,11 +187,11 @@ fn protocol_seeds(dir: &Path) -> Result<()> {
 /// there. Fails if the protocol's reader doesn't read the bytes back as
 /// exactly that one frame: AFL takes a seed the target refuses without a
 /// word, so a bad seed fails here instead.
-fn frame_seed(dir: &Path, name: &str, frame: &Frame<FromEngine>) -> Result<()> {
+fn frame_seed<M: WireMessage + PartialEq>(dir: &Path, name: &str, frame: &Frame<M>) -> Result<()> {
     let bytes = encode(frame).map_err(|e| format!("the {name} seed doesn't encode: {e}"))?;
     let mut input = bytes.as_slice();
     let read = FrameReader::new(&mut input)
-        .read_frame::<FromEngine>()
+        .read_frame::<M>()
         .map_err(|e| format!("the {name} seed doesn't read back: {e}"))?;
     if read.as_ref() != Some(frame) || !input.is_empty() {
         return Err(format!("the {name} seed doesn't read back as its frame").into());

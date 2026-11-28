@@ -5,17 +5,22 @@ fn args(list: &[&str]) -> Vec<OsString> {
 }
 
 fn engine(list: &[&str]) -> Result<ModelPaths, String> {
-    engine_cutting(list).map(|(paths, _)| paths)
+    engine_setup(list).map(|setup| setup.paths)
 }
 
 fn engine_cutting(list: &[&str]) -> Result<(ModelPaths, ChunkerConfig), String> {
+    engine_setup(list).map(|setup| (setup.paths, setup.chunking))
+}
+
+fn engine_setup(list: &[&str]) -> Result<EngineSetup, String> {
     match parse(&args(list))? {
-        Command::EngineAsr(paths, chunking) => Ok((paths, chunking)),
+        Command::EngineAsr(setup) => Ok(setup),
         Command::Record(_)
         | Command::App(_)
         | Command::EngineFake(_)
         | Command::EngineLlama(_)
-        | Command::Pack(_) => Err("record".into()),
+        | Command::Pack(_)
+        | Command::Bench(_) => Err("record".into()),
     }
 }
 
@@ -26,7 +31,8 @@ fn record(list: &[&str]) -> Result<RecordArgs, String> {
         | Command::App(_)
         | Command::EngineFake(_)
         | Command::EngineLlama(_)
-        | Command::Pack(_) => Err("engine".into()),
+        | Command::Pack(_)
+        | Command::Bench(_) => Err("engine".into()),
     }
 }
 
@@ -37,7 +43,8 @@ fn app(list: &[&str]) -> Result<RecordArgs, String> {
         | Command::Record(_)
         | Command::EngineFake(_)
         | Command::EngineLlama(_)
-        | Command::Pack(_) => Err("not the app".into()),
+        | Command::Pack(_)
+        | Command::Bench(_) => Err("not the app".into()),
     }
 }
 
@@ -242,4 +249,67 @@ fn parses_engine_llama_server() {
     assert_eq!(server, args(&list[2..]));
     let bare = parse(&args(&["engine", "llama-server"])).unwrap_err();
     assert_eq!(bare, "nota engine llama-server needs the server's program");
+}
+
+/// `nota bench` is handed to the bench's own parser.
+#[test]
+fn parses_bench() {
+    let Ok(Command::Bench(command)) = parse(&args(&["bench", "compare", "a", "b"])) else {
+        panic!("not the bench");
+    };
+    assert_eq!(
+        command,
+        bench::BenchCommand::Compare {
+            old: PathBuf::from("a"),
+            new: PathBuf::from("b"),
+        }
+    );
+}
+
+/// `--pass hotword` cuts only at flushes and takes the boost score and the
+/// vocabulary file, both required and refused for any other pass.
+#[test]
+fn the_hotword_pass_takes_a_boost_and_a_vocabulary() {
+    let base = [
+        "engine",
+        "asr",
+        "--vad",
+        "v",
+        "--parakeet",
+        "p",
+        "--pass",
+        "hotword",
+    ];
+    let setup =
+        engine_setup(&[&base[..], &["--boost", "3", "--vocab", "h.vocab"]].concat()).unwrap();
+    assert_eq!(
+        setup.chunking,
+        ChunkerConfig::hotword_pass(SampleRate::SPEECH)
+    );
+    let boost = setup.boost.unwrap();
+    assert!((boost.score - 3.0).abs() < f32::EPSILON, "{boost:?}");
+    assert_eq!(boost.vocab, PathBuf::from("h.vocab"));
+    let needs = "--pass hotword needs --boost and --vocab".to_owned();
+    assert_eq!(engine_setup(&base).unwrap_err(), needs);
+    assert_eq!(
+        engine_setup(&[&base[..], &["--boost", "3"]].concat()).unwrap_err(),
+        needs
+    );
+    let only = "--boost and --vocab are for --pass hotword".to_owned();
+    let final_with = [
+        "engine",
+        "asr",
+        "--vad",
+        "v",
+        "--parakeet",
+        "p",
+        "--boost",
+        "2",
+    ];
+    assert_eq!(engine_setup(&final_with).unwrap_err(), only);
+    let range = "--boost takes a number above 0 and at most 10".to_owned();
+    for bad in ["0", "-1", "11", "NaN", "x"] {
+        let list = [&base[..], &["--boost", bad, "--vocab", "h"]].concat();
+        assert_eq!(engine_setup(&list).unwrap_err(), range, "{bad}");
+    }
 }
