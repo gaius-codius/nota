@@ -78,10 +78,12 @@ fn same(got: &[Found], want: &[Found], tolerance: f64) -> bool {
             .all(|(g, w)| g.0 == w.0 && g.1 == w.1 && (g.2 - w.2).abs() <= tolerance)
 }
 
-/// Where `window`, words joined by one space, first is in `text`: the byte
-/// its first word starts at. Words are the lookup's, runs of ASCII letters,
-/// digits, apostrophes and hyphens.
-fn window_start(text: &str, window: &str) -> Option<usize> {
+/// Where `window`, words joined by one space, is in `text`: the byte its
+/// first word starts at. With `at`, the window's first word's index, as the
+/// invented fixture records it, it's there; without, its first occurrence
+/// (the bench's export records no place). Words are the lookup's, runs of
+/// ASCII letters, digits, apostrophes and hyphens.
+fn window_start(text: &str, window: &str, at: Option<usize>) -> Option<usize> {
     let in_word = |c: char| c.is_ascii_alphanumeric() || c == '\'' || c == '-';
     let mut words: Vec<(usize, &str)> = Vec::new();
     let mut start = None;
@@ -96,10 +98,25 @@ fn window_start(text: &str, window: &str) -> Option<usize> {
         }
     }
     let n = window.split(' ').count();
-    words.windows(n).find_map(|run| {
-        let joined: Vec<&str> = run.iter().map(|&(_, w)| w).collect();
-        (joined.join(" ") == window).then_some(run[0].0)
-    })
+    words
+        .windows(n)
+        .enumerate()
+        .filter(|&(i, _)| at.is_none_or(|at| at == i))
+        .find_map(|(_, run)| {
+            let joined: Vec<&str> = run.iter().map(|&(_, w)| w).collect();
+            (joined.join(" ") == window).then_some(run[0].0)
+        })
+}
+
+/// Each candidate's first word's index, as a fixture chunk lists it, if
+/// the fixture records one.
+fn starts(chunk: &Value) -> Vec<Option<usize>> {
+    chunk["candidates"]
+        .as_array()
+        .expect("a candidate list")
+        .iter()
+        .map(|c| c["start"].as_u64().and_then(|s| usize::try_from(s).ok()))
+        .collect()
 }
 
 /// `want`, the bench's candidates for `text`, without those nota passes
@@ -107,15 +124,19 @@ fn window_start(text: &str, window: &str) -> Option<usize> {
 /// window and goes on past them ("beta blocker" for "blocker" after
 /// "beta"), which a yes would make read twice (the spec, C4, "New here").
 /// The bench offered them; the count left out is returned too.
-fn without_repeats(text: &str, want: Vec<Found>) -> (Vec<Found>, usize) {
+/// `at` gives each candidate's first word's index, where the fixture
+/// records it.
+fn without_repeats(text: &str, want: Vec<Found>, at: &[Option<usize>]) -> (Vec<Found>, usize) {
     let before = want.len();
     let kept: Vec<Found> = want
         .into_iter()
-        .filter(|(window, term, _)| {
-            let start = window_start(text, window)
-                .unwrap_or_else(|| panic!("{window:?} isn't in {text:?}"));
+        .zip(at.iter().copied().chain(std::iter::repeat(None)))
+        .filter(|((window, term, _), at)| {
+            let start = window_start(text, window, *at)
+                .unwrap_or_else(|| panic!("{window:?} isn't in {text:?} at {at:?}"));
             !repeats_before(&text[..start], term)
         })
+        .map(|(found, _)| found)
         .collect();
     let left_out = before - kept.len();
     (kept, left_out)
@@ -142,7 +163,7 @@ fn every_invented_chunk_gets_the_bench_candidates() {
     for chunk in chunks {
         let text = chunk["text"].as_str().expect("a text");
         full += usize::from(listed(chunk).len() == nota_checks::MAX_CANDIDATES);
-        let (want, left_out) = without_repeats(text, listed(chunk));
+        let (want, left_out) = without_repeats(text, listed(chunk), &starts(chunk));
         repeats += left_out;
         let got = found(&lookup, text);
         if !same(&got, &want, 1e-12) {
@@ -218,7 +239,7 @@ fn every_bench_chunk_gets_the_bench_candidates() {
         );
         let want = listed(chunk);
         offered += want.len();
-        let (want, left_out) = without_repeats(text, with_differences(at, want));
+        let (want, left_out) = without_repeats(text, with_differences(at, want), &starts(chunk));
         repeats += left_out;
         let got = found(&lookup, text);
         // The bench's scores are rounded to three places.

@@ -194,9 +194,6 @@ pub struct Lookup<'a> {
     /// Each alias's letters and digits, and the entries it's an alias of,
     /// in order.
     aliases: BTreeMap<String, Vec<usize>>,
-    /// The most words any term has: how many of the words before a window
-    /// can be repeated by a term.
-    most_term_words: usize,
 }
 
 /// A term, made ready to score.
@@ -206,7 +203,7 @@ struct Entry {
     term: String,
     /// Its letters and digits, lower-cased.
     letters: String,
-    /// Its words, as the gate takes them, for the repeat check.
+    /// Its words, as the repeat check takes them.
     words: Vec<String>,
     /// How it sounds.
     sounds: Sounds,
@@ -272,13 +269,11 @@ impl<'a> Lookup<'a> {
             .unzip();
         let known: BTreeSet<String> = entries.iter().map(|e| e.letters.clone()).collect();
         let aliases = index_aliases(&term_aliases);
-        let most_term_words = entries.iter().map(|e| e.words.len()).max().unwrap_or(0);
         Self {
             language,
             entries,
             known,
             aliases,
-            most_term_words,
         }
     }
 
@@ -300,11 +295,9 @@ impl<'a> Lookup<'a> {
                 zipf: self.language.zipf(text).value(),
             })
             .collect();
-        // The words just before each word, as many as a term may repeat.
-        let before: Vec<Vec<String>> = words
-            .iter()
-            .map(|w| last(repeat::words(&text[..w.span.start]), self.most_term_words))
-            .collect();
+        // The chunk's words for the repeat check, split once: those before
+        // a window are the ones that end by its start.
+        let (ends, said): (Vec<usize>, Vec<String>) = repeat::spans(text).into_iter().unzip();
         let mut exact = Vec::new();
         let mut scored = Vec::new();
         // An alias may be heard as more words than it's written in ("endside"
@@ -320,7 +313,7 @@ impl<'a> Lookup<'a> {
                 if window.letters.len() < MIN_LETTERS || self.has_known_word(&window) {
                     continue;
                 }
-                let before = before.get(start).map_or(&[][..], Vec::as_slice);
+                let before = &said[..ends.partition_point(|&end| end <= run[0].span.start)];
                 let fits =
                     |e: &Entry| allows(&window.text, &e.term) && !repeat::repeats(before, &e.words);
                 if let Some(hit) = self.exact(&window, start, &fits) {
@@ -488,13 +481,6 @@ fn index_aliases(term_aliases: &[BTreeSet<&str>]) -> BTreeMap<String, Vec<usize>
         }
     }
     aliases
-}
-
-/// The last `n` of `words`, or all of them if there are fewer.
-fn last(mut words: Vec<String>, n: usize) -> Vec<String> {
-    let cut = words.len().saturating_sub(n);
-    words.drain(..cut);
-    words
 }
 
 /// The candidates from `hits`, in their order, leaving out any that shares

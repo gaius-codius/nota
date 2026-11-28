@@ -261,17 +261,13 @@ fn yeses(found: &[Candidate]) -> Vec<Proposal> {
 #[test]
 fn the_planted_chunks_reach_the_repeat() {
     let mut runner = TestRunner::deterministic();
-    let terms: Vec<Term> = TERMS
-        .iter()
-        .map(|&t| Term {
-            term: t.to_owned(),
-            aliases: Vec::new(),
-            language: "en".to_owned(),
-        })
-        .collect();
     let mut reached = 0;
     for _ in 0..256 {
-        let text = any_planted_text().new_tree(&mut runner).unwrap().current();
+        // Drawn as the property draws them.
+        let (terms, text) = (any_terms(), any_planted_text())
+            .new_tree(&mut runner)
+            .unwrap()
+            .current();
         // The planted phrase's first word, and where the words after it start.
         let Some((first, rest)) = PLANTED.iter().find_map(|p| {
             let at = text.find(p)?;

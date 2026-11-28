@@ -450,8 +450,22 @@ fn offered_for<'a>(offered: &'a [Offered], proposal: &Proposal) -> Result<&'a Of
 /// matched always have the same words: rule 4, checked on the proposal's
 /// span, holds for the text the fix replaces. Python's `lower()` turns `İ`
 /// into `i` and a combining dot, which splits the word.
-fn words(s: &str) -> BTreeSet<String> {
-    crate::repeat::words(s).into_iter().collect()
+fn words(s: &str) -> BTreeSet<Vec<u8>> {
+    let mut out = BTreeSet::new();
+    let mut word = Vec::new();
+    for c in s.chars().map(fold) {
+        match u8::try_from(c) {
+            Ok(b) if b.is_ascii_lowercase() || b.is_ascii_digit() => word.push(b),
+            _ if !word.is_empty() => {
+                out.insert(std::mem::take(&mut word));
+            }
+            _ => {}
+        }
+    }
+    if !word.is_empty() {
+        out.insert(word);
+    }
+    out
 }
 
 /// Where `proposal`'s span may go in `chunk`: the match at its place, if

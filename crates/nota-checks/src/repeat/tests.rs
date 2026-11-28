@@ -57,12 +57,48 @@ fn a_replacement_that_is_wholly_the_words_before_is_not_a_repeat() {
     assert!(repeats_before("then furosemide ", "furosemide forty"));
 }
 
-/// Words are split as the gate's rule 4 splits them.
+/// Words are runs of letters and digits of any script, lowercased, with an
+/// apostrophe inside a word kept.
 #[test]
-fn words_are_the_gate_words_in_order() {
+fn words_are_letters_and_digits_of_any_script() {
     assert_eq!(
-        words("Type-2 diabetes, İnhale"),
-        ["type", "2", "diabetes", "inhale"]
+        words("Type-2 diabetes, İnhale α patient's don’t 'quoted'"),
+        [
+            "type",
+            "2",
+            "diabetes",
+            "inhale",
+            "α",
+            "patient's",
+            "don't",
+            "quoted"
+        ]
     );
     assert_eq!(words("  "), Vec::<String>::new());
+}
+
+/// Each word's span ends where its last character does.
+#[test]
+fn spans_end_after_each_word() {
+    assert_eq!(
+        spans("a bé, c"),
+        [
+            (1, "a".to_owned()),
+            (5, "bé".to_owned()),
+            (8, "c".to_owned())
+        ]
+    );
+}
+
+/// A possessive isn't the letter after its apostrophe: "S phase" after
+/// "patient's" doesn't repeat it.
+#[test]
+fn a_possessive_is_one_word() {
+    assert!(!repeats_before("the patient's ", "S phase"));
+}
+
+/// A letter of another script is a word: "α amylase" after "α" repeats it.
+#[test]
+fn a_greek_letter_is_a_word() {
+    assert!(repeats_before("this is α ", "α amylase"));
 }
