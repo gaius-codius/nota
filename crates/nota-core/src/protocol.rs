@@ -14,12 +14,14 @@
 //! | `0x03` | to engine | [`ToEngine::Hotwords`] | count `u32`, then each hotword's length in bytes `u16` and its UTF-8 text |
 //! | `0x81` | from engine | [`FromEngine::Transcript`] | track `u32`, start `u64`, end `u64`, word count `u32`, the words, UTF-8 text… |
 //! | `0x82` | from engine | [`FromEngine::Confirmed`] | track `u32`, up to `u64` |
+//! | `0x83` | from engine | [`FromEngine::LeftOut`] | as `0x03`: count `u32`, then each term's length in bytes `u16` and its UTF-8 text |
 //!
 //! Each word of a transcript is its first sample `u64`, its end `u64`, its
 //! log-probability (the `f32` bits of a [`LogProb`], or
 //! [`UNKNOWN_LOG_PROB`] if the engine gave none) `u32`, its text's length
-//! in bytes `u32`, then its UTF-8 text. Version 2 had no hotwords, version
-//! 1 no log-probabilities, and version 0 no word count or words.
+//! in bytes `u32`, then its UTF-8 text. Version 3 had no left-out terms,
+//! version 2 no hotwords, version 1 no log-probabilities, and version 0 no
+//! word count or words.
 //!
 //! All integers are little-endian. Each side sends `Hello` first and refuses
 //! a peer whose version isn't [`ProtocolVersion::CURRENT`]; the magic bytes
@@ -64,6 +66,7 @@ const TAG_FLUSH: u8 = 0x02;
 const TAG_HOTWORDS: u8 = 0x03;
 const TAG_TRANSCRIPT: u8 = 0x81;
 const TAG_CONFIRMED: u8 = 0x82;
+const TAG_LEFT_OUT: u8 = 0x83;
 
 /// Tag, track, first sample, rate; the samples follow.
 const AUDIO_FIXED_LEN: usize = 1 + 4 + 8 + 4;
@@ -125,7 +128,7 @@ impl WireMessage for ToEngine {
                 out.push(TAG_FLUSH);
                 out.extend_from_slice(&track.get().to_le_bytes());
             }
-            Self::Hotwords(hotwords) => encode_hotwords(hotwords, out)?,
+            Self::Hotwords(hotwords) => encode_hotwords(TAG_HOTWORDS, hotwords, out)?,
         }
         Ok(())
     }
@@ -158,19 +161,20 @@ impl WireMessage for ToEngine {
     }
 }
 
-/// Appends [`ToEngine::Hotwords`]' tag and fields to `out`.
+/// Appends `tag` and a list of `hotwords` to `out`: the fields of
+/// [`ToEngine::Hotwords`] and of [`FromEngine::LeftOut`].
 ///
 /// # Errors
 ///
 /// [`EncodeError::TooLarge`] past [`MAX_HOTWORDS`]; each hotword is at most
 /// [`MAX_HOTWORD_LEN`](crate::messages::MAX_HOTWORD_LEN) bytes, so that
 /// many always fit a frame.
-fn encode_hotwords(hotwords: &[Hotword], out: &mut Vec<u8>) -> Result<(), EncodeError> {
+fn encode_hotwords(tag: u8, hotwords: &[Hotword], out: &mut Vec<u8>) -> Result<(), EncodeError> {
     let count = u32::try_from(hotwords.len())
         .ok()
         .filter(|_| hotwords.len() <= MAX_HOTWORDS)
         .ok_or(EncodeError::TooLarge)?;
-    out.push(TAG_HOTWORDS);
+    out.push(tag);
     out.extend_from_slice(&count.to_le_bytes());
     for hotword in hotwords {
         // A hotword is at most MAX_HOTWORD_LEN bytes, so its length fits.
@@ -181,8 +185,10 @@ fn encode_hotwords(hotwords: &[Hotword], out: &mut Vec<u8>) -> Result<(), Encode
     Ok(())
 }
 
-/// [`ToEngine::Hotwords`]' fields: each checked as a [`Hotword`], so the
-/// engine never sees text the per-stream format would misread.
+/// A list of hotwords' fields, as [`ToEngine::Hotwords`] and
+/// [`FromEngine::LeftOut`] carry them: each checked as a [`Hotword`], so
+/// the engine never sees text the per-stream format would misread, and
+/// the recorder is never told of a term it couldn't have sent.
 ///
 /// # Errors
 ///
@@ -245,6 +251,7 @@ impl WireMessage for FromEngine {
                 out.extend_from_slice(&track.get().to_le_bytes());
                 out.extend_from_slice(&up_to.get().to_le_bytes());
             }
+            Self::LeftOut(terms) => encode_hotwords(TAG_LEFT_OUT, terms, out)?,
         }
         Ok(())
     }
@@ -284,6 +291,7 @@ impl WireMessage for FromEngine {
                 fields.end()?;
                 Ok(Self::Confirmed { track, up_to })
             }
+            TAG_LEFT_OUT => decode_hotwords(fields).map(Self::LeftOut),
             other => Err(DecodeError::UnknownTag(other)),
         }
     }
@@ -623,7 +631,7 @@ mod tests {
     #[test]
     fn hello_layout() {
         let bytes = encode::<ToEngine>(&Frame::Hello(ProtocolVersion::CURRENT)).unwrap();
-        assert_eq!(bytes, [7, 0, 0, 0, 0x00, b'n', b'o', b't', b'a', 3, 0]);
+        assert_eq!(bytes, [7, 0, 0, 0, 0x00, b'n', b'o', b't', b'a', 4, 0]);
     }
 
     /// A hotwords frame is its count, then each hotword's length and text,
@@ -682,6 +690,64 @@ mod tests {
         let frame = Frame::Message(ToEngine::Hotwords(hotwords));
         let bytes = encode(&frame).unwrap();
         assert_eq!(decode_body::<ToEngine>(&bytes[4..]), Ok(frame));
+    }
+
+    /// A left-out frame is laid out as a hotwords frame under its own tag,
+    /// and reads back to the same terms, only from the engine.
+    #[test]
+    fn left_out_layout() {
+        let terms = ["amlodipine", "varicose veins"].map(|t| Hotword::new(t).unwrap());
+        let frame = Frame::Message(FromEngine::LeftOut(terms.to_vec()));
+        let bytes = encode(&frame).unwrap();
+        let mut want = vec![33, 0, 0, 0, 0x83, 2, 0, 0, 0, 10, 0];
+        want.extend_from_slice(b"amlodipine");
+        want.extend_from_slice(&[14, 0]);
+        want.extend_from_slice(b"varicose veins");
+        assert_eq!(bytes, want);
+        assert_eq!(decode_body::<FromEngine>(&bytes[4..]), Ok(frame));
+        // Sent the wrong way, it's refused rather than misread.
+        assert_eq!(
+            decode_body::<ToEngine>(&bytes[4..]),
+            Err(DecodeError::UnknownTag(0x83))
+        );
+    }
+
+    /// A left-out frame is refused as a hotwords frame is: a text that
+    /// isn't a hotword, too many, or bytes after the last.
+    #[test]
+    fn bad_left_out_terms_are_refused() {
+        let body = |count: u32, texts: &[&[u8]]| {
+            let mut body = vec![TAG_LEFT_OUT];
+            body.extend_from_slice(&count.to_le_bytes());
+            for text in texts {
+                body.extend_from_slice(&u16::try_from(text.len()).unwrap().to_le_bytes());
+                body.extend_from_slice(text);
+            }
+            body
+        };
+        let refused = |bytes: &[u8]| decode_body::<FromEngine>(bytes).unwrap_err();
+        assert_eq!(refused(&body(1, &[b"mmol/L"])), DecodeError::BadHotword);
+        let over = u32::try_from(MAX_HOTWORDS + 1).unwrap();
+        assert_eq!(refused(&body(over, &[])), DecodeError::BadHotword);
+        let mut trailing = body(1, &[b"amlodipine"]);
+        trailing.push(0);
+        assert_eq!(refused(&trailing), DecodeError::TrailingBytes);
+        let too_many = vec![Hotword::new("a").unwrap(); MAX_HOTWORDS + 1];
+        assert_eq!(
+            encode(&Frame::Message(FromEngine::LeftOut(too_many))),
+            Err(EncodeError::TooLarge)
+        );
+    }
+
+    /// [`MAX_HOTWORDS`] terms, each the longest a hotword can be, still fit
+    /// one left-out frame, so an engine can always say what it left out.
+    #[test]
+    fn the_most_left_out_terms_fit_a_frame() {
+        let longest = Hotword::new(&"a".repeat(crate::messages::MAX_HOTWORD_LEN)).unwrap();
+        let frame = Frame::Message(FromEngine::LeftOut(vec![longest; MAX_HOTWORDS]));
+        let bytes = encode(&frame).unwrap();
+        assert!(bytes.len() - 4 <= MAX_BODY_LEN, "{}", bytes.len());
+        assert_eq!(decode_body::<FromEngine>(&bytes[4..]), Ok(frame));
     }
 
     #[test]

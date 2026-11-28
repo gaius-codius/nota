@@ -1237,7 +1237,9 @@ fn a_rejected_pair_isnt_offered_by_the_diff() {
 }
 
 /// Clean-up waits while the session's hotword pass is still to finish,
-/// whatever holds it up.
+/// whatever holds it up, short of no engine at all
+/// (`clean_up_goes_on_without_a_hotword_pass_that_has_no_engine`) or one
+/// that keeps failing.
 #[test]
 fn the_job_waits_for_the_hotword_pass() {
     let fixture = Fixture::new("waits-hotword", &[STATINS], &["statins"]);
@@ -1245,7 +1247,7 @@ fn the_job_waits_for_the_hotword_pass() {
     let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
     let id = fixture.job(JobKind::HotwordPass);
     let states = [
-        JobEnd::Waiting(Some(Wait::Engine)),
+        JobEnd::Waiting(Some(Wait::FinalText)),
         JobEnd::EngineDown("gone".to_owned()),
     ];
     for end in &states {
@@ -1291,6 +1293,137 @@ fn a_failed_hotword_pass_leaves_only_the_lookup() {
     assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
     assert_eq!(fake.questions(), 0);
     assert_eq!(fixture.shown(), [STATINS]);
+}
+
+/// Acceptance (#297): a hotword pass whose engine keeps failing holds
+/// clean-up up only until [`HOTWORD_DOWN_RUNS`] of its runs in a row have
+/// ended with its engine down, as the store counts them; then clean-up runs
+/// with the lookup alone, its wait and its run agreeing at each count. A
+/// pause doesn't count, and a pass that finishes starts the count again.
+#[test]
+fn clean_up_goes_on_without_a_hotword_pass_whose_engine_keeps_failing() {
+    let fixture = Fixture::new("hotword-down", &[AMLODIPINE], &["amlodipine"]);
+    let fake = Fake::saying_yes([("amylo diping", "amlodipine")]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    let down = JobEnd::EngineDown("stalled".into());
+    for _ in 1..HOTWORD_DOWN_RUNS {
+        fixture.end(JobKind::HotwordPass, &down);
+        // A pause between runs says nothing about the engine.
+        fixture.end(JobKind::HotwordPass, &JobEnd::Waiting(None));
+        assert_eq!(
+            clean_up.lacks(&fixture.db, SESSION),
+            Some(Wait::HotwordText)
+        );
+        assert_eq!(
+            run(&mut clean_up, &fixture),
+            JobEnd::Waiting(Some(Wait::HotwordText))
+        );
+    }
+    assert_eq!(fake.questions(), 0);
+    fixture.end(JobKind::HotwordPass, &down);
+    assert_eq!(clean_up.lacks(&fixture.db, SESSION), None);
+    // A clean-up made afresh, as after a restart, goes on all the same:
+    // the count is the store's.
+    let mut fresh = fixture.clean_up(Gives::Fake(fake));
+    assert_eq!(run(&mut fresh, &fixture), JobEnd::Done);
+    assert_eq!(fixture.shown(), ["start amlodipine daily"]);
+    // A pass that finishes starts the count again: a later failing pass
+    // is waited for afresh.
+    fixture.end(JobKind::HotwordPass, &JobEnd::Done);
+    fixture.end(JobKind::HotwordPass, &down);
+    assert_eq!(
+        clean_up.lacks(&fixture.db, SESSION),
+        Some(Wait::HotwordText)
+    );
+}
+
+/// Acceptance (#297): once a hotword pass clean-up went on without
+/// finishes, clean-up runs again and adds the pass's candidates, without
+/// proposing a lookup candidate twice, nor a difference the lookup also
+/// offers.
+#[test]
+fn a_hotword_pass_that_finishes_later_adds_only_its_own_candidates() {
+    let metoprolol = "take the metro pro lol daily";
+    let fixture = Fixture::new(
+        "hotword-later",
+        &[metoprolol, STATINS],
+        &["metoprolol", "statins"],
+    );
+    for _ in 0..HOTWORD_DOWN_RUNS {
+        fixture.end(JobKind::HotwordPass, &JobEnd::EngineDown("stalled".into()));
+    }
+    let fake = Fake::saying_yes([]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(asked(&fake), [["metro pro lol -> metoprolol"]]);
+    fixture.end(JobKind::CleanUp, &JobEnd::Done);
+
+    // The pass finishes: its texts are stored, and it ends done.
+    fixture.boosted(&[Some("take the metoprolol daily"), Some("start the statins")]);
+    fixture.end(JobKind::HotwordPass, &JobEnd::Done);
+    let state = job_state(&fixture.db, SESSION, JobKind::CleanUp);
+    assert_eq!(state.unwrap(), Some(JobState::Waiting(None)));
+    assert_eq!(clean_up.lacks(&fixture.db, SESSION), None);
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    // Only the difference no lookup offered is asked about this time.
+    assert_eq!(
+        asked(&fake),
+        [["metro pro lol -> metoprolol"], ["stat ins -> statins"]]
+    );
+    let found: Vec<(String, nota_store::Found)> = fixture
+        .proposals()
+        .into_iter()
+        .map(|p| (p.proposed.term, p.proposed.found))
+        .collect();
+    let [(first, lookup), (second, hotword)] = &found[..] else {
+        panic!("{found:?}")
+    };
+    assert_eq!((first.as_str(), second.as_str()), ("metoprolol", "statins"));
+    assert_ne!(*lookup, nota_store::Found::Hotword);
+    assert_eq!(*hotword, nota_store::Found::Hotword);
+}
+
+/// Acceptance (#306): a hotword pass waiting for an engine this nota
+/// hasn't got (the runner marks it so) doesn't hold clean-up up: it runs
+/// with the lookup alone, its wait and its run agreeing. A pass waiting
+/// for anything else is still waited for. Once an engine runs the pass to
+/// the end, clean-up runs again and adds only the pass's candidates.
+#[test]
+fn clean_up_goes_on_without_a_hotword_pass_that_has_no_engine() {
+    let metoprolol = "take the metro pro lol daily";
+    let fixture = Fixture::new(
+        "hotword-no-engine",
+        &[metoprolol, STATINS],
+        &["metoprolol", "statins"],
+    );
+    let fake = Fake::saying_yes([]);
+    let mut clean_up = fixture.clean_up(Gives::Fake(fake.clone()));
+    for waits in [None, Some(Wait::FinalText)] {
+        fixture.end(JobKind::HotwordPass, &JobEnd::Waiting(waits));
+        assert_eq!(
+            clean_up.lacks(&fixture.db, SESSION),
+            Some(Wait::HotwordText)
+        );
+        assert_eq!(
+            run(&mut clean_up, &fixture),
+            JobEnd::Waiting(Some(Wait::HotwordText))
+        );
+    }
+    fixture.end(JobKind::HotwordPass, &JobEnd::Waiting(Some(Wait::Engine)));
+    assert_eq!(clean_up.lacks(&fixture.db, SESSION), None);
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(asked(&fake), [["metro pro lol -> metoprolol"]]);
+    fixture.end(JobKind::CleanUp, &JobEnd::Done);
+
+    // An engine is back, and the pass finishes.
+    fixture.boosted(&[Some("take the metoprolol daily"), Some("start the statins")]);
+    fixture.end(JobKind::HotwordPass, &JobEnd::Done);
+    assert_eq!(clean_up.lacks(&fixture.db, SESSION), None);
+    assert_eq!(run(&mut clean_up, &fixture), JobEnd::Done);
+    assert_eq!(
+        asked(&fake),
+        [["metro pro lol -> metoprolol"], ["stat ins -> statins"]]
+    );
 }
 
 /// A session stopped before nota had the hotword pass has no such job:
@@ -1580,4 +1713,46 @@ impl Sources for Renamed {
     fn precheck(&self) -> Precheck {
         self.0.precheck()
     }
+}
+
+/// The hotword list holds the session's terms each once, in its order, up
+/// to the most a list carries; a term that can't be a hotword, and any
+/// past the most, is refused rather than dropped, so it's counted.
+#[test]
+fn terms_that_cant_be_hotwords_are_refused() {
+    let about = GlossaryAbout {
+        name: "terms".to_owned(),
+        version: "1".to_owned(),
+        language: "en".to_owned(),
+        author: "a tester".to_owned(),
+    };
+    let pack = glossary("a", &about).unwrap();
+    let offered = |term: &str| nota_store::packs::Offered {
+        term: term.to_owned(),
+        aliases: Vec::new(),
+        language: "en".to_owned(),
+        pack: pack.pack_ref(),
+        sources: Vec::new(),
+        reviewed: true,
+    };
+    let mut terms: Vec<_> = (0..MAX_HOTWORDS)
+        .map(|i| offered(&format!("term {i}")))
+        .collect();
+    terms.insert(1, offered("TMP/SMX"));
+    terms.insert(2, offered("term 0"));
+    terms.push(offered("one too many"));
+    let found = hotwords(&SessionTerms {
+        terms,
+        learned: nota_store::Learned::default(),
+    });
+    assert_eq!(found.list.len(), MAX_HOTWORDS);
+    assert_eq!(
+        found.list[..2],
+        [
+            Hotword::new("term 0").unwrap(),
+            Hotword::new("term 1").unwrap()
+        ]
+    );
+    assert_eq!(found.refused, ["TMP/SMX", "one too many"]);
+    assert_eq!(found.terms(), MAX_HOTWORDS + 2);
 }

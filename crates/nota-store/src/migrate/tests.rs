@@ -41,7 +41,7 @@ fn a_new_file_gets_the_current_schema() {
     let dir = TestDir::new("fresh");
     let store = Store::open(&dir.db()).unwrap();
     assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
-    assert_eq!(STEPS.len(), 13);
+    assert_eq!(STEPS.len(), 14);
     assert_eq!(STEPS.len(), usize::try_from(VERSION - FIRST + 1).unwrap());
     // Opening again changes nothing.
     drop(store);
@@ -1221,4 +1221,35 @@ fn version_13_upgrades_to_14_keeping_its_proposals() {
     ] {
         assert!(refused(&conn, sql), "{sql}");
     }
+}
+
+/// A version 14 library gains the left-out tables empty (no session's
+/// engine has said anything yet, and one can then say) and its jobs no
+/// engine-down runs.
+#[test]
+fn version_14_upgrades_to_15_with_nothing_left_out_or_counted() {
+    let dir = TestDir::new("v14");
+    {
+        let conn = crate::tests::library_at(&dir.db(), 14);
+        conn.execute_batch(
+            "INSERT INTO session (id, state, language) VALUES (1, 'stopped', 'en');
+             INSERT INTO job (session_id, kind, state, detail, waits_for) \
+                 VALUES (1, 'hotword-pass', 'waiting', 'stalled', 'engine');",
+        )
+        .unwrap();
+    }
+    let mut store = Store::open(&dir.db()).unwrap();
+    assert_eq!(store.pragma_text("user_version"), VERSION.to_string());
+    let one = SessionId::new(1);
+    // A job from before keeps its state, with no engine-down runs counted.
+    let jobs = store.session_jobs(one).unwrap();
+    let [job] = &jobs[..] else { panic!("{jobs:?}") };
+    assert_eq!(
+        (&job.state, job.engine_downs),
+        (&JobState::EngineDown("stalled".to_owned()), 0)
+    );
+    assert_eq!(store.hotword_left_out(one).unwrap(), None);
+    let said = crate::hotword_text::LeftOut::new(2, vec!["varicose veins".to_owned()]).unwrap();
+    store.set_hotword_left_out(one, &said).unwrap();
+    assert_eq!(store.hotword_left_out(one).unwrap(), Some(said));
 }

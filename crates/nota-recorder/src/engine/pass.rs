@@ -50,7 +50,7 @@ use std::sync::Arc;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
 
-use nota_core::messages::{AudioChunk, Transcript};
+use nota_core::messages::{AudioChunk, Hotword, Transcript};
 use nota_core::{Clock, SampleCount, SampleIndex, SampleRange, SampleRate, TrackId};
 use nota_store::SegmentRow;
 
@@ -102,6 +102,16 @@ pub trait PassSink {
     /// comes back; never for an engine that hasn't been down in this pass.
     /// It's only shown: the pass carries on whatever the sink does with it.
     fn engine_down(&mut self, why: Option<&str>);
+
+    /// The engine now running left out `terms` of the hotwords its
+    /// greeting gave it ([`EngineEvent::LeftOut`]): told once by each
+    /// engine that boosts, so again after a restart. It isn't a sign the
+    /// engine works. A pass that sends no hotwords is never told.
+    ///
+    /// # Errors
+    ///
+    /// If they couldn't be committed; the pass stops.
+    fn left_out(&mut self, terms: Vec<Hotword>) -> Result<(), Self::Error>;
 }
 
 /// How a pass runs.
@@ -318,6 +328,14 @@ pub fn transcribe<K: PassSink>(
                 starts.online();
                 if offline.take().is_some() {
                     sink.engine_down(None);
+                }
+                continue;
+            }
+            // Not progress: the stall timer runs on, so an engine that
+            // only ever reports this still stalls.
+            EngineEvent::LeftOut(terms) => {
+                if let Err(e) = sink.left_out(terms) {
+                    return PassEnd::Sink(e);
                 }
                 continue;
             }

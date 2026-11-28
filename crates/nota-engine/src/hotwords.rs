@@ -163,8 +163,11 @@ pub struct Boost {
     /// The terms it boosts, lowercased, in the list's order.
     pub admitted: Vec<String>,
     /// The terms left out because the vocabulary doesn't split them as the
-    /// model does, or the model can't say them, in the list's order.
-    pub left_out: Vec<String>,
+    /// model does, or the model can't say them, in the list's order: every
+    /// form the list gave of each, once (a term given in two cases is left
+    /// out in both), so the recorder is told of the terms it sent, one for
+    /// one.
+    pub left_out: Vec<Hotword>,
 }
 
 /// What to boost for `hotwords`: each lowercased (Parakeet's lowercase
@@ -191,10 +194,18 @@ pub fn prepare(tokens: &Tokens, hotwords: &[Hotword]) -> Boost {
             .get(word)
             .is_some_and(|want| vocab.split(word) == *want)
     };
-    let (admitted, left_out): (Vec<String>, Vec<String>) = terms
+    let admitted: Vec<String> = terms
         .iter()
+        .filter(|term| sayable.contains(&term.as_str()) && term.split(' ').all(agrees))
         .cloned()
-        .partition(|term| sayable.contains(&term.as_str()) && term.split(' ').all(agrees));
+        .collect();
+    let mut given = BTreeSet::new();
+    let left_out = hotwords
+        .iter()
+        .filter(|hotword| given.insert(hotword.as_str()))
+        .filter(|hotword| !admitted.contains(&hotword.as_str().to_lowercase()))
+        .cloned()
+        .collect();
     Boost {
         vocab: vocab.text(),
         hotwords: admitted.join("/"),

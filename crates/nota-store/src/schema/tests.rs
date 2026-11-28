@@ -86,6 +86,8 @@ fn the_schema_has_exactly_these_tables() {
             "heard_proposal",
             "heard_revision",
             "heard_revision_text",
+            "hotword_left_out",
+            "hotword_left_out_term",
             "hotword_progress",
             "hotword_text",
             "job",
@@ -485,8 +487,9 @@ fn marks_and_notes_read_back() {
 #[test]
 fn jobs_read_back() {
     let (_dir, store) = store("job");
-    let columns = "id, session_id, kind, state, attempts, detail, progress, total, waits_for";
-    let job = |id, session, kind, attempts, progress, total| {
+    let columns =
+        "id, session_id, kind, state, attempts, detail, progress, total, waits_for, engine_downs";
+    let job = |id, session, kind, attempts, progress, total, downs| {
         vec![
             int(id),
             int(session),
@@ -497,18 +500,21 @@ fn jobs_read_back() {
             int(progress),
             int(total),
             text("space"),
+            int(downs),
         ]
     };
-    let jobs = [job(1, 1, "final-pass", 0, 5, 10)];
+    let jobs = [job(1, 1, "final-pass", 0, 5, 10, 2)];
     write(&store, "job", columns, &jobs[0]);
     assert_eq!(read(&store, "job"), jobs);
     for bad in [
-        job(2, 1, "k", -1, 0, 0),
-        job(2, 2, "k", 0, 0, 0),
-        job(2, 1, "k", 0, -1, 0),
-        job(2, 1, "k", 0, 0, -1),
+        job(2, 1, "k", -1, 0, 0, 0),
+        job(2, 2, "k", 0, 0, 0, 0),
+        job(2, 1, "k", 0, -1, 0, 0),
+        job(2, 1, "k", 0, 0, -1, 0),
+        // A count of engine-down runs is never below zero (V15).
+        job(2, 1, "k", 0, 0, 0, -1),
         // One job of each kind a session.
-        job(2, 1, "final-pass", 0, 0, 0),
+        job(2, 1, "final-pass", 0, 0, 0, 0),
     ] {
         refused(&store, "job", columns, &bad);
     }

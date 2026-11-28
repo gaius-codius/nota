@@ -30,6 +30,13 @@
 //! screen shows it at its next refresh. It goes when that engine comes
 //! back ([`Store::engine_answered`]).
 //!
+//! **Clean-up again once the hotword pass is done.** Clean-up compares
+//! only a finished hotword pass's text, so it can only be done before the
+//! pass when it went on without it (the pass's engine kept failing). So
+//! when a hotword pass ends done, its session's clean-up, if done, waits
+//! to run again, in the same transaction, and adds the pass's candidates
+//! ([`Store::end_job`]).
+//!
 //! The Processing screen shows what this holds.
 
 use nota_core::SessionId;
@@ -179,6 +186,10 @@ pub struct Job {
     pub state: JobState,
     /// How many times a runner died while running it.
     pub attempts: u32,
+    /// How many of its runs in a row have ended with its engine down
+    /// ([`JobEnd::EngineDown`]), since it last finished or failed, in any
+    /// nota: a pause or a wait leaves the count as it is.
+    pub engine_downs: u32,
     /// How far it has got.
     pub progress: Progress,
 }
@@ -209,10 +220,11 @@ type RawJob = (
     i64,
     Option<String>,
     Option<String>,
+    i64,
 );
 
 const JOB_COLUMNS: &str =
-    "id, session_id, kind, state, attempts, progress, total, waits_for, detail";
+    "id, session_id, kind, state, attempts, progress, total, waits_for, detail, engine_downs";
 
 fn raw_job(r: &rusqlite::Row<'_>) -> rusqlite::Result<RawJob> {
     Ok((
@@ -225,6 +237,7 @@ fn raw_job(r: &rusqlite::Row<'_>) -> rusqlite::Result<RawJob> {
         r.get(6)?,
         r.get(7)?,
         r.get(8)?,
+        r.get(9)?,
     ))
 }
 
@@ -233,7 +246,7 @@ fn count(n: i64, what: &str) -> Result<u64, StoreError> {
 }
 
 fn parse_job(
-    (id, session, kind, state, attempts, progress, total, waits, detail): RawJob,
+    (id, session, kind, state, attempts, progress, total, waits, detail, downs): RawJob,
 ) -> Result<Job, StoreError> {
     let waits = waits.as_deref().map(Wait::parse).transpose()?;
     let state = match (state.as_str(), waits, detail) {
@@ -257,6 +270,8 @@ fn parse_job(
         state,
         attempts: u32::try_from(attempts)
             .map_err(|_| StoreError::Corrupt(format!("job {id} attempts {attempts}")))?,
+        engine_downs: u32::try_from(downs)
+            .map_err(|_| StoreError::Corrupt(format!("job {id} engine downs {downs}")))?,
         progress: Progress {
             done: count(progress, "progress")?,
             total: count(total, "total")?,
@@ -275,6 +290,25 @@ pub(crate) fn queue(conn: &Connection, key: i64, waits: Option<Wait>) -> Result<
             params![key, kind.as_str(), waits.map(Wait::as_str)],
         )?;
     }
+    Ok(())
+}
+
+/// If job `id` is a hotword pass, sends its session's clean-up back to
+/// waiting if it's done, its progress back to nothing: it went on without
+/// the pass, and runs again to add its candidates. A clean-up not yet done reads the pass's text when
+/// it runs anyway, and a failed one isn't run again.
+fn again_after_hotwords(conn: &Connection, id: JobId) -> Result<(), StoreError> {
+    conn.execute(
+        "UPDATE job SET state = 'waiting', waits_for = NULL, detail = NULL, \
+             progress = 0, total = 0 \
+         WHERE kind = ?2 AND state = 'done' AND session_id = \
+             (SELECT session_id FROM job WHERE id = ?1 AND kind = ?3)",
+        params![
+            id.0,
+            JobKind::CleanUp.as_str(),
+            JobKind::HotwordPass.as_str()
+        ],
+    )?;
     Ok(())
 }
 
@@ -412,12 +446,18 @@ impl Store {
     }
 
     /// Ends a run of the job, as `end` says. A reason kept from an
-    /// earlier engine failure goes, or is replaced by this end's.
+    /// earlier engine failure goes, or is replaced by this end's. An end
+    /// with the engine down counts one more of [`Job::engine_downs`]; a
+    /// finished or failed run starts the count again. A
+    /// hotword pass that ends done sends its session's clean-up, if done,
+    /// back to waiting, in the same transaction, so it runs again with
+    /// the pass's candidates (the module's docs).
     ///
     /// # Errors
     ///
     /// [`StoreError::NoJob`] if there's no such job, and
-    /// [`StoreError::Sqlite`] for any SQLite failure.
+    /// [`StoreError::Sqlite`] for any SQLite failure. Nothing changes
+    /// then.
     pub fn end_job(&mut self, id: JobId, end: &JobEnd) -> Result<(), StoreError> {
         let (state, waits, detail) = match end {
             JobEnd::Done => ("done", None, None),
@@ -425,13 +465,30 @@ impl Store {
             JobEnd::EngineDown(why) => ("waiting", Some(Wait::Engine.as_str()), Some(why.as_str())),
             JobEnd::Failed(why) => ("failed", None, Some(why.as_str())),
         };
-        let changed = self.conn.execute(
-            "UPDATE job SET state = ?2, waits_for = ?3, detail = ?4 WHERE id = ?1",
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // An engine down adds a run to the count, an end for good starts
+        // it again, and a wait or a pause leaves it.
+        let downs = match end {
+            JobEnd::EngineDown(_) => "min(engine_downs + 1, 4294967295)",
+            JobEnd::Done | JobEnd::Failed(_) => "0",
+            JobEnd::Waiting(_) => "engine_downs",
+        };
+        let changed = tx.execute(
+            &format!(
+                "UPDATE job SET state = ?2, waits_for = ?3, detail = ?4, engine_downs = {downs} \
+                 WHERE id = ?1"
+            ),
             params![id.0, state, waits, detail],
         )?;
         if changed == 0 {
             return Err(StoreError::NoJob(id.0));
         }
+        if *end == JobEnd::Done {
+            again_after_hotwords(&tx, id)?;
+        }
+        tx.commit()?;
         Ok(())
     }
 

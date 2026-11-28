@@ -13,7 +13,7 @@
 //!   as a [`LogProb`] that re-encodes to those bits, or not at all;
 //! - a hotwords message, whatever its texts, reads back only as hotwords
 //!   [`Hotword::new`] accepts, so none holds a `/`, a control character or
-//!   a word starting with `:`.
+//!   a word starting with `:`; so does a left-out message.
 
 use proptest::prelude::*;
 
@@ -122,6 +122,8 @@ fn from_engine() -> impl Strategy<Value = Frame<FromEngine>> {
                 up_to: SampleIndex::new(up_to),
             }
         )),
+        prop::collection::vec(any_hotword(), 0..20)
+            .prop_map(|terms| Frame::Message(FromEngine::LeftOut(terms))),
     ]
 }
 
@@ -310,10 +312,10 @@ impl Read for OneByte<'_> {
     }
 }
 
-/// A hotwords message's body with these `texts`, each any bytes up to the
-/// length field's limit, as a peer could write it.
-fn hotwords_body(texts: &[Vec<u8>]) -> Vec<u8> {
-    let mut body = vec![TAG_HOTWORDS];
+/// A body under `tag` (hotwords or left-out) with these `texts`, each any
+/// bytes up to the length field's limit, as a peer could write it.
+fn hotwords_body(tag: u8, texts: &[Vec<u8>]) -> Vec<u8> {
+    let mut body = vec![tag];
     body.extend_from_slice(&u32::try_from(texts.len()).unwrap().to_le_bytes());
     for text in texts {
         body.extend_from_slice(&u16::try_from(text.len()).unwrap().to_le_bytes());
@@ -332,7 +334,7 @@ proptest! {
             0..8,
         ),
     ) {
-        let body = hotwords_body(&texts);
+        let body = hotwords_body(TAG_HOTWORDS, &texts);
         if let Ok(Frame::Message(ToEngine::Hotwords(hotwords))) = decode_body::<ToEngine>(&body) {
             prop_assert_eq!(hotwords.len(), texts.len());
             for (hotword, text) in hotwords.iter().zip(&texts) {
@@ -341,13 +343,56 @@ proptest! {
                 // phrases split at `/` and line ends, words at whitespace, a
                 // word starting with `:` a score. None of that may be in a
                 // hotword that got through.
-                let text = hotword.as_str();
-                prop_assert!((1..=crate::messages::MAX_HOTWORD_LEN).contains(&text.len()), "{text:?}");
-                prop_assert!(!text.chars().any(|c| c == '/' || c.is_control()), "{text:?}");
-                prop_assert!(!text.chars().any(|c| c.is_whitespace() && c != ' '), "{text:?}");
-                prop_assert!(text.split(' ').all(|w| !w.is_empty() && !w.starts_with(':')), "{text:?}");
+                assert_unmistakable(hotword.as_str())?;
             }
             let frame = encode(&Frame::Message(ToEngine::Hotwords(hotwords))).unwrap();
+            prop_assert_eq!(&frame[4..], body.as_slice());
+        }
+    }
+}
+
+/// Asserts `text` is one the per-stream format can't misread: what
+/// [`Hotword::new`] promises, checked from the outside.
+fn assert_unmistakable(text: &str) -> Result<(), TestCaseError> {
+    prop_assert!(
+        (1..=crate::messages::MAX_HOTWORD_LEN).contains(&text.len()),
+        "{text:?}"
+    );
+    prop_assert!(
+        !text.chars().any(|c| c == '/' || c.is_control()),
+        "{text:?}"
+    );
+    prop_assert!(
+        !text.chars().any(|c| c.is_whitespace() && c != ' '),
+        "{text:?}"
+    );
+    prop_assert!(
+        text.split(' ')
+            .all(|w| !w.is_empty() && !w.starts_with(':')),
+        "{text:?}"
+    );
+    Ok(())
+}
+
+proptest! {
+    /// Whatever texts a left-out message carries, it decodes only to terms
+    /// that are valid hotwords as given, and re-encodes to the same body:
+    /// an engine can't name a term the recorder couldn't have sent it.
+    #[test]
+    fn left_out_terms_read_back_only_as_valid_hotwords(
+        texts in prop::collection::vec(
+            prop::collection::vec(prop_oneof![Just(b'/'), Just(0u8), Just(b'\n'), Just(b' '), Just(b':'), any::<u8>()], 0..16),
+            0..8,
+        ),
+    ) {
+        let body = hotwords_body(TAG_LEFT_OUT, &texts);
+        if let Ok(Frame::Message(FromEngine::LeftOut(terms))) = decode_body::<FromEngine>(&body) {
+            prop_assert_eq!(terms.len(), texts.len());
+            for (term, text) in terms.iter().zip(&texts) {
+                prop_assert_eq!(term.as_str().as_bytes(), text.as_slice());
+                assert_unmistakable(term.as_str())?;
+            }
+            let frame = encode(&Frame::Message(FromEngine::LeftOut(terms))).unwrap();
             prop_assert_eq!(&frame[4..], body.as_slice());
         }
     }

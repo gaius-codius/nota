@@ -163,3 +163,74 @@ fn boosted_text_is_never_changed() {
         assert!(refused(&conn, sql), "{sql} was allowed");
     }
 }
+
+/// `terms` left out of `given`.
+fn left_out(given: usize, terms: &[&str]) -> LeftOut {
+    LeftOut::new(given, terms.iter().map(|&t| t.to_owned()).collect()).unwrap()
+}
+
+/// Before any engine has said, there's nothing; what one says reads back
+/// in order, and a report with none left out reads back as such, not as
+/// nothing.
+#[test]
+fn left_out_terms_read_back_once_told() {
+    let (_dir, mut store) = store("left-out");
+    assert_eq!(store.hotword_left_out(S1).unwrap(), None);
+    let said = left_out(3, &["varicose veins", "Mg2+"]);
+    store.set_hotword_left_out(S1, &said).unwrap();
+    assert_eq!(store.hotword_left_out(S1).unwrap(), Some(said));
+    let none = left_out(3, &[]);
+    store.set_hotword_left_out(S1, &none).unwrap();
+    assert_eq!(store.hotword_left_out(S1).unwrap(), Some(none));
+}
+
+/// A later report replaces the earlier one whole: a term no longer left
+/// out goes, and the count is the new one.
+#[test]
+fn a_later_report_replaces_the_earlier() {
+    let (_dir, mut store) = store("left-out-again");
+    store
+        .set_hotword_left_out(S1, &left_out(5, &["a", "b", "c"]))
+        .unwrap();
+    let later = left_out(4, &["d"]);
+    store.set_hotword_left_out(S1, &later).unwrap();
+    assert_eq!(store.hotword_left_out(S1).unwrap(), Some(later));
+}
+
+/// A report for a session the library doesn't have is refused.
+#[test]
+fn left_out_terms_for_an_unknown_session_are_refused() {
+    let (_dir, mut store) = store("left-out-unknown");
+    let got = store.set_hotword_left_out(SessionId::new(9), &left_out(1, &["a"]));
+    assert!(
+        matches!(got, Err(StoreError::NoSession(id)) if id == SessionId::new(9)),
+        "{got:?}"
+    );
+}
+
+/// More terms left out than given, or an empty one, isn't a report.
+#[test]
+fn a_report_never_leaves_out_more_than_it_was_given() {
+    assert_eq!(LeftOut::new(1, vec!["a".to_owned(), "b".to_owned()]), None);
+    assert_eq!(LeftOut::new(1, vec![String::new()]), None);
+    let fits = LeftOut::new(2, vec!["a".to_owned(), "b".to_owned()]).unwrap();
+    assert_eq!(
+        (fits.given(), fits.terms()),
+        (2, &["a".to_owned(), "b".to_owned()][..])
+    );
+}
+
+/// Rows that leave out more terms than were given read as corrupt, not as
+/// a report.
+#[test]
+fn stored_rows_that_leave_out_too_many_are_corrupt() {
+    let (dir, mut store) = store("left-out-corrupt");
+    store
+        .set_hotword_left_out(S1, &left_out(1, &["a"]))
+        .unwrap();
+    raw(&dir.db())
+        .execute("INSERT INTO hotword_left_out_term VALUES (1, 1, 'b')", [])
+        .unwrap();
+    let got = store.hotword_left_out(S1);
+    assert!(matches!(got, Err(StoreError::Corrupt(_))), "{got:?}");
+}

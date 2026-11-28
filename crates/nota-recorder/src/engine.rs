@@ -52,7 +52,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use nota_core::lifeline::RECORDER_PID_VAR;
-use nota_core::messages::{AudioChunk, FromEngine, ProtocolVersion, ToEngine, Transcript};
+use nota_core::messages::{AudioChunk, FromEngine, Hotword, ProtocolVersion, ToEngine, Transcript};
 use nota_core::protocol::{Frame, FrameReader, ReadError, write_frame};
 use nota_core::{Clock, SampleCount, SampleIndex, SampleRange, SampleRate, SessionTime, TrackId};
 
@@ -165,6 +165,10 @@ pub enum EngineEvent {
         /// The samples never transcribed live.
         range: SampleRange,
     },
+    /// The terms of the configured greeting's hotwords that the engine now
+    /// running left out: it can't boost them. Each engine that boosts says
+    /// so once it has been given them, so a restart gives it again.
+    LeftOut(Vec<Hotword>),
 }
 
 /// Whether the transcriber is working.
@@ -753,6 +757,14 @@ impl Supervisor {
                 self.emit(EngineEvent::Confirmed { track, up_to });
                 Ok(())
             }
+            // Only passed on: it says nothing about whether the engine
+            // decodes, so it neither counts as progress nor resets the
+            // backoff, and an engine that reports and then dies is still
+            // one that died.
+            FromEngine::LeftOut(terms) => {
+                self.emit(EngineEvent::LeftOut(terms));
+                Ok(())
+            }
         }
     }
 
@@ -1150,7 +1162,7 @@ mod tests {
         assert_eq!(OfflineReason::Hung.to_string(), "stopped answering");
         assert_eq!(
             OfflineReason::Version(ProtocolVersion::new(7)).to_string(),
-            "speaks protocol v7, nota needs v3"
+            "speaks protocol v7, nota needs v4"
         );
         assert_eq!(
             OfflineReason::Protocol("bad".into()).to_string(),
@@ -1216,6 +1228,34 @@ mod tests {
             inputs,
             rx,
         )
+    }
+
+    /// An engine naming the terms it left out has its report passed on,
+    /// but it isn't progress: the backoff and the time of the last progress
+    /// stay as they were, so an engine that reports and then dies, or
+    /// never confirms, is restarted as one that said nothing.
+    #[test]
+    fn left_out_terms_are_passed_on_but_are_not_progress() {
+        let config = EngineConfig::new(EngineCommand {
+            program: PathBuf::from("true"),
+            args: Vec::new(),
+        });
+        let clock: Arc<dyn Clock> = Arc::new(nota_core::SystemClock::start().unwrap());
+        let (inputs, _rx) = mpsc::channel();
+        let (events, heard) = mpsc::channel();
+        let mut supervisor = Supervisor::new(config, clock, inputs, events);
+        let backoff = Duration::from_secs(8);
+        supervisor.backoff = backoff;
+        let progress = supervisor.progress;
+        let terms = vec![Hotword::new("varicose veins").unwrap()];
+        supervisor
+            .on_message(FromEngine::LeftOut(terms.clone()))
+            .unwrap();
+        assert_eq!(
+            (supervisor.backoff, supervisor.progress),
+            (backoff, progress)
+        );
+        assert_eq!(heard.try_recv().unwrap(), EngineEvent::LeftOut(terms));
     }
 
     /// Only audio the engine hasn't confirmed counts: a track with none

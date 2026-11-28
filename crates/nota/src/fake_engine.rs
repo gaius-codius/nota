@@ -9,9 +9,11 @@
 //! the log-probability [`COUNT_LOG_PROB`] and the second none, so a test
 //! can see both reach the stored text.
 //!
-//! Boosted (`--pass hotword`, sent hotwords), its second word is the first
-//! hotword it was given instead of "samples", so a session whose pack has a
-//! term close to "samples" gets a hotword candidate.
+//! Boosted (`--pass hotword`, sent hotwords), it leaves out every term with
+//! a character other than an ASCII letter or a space, as the real engine
+//! leaves out a term its vocabulary can't split, and says which; its second
+//! word is then the first term it kept instead of "samples", so a session
+//! whose pack has a term close to "samples" gets a hotword candidate.
 
 use std::io;
 
@@ -132,11 +134,19 @@ impl Models for Stand {
         self
     }
 
-    /// Keeps the first of `hotwords` (none clears the boost), as a beam
-    /// search would favour it.
-    fn boost(&mut self, hotwords: &[Hotword]) -> Result<(), EngineError> {
-        self.boosted = hotwords.first().map(|hotword| hotword.as_str().to_owned());
-        Ok(())
+    /// Leaves out the terms of `hotwords` it can't "split" (any character
+    /// but an ASCII letter or a space) and keeps the first of the rest
+    /// (none clears the boost), as a beam search would favour it.
+    fn boost(&mut self, hotwords: &[Hotword]) -> Result<Option<Vec<Hotword>>, EngineError> {
+        let splits = |hotword: &&Hotword| {
+            hotword
+                .as_str()
+                .chars()
+                .all(|c| c.is_ascii_alphabetic() || c == ' ')
+        };
+        let (kept, left_out): (Vec<&Hotword>, Vec<&Hotword>) = hotwords.iter().partition(splits);
+        self.boosted = kept.first().map(|hotword| hotword.as_str().to_owned());
+        Ok(Some(left_out.into_iter().cloned().collect()))
     }
 }
 
@@ -166,7 +176,7 @@ mod tests {
             )
         );
         let hotwords = ["sampler", "amlodipine"].map(|t| Hotword::new(t).unwrap());
-        stand.boost(&hotwords).unwrap();
+        assert_eq!(stand.boost(&hotwords).unwrap(), Some(Vec::new()));
         assert_eq!(
             heard(&mut stand),
             (
@@ -176,5 +186,19 @@ mod tests {
         );
         stand.boost(&[]).unwrap();
         assert_eq!(heard(&mut stand).0, "3 samples");
+    }
+
+    /// A term with a character other than an ASCII letter or a space is
+    /// left out and named, as given; the first term kept is boosted.
+    #[test]
+    fn a_stand_in_leaves_out_terms_it_cannot_split() {
+        let mut stand = Stand::default();
+        let hotwords = ["Mg2+", "sampler", "β-blocker"].map(|t| Hotword::new(t).unwrap());
+        let left_out = stand.boost(&hotwords).unwrap();
+        assert_eq!(
+            left_out,
+            Some(vec![hotwords[0].clone(), hotwords[2].clone()])
+        );
+        assert_eq!(heard(&mut stand).0, "3 sampler");
     }
 }

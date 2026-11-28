@@ -225,6 +225,11 @@ fn read_pass(
                 }
                 confirmed = up_to;
             }
+            // It sends no hotwords, so an engine naming terms it left
+            // out isn't answering it.
+            Frame::Message(FromEngine::LeftOut(_)) => {
+                return Err("engine left out hotwords it was never sent".into());
+            }
             Frame::Hello(_) => return Err("engine repeated hello".into()),
         }
     }

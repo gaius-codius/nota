@@ -210,10 +210,19 @@ impl Data<'_> {
             .map(|line| &line.heard.heard_by)
             .map(|by| format!("{} · {}", by.engine, by.model));
         let engine = engine.as_deref().unwrap_or_else(|| self.engines.label());
+        let hotword = jobs
+            .iter()
+            .find(|job| job.kind == JobKind::HotwordPass)
+            .map(|job| job.state.clone());
         steps.extend(jobs.into_iter().map(|job| match job.kind {
             // The hotword pass runs the same speech engine, boosted.
             JobKind::FinalPass | JobKind::HotwordPass => step(job, engine, None),
-            JobKind::CleanUp => step(job, &clean_up.decider, clean_up.note.clone()),
+            JobKind::CleanUp => {
+                let missing = missing_note(&job.state, hotword.as_ref());
+                let notes: Vec<String> = missing.into_iter().chain(clean_up.note.clone()).collect();
+                let note = (!notes.is_empty()).then(|| notes.join("; "));
+                step(job, &clean_up.decider, note)
+            }
         }));
         steps
     }
@@ -262,6 +271,25 @@ fn given_up_note(chunks: usize) -> Option<String> {
         n => Some(format!(
             "{n} chunks left unfixed: the decider kept failing on them"
         )),
+    }
+}
+
+/// What the clean-up step says of the hotword pass's candidates, from
+/// clean-up's `state` and the hotword pass's (none for a session from
+/// before the pass): nothing unless clean-up has run, or is running,
+/// while the pass isn't done. A failed pass's candidates never come; one
+/// whose engine keeps failing (clean-up went on without it) may still
+/// finish, and clean-up then runs again with them.
+fn missing_note(state: &JobState, hotword: Option<&JobState>) -> Option<String> {
+    let started = matches!(
+        state,
+        JobState::Done | JobState::Running | JobState::Retrying(_)
+    );
+    match hotword? {
+        _ if !started => None,
+        JobState::Done => None,
+        JobState::Failed(_) => Some("terms not heard again: that step failed".to_owned()),
+        _ => Some("terms not heard again yet: added if that step ends".to_owned()),
     }
 }
 
@@ -729,6 +757,98 @@ mod tests {
         assert_eq!(
             note(&fixture).as_deref(),
             Some("2 chunks left unfixed: the decider kept failing on them")
+        );
+    }
+
+    /// Ends `fixture`'s session's job of `kind` as `end`.
+    fn end(fixture: &Fixture, kind: JobKind, end: &JobEnd) {
+        let db = fixture.library.db();
+        let jobs = db.with(|db| db.session_jobs(fixture.id)).unwrap();
+        let id = jobs.into_iter().find(|j| j.kind == kind).unwrap().id;
+        db.with(|db| db.end_job(id, end)).unwrap();
+    }
+
+    /// Acceptance (#297): once clean-up has gone on without a hotword pass
+    /// whose engine keeps failing, its step says the pass's candidates are
+    /// missing and may still come; once the pass finishes, it says nothing
+    /// of them.
+    #[test]
+    fn the_clean_up_step_says_the_hotword_candidates_are_missing() {
+        let fixture = Fixture::new("the_clean_up_step_says_the_hotword_candidates_are_missing");
+        fixture.finish();
+        let note = |fixture: &Fixture| fixture.read().jobs[3].note.clone();
+        end(
+            &fixture,
+            JobKind::HotwordPass,
+            &JobEnd::EngineDown("stalled".into()),
+        );
+        // Clean-up hasn't run: it's still waiting for the pass.
+        assert_eq!(note(&fixture), None);
+        end(&fixture, JobKind::CleanUp, &JobEnd::Done);
+        assert_eq!(
+            note(&fixture).as_deref(),
+            Some("terms not heard again yet: added if that step ends")
+        );
+        // The pass gets through: clean-up runs again with its candidates.
+        end(&fixture, JobKind::HotwordPass, &JobEnd::Done);
+        end(&fixture, JobKind::CleanUp, &JobEnd::Done);
+        assert_eq!(note(&fixture), None);
+    }
+
+    /// Acceptance (#306): a clean-up that went on while the hotword pass
+    /// waits for an engine this nota hasn't got says the pass's candidates
+    /// are missing and may still come.
+    #[test]
+    fn the_clean_up_step_says_the_hotword_candidates_are_missing_without_an_engine() {
+        let fixture = Fixture::new(
+            "the_clean_up_step_says_the_hotword_candidates_are_missing_without_an_engine",
+        );
+        fixture.finish();
+        end(
+            &fixture,
+            JobKind::HotwordPass,
+            &JobEnd::Waiting(Some(Wait::Engine)),
+        );
+        end(&fixture, JobKind::CleanUp, &JobEnd::Done);
+        assert_eq!(
+            fixture.read().jobs[3].note.as_deref(),
+            Some("terms not heard again yet: added if that step ends")
+        );
+    }
+
+    /// A clean-up that ran after the hotword pass failed says that pass's
+    /// candidates are missing, beside the chunks it gave up on.
+    #[test]
+    fn the_clean_up_step_says_a_failed_hotword_pass_left_it_without() {
+        let fixture = Fixture::new("the_clean_up_step_says_a_failed_hotword_pass_left_it_without");
+        fixture.finish();
+        // A chunk of one word, for the proposal given up on to name.
+        let mut line = text(TrackId::new(0), SampleIndex::ZERO, "dose");
+        line.words = vec![nota_store::FinalWord {
+            text: "dose".into(),
+            range: SampleRange::new(SampleIndex::ZERO, SampleIndex::new(100)).unwrap(),
+            log_prob: None,
+        }];
+        let db = fixture.library.db();
+        db.with(|db| {
+            db.add_final_text(fixture.id, TrackId::new(0), SampleIndex::new(100), &[line])
+        })
+        .unwrap();
+        end(
+            &fixture,
+            JobKind::HotwordPass,
+            &JobEnd::Failed("no beam".into()),
+        );
+        end(&fixture, JobKind::CleanUp, &JobEnd::Done);
+        let gave_up = nota_store::Decided::GaveUp("no server".into());
+        db.with(|db| db.add_proposals(fixture.id, &[proposal_at(0, 0, gave_up)]))
+            .unwrap();
+        assert_eq!(
+            fixture.read().jobs[3].note.as_deref(),
+            Some(
+                "terms not heard again: that step failed; \
+                 1 chunk left unfixed: the decider kept failing on it"
+            )
         );
     }
 

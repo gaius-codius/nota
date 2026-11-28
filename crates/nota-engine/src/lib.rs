@@ -151,10 +151,10 @@ mod tests {
 
     #[test]
     fn errors_say_what_went_wrong() {
-        let version = EngineError::Version(ProtocolVersion::new(4));
+        let version = EngineError::Version(ProtocolVersion::new(5));
         assert_eq!(
             version.to_string(),
-            "the recorder speaks protocol v4, this engine v3"
+            "the recorder speaks protocol v5, this engine v4"
         );
         assert_eq!(
             EngineError::Protocol("second hello").to_string(),

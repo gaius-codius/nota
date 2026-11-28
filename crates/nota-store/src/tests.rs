@@ -559,7 +559,7 @@ pub(crate) fn refused(conn: &Connection, sql: &str) -> bool {
     }
 }
 
-/// An empty library at `path` as version `version` (2 to 11) made it, and a
+/// An empty library at `path` as version `version` (2 to 14) made it, and a
 /// plain connection to it for filling it in by hand.
 pub(crate) fn library_at(path: &Path, version: usize) -> Connection {
     let steps = [
@@ -575,6 +575,7 @@ pub(crate) fn library_at(path: &Path, version: usize) -> Connection {
         schema::V11,
         schema::V12,
         schema::V13,
+        schema::V14,
     ];
     let conn = raw(path);
     for step in &steps[..version - 1] {

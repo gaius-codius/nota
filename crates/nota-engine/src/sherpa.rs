@@ -223,10 +223,11 @@ impl Models for SherpaModels {
     }
 
     /// Rebuilds the beam recogniser with `hotwords`' vocabulary and boosts
-    /// the terms it splits as the model does. The greedy passes ignore it.
-    fn boost(&mut self, hotwords: &[Hotword]) -> Result<(), EngineError> {
+    /// the terms it splits as the model does, giving the rest. The greedy
+    /// passes ignore it.
+    fn boost(&mut self, hotwords: &[Hotword]) -> Result<Option<Vec<Hotword>>, EngineError> {
         let Some(booster) = &self.boost else {
-            return Ok(());
+            return Ok(None);
         };
         let prepared = prepare(&booster.tokens, hotwords);
         write_vocab(&booster.setup.vocab, &prepared.vocab)?;
@@ -242,7 +243,7 @@ impl Models for SherpaModels {
             recognizer,
             hotwords: stream_hotwords(prepared.hotwords),
         };
-        Ok(())
+        Ok(Some(prepared.left_out))
     }
 }
 
@@ -822,9 +823,10 @@ mod tests {
         };
         let mut models = SherpaModels::load_boosted(&paths, setup.clone()).unwrap();
         let list = ["amlodipine", "Bisoprolol"].map(|t| Hotword::new(t).unwrap());
-        models.boost(&list).unwrap();
+        let left_out = models.boost(&list).unwrap();
         let tokens = read_tokens(&paths.parakeet_dir.join("tokens.txt")).unwrap();
         let prepared = prepare(&tokens, &list);
+        assert_eq!(left_out, Some(prepared.left_out.clone()));
         assert_eq!(
             std::fs::read_to_string(&setup.vocab).unwrap(),
             prepared.vocab
@@ -835,7 +837,7 @@ mod tests {
             Some(prepared.hotwords.as_str())
         );
         // An empty list boosts nothing, rather than an empty term.
-        models.boost(&[]).unwrap();
+        assert_eq!(models.boost(&[]).unwrap(), Some(Vec::new()));
         assert_eq!(models.recognizer.hotwords, None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
