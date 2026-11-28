@@ -19,7 +19,7 @@ use nota_core::{Clock, EpochId, SampleCount, SampleIndex, SampleRange, SystemClo
 use nota_recorder::engine::EngineCommand;
 use nota_recorder::engine::pass::{PassConfig, PassEnd, PassSink, TrackAudio, transcribe};
 use nota_recorder::segment::ReadSegmentError;
-use nota_store::{SegmentRow, Sha256Digest};
+use nota_store::{AudioDigest, SegmentRow, Sha256Digest};
 
 const MIC: TrackId = TrackId::new(0);
 const SYSTEM: TrackId = TrackId::new(1);
@@ -745,4 +745,136 @@ fn a_restarted_engine_is_greeted_again_and_gives_the_same_text() {
     );
     assert_eq!(sink.texts, reference.texts);
     assert_eq!(sink.progress, reference.progress);
+}
+
+/// Runs `feeds` over the boosted fake, reading each segment with `read`,
+/// and gives what the pass committed with the rows it read, in order.
+fn run_counting(
+    feeds: &[TrackAudio],
+    read: impl Fn(&SegmentRow) -> Result<Vec<i16>, ReadSegmentError>,
+) -> (Committed, Vec<SegmentRow>) {
+    let mut sink = Committed::default();
+    let mut reads = Vec::new();
+    let end = transcribe(
+        feeds,
+        |row| {
+            reads.push(*row);
+            read(row)
+        },
+        &boosted(&["echo"]),
+        &clock(),
+        &mut sink,
+        &|| false,
+    );
+    assert!(matches!(end, PassEnd::Done), "{end:?}");
+    (sink, reads)
+}
+
+/// Bounded feeds over `chunks` of the mic, each given `segments`, as the
+/// hotword pass builds them.
+fn chunks_of(segments: &[SegmentRow], chunks: &[(u64, u64)]) -> Vec<TrackAudio> {
+    chunks
+        .iter()
+        .map(|&(start, end)| TrackAudio {
+            track: MIC,
+            segments: segments.to_vec(),
+            from: SampleIndex::new(start),
+            until: Some(SampleIndex::new(end)),
+        })
+        .collect()
+}
+
+/// Acceptance (#298): four chunks fed one after the other from one 30 s
+/// segment read it once, and each chunk is still decoded whole.
+#[test]
+fn consecutive_chunks_of_one_segment_read_it_once() {
+    let segment = row(MIC, 0, 0, 30 * S);
+    let chunks = [
+        (0, 5 * S),
+        (5 * S, 12 * S),
+        (12 * S, 20 * S),
+        (20 * S, 30 * S),
+    ];
+    let (sink, reads) = run_counting(&chunks_of(&[segment], &chunks), |row| Ok(audio(row)));
+    // Once for the pass, not once for each chunk that touches it.
+    assert_eq!(reads, [segment]);
+    let want = chunks.map(|(a, b)| (MIC, a, b, format!("{a}-{b}~2")));
+    assert_eq!(sink.texts, want);
+    assert!(sink.skipped.is_empty(), "{:?}", sink.skipped);
+}
+
+/// The mic's bounded feeds read each of its segments once, though two
+/// chunks touch its first segment.
+#[test]
+fn bounded_feeds_read_each_segment_once() {
+    let (sink, reads) = run_counting(&bounded(0), |row| Ok(audio(row)));
+    assert_eq!(reads, published().swap_remove(0));
+    assert_eq!(sink.progress, BTreeMap::from([(MIC, 23 * S)]));
+}
+
+/// A segment that can't be read is tried once for the pass, and every
+/// chunk in it is skipped, each up to its own end.
+#[test]
+fn an_unreadable_segment_is_read_once_and_each_chunk_in_it_skipped() {
+    let segment = row(MIC, 0, 0, 30 * S);
+    let chunks = [(0, 5 * S), (5 * S, 12 * S), (20 * S, 30 * S)];
+    let (sink, reads) = run_counting(&chunks_of(&[segment], &chunks), |_| {
+        Err(ReadSegmentError::Hash)
+    });
+    assert_eq!(reads, [segment]);
+    assert_eq!(sink.skipped, chunks.map(|(a, b)| (MIC, a, b)));
+    assert!(sink.texts.is_empty(), "{:?}", sink.texts);
+}
+
+/// Audio is only ever used for the row it was proven against: a row with
+/// the same samples but another digest is read again, not served the
+/// first row's audio.
+#[test]
+fn a_row_with_another_digest_is_read_again() {
+    let first = row(MIC, 0, 0, 30 * S);
+    let other = SegmentRow::new(
+        MIC,
+        EpochId::new(0),
+        first.range(),
+        Sha256Digest::new([1; 32]),
+    )
+    .unwrap();
+    let mut feeds = chunks_of(&[first], &[(0, 5 * S)]);
+    feeds.extend(chunks_of(&[other], &[(5 * S, 12 * S)]));
+    let (_, reads) = run_counting(&feeds, |row| Ok(audio(row)));
+    assert_eq!(reads, [first, other]);
+}
+
+/// The same holds for a row that differs only in its audio digest, the
+/// other way a file can be proven against its row.
+#[test]
+fn a_row_with_another_audio_digest_is_read_again() {
+    let first = row(MIC, 0, 0, 30 * S);
+    let other = first.with_audio(AudioDigest::new([1; 32]));
+    let mut feeds = chunks_of(&[first], &[(0, 5 * S)]);
+    feeds.extend(chunks_of(&[other], &[(5 * S, 12 * S)]));
+    let (_, reads) = run_counting(&feeds, |row| Ok(audio(row)));
+    assert_eq!(reads, [first, other]);
+}
+
+/// A segment the disk failed to give is read again by the next chunk in
+/// it, so one failed read loses only its own chunk; once read, it serves
+/// the chunks after it.
+#[test]
+fn a_segment_the_disk_failed_to_give_is_read_again_by_the_next_chunk() {
+    let segment = row(MIC, 0, 0, 30 * S);
+    let chunks = [(0, 5 * S), (5 * S, 12 * S), (12 * S, 20 * S)];
+    let failed = Cell::new(false);
+    let (sink, reads) = run_counting(&chunks_of(&[segment], &chunks), |row| {
+        // The first read fails as a disk error would; the rest succeed.
+        if failed.replace(true) {
+            Ok(audio(row))
+        } else {
+            Err(ReadSegmentError::Io(std::io::Error::other("busy")))
+        }
+    });
+    assert_eq!(reads, [segment, segment]);
+    assert_eq!(sink.skipped, [(MIC, 0, 5 * S)]);
+    let want = [(5 * S, 12 * S), (12 * S, 20 * S)].map(|(a, b)| (MIC, a, b, format!("{a}-{b}~2")));
+    assert_eq!(sink.texts, want);
 }
