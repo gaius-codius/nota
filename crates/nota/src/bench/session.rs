@@ -64,7 +64,7 @@ pub(crate) fn from_session(
 /// Whether `session`'s hotword pass finished, so its text is compared as
 /// a clean-up run compares it: a failed or unfinished pass's text may stop
 /// partway.
-fn hotword_done(
+pub(super) fn hotword_done(
     db: &nota_store::Store,
     session: SessionId,
 ) -> Result<bool, nota_store::StoreError> {

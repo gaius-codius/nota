@@ -1,7 +1,7 @@
 # Weekly mutation testing of the whole core, recorder, checks, LLM, store and
-# engine crates. Each PR tests only the mutants of its own changes (ci.yml);
-# this catches tests that have weakened since, and code a PR's diff didn't
-# reach.
+# engine crates, and of the nota crate's clean-up, settings and bench files.
+# Each PR tests only the mutants of its own changes (ci.yml); this catches
+# tests that have weakened since, and code a PR's diff didn't reach.
 name: Mutation testing
 
 on:
@@ -94,6 +94,28 @@ jobs:
             -p nota-engine \
             --shard "$SHARD/$SHARDS" --sharding round-robin \
             --test-tool nextest --jobs 2 --output "$RUNNER_TEMP/engine"
+      # The nota crate's clean-up, settings and bench files, the ones ci.yml's
+      # PR job mutates. The crate links the engine and its tests start it, so
+      # this comes after the engine's setup, with the engine's cap. A full run
+      # of these files on 2026-11-28 made 439 mutants (126 unviable), about
+      # 44 a shard. The rest of the crate (recording, the screens, the final
+      # and hotword passes) isn't mutated yet.
+      - name: Mutate the nota crate's clean-up, settings and bench
+        if: ${{ !cancelled() }}
+        env:
+          SHARD: ${{ strategy.job-index }}
+          SHARDS: ${{ strategy.job-total }}
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: prlimit --as=3221225472 --
+          NEXTEST_TEST_THREADS: "2"
+        run: |
+          mkdir -p "$RUNNER_TEMP/nota"
+          cargo mutants \
+            -p nota \
+            --file 'crates/nota/src/cleanup.rs' --file 'crates/nota/src/cleanup/**' \
+            --file 'crates/nota/src/settings.rs' \
+            --file 'crates/nota/src/bench.rs' --file 'crates/nota/src/bench/**' \
+            --shard "$SHARD/$SHARDS" --sharding round-robin \
+            --test-tool nextest --jobs 2 --output "$RUNNER_TEMP/nota"
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -126,9 +148,9 @@ jobs:
             --description "A weekly mutation testing run failed"
           body="[Mutation testing run]($RUN_URL) on \`$REF\` failed. Each shard's
           missed and timed-out mutants are in its mutants-shard-N artifact
-          (missed.txt and timeout.txt, in crates/mutants.out/ and
-          engine/mutants.out/); a shard that stopped without one lists them in
-          its log."
+          (missed.txt and timeout.txt, in crates/mutants.out/,
+          engine/mutants.out/ and nota/mutants.out/); a shard that stopped
+          without one lists them in its log."
           open=$(gh issue list --label mutants-weekly --state open --limit 1 \
             --json number --jq '.[0].number // empty')
           if [ -n "$open" ]; then

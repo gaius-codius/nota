@@ -144,8 +144,7 @@ jobs:
     # LLM, store and engine crates, and in the nota crate's clean-up,
     # settings and bench files, must be caught by a test. A missed or timed-out mutant
     # fails. The rest of the nota crate (recording, the screens, the final
-    # and hotword passes) isn't mutated here yet, and neither is any of it
-    # in the weekly run.
+    # and hotword passes) isn't mutated here yet, nor in the weekly run.
     # The mutants are dealt out round-robin to five shards that run side by
     # side; the job below gathers the results. Round-robin, not cargo-mutants'
     # default consecutive slices: a file's mutants tend to share slow tests,
