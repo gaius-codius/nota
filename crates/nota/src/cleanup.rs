@@ -348,7 +348,7 @@ impl Screen {
         chunk: &Chunk,
         new: Vec<Offer>,
     ) -> (Vec<Offer>, Vec<(Offer, Skipped)>) {
-        if Precheck::Off == self.precheck {
+        if self.precheck == Precheck::Off {
             return (new, Vec::new());
         }
         let mut asked = Vec::new();

@@ -488,7 +488,7 @@ fn read_text(path: &Path, max: u64) -> Result<String, String> {
         .read_to_end(&mut bytes)
         .map_err(|e| format!("{name} can't be read: {e}"))?;
     // The size first: a cut at the limit may fall inside a character.
-    if max < bytes.len() as u64 {
+    if bytes.len() as u64 > max {
         return Err(format!("{name} is too big: over {max} bytes"));
     }
     String::from_utf8(bytes).map_err(|e| format!("{name} isn't UTF-8: {e}"))
