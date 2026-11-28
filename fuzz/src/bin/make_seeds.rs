@@ -79,6 +79,9 @@ fn seed(
 fn main() -> Result<()> {
     // The filesystem layer wants absolute paths.
     let here = std::env::current_dir()?;
+    // The protocol seeds first: they don't depend on in/, so a stale
+    // journal seed there can't stop them being written.
+    protocol_seeds(&here.join("in-protocol"))?;
     let (dir, scratch) = (&here.join("in"), &here.join("seeds.tmp"));
     ensure_dir(dir)?;
     ensure_dir(scratch)?;
@@ -145,8 +148,7 @@ fn main() -> Result<()> {
         },
     )?;
     older_copy(dir, "one_track.journal", "untimed.journal", 2)?;
-    older_copy(dir, "later_journal.journal", "undrifted.journal", 3)?;
-    protocol_seeds(&here.join("in-protocol"))
+    older_copy(dir, "later_journal.journal", "undrifted.journal", 3)
 }
 
 /// Writes the engine-protocol seeds in `dir`: the current version's
@@ -158,7 +160,9 @@ fn protocol_seeds(dir: &Path) -> Result<()> {
     ensure_dir(dir)?;
     frame_seed::<FromEngine>(dir, "hello", &Frame::Hello(ProtocolVersion::CURRENT))?;
 
-    let hotwords = vec![Hotword::new("amlodipine")?, Hotword::new("varicose veins")?];
+    let hotword =
+        |text| Hotword::new(text).map_err(|e| format!("the hotwords seed's {text:?}: {e}"));
+    let hotwords = vec![hotword("amlodipine")?, hotword("varicose veins")?];
     frame_seed(
         dir,
         "hotwords",
