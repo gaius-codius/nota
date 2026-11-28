@@ -50,6 +50,16 @@ fn write_file(path: &Path, text: &str) {
     std::fs::write(path, text).unwrap();
 }
 
+/// Makes `path` a file of `len` zero bytes, sparse where the filesystem
+/// allows, so a test of a size limit doesn't write it out.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test scaffolding outside the recorder's write path"
+)]
+fn sized_file(path: &Path, len: u64) {
+    std::fs::File::create(path).unwrap().set_len(len).unwrap();
+}
+
 /// The track the invented chunks are on.
 const MIC: TrackId = TrackId::new(0);
 

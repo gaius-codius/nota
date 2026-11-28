@@ -128,3 +128,18 @@ fn terms_up_to_the_limit_are_read() {
         })
     );
 }
+
+/// A fixture over 32 MiB is refused, naming the limit, before it's parsed.
+#[test]
+fn a_fixture_over_its_size_limit_is_refused() {
+    let dir = TestDir::new("big-fixture");
+    let path = dir.0.join("fixture.json");
+    sized_file(&path, (32 << 20) + 1);
+    assert_eq!(
+        from_fixture(&path, Precheck::Off).err(),
+        Some(format!(
+            "{} is too big: over 33554432 bytes",
+            path.display()
+        ))
+    );
+}

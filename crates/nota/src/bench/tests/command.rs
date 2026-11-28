@@ -8,7 +8,9 @@ use super::*;
 use crate::bench::command::{RunArgs, Source, stamp};
 #[cfg(unix)]
 use crate::bench::command::{engines, real::work_dir};
-use crate::bench::{BenchCommand, dispatch, parse};
+#[cfg(unix)]
+use crate::bench::dispatch;
+use crate::bench::{BenchCommand, parse};
 
 /// `list` as arguments.
 fn args(list: &[&str]) -> Vec<OsString> {

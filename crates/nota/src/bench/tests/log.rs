@@ -203,6 +203,18 @@ fn a_file_that_is_not_a_log_is_refused_at_its_header() {
     );
 }
 
+/// A log over 64 MiB is refused, naming the limit, before it's parsed.
+#[test]
+fn a_log_over_its_size_limit_is_refused() {
+    let dir = TestDir::new("big-log");
+    let path = dir.0.join("big.jsonl");
+    sized_file(&path, (64 << 20) + 1);
+    assert_eq!(
+        read(&path).unwrap_err(),
+        format!("{} is too big: over 67108864 bytes", path.display())
+    );
+}
+
 /// A verdict line that can't be read is refused, naming the file and its
 /// line number.
 #[test]

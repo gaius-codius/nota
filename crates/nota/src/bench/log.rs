@@ -216,9 +216,9 @@ pub(super) const REFUSALS: [Refusal; 7] = [
     Refusal::AlreadyChanged,
 ];
 
-/// A rule nota-store adds is a build error here until [`REFUSALS`] lists
-/// it, so a log never holds a rule it can't read back: the match must
-/// name every rule, whichever one it's given.
+/// A rule nota-store adds is a build error here until this match names
+/// it, whichever rule it's given: the reminder to list the rule in
+/// [`REFUSALS`] too, so a log never holds a rule it can't read back.
 const _: () = match Refusal::EmptySpan {
     Refusal::EmptySpan
     | Refusal::SpanNotFound
