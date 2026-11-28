@@ -10,7 +10,11 @@
 //! 2. its heard words hold no listed word, so a term the final pass already
 //!    heard isn't proposed again;
 //! 3. C1 ([`letter_similarity`], the heard words first) is at least
-//!    [`SIMILARITY_MIN`].
+//!    [`SIMILARITY_MIN`];
+//! 4. the boosted words don't start with the heard words just before the
+//!    difference and go on past them ([`crate::repeats_before`]): a beam
+//!    that heard "type type 2 diabetes" where the final pass heard "type to
+//!    diabeetus" would make the text read "type" twice.
 //!
 //! A sentence the beam pass drops is a difference with no boosted words, so
 //! rule 1 refuses it: the beam's known habit of losing whole sentences can't
@@ -35,6 +39,8 @@
 //!   scored any length; no bench difference comes near.
 //! - **A beam text that only lost words gives nothing,** as above.
 //!   `propose.py` compared the alignment alone; no bench chunk is affected.
+//! - **Rule 4 is new.** `propose.py` kept a difference that repeats the
+//!   words before it.
 
 use std::collections::BTreeSet;
 use std::error::Error;
@@ -42,6 +48,7 @@ use std::fmt;
 use std::ops::Range;
 
 use crate::gate::SIMILARITY_MIN;
+use crate::repeat::repeats_before;
 use crate::similarity::{Block, Region, letter_similarity, longest_match};
 
 /// A listed word is longer than this many characters: `propose.py`'s
@@ -161,11 +168,13 @@ pub fn propose(
                 list,
             )
         })
+        // Rule 4.
+        .filter(|c| !repeats_before(&heard[..c.heard.start].join(" "), &c.replacement))
         .collect())
 }
 
 /// The candidate for the difference that replaces `heard[old]` with
-/// `boosted[new]` (`a` and `b` the same words normalised), if the rules
+/// `boosted[new]` (`a` and `b` the same words normalised), if rules 1 to 3
 /// keep it.
 fn candidate(
     heard: &[&str],

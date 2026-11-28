@@ -594,3 +594,47 @@ fn a_lookup_can_be_shared_between_threads() {
     let terms = [term("amlodipine", &[])];
     shareable(&Lookup::new(english(), &terms));
 }
+
+/// Invented text where "type 2 diabetes" was heard right.
+const TYPE_2: &str = "She was told she has type 2 diabetes last year.";
+
+/// Invented text where "type 2 diabetes" was heard as "two diabetes".
+const TWO: &str = "She was told she has two diabetes last year.";
+
+/// The term the T3 bench offered for the last two words of "type 2
+/// diabetes" isn't offered where the word before is its first word: a yes
+/// would make "type type 2 diabetes".
+#[test]
+fn a_term_that_starts_with_the_word_before_is_not_offered() {
+    let terms = [term("type 2 diabetes", &[])];
+    assert_eq!(offered(english(), &terms, TYPE_2), pairs(&[]));
+}
+
+/// The same is true of an exact match: an alias the user accepted.
+#[test]
+fn an_alias_match_that_repeats_the_word_before_is_not_offered() {
+    let terms = [term("type 2 diabetes", &["2 diabetes"])];
+    assert_eq!(offered(english(), &terms, TYPE_2), pairs(&[]));
+}
+
+/// The term is still offered for words with a different word before them.
+#[test]
+fn a_term_is_offered_where_the_word_before_differs() {
+    let terms = [term("type 2 diabetes", &[])];
+    assert_eq!(
+        offered(english(), &terms, TWO),
+        pairs(&[("two diabetes", "type 2 diabetes")])
+    );
+}
+
+/// A term said twice is still offered: "horosemi de" just after
+/// "furosemide" is offered "furosemide", since the replacement is wholly
+/// the word before, as the bench offered it.
+#[test]
+fn a_term_said_twice_is_still_offered() {
+    let terms = [term("furosemide", &[])];
+    assert_eq!(
+        offered(english(), &terms, "Then furosemide horosemi de daily."),
+        pairs(&[("horosemi de", "furosemide")])
+    );
+}

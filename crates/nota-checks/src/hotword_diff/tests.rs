@@ -301,3 +301,30 @@ fn too_many_words_names_the_limit() {
         "too many words to compare: over 2000"
     );
 }
+
+/// A beam text that repeats the heard word before the difference gives
+/// nothing there: "type 2 diabetes" for "to diabeetus" after "type" would
+/// make the text read "type type 2 diabetes".
+#[test]
+fn boosted_words_that_repeat_the_word_before_are_not_a_candidate() {
+    let got = found(
+        "she has type to diabeetus now",
+        "she has type type 2 diabetes now",
+        &["type 2 diabetes"],
+    );
+    assert_eq!(changes(&got), Vec::<String>::new());
+}
+
+/// The same boosted words with another word before them are a candidate.
+#[test]
+fn boosted_words_after_another_word_are_a_candidate() {
+    let got = found(
+        "she has to diabeetus now",
+        "she has type 2 diabetes now",
+        &["type 2 diabetes"],
+    );
+    assert_eq!(
+        changes(&got),
+        ["to diabeetus -> type 2 diabetes (type 2 diabetes, type)"]
+    );
+}

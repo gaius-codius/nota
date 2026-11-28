@@ -29,6 +29,10 @@
 //!   term listed first; here the term that sorts first wins.
 //! - **Rejected pairs.** The caller says which window and term pairs the
 //!   user rejected; a rejected term is passed over for the next best.
+//! - **Repeats.** A term that starts with the words just before its window
+//!   and goes on past them ("type 2 diabetes" for "2 diabetes" after
+//!   "type") is passed over too, as [`crate::repeats_before`] says: a yes
+//!   would make the text read them twice.
 //!
 //! The same text and terms always give the same candidates.
 
@@ -37,6 +41,7 @@ use std::ops::Range;
 
 use crate::language::Language;
 use crate::phonetic::{self, Sounds};
+use crate::repeat;
 
 /// The fewest letters and digits a window needs to be a candidate.
 pub const MIN_LETTERS: usize = 5; // check-bound
@@ -198,6 +203,8 @@ struct Entry {
     term: String,
     /// Its letters and digits, lower-cased.
     letters: String,
+    /// Its words, as the repeat check takes them.
+    words: Vec<String>,
     /// How it sounds.
     sounds: Sounds,
     /// Its letter trigrams.
@@ -274,7 +281,10 @@ impl<'a> Lookup<'a> {
     /// windows come (fewer words first, then position), then scored
     /// candidates best first. `allows(window, term)` says
     /// whether `term` may be offered for `window`; a term it refuses is
-    /// passed over (the user's rejected pairs).
+    /// passed over (the user's rejected pairs). So is a term that starts
+    /// with the words just before the window in `text`
+    /// ([`repeats_before`](crate::repeats_before)), which a yes would make
+    /// read twice.
     #[must_use]
     pub fn find(&self, text: &str, allows: &dyn Fn(&str, &str) -> bool) -> Vec<Candidate> {
         let words: Vec<Word<'_>> = window_words(text)
@@ -285,6 +295,9 @@ impl<'a> Lookup<'a> {
                 zipf: self.language.zipf(text).value(),
             })
             .collect();
+        // The chunk's words for the repeat check, split once: those before
+        // a window are the ones that end by its start.
+        let (ends, said): (Vec<usize>, Vec<String>) = repeat::spans(text).into_iter().unzip();
         let mut exact = Vec::new();
         let mut scored = Vec::new();
         // An alias may be heard as more words than it's written in ("endside"
@@ -300,11 +313,14 @@ impl<'a> Lookup<'a> {
                 if window.letters.len() < MIN_LETTERS || self.has_known_word(&window) {
                     continue;
                 }
-                if let Some(hit) = self.exact(&window, start, allows) {
+                let before = &said[..ends.partition_point(|&end| end <= run[0].span.start)];
+                let fits =
+                    |e: &Entry| allows(&window.text, &e.term) && !repeat::repeats(before, &e.words);
+                if let Some(hit) = self.exact(&window, start, &fits) {
                     exact.push(hit);
                 } else if n <= MAX_WORDS
                     && !self.skipped(&window)
-                    && let Some(hit) = self.scored(&window, start, allows)
+                    && let Some(hit) = self.scored(&window, start, &fits)
                 {
                     scored.push(hit);
                 }
@@ -347,37 +363,36 @@ impl<'a> Lookup<'a> {
 
     /// The exact match for `window`, which starts at word `start`: the
     /// first term, in order, that has the window as an alias and that
-    /// `allows` lets through.
+    /// `fits` there.
     fn exact(
         &self,
         window: &Window<'_>,
         start: usize,
-        allows: &dyn Fn(&str, &str) -> bool,
+        fits: &dyn Fn(&Entry) -> bool,
     ) -> Option<Hit> {
         let entry = self
             .aliases
             .get(&window.letters)?
             .iter()
             .map(|&i| &self.entries[i])
-            .find(|e| allows(&window.text, &e.term))?;
+            .find(|e| fits(e))?;
         Some(window.hit(start, entry, Matched::Alias))
     }
 
-    /// The best term for `window`, which starts at word `start`, with its
-    /// score, if it clears its bar.
+    /// The best term that `fits` `window`, which starts at word `start`,
+    /// with its score, if it clears its bar.
     fn scored(
         &self,
         window: &Window<'_>,
         start: usize,
-        allows: &dyn Fn(&str, &str) -> bool,
+        fits: &dyn Fn(&Entry) -> bool,
     ) -> Option<(f64, Hit)> {
         let sounds = self.language.sounds(&window.text);
         let trigrams = Trigrams::of(&window.letters);
         let mut best: Option<(&Entry, Score)> = None;
         // A window spelled like a term never gets here: it has a known word.
         for entry in &self.entries {
-            if !within_reach(&window.letters, &entry.letters) || !allows(&window.text, &entry.term)
-            {
+            if !within_reach(&window.letters, &entry.letters) || !fits(entry) {
                 continue;
             }
             let score = score(&sounds, &trigrams, &window.letters, entry);
@@ -406,6 +421,7 @@ impl Entry {
         let letters = letters(term);
         Self {
             term: term.to_owned(),
+            words: repeat::words(term),
             sounds: language.sounds(term),
             trigrams: Trigrams::of(&letters),
             letters,
@@ -588,4 +604,4 @@ impl Trigrams {
 mod tests;
 
 #[cfg(test)]
-mod props;
+pub(crate) mod props;
