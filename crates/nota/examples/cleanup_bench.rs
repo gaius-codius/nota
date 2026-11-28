@@ -12,8 +12,11 @@
 //! - `lookup-only DATA`: ends every hotword pass not yet run as failed, so
 //!   clean-up runs with the lookup's candidates alone, as it does after a
 //!   failed pass.
-//! - `status DATA`: one line per job, `SESSION KIND STATE`, and exits 0
-//!   once every clean-up job has ended, 1 while any is still to run.
+//! - `status DATA`: one line per job, `SESSION KIND STATE`. Exits 0 once
+//!   every clean-up job is done, and [`STILL_RUNNING`] while any final pass
+//!   or clean-up is still to end. A final pass or clean-up that failed, or a
+//!   library with no clean-up job, is an error (exit 1): the run measured
+//!   nothing. A failed hotword pass isn't, since `lookup-only` fails them.
 //! - `export DATA`: one JSON object per session: its final text (revision
 //!   0) and its newest revision chunk by chunk, the hotword pass's texts
 //!   with their boost, every proposal with its decision and outcome, and
@@ -24,6 +27,7 @@
 //! directory, never into the repository.
 
 use std::error::Error;
+use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -40,12 +44,16 @@ type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 /// The library database's name in a data directory, as the app names it.
 const LIBRARY_DB: &str = "library.db";
 
+/// `status`'s exit code while a final pass or clean-up is still to end:
+/// not 1, which is any error's.
+const STILL_RUNNING: u8 = 2;
+
 /// Why `lookup-only` ends a hotword pass.
 const LOOKUP_ONLY: &str = "the bench runs clean-up with the lookup alone";
 
 /// Runs the command the arguments name.
 fn main() -> Result<ExitCode> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let [command, data, rest @ ..] = &args[..] else {
         return Err(usage());
     };
@@ -53,7 +61,7 @@ fn main() -> Result<ExitCode> {
     if !db.is_file() {
         return Err(format!("there's no library at {}", db.display()).into());
     }
-    match (command.as_str(), rest) {
+    match (command.to_str().unwrap_or_default(), rest) {
         ("attach", [pack]) => attach(&db, Path::new(pack)).map(|()| ExitCode::SUCCESS),
         ("lookup-only", []) => lookup_only(&db).map(|()| ExitCode::SUCCESS),
         ("status", []) => status(&db),
@@ -99,21 +107,36 @@ fn lookup_only(db: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Prints every job, and says whether every clean-up has ended.
+/// Prints every job, and says whether every clean-up is done.
+///
+/// # Errors
+///
+/// A final pass or clean-up that failed, a library with no clean-up job,
+/// or the library that can't be read.
 fn status(db: &Path) -> Result<ExitCode> {
     let store = Store::open_as_is(db)?;
     let mut out = io::stdout().lock();
-    let mut all_ended = true;
+    let mut running = false;
+    let mut clean_ups = 0_usize;
     for job in store.jobs()? {
         writeln!(out, "{} {:?} {:?}", job.session.get(), job.kind, job.state)?;
-        if job.kind == JobKind::CleanUp && !ended(&job.state) {
-            all_ended = false;
+        let measured = matches!(job.kind, JobKind::FinalPass | JobKind::CleanUp);
+        if let (true, JobState::Failed(why)) = (measured, &job.state) {
+            let n = job.session.get();
+            return Err(format!("session {n}'s {:?} failed: {why}", job.kind).into());
         }
+        if job.kind == JobKind::CleanUp {
+            clean_ups += 1;
+        }
+        running |= measured && !ended(&job.state);
     }
-    Ok(if all_ended {
-        ExitCode::SUCCESS
+    if clean_ups == 0 {
+        return Err("the library has no clean-up job".into());
+    }
+    Ok(if running {
+        ExitCode::from(STILL_RUNNING)
     } else {
-        ExitCode::FAILURE
+        ExitCode::SUCCESS
     })
 }
 
@@ -169,7 +192,7 @@ fn session_json(store: &Store, id: SessionId, title: Option<&str>) -> Result<Val
     }))
 }
 
-/// A revision's chunks: each one's track, first sample and text.
+/// A revision's chunks: each one's track, samples and text.
 fn lines_json(lines: &[FinalLine]) -> Vec<Value> {
     lines
         .iter()
@@ -177,6 +200,7 @@ fn lines_json(lines: &[FinalLine]) -> Vec<Value> {
             json!({
                 "track": line.heard.track.get(),
                 "start": line.heard.range.start().get(),
+                "end": line.heard.range.end().get(),
                 "text": line.text,
             })
         })
